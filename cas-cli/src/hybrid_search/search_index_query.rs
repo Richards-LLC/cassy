@@ -73,7 +73,29 @@ impl SearchIndex {
     /// the whole query. Registered fields are left untouched to retain
     /// Tantivy's strict syntax validation.
     fn literalize_unknown_field_tokens(&self, query: &str) -> String {
-        query
+        // Word apostrophes and unmatched edge quotes are literal text.
+        // Keep authored quotes and field/operator syntax intact.
+        let mut escaped = String::with_capacity(query.len());
+        let mut previous: Option<char> = None;
+        let mut opening_quote = None;
+        let mut chars = query.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\'' {
+                let follows_word = previous.is_some_and(char::is_alphanumeric);
+                let inside_word = follows_word && chars.peek().is_some_and(|next| next.is_alphanumeric());
+                if inside_word || (opening_quote.is_none() && follows_word) {
+                    escaped.push('\\');
+                } else if opening_quote.take().is_none() {
+                    opening_quote = Some(escaped.len());
+                }
+            }
+            escaped.push(ch);
+            previous = Some(ch);
+        }
+        if let Some(offset) = opening_quote {
+            escaped.insert(offset, '\\');
+        }
+        escaped
             .split_whitespace()
             .map(|token| {
                 let Some((field, _)) = token.split_once(':') else {

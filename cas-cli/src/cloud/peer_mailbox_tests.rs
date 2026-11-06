@@ -678,7 +678,7 @@ fn history_delivery(machine: &Machine, mailbox: &FakeMailbox, history: &Recipien
     deliver_claimed_with_history(
         mailbox, open_prompt_queue_store(&machine.cas).unwrap().as_ref(),
         open_agent_store(&machine.cas).unwrap().as_ref(), REPO, &[], session,
-        "consumer", history, &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered),
+        "consumer", history, None, &|_,_| Ok(None), &|_,_| Ok(PeerAckOutcome::Delivered),
     )
 }
 
@@ -800,6 +800,112 @@ async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
     .unwrap();
     assert!(result.is_ok(), "{result:?}");
     assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for recipient in [None, Some("recipient"), Some("worker")] {
+        let server = MockServer::start().await;
+        // Sender labels also use /api/agents once for a nonempty batch.
+        let lookups = usize::from(recipient.is_some()) + usize::from(recipient == Some("worker"));
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[{
+                "id":"recipient", "name":"recipient", "agent_type":"primary", "status":"active",
+                "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"owner"
+            }]}))).expect(lookups as u64).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents/locks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":[]})))
+            .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
+        let messages = recipient.map(|id| serde_json::json!({
+            "id":"mail", "project_id":REPO, "recipient_agent_id":id,
+            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":"collision warning",
+            "created_at":chrono::Utc::now().to_rfc3339()
+        })).into_iter().collect::<Vec<_>>();
+        Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":messages.clone()})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"mail","status":200}]})))
+            .expect(u64::from(recipient == Some("recipient"))).mount(&server).await;
+        let machine = Machine::new();
+        machine.register("recipient", "recipient", AgentRole::Supervisor, "factory-a");
+        machine.register("worker", "worker", AgentRole::Worker, "factory-a");
+        let agents = open_agent_store(&machine.cas).unwrap();
+        let mut worker = agents.get("worker").unwrap();
+        worker.machine_id = Some("box-a".into());
+        agents.update(&worker).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+            .save_to_cas_dir(&machine.cas).unwrap();
+        let root = machine.cas.clone();
+        let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
+            .await.unwrap();
+        assert!(report.errors.is_empty(), "{recipient:?}: {report:?}");
+        if recipient == Some("worker") {
+            assert_eq!((report.delivered, report.rejected), (0, 0),
+                "a recipient missing from Cloud must keep its message pending: {report:?}");
+            assert!(machine.rows().is_empty());
+        } else {
+            assert_eq!(report.delivered, usize::from(recipient.is_some()));
+        }
+        server.verify().await;
+        if recipient == Some("worker") {
+            // The next poll sees both live workers under the same epic. The
+            // exact message retained above must now reach the worker and both
+            // supervisors before Cloud receives its delivered acknowledgement.
+            let tasks = crate::store::open_task_store_local(&machine.cas).unwrap();
+            let mut epic = crate::types::Task::new("cas-shared".into(), "Shared delivery".into());
+            epic.task_type = crate::types::TaskType::Epic;
+            tasks.add(&epic).unwrap();
+            // A receipt with a temporarily missing epic claim stays pending;
+            // the next observation includes a renewal ahead of the local clock.
+            for scope_ready in [false, true] {
+                server.reset().await;
+                let now = chrono::Utc::now();
+                let agent = |id: &str, role: &str, session: &str, machine: &str| serde_json::json!({
+                    "id":id, "name":id, "agent_type":"worker", "status":"active", "active_tasks":0,
+                    "machine_id":machine, "last_heartbeat":now.to_rfc3339(), "user_id":"owner",
+                    "metadata":{"role":role, "factory_session":session, "canonical_id":REPO, "hostname":machine}
+                });
+                Mock::given(method("GET")).and(path("/api/agents"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[
+                        agent("recipient", "supervisor", "factory-a", "box-a"),
+                        agent("worker", "worker", "factory-a", "box-a"),
+                        agent("remote-sup", "supervisor", "factory-b", "box-b"),
+                        agent("remote-worker", "worker", "factory-b", "box-b")
+                    ]}))).expect(2).mount(&server).await;
+                let locks = ["worker", "remote-worker"].map(|id| serde_json::json!({
+                    "id":id, "task_id":epic.id, "agent_id":id, "status":"active", "renewal_count":1,
+                    "expires_at":(now + chrono::Duration::minutes(10)).to_rfc3339(), "renewed_at":(now + chrono::Duration::seconds(30)).to_rfc3339()
+                }));
+                Mock::given(method("GET")).and(path("/api/agents/locks"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status":"ok", "locks":if scope_ready { locks.to_vec() } else { Vec::new() }})))
+                    .expect(1).mount(&server).await;
+                Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":messages.clone()})))
+                    .expect(1).mount(&server).await;
+                Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+                    .and(wiremock::matchers::body_partial_json(serde_json::json!({"acks":[{"id":"mail","outcome":"delivered"}]})))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"mail","status":200}]})))
+                    .expect(u64::from(scope_ready)).mount(&server).await;
+                Mock::given(method("POST")).and(path("/api/peer-messages"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"supervisor-copy", "status":"queued"})))
+                    .expect(u64::from(scope_ready)).mount(&server).await;
+                let root = machine.cas.clone();
+                let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
+                    .await.unwrap();
+                assert_eq!((report.delivered, report.rejected), (usize::from(scope_ready), 0), "scope_ready={scope_ready}: {report:?}");
+                assert!(report.errors.is_empty(), "{report:?}");
+                let rows = machine.rows();
+                assert_eq!(rows.iter().filter(|row| row.target == "worker").count(), usize::from(scope_ready));
+                assert_eq!(rows.iter().filter(|row| row.target == "recipient").count(), usize::from(scope_ready));
+                server.verify().await;
+            }
+        }
+    }
 }
 
 #[tokio::test]

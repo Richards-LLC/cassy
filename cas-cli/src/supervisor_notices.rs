@@ -251,6 +251,7 @@ pub(crate) fn orphan_epics(root: &Path, ending: &Agent) -> Result<(), crate::err
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReleaseNoticePhase {
     CutReady,
+    RustRed,
     #[allow(dead_code)] // cas-61e0 sends it on publish.
     PostPublish,
 }
@@ -259,6 +260,7 @@ impl ReleaseNoticePhase {
     pub(crate) fn kind(self) -> &'static str {
         match self {
             Self::CutReady => "release_cut_ready",
+            Self::RustRed => "train_ci_red",
             Self::PostPublish => "release_post_publish",
         }
     }
@@ -283,7 +285,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["premerge_verification", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew"]
+    let valid_kind = ["premerge_verification", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

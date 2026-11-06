@@ -86,7 +86,8 @@ PY
         fi
         base="${base:-origin/main}"
     fi
-    printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "$base" >&2
+    printf 'pre-push: running fast rows on %s (base %s)\n' "${local_sha:0:12}" "${base:0:12}" >&2
+    base="$(git merge-base "$base" "$local_sha" 2>/dev/null || printf '%s' "$base")"
     # The gate's guardian removes its scratch tree on exit. Keep each push
     # attempt's complete diagnostics outside that tree, even if the gate exits
     # before it can write a receipt. A later attempt must not overwrite it.

@@ -18,7 +18,7 @@ Group tasks that touch the same files into one lane; the worker count is the num
 
 **Severity × reach for review findings.** Every finding names its impact, reach and journey. Use `severity:money|data_loss|broken|awkward|cosmetic`, `reach:main|secondary|theoretical` and `journey:<id>` labels with `repro`; see `docs/qa/triage.md`. `task action=create` accepts a code-read finding as theoretical P4 backlog; a reproduced main-journey failure outranks it. Money or data loss on a declared main journey is the only theoretical exception (P2). Use the existing `repro` and `affected` fields for observed failures and the severity/reach/journey labels; do not hand-pick P0. Declare main journeys in `docs/qa/journeys.yaml` and set `factory.focus_mode` for inherited operator intent. A staffing nudge names unowned main-journey FAILs; give those the worker first. A nit never reopens a merged task. At release prep, `cas qa polish --epic <id>` lists warnings by file; batch observed improvements or leave them in the backlog.
 
-**Verification tiers.** Close records the tier. Tier 0 (docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys only) gets no independent verifier and walks no journeys. Tier 1 in `qa.mode=batch` shares one release verdict, recorded with `verification action=batch_receipt verification_type=release`; `qa.mode=per_task`, the `force-verifier` label or an unmeasurable diff gets its own verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, merge-queue and close-gate code) always gets its own verifier plus an `Adversarial probe:` ledger row.
+**Verification tiers.** Close records the tier. Tier 0 (docs, non-agent Markdown, `CHANGELOG.md`, or tests and journeys only) gets no independent verifier and walks no journeys. Tier 1 in `qa.mode=batch` shares one release verdict, recorded with `verification action=batch_receipt verification_type=release`; `qa.mode=per_task`, the `force-verifier` label or an unmeasurable diff gets its own verifier. Tier 2 (guards and hooks, `.github/workflows`, `scripts/release*`, integration and close-gate code) always gets its own verifier plus an `Adversarial probe:` ledger row.
 
 **Standalone follow-up work.** For one loose task after an epic closes, do not create a single-child epic. Create the task and spawn onto it; an open, unassigned `task_id` authorizes the spawn:
 
@@ -145,7 +145,7 @@ Before landing a lane, check that the worker's capped `check: PASS <sha>` and ta
    factory action=worktree_merge id=<worker> task_id=<task-id>
    ```
 
-4. The merge starts the close. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. A delivery with its own verifier (Tier 2, `force-verifier`, `qa.mode=per_task`): `worktree_merge` prepares a candidate and opens a pre-merge dispatch; run the verifier on it and send the worker nothing. PASS publishes and closes the task; FAIL returns it to the same worker with the findings. Message the worker only when a receipt names a gate that still holds.
+4. The merge starts the close. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. A delivery with its own verifier (Tier 2, `force-verifier`, `qa.mode=per_task`): `worktree_merge` prepares a candidate and opens a pre-merge dispatch; run the verifier on it and send the worker nothing. When `worktree_merge` returns `PRE-MERGE VERIFICATION`, use your Task/Agent tool to spawn `subagent_type="task-verifier"` with `prompt="Verify task <task-id>"` for that exact dispatch. PASS publishes and closes the task; FAIL returns it to the same worker with the findings. Message the worker only when a receipt names a gate that still holds.
 5. Hand the worker its next task. Do not poll for merge state.
 
 To reject a parked delivery on review, use `task action=request_changes id=<task-id>`; it reopens the task for the same worker.
@@ -249,24 +249,27 @@ commands the project's CLAUDE.md or AGENTS.md names) are the precheck.
    <!-- cas-src:end -->
 4. Run the final assembled-tree gate:
    <!-- cas-src:begin -->
-   the epic's single full-suite run on the tree that lands; skip it when the queue or CI already ran it. With a merge queue, the queue owns the full suite; without one, the full suite must be green on the exact SHA reaching the default branch, via CI check-runs on that SHA (preferred) or the supervisor's integrated run recorded on the epic; Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Do not run a local full suite before the PR. Without a queue or check-runs, run the project's assembly gate on that SHA; with `scripts/assembly-proof.py` it is `python3 scripts/assembly-proof.py prove <epic-worktree>`. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
+   On Cassy's release train, the existing CI archive/shards run the full Rust suite
+   on each newest train tip; older runs are cancelled. Read the complete log
+   artifact and failure list. A known red holds `train_merge` until green or a
+   visible supervisor override for that run; do not treat a baseline red as safe.
+   `scripts/release.sh` checks a green receipt for the starting train tip before
+   version preparation. Do not run a local pre-cut full suite. The merge queue
+   remains the final-tree gate, proving the version commit once. Workers run
+   only touched tests before park; batch QA owns the release's user-path walk.
    <!-- cas-src:else -->
    the epic's single full-suite run on the tree that lands; skip it when CI already ran it. Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check. Without check-runs on the exact default-branch SHA, run the project's full suite (the commands its CLAUDE.md or AGENTS.md names) on that SHA. A matching code tree reuses its durable PASS. On exit 0, note on the epic: `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`, with the log under `[factory] artifacts_root/<epic-id>/`.
    <!-- cas-src:end -->
 5. Put every review, precheck and QA finding that needs worker action into one batch: a bounded epic-child fix-round task per worker, started together, each description carrying the finding, fix, acceptance criteria and proof command.
-6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR, or rerun the local gate and record a fresh `ASSEMBLY_PROOF` from its real exit code:
+6. After a failed queue run, use the [interim queue precheck](#interim-queue-precheck) at the fix tip. Once the fix lands, rerun only the failed checks, then re-enqueue the PR.
 
-   ```bash
-   <assembly gate command> > <artifacts_root>/<project-key>/<epic-id>/assembly-gate.log 2>&1; echo $?
-   ```
-
-   Never pipe the test run to `tail`; that captures the pipe status, not the test status.
+   Never pipe the test run to `tail`; retain the complete output and the test command's exit status.
 7. Once the gate passes, reclaim each lane's worktree:
 
    ```text
    factory action=worktree_merge id=<worker> task_id=<task-id> cleanup=true
    ```
 
-   With a queue, the queue landing is the merge to base; the local merge applies only without one. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
+   Queued landing integrates to base; merge locally only without a queue. If the tracked merge cannot act, ask the operator; do not use an untracked merge path.
 8. Start the [post-release check](reporting-and-routing.md#post-release-check) when a deployed product's merge lands; close the epic and post release notes once it is clean.
 9. Shut down the epic's workers by name once each has pushed and parked: `factory action=shutdown_workers worker_names=<worker>[,<worker>...]`.

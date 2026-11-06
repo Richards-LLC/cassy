@@ -46,6 +46,7 @@ runs:
       shell: bash
       env:
         FULL_VALIDATION: ${{ startsWith(github.ref, 'refs/heads/precheck/') }}
+        TRAIN_RUST: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-') }}
         BASE_SHA: ${{ inputs.base-sha }}
         ZERO_BASE_REF: ${{ inputs.zero-base-ref }}
       run: |
@@ -88,6 +89,18 @@ runs:
             web_check_needed=false
             ;;
         esac
+
+        # The train receives one complete Rust result at each newest tip,
+        # including a docs-only tip. Web selection stays path-scoped below.
+        if [[ "${TRAIN_RUST:-false}" == true ]]; then
+          if python3 scripts/train-ci.py prepared >/dev/null 2>&1; then
+            class=version-bump
+            rust_unaffected=true
+          else
+            class=rust-touched
+            rust_unaffected=false
+          fi
+        fi
 
         # Web tests read hub-web/ plus named repo-level inputs (the journey
         # catalog, scripts/visual-qa.mjs, design tokens);

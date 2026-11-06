@@ -36,13 +36,20 @@ case "$1 $2" in
   "repo view") echo example/repo ;;
   "release view") exit 1 ;;
   "release create") ;;
-  "api repos/"*) echo '{}' ;;
+  "api repos/"*)
+    case "$2" in */logs) cat "${FAKE_TRAIN_LOG_ZIP:?}" ;; *) echo '{}' ;; esac ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
+  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
+  "api -X")
+    case "$4" in
+      */jobs) echo '{"jobs":[{"name":"Fast Validation — full suite","conclusion":"success"}]}' ;;
+      *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
+    esac ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
@@ -105,7 +112,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -513,6 +520,31 @@ hotfix_fallback() {
     [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
     grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log"
 }
+train_receipt_cut() {
+    local fixture="$tmp/train-ci-cut" status=0 before after
+    clone_epic "$fixture" epic/release-train-fixture train-ci
+    write_valid_draft "$tmp/train-ci-notes.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    mkdir -p "$tmp/train-ci-artifact"
+    export FAKE_TRAIN_ARTIFACT="$tmp/train-ci-artifact" FAKE_TRAIN_RUN="$tmp/train-ci-run.json" FAKE_TRAIN_LOG_ZIP="$tmp/train-ci-logs.zip"
+    echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    python3 - "$before" <<'PY'
+import json, os, pathlib, sys, zipfile
+head=sys.argv[1]
+json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'push','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
+json.dump({'schema':1,'head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','tests':1,'failures':[]},open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
+with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
+PY
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    after="$(git -C "$fixture" rev-parse HEAD)"
+    [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
+}
+check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
+unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
 check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
 check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
 freeze_failure_stops_publication() {

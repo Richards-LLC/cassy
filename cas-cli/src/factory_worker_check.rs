@@ -953,7 +953,9 @@ pub(crate) fn passing_test_packages_against(
 /// Exact test receipts plus ancestor receipts whose full commit range contains
 /// no Rust, test or build inputs. The latter saves an identical rerun after a
 /// documentation-only delivery commit while keeping proof tied to its tested
-/// tree. With a target, commits already on it are not part of the range.
+/// tree. Builtin Markdown and reference history use CI's contract/doc-hygiene
+/// proof instead of invalidating Rust receipts. With a target, commits already
+/// on it are not part of the range.
 fn passing_test_records(
     cas_root: &Path,
     repo: &Path,
@@ -1015,7 +1017,13 @@ fn passing_test_records(
         let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
             continue;
         };
-        if exact.contains_key(&key) || changes.iter().any(|path| proof_inputs.contains(path)) {
+        if exact.contains_key(&key) || changes.iter().any(|path| {
+            // cas-23b1: embedded builtin docs have their own contract checks;
+            // every other proof input still invalidates the Rust receipt.
+            let builtin_doc = path.starts_with("cas-cli/src/builtins/")
+                && (path.ends_with(".md") || path == "cas-cli/src/builtins/reference-history.json");
+            !builtin_doc && proof_inputs.contains(path)
+        }) {
             continue;
         }
         match exact.entry(key) {

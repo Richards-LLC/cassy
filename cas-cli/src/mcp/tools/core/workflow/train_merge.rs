@@ -29,6 +29,8 @@ struct Queue {
     next: usize,
     outcomes: Vec<String>,
     waiting: Option<String>,
+    #[serde(default)]
+    ci_override: Option<String>,
 }
 
 impl Queue {
@@ -132,7 +134,13 @@ fn driver_lock(
 }
 
 impl CasCore {
-    pub(crate) fn train_merge(&self, train: &str, ordered: Option<&[String]>) -> Result<String> {
+    pub(crate) fn train_merge(
+        &self,
+        train: &str,
+        ordered: Option<&[String]>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+    ) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
             .map_err(|_| anyhow::anyhow!("train_merge requires a live registered supervisor"))?;
@@ -195,10 +203,20 @@ impl CasCore {
                 );
                 queue.supervisor = actor.id;
             }
+            queue.ci_override = crate::train_ci::guard(
+                self,
+                train,
+                &target,
+                queue.ci_override.as_deref(),
+                supervisor_override,
+                reason,
+            )?;
             queue.session = session.into();
             save(&path, &queue)?;
             return Ok(queue.render());
         }
+        let ci_override =
+            crate::train_ci::guard(self, train, &target, None, supervisor_override, reason)?;
         let mut candidates = tasks.list(Some(TaskStatus::AwaitingMerge))?;
         candidates.sort_by(|a, b| (a.updated_at, &a.id).cmp(&(b.updated_at, &b.id)));
         let ids = match ordered {
@@ -278,6 +296,7 @@ impl CasCore {
             next: 0,
             outcomes: vec![],
             waiting: None,
+            ci_override,
         };
         let common = GitOperations::new(repo).canonical_repo_key()?;
         let _target = target_lock::try_lock_delivery_target(&self.cas_root, &common, &target)?
@@ -340,6 +359,18 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             .open_task_store()
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         while queue.active() {
+            if let Err(error) = crate::train_ci::guard(
+                &core,
+                &queue.train,
+                &queue.target,
+                queue.ci_override.as_deref(),
+                false,
+                None,
+            ) {
+                queue.waiting = Some(error.to_string());
+                save(&path, &queue)?;
+                break;
+            }
             let entry = &queue.entries[queue.next];
             if published(&queue, entry)? {
                 queue
@@ -609,6 +640,56 @@ mod tests {
     async fn train_merge_returns_conflict_and_preserves_order_across_resume() {
         let fixture = Fixture::new();
         fixture.start().await;
+        let ci_dir = crate::train_ci::directory(&fixture.root, "cas-train").unwrap();
+        std::fs::create_dir_all(&ci_dir).unwrap();
+        let mut red = serde_json::json!({"branch":"epic/train", "head":"bad-tip", "red_head":"bad-tip",
+            "red_since":"bad-tip", "run_id":"17", "run_attempt":1, "outcome":"FAIL", "failures":["fixture::regression"],
+            "complete_log":"complete-workflow-logs.zip"});
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        resume_pending(&fixture.root, "queue-session")
+            .await
+            .unwrap();
+        assert!(
+            !GitOperations::new(fixture._repo.path().to_path_buf())
+                .is_ancestor(&fixture.shas[0], "epic/train"),
+            "a running queue must hold on red CI"
+        );
+        let service = crate::mcp::CasService::new(fixture.core.clone(), None);
+        let request = |override_ci, reason| {
+            serde_json::from_value(serde_json::json!({
+            "action":"train_merge", "id":"cas-train", "supervisor_override":override_ci, "reason":reason,
+        })).unwrap()
+        };
+        assert!(
+            service
+                .factory(Parameters(request(false, None::<&str>)))
+                .await
+                .unwrap_err()
+                .message
+                .contains("TRAIN SUITE RED")
+        );
+        assert!(
+            service
+                .factory(Parameters(request(true, None)))
+                .await
+                .unwrap_err()
+                .message
+                .contains("reason")
+        );
+        service
+            .factory(Parameters(request(true, Some("merge the reviewed repair"))))
+            .await
+            .unwrap();
+        assert!(
+            fixture
+                .core
+                .open_task_store()
+                .unwrap()
+                .get("cas-train")
+                .unwrap()
+                .notes
+                .contains("TRAIN SUITE OVERRIDE")
+        );
         // Exercise the ordinary merge entry, rather than just the reservation
         // helper. Singles cannot overtake the queued first delivery.
         let error = fixture
@@ -651,6 +732,12 @@ mod tests {
             "pending verdict must retain the first position"
         );
         assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
+        assert!(
+            held.waiting
+                .as_deref()
+                .is_some_and(|message| message.contains(&dispatch.id)),
+            "the exact red override must allow the queue to reach review"
+        );
         let service = crate::mcp::CasService::new(fixture.core.clone(), None);
         let request = serde_json::from_value(serde_json::json!({
             "action": "add", "task_id": fixture.ids[0], "dispatch_id": dispatch.id,
@@ -659,6 +746,17 @@ mod tests {
         .unwrap();
         let approval = service.verification(Parameters(request)).await.unwrap();
         assert_ne!(approval.is_error, Some(true), "{approval:?}");
+        // A rerun attempt is not covered by the earlier override. Green then
+        // releases the same durable position without another override.
+        red["run_attempt"] = 2.into();
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
+        resume_pending(&fixture.root, "queue-session")
+            .await
+            .unwrap();
+        assert!(!operations.is_ancestor(&fixture.shas[0], "epic/train"));
+        red["outcome"] = "PASS".into();
+        red.as_object_mut().unwrap().remove("red_since");
+        std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
         // Reconstruct the consumer from durable state, as after daemon restart.
         resume_pending(&fixture.root, "queue-session")
             .await

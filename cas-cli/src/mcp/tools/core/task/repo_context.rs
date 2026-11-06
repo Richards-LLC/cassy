@@ -647,6 +647,9 @@ pub(crate) fn default_child_work_target_from_epic(
     child: &cas_types::Task,
     epic: &cas_types::Task,
 ) -> Option<WorkTarget> {
+    if child.deliverables.work_target_pinned {
+        return None;
+    }
     let inherited = inherited_work_target_from_epic(epic)?;
     let child_target = child.deliverables.work_target.as_ref();
     let epic_target = epic.deliverables.work_target.as_ref()?;
@@ -688,6 +691,9 @@ pub(crate) fn work_target_for_task_moved_into_epic(
     previous_parents: &[cas_types::Task],
     known_epics: impl FnOnce() -> Vec<cas_types::Task>,
 ) -> Option<WorkTarget> {
+    if task.deliverables.work_target_pinned {
+        return None;
+    }
     if let Some(target) = default_child_work_target_from_epic(task, epic) {
         return Some(target);
     }

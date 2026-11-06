@@ -212,6 +212,8 @@ def run(args):
     repo = args.repo.resolve()
     out = args.out.resolve()
     queued = os.environ.get('GITHUB_EVENT_NAME') == 'merge_group'
+    train = (os.environ.get('GITHUB_EVENT_NAME') == 'push'
+             and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('queue tests require a clean tracked tree')
@@ -227,7 +229,7 @@ def run(args):
         cwd = repo
         command = [str(HERE/'run-verified-tests.sh'),'nextest','run','--archive-file',str(repo/'fast-validation-suite.tar.zst'),
                    '--workspace-remap',str(repo),'--no-fail-fast']
-        if queued:command += ['--profile','queue','--retries','0']
+        if queued or train:command += ['--profile','queue','--retries','0']
     else:
         cwd = repo/'hub-web'
         command = ['npm','run','journeys','--','--workers=2']

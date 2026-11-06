@@ -111,8 +111,8 @@ alone. Test-only, docs-only or internal QA deliveries record a decision note
 - Human-facing output: put the `design:` line from
   [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
   in the close reason.
-- Risk: read task `risk` and `proof_targets`. Full Rust execution is
-  the merge-queue run (or `ASSEMBLY_PROOF` where the project has no queue). Non-Rust platform risk needs a
+- Risk: read task `risk` and `proof_targets`. Full-suite evidence follows
+  the project's integration policy. Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
   A `risk=concurrency` non-Rust target needs one `note_type=loaded_proof` line;
   its refusal prints the parsed and missing fields and an example. Rust

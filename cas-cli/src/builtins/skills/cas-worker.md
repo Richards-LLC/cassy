@@ -42,7 +42,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
 
 - One integration per release: fixes merge to the train, the train goes through the gate once.
 - One task at a time. Scope is frozen. Honor non-goals and layer boundaries; cite the plan section and its metric receipt at close when the brief links one.
-- Worker peer lane: collision warnings only, within the same factory session
+- Worker peer lane: local collision warnings; remote same-epic contracts
   ([rules](references/details.md#worker-peer-lane)); Cassy sends a copy to the supervisor.
 - The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
 - `kind=status` (actionable, work continues) requests a typed action wake; FYIs

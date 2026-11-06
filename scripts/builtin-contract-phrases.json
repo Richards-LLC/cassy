@@ -3286,8 +3286,8 @@
           "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor fix round recovery guidance present and mirrored."
         },
         {
-          "text": "python3 scripts/assembly-proof.py prove <epic-worktree>",
-          "reason": "Preserve a command, schema, receipt or markup token consumed by supervisor fix round recovery guidance present and mirrored."
+          "text": "Do not run a local pre-cut full suite.",
+          "reason": "cas-f0a9 operator-approved train CI replaces the supervisor's local pre-cut full suite; the queue remains the final-tree gate."
         },
         {
           "text": "bounded epic-child fix-round task",

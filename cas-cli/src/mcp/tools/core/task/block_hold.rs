@@ -44,6 +44,18 @@ pub(crate) fn record_supervisor_answer(
         .map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// A dependency recorded during this hold owns its next wake. Older edges
+/// alone cannot turn a new manual hold into a dependency wait. Unknown targets
+/// retain the ordinary blocker alert rather than claiming completion.
+pub(crate) fn recorded_dependency_wait(
+    tasks: &dyn TaskStore, task_id: &str, start: chrono::DateTime<chrono::Utc>,
+) -> Option<Vec<Task>> {
+    let edges: Vec<_> = tasks.get_dependencies(task_id).ok()?.into_iter()
+        .filter(|edge| edge.is_blocking()).collect();
+    if !edges.iter().any(|edge| edge.created_at >= start) { return None; }
+    edges.iter().map(|edge| tasks.get(&edge.to_id)).collect::<Result<Vec<_>, _>>().ok()
+}
+
 /// Positive, durable evidence only. New questions/holds, dependencies, changed
 /// owners and non-blocked task states retain their normal wake policy.
 pub(crate) fn answered_blocker_wait(
@@ -56,6 +68,10 @@ pub(crate) fn answered_blocker_wait(
             .list_blocking_for_task(task_id).ok()?.is_empty()
     { return None; }
     let state = tasks.get_execution_state(task_id).ok()??;
+    let hold = read(tasks.as_ref(), task_id).ok()??;
+    // A linked answer cannot swallow the dependency-completed wake after the
+    // reconciler observes that the recorded wait has cleared.
+    if recorded_dependency_wait(tasks.as_ref(), task_id, hold.when).is_some() { return None; }
     let receipt: AnsweredBlocker = serde_json::from_value(state.get("answered_blocker")?.clone()).ok()?;
     let agents = crate::store::open_agent_store(cas_dir).ok()?;
     let supervisor = agents.get(&receipt.supervisor).ok()?;
@@ -64,7 +80,7 @@ pub(crate) fn answered_blocker_wait(
         || ![supervisor.name.as_str(), supervisor.id.as_str(), "supervisor"].contains(&recipient)
         || supervisor.factory_session != worker.factory_session
         || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
-        || read(tasks.as_ref(), task_id).ok()??.reason != receipt.reason
+        || hold.reason != receipt.reason
         || state.get("blocker_ask").and_then(serde_json::Value::as_str) != receipt.ask.as_deref()
     { return None; }
     Some(receipt.message_id)

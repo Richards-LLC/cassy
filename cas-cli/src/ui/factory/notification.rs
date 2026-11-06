@@ -88,7 +88,8 @@ impl Notifier {
                 urgency: Urgency::Normal,
             }),
             // Don't notify for these events
-            DirectorEvent::TaskAssigned { .. } | DirectorEvent::AgentRegistered { .. } => None,
+            DirectorEvent::TaskAssigned { .. } | DirectorEvent::AgentRegistered { .. }
+            | DirectorEvent::QaWalkAttention { .. } => None,
         }
     }
 

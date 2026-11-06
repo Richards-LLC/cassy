@@ -11,11 +11,11 @@ session moving, and if not, what do I do.
 | Scannable | Four labelled rows with a fixed 10-cell label column; an agents ledger whose last column is right-aligned age. |
 | Readable | Nothing — every value is a count, a name, or an age. |
 | Machine output | `--json`: one object with `session`, `prompt_queue_pending`, `tasks_ready`, `tasks_in_progress`, `epics`, `agents`, `activity`. |
-| Omitted | The queue peek and the activity feed; both are in `--json` and the receipt says so. |
+| Omitted | Queue peek and activity feed; both are in `--json` and the receipt says so. |
 
 ## Render at 80 columns
 
-```
+```text
 ✓ active · cas-src-lively-panther-31 · 2 agents · 98 ready · 11 in progress
 ────────────────────────────────────────────────────────────────────────────────
 Project   ~/work/cas-src
@@ -27,7 +27,7 @@ agent              status  task      last seen
 lively-panther-31  active  -            12s ago
 golden-koala-58    active  cas-1111      3s ago
 
---json for the queue peek and activity · --full for untruncated values
+--json for queue peek and activity · --full for untruncated values
 ```
 
 ## Annotations
@@ -37,7 +37,7 @@ golden-koala-58    active  cas-1111      3s ago
    inside the band the TUI's chip contrast guard allows), on a dark one `#50c878` (8:1).
    The alternative verdicts are `⚠ idle 14 min` and `⚠ no agents`, each with a remedy line.
 2. **Rows** — labels are bold words in a fixed column, values start at cell 11. Compare the
-   old right-aligned `        Pending prompts: 0`, which makes the eye hunt for the colon.
+   old right-aligned `Pending prompts: 0`, which makes the eye hunt for the colon.
 3. **Ledger** — the `last seen` column is right-aligned so a `2h ago` outlier sits visibly apart
    from `12s ago`; the agent name column is the only one that truncates, with `…`, and the
    receipt names `--full`.

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  train-rust-red-feedback:
+    title: A red train tip wakes its owner once with complete evidence and holds ordered merges until green or an audited decision
+    tasks: [cas-f0a9]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   approved-dispatch-close-owner:
     title: Approved dispatch and batch receipt recovery use ordinary close gates without worker retries or repeated covered QA offers
     tasks: [cas-abb0]
@@ -43,9 +48,24 @@ bug_families:
     invariants: [HUB-J26-REGISTERED-RUN-STALL]
     journeys: [HUB-J26]
   peer-ask-merge-scope:
-    title: Only explicit asks hold related merges and later messages from that peer clear them
+    title: Only explicit asks hold related merges and correlated typed answers clear them
     tasks: [cas-5ec1]
     invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
+  image-viewer-reload-readiness:
+    title: Image-viewer recovery waits for the restored turn after reload without racing the transient conversation list
+    tasks: [cas-4acf]
+    invariants: [HUB-J4-IMAGE-INSPECTION]
+    journeys: [HUB-J4]
+  recorded-blocker-dependency-wait:
+    title: A dependency recorded during a blocker hold owns the next supervisor wake until all blockers resolve
+    tasks: [cas-f8c7]
+    invariants: [FACTORY-RECORDED-BLOCKER-WAIT]
+    journeys: [HUB-J5]
+  supervisor-clock-drift:
+    title: Delayed wakes, reminders, digests and peer messages show the current local clock without inferred turn timing
+    tasks: [cas-06eb]
+    invariants: [HUB-J5-RENDER-CLOCK]
     journeys: [HUB-J5]
   sandboxed-harness-stall-detection:
     title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
@@ -424,13 +444,21 @@ invariants:
     statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
     bug: {task: cas-fc10}
+  HUB-J5-RENDER-CLOCK:
+    statement: Agent message provenance and pointer wakes carry their render time in the host operator timezone, in twelve-hour form with a zone; identity, age and replay remain visible.
+    check: 'Run delayed_messages_and_wakes_show_the_host_clock_cas_06eb for delayed messages and cloud peers, noon/midnight and both sides of Eastern daylight saving, plus pointer wakes. On the release candidate, compare an actual delayed reminder, inbox digest and peer delivery against the host clock; confirm supervisor clock times and ETAs cite a clock read or measured start in the same turn.'
+    bug: {task: cas-06eb}
   FACTORY-IDLE-STALE-ASSIGNMENT:
     statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
+  FACTORY-RECORDED-BLOCKER-WAIT:
+    statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
+    check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'
+    bug: {task: cas-f8c7}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes without creating a merge hold (cas-5ec1) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
-    check: 'Run peer_ask_gate::tests for explicit asks, later same-peer messages and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
     statement: Automatic about-to-merge notices stay in the peer inbox as receipts without waking the idle supervisor.
@@ -623,6 +651,10 @@ invariants:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
     bug: {task: cas-0a75}
+  FACTORY-QA-PROGRESS:
+    statement: Independent QA surfaces have isolated jobs and evidence; flat ledger output does not change native execution liveness, and one remaining focused-epic QA lane prompts split advice only when an eligible worker is idle.
+    check: Run scripts/test-walk-kit.mjs and qa_walk_progress::tests plus qa_advisory_prompt_uses_fresh_progress; compare worker_status and director output for a flat ledger, a new coalesced result, legacy metadata, multiple or pending lanes, held or assigned workers, and foreign scope during batch QA.
+    bug: {task: cas-3372e}
   HUB-J17-SUPERVISOR-SCOPE:
     statement: Default task groups and the release header use this supervisor's open pinned epic, otherwise its assigned or verification-owned epics; foreign and terminal epics stay behind All tasks.
     check: Run the server-shaped progress-model regression and HUB-J7 truthful-progress case with an unpinned supervisor ID, several project epics, another owner and a closed epic; verify the real-store focused_epic_tests status projection preserves status, assignee and epic_verification_owner.
@@ -697,9 +729,10 @@ invariants:
     statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
     check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
     bug: {task: cas-a147}
-  HUB-J26-EPIC-TABS:
-    statement: Every running session's live epics are visible above the conversation across paired machines, with authoritative merged/total and live worker dots; the busiest opens by default and an explicit selection survives updates until epic closure. Phone tabs scroll and open a task sheet with focus return.
-    check: Run the HUB-J26 epic tabs across machines cases in team.journey.ts at desktop and phone; compare both machines' status snapshots, switch to the peer epic, observe a merge event and inspect keyboard, forced colors and overflow.
+  HUB-J26-PROJECT-EPICS:
+    statement: Tasks & progress shows the selected session's project's live epics only, joined across paired machines by epic id, after the release header; each row and the train header show the TUI's open / in progress / merged split with a segmented bar, untitled epics and placeholder counts never render, and nothing sits between the conversation tabs and the conversation. Phone reads the same section in the Tasks & progress sheet with focus return.
+    check: Run the HUB-J26 project epics cases in team.journey.ts at 1280x800 and 390x844 in light and dark; confirm the foreign project's epic is absent and its session's status is never read, expand the peer epic, observe a merge event update its split, and inspect forced colors, reduced motion and overflow.
+    bug: {task: cas-9b99}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -1148,6 +1181,8 @@ journeys:
   - commander_dependencies
   owners:
   - cas-cli/src/hooks/handlers/handlers_events/message_display.rs
+  - cas-cli/src/mcp/tools/core/task/block_hold.rs
+  - cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts
   - hub-web/src/conversation-view.ts
@@ -1198,6 +1233,7 @@ journeys:
   - hub-web/src/viewport.ts
   - hub-web/src/worker-visibility.ts
   invariants:
+  - FACTORY-RECORDED-BLOCKER-WAIT
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
@@ -2628,7 +2664,7 @@ journeys:
   - Read Team with forced colors and reduced motion
   owner_groups: [commander_runtime]
   owners:
-  - hub-web/src/epic-tabs.ts
+  - hub-web/src/epic-progress.ts
   - hub-web/src/team-view.ts
   - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
@@ -2644,7 +2680,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

@@ -22,6 +22,11 @@ In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict 
 offer per distinct uncovered delivery set. Advancing main alone stays quiet; a
 changed set receives an offer naming the current published tip in its receipt call.
 
+For parked deliveries already on `origin/<target>`, Cassy offers the supervisor
+the exact receipt call once per target branch and live parked task set. Unrelated
+merges that only move the target tip do not repeat it. A new task set receives
+an offer using the current target SHA; the supervisor still records the receipt.
+
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. A non-implementer walks the frozen-tip candidate (or
 deployed staging where one exists), capped per release, and writes one ledger

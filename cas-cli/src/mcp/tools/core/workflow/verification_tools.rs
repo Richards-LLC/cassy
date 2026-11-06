@@ -215,6 +215,36 @@ impl CasCore {
         if crate::mcp::tools::core::task::lifecycle::stale_close_guard::is_terminal_closed(
             task.status,
         ) {
+            // A supervisor may replay its identical exact verdict after Cassy
+            // completed the saved close. This acknowledges history only: no
+            // dispatch, repository mutation, close or second notice is run.
+            let caller_id = self.get_agent_id()?;
+            let authenticated = agent_store.get(&caller_id).is_ok_and(|caller|
+                caller.is_alive() && caller.role == cas_types::AgentRole::Supervisor
+                    && self.has_server_internal_identity(&caller_id));
+            if authenticated && req.verifier_capability.is_none()
+                && let Some(dispatch_id) = req.dispatch_id.as_deref()
+                && let Some(dispatch) = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                && dispatch.id == dispatch_id
+                && dispatch.state == cas_types::VerificationDispatchState::Resolved
+                && let Some(existing) = cas_store::get_verification_for_dispatch(&self.cas_root, dispatch_id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            {
+                let mut candidate = authored_content.clone();
+                candidate.status = VerificationStatus::from_storage(&req.status, None);
+                candidate.set_agent(caller_id.clone());
+                candidate.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+                candidate.dispatch_id = Some(dispatch_id.to_string());
+                candidate.issuer_agent_id = Some(caller_id);
+                if let Some(confidence) = req.confidence { candidate.set_confidence(confidence); }
+                if req.verification_type.as_deref().is_some_and(|kind| kind.trim().eq_ignore_ascii_case("epic")) {
+                    candidate.verification_type = VerificationType::Epic;
+                }
+                if supervisor_verification_retry_matches(&existing, &candidate, req.duration_ms) {
+                    return Ok(Self::success(format!("Verification {} for task {} (idempotent retry; already closed).", existing.id, req.task_id)));
+                }
+            }
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
                 message: Cow::from(
@@ -754,6 +784,9 @@ impl CasCore {
                         && existing.verification_type == VerificationType::Task
                         && proof_dispatch.delivery_transaction_id.is_none()
                     {
+                        if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
+                            outcome
+                        } else {
                         match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_recovery(
                             &self.cas_root,
                             &task,
@@ -762,6 +795,7 @@ impl CasCore {
                             Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::Queued) => "; Supervisor close recovery queued for the exact dispatch".to_string(),
                             Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRecovery::NotQueued(reason)) => format!("; no supervisor recovery queued: {reason}"),
                             Err(error) => format!("; supervisor recovery notice failed: {error}; the supervisor must retry ordinary task close"),
+                        }
                         }
                     } else {
                         String::new()
@@ -1123,6 +1157,9 @@ impl CasCore {
             && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
         {
+            if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
+                outcome
+            } else {
             // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
             // the supervisor owns recovery when a gate still holds.
             use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
@@ -1154,6 +1191,7 @@ impl CasCore {
                 },
             };
             format!("{}{recovery}", cassy_close.receipt(&req.task_id))
+            }
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged

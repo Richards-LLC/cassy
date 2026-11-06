@@ -286,8 +286,10 @@ mod tests {
     fn contextual_capabilities_preserve_launch_context_without_claiming_dispatch() {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
-        let cwd = root.path().join("project");
-        let home = root.path().join("profile");
+        // The shell reports physical $PWD, including macOS's /private prefix.
+        let canonical_root = root.path().canonicalize().unwrap();
+        let cwd = canonical_root.join("project");
+        let home = canonical_root.join("profile");
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let cli = root.path().join("codex");

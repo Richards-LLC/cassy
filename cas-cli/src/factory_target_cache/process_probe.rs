@@ -336,6 +336,27 @@ mod tests {
     }
 
     #[test]
+    fn exited_process_read_error_does_not_block_reclaim_cas_61ab() {
+        use std::io::Write;
+        let (_temp, root, process, cache) = fixture();
+        let stat = process.join("stat");
+        fs::remove_file(&stat).unwrap();
+        assert!(std::process::Command::new("mkfifo").arg(&stat).status().unwrap().success());
+        let exited = process.clone();
+        let writer = std::thread::spawn(move || {
+            // Opening the FIFO waits until the probe opens stat. Remove the
+            // PID before completing that read with an error, without sleeps.
+            let mut stat = fs::OpenOptions::new().write(true).open(stat).unwrap();
+            fs::remove_dir_all(exited).unwrap();
+            stat.write_all(&[0xff]).unwrap();
+        });
+        let evidence = linux_evidence_many(&root, &cache, &cache, &[]);
+        writer.join().unwrap();
+        assert_eq!(evidence, Evidence::Idle,
+            "an errored read of an exited process cannot keep unrelated review trash live");
+    }
+
+    #[test]
     fn leased_target_ignores_opaque_only_after_all_positive_evidence_cas_f96d() {
         let (_temp, root, process, cache) = fixture();
         fs::remove_file(process.join("maps")).unwrap();

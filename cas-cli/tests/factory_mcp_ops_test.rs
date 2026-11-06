@@ -12327,6 +12327,11 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         "reason": reason,
     }))
     .unwrap();
+    // cas-4c92: queued work bound by session ID is still Open, not active
+    // work holding this dirty lane against an audited supervisor assignment.
+    let mut queued = Task::new("cas-4c92-queued".into(), "Queued worker task".into());
+    queued.assignee = Some(registered_worker.id.clone());
+    tasks.add(&queued).unwrap();
     let response = env
         .service
         .task(Parameters(request))

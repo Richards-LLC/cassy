@@ -3274,7 +3274,9 @@ printf '%s\n' "$@" > target/cargo-args"#);
                 assert!(result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
                     "{name} under {actual:?}: {result:?}");
             }
-            std::fs::write(std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap().join("observed-tmp"), actual.as_os_str().as_encoded_bytes()).unwrap();
+            let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap();
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("observed-tmp"), actual.as_os_str().as_encoded_bytes()).unwrap();
             // Replay an abandoned temporary HOME without copying a multi-GB binary.
             let temporary = tempfile::tempdir().unwrap().keep();
             assert!(temporary.starts_with(&actual));

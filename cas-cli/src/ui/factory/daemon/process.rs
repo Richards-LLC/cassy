@@ -293,6 +293,9 @@ pub enum ForkResult {
 pub async fn run_daemon_after_fork(
     app: FactoryApp, listener: UnixListener, session_name: String,
 ) -> anyhow::Result<()> {
+    // This legacy fork entry establishes the environment before adoption can
+    // create any fresh runtime workers. The shared reconstruction stays pure.
+    unsafe { std::env::set_var("CAS_FACTORY_SESSION", &session_name) };
     from_app_after_fork(app, listener, session_name, None)?.run().await
 }
 
@@ -301,7 +304,6 @@ pub(super) fn from_app_after_fork(
     handoff: Option<&super::reexec::Handoff>,
 ) -> anyhow::Result<FactoryDaemon> {
     crate::server_signals::ignore_sigpipe_for_server();
-    if handoff.is_none() { unsafe { std::env::set_var("CAS_FACTORY_SESSION", &session_name) }; }
     app.set_factory_session(session_name.clone());
 
     let trace_path = daemon_trace_log_path(&session_name);

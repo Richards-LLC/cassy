@@ -84,10 +84,17 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
         for (key, value) in protocol {
             guard.set(key, value);
         }
-        if std::env::var_os("CAS_DAEMON_HANDOFF_FD").is_some() {
+        if let Ok(fd) = std::env::var("CAS_DAEMON_HANDOFF_FD") {
+            let fallback =
+                std::env::var("CAS_DAEMON_HANDOFF_FALLBACK").ok().as_deref() == Some("1");
+            let rollback =
+                std::env::var_os("CAS_DAEMON_ROLLBACK_BINARY").map(std::path::PathBuf::from);
+            guard.remove("CAS_DAEMON_HANDOFF_FD");
+            guard.remove("CAS_DAEMON_HANDOFF_FALLBACK");
+            guard.remove("CAS_DAEMON_ROLLBACK_BINARY");
             assert_eq!(
-                super::super::reexec::resume_inherited_daemon(),
-                Some(std::process::ExitCode::SUCCESS)
+                super::super::reexec::resume_inherited_daemon(fd, fallback, rollback),
+                std::process::ExitCode::SUCCESS
             );
             return;
         }
@@ -141,9 +148,7 @@ fn reexec_adopts_two_panes_and_rolls_back_failed_candidate() {
     // The caller supplies the host's scratch TMPDIR; CI defaults to its checkout.
     let scratch = std::env::var_os("TMPDIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/reexec-tmp")
-        });
+        .unwrap_or_else(|| crate::temp_hygiene::default_scratch_root("cas-reexec-tests"));
     std::fs::create_dir_all(&scratch).unwrap();
     let home = tempfile::Builder::new()
         .prefix("cas-reexec-")

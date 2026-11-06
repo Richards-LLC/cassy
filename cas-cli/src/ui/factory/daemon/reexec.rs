@@ -330,17 +330,11 @@ pub(super) fn duplicate(fd: RawFd) -> Result<RawFd> {
 }
 
 /// Called before ordinary CLI startup so the original argv never forks again.
-pub fn resume_inherited_daemon() -> Option<std::process::ExitCode> {
-    let fd = std::env::var(HANDOFF_ENV).ok()?;
-    let fallback = std::env::var(FALLBACK_ENV).ok().as_deref() == Some("1");
-    let rollback = std::env::var_os(ROLLBACK_ENV).map(PathBuf::from);
-    // SAFETY: main calls this before creating threads. Children must not
-    // inherit stale handoff markers and enter the daemon adoption path.
-    unsafe {
-        std::env::remove_var(HANDOFF_ENV);
-        std::env::remove_var(FALLBACK_ENV);
-        std::env::remove_var(ROLLBACK_ENV);
-    }
+pub fn resume_inherited_daemon(
+    fd: String,
+    fallback: bool,
+    rollback: Option<PathBuf>,
+) -> std::process::ExitCode {
     let adopted = std::cell::Cell::new(false);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         resume(fd.clone(), fallback, &adopted)
@@ -361,13 +355,13 @@ pub fn resume_inherited_daemon() -> Option<std::process::ExitCode> {
             eprintln!("Daemon rollback exec failed: {error}");
         }
     }
-    Some(match result {
+    match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("Daemon reexec failed: {error:#}");
             std::process::ExitCode::FAILURE
         }
-    })
+    }
 }
 
 fn resume(fd: String, fallback: bool, adopted: &std::cell::Cell<bool>) -> Result<()> {

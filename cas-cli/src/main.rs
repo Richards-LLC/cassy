@@ -124,7 +124,18 @@ fn main() -> ExitCode {
     // clients with a confusing "Connection refused" error.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    if let Some(outcome) = cas::ui::factory::resume_inherited_daemon() { return outcome; }
+    if let Ok(fd) = std::env::var("CAS_DAEMON_HANDOFF_FD") {
+        let fallback = std::env::var("CAS_DAEMON_HANDOFF_FALLBACK").ok().as_deref() == Some("1");
+        let rollback = std::env::var_os("CAS_DAEMON_ROLLBACK_BINARY").map(std::path::PathBuf::from);
+        // SAFETY: main has not started threads. Remove process-only markers
+        // here, before the shared adoption code creates runtime workers.
+        unsafe {
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FD");
+            std::env::remove_var("CAS_DAEMON_HANDOFF_FALLBACK");
+            std::env::remove_var("CAS_DAEMON_ROLLBACK_BINARY");
+        }
+        return cas::ui::factory::resume_inherited_daemon(fd, fallback, rollback);
+    }
 
     let raw_args: Vec<String> = std::env::args().collect();
     let parse_args = maybe_rewrite_factory_args(raw_args);

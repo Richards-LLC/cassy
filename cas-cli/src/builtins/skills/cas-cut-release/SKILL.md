@@ -36,6 +36,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    train PR, requests auto-merge only when needed and checks admission once.
    It returns after admission; `--no-watch` behaves the same way. No PR-CI watch
    or PR polling stage runs: the queue proves the prepared tree once.
+   `scripts/release.sh --hotfix` takes the next patch version on the train.
 3. The command automatically arms cross-session `branch_contained_in` for the
    release SHA and integration branch, plus `tag_exists` for the version, even
    with `--no-watch`. A retry reuses these durable occurrences. Do not arm a
@@ -47,7 +48,8 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    exact release tree. Commander journey shards run only for web product inputs.
    Landing wakes the supervisor through the persisted SHA reminder; publication
    wakes through the tag reminder. The command never closes the train: core
-   rolls it over when later work is created.
+   rolls it over when later work is created. For a distinct recovery CI run,
+   use `remind_event=ci_completed`; workers never poll CI.
 5. Landing on `main` starts `release.yml` with no agent: it adopts the queue
    run's archives by tree id, runs the ISA audit and the operator launch smoke
    on the packaged Linux and macOS assets, creates the annotated tag and the

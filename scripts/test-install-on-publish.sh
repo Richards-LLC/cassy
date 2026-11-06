@@ -25,7 +25,7 @@ cat >"$tmp/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FAKE_LOG"
 case "$1 $2" in
-  "api repos/example/repo/releases/latest") printf '%s\n' "$FAKE_LATEST" ;;
+  "api repos/example/repo/releases/latest") printf '{"tag_name":"%s","published_at":"2026-11-05T23:00:00Z","draft":false}\n' "$FAKE_LATEST" ;;
   "api repos/example/repo/releases/tags/"*) cat "$FAKE_BODY" ;;
   "release edit")
     while (($#)); do [[ "$1" == --notes-file ]] && cp "$2" "$FAKE_BODY"; shift; done ;;
@@ -36,6 +36,10 @@ cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10-15)"; exit 0; fi
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
+if [[ "$1 $2" == "release installed" ]]; then
+    [[ "${FAKE_NOTICE_FAILS:-}" == 1 ]] && exit 1
+    exit 0
+fi
 [[ "${FAKE_UPDATE_FAILS:-}" == 1 ]] && exit 1
 [[ "$1 $2 $3" == "update --yes --version" ]] && printf '%s\n' "$4" >"$FAKE_INSTALLED"
 # The binary is current but a project refresh failed.
@@ -96,10 +100,22 @@ check 'grep -q "Installed on testhost 2025-10-15T04:10:40Z.*PR #4242 opened → 
 check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$published installed=$installed -->" "$FAKE_BODY"' 'the timer marker records the install time'
 check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
 
+check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 1 ]]' 'cas-61e0: fake publication and verified install notify the owning supervisor once'
+
 # 2. An installed release is a no-op: no update, no notes edit.
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
-check 'grep -q "^api repos/example/repo/releases/latest --jq .tag_name$" "$FAKE_LOG" && ! grep -q "update\|release edit" "$FAKE_LOG"' 'an installed release does nothing'
+check 'grep -q "^api repos/example/repo/releases/latest$" "$FAKE_LOG" && ! grep -q "update\|release edit" "$FAKE_LOG"' 'an installed release does nothing'
+
+# Failed notice delivery is retried on the current-version path, without reinstall.
+FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
+# Force a new publication episode by clearing only the fixture notification receipt.
+rm -f "$XDG_STATE_HOME/cassy/install-on-publish.notified"
+: >"$FAKE_LOG"
+FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
+FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
+FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
+check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 2 ]] && ! grep -q "cas update" "$FAKE_LOG"' 'cas-61e0: a pending notice retries once successfully without reinstalling'
 
 # 3. A second host leaves the completed timer alone.
 echo 9.99.1 >"$FAKE_INSTALLED"

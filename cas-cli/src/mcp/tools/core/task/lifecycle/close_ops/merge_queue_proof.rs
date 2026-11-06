@@ -22,6 +22,7 @@ fn full_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[track_caller]
 fn api(repo: &Path, binary: &Path, endpoint: &str, deadline: Deadline) -> Result<Value, String> {
     let mut command = Command::new(binary);
     command

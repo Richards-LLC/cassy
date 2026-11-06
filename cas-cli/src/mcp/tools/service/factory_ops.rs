@@ -13344,13 +13344,12 @@ fn collect_worker_pr_url(
         return WorkerPrUrl::Unknown("branch not on origin locally");
     }
 
-    let output = match std::process::Command::new(gh_program)
-        .args([
-            "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url",
-        ])
-        .current_dir(worktree_path)
-        .output()
-    {
+    let output = match crate::gh_budget::output(
+        std::process::Command::new(gh_program)
+            .args(["pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url"])
+            .current_dir(worktree_path),
+        std::time::Duration::from_secs(10),
+    ) {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return WorkerPrUrl::Unknown("gh unavailable");

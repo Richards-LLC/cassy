@@ -9,6 +9,7 @@ mod proposals;
 mod query;
 mod rebind;
 pub(crate) mod repo_context;
+pub(crate) mod release_train;
 pub(crate) mod source_claim;
 mod update;
 

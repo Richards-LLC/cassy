@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -515,10 +516,13 @@ class FastRows(unittest.TestCase):
             with self.subTest(row=row, files=sorted(files)):
                 self.refused_at_park(row, files, fix)
 
-    def test_next_version_literal_elsewhere_is_noted_not_refused_cas_7bce(self):
+    def test_preexisting_next_version_literals_are_not_refused_cas_c3fa(self):
         self.write("crates/cas-core/src/lib.rs", "// SQLite 9.99.8 fixed it.\n")
+        fixture = '#[test]\nfn sample() {\n    let fixture = r#"{"dependencies":{"vite":"^10.0.0"}}"#;\n}\n'
+        self.write("cas-cli/tests/sample.rs", fixture)
         self.commit()
         self.base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("cas-cli/tests/sample.rs", "// unrelated lane change\n" + fixture)
         self.write("scripts/example.py", "# unrelated lane\n")
         self.commit()
         result = self.fast()
@@ -527,6 +531,7 @@ class FastRows(unittest.TestCase):
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
         self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
+        self.assertIn("cas-cli/tests/sample.rs:4:", log)
 
     def test_a_call_shape_error_in_a_builtin_skill_is_refused_with_its_line_cas_043b(self):
         # cas-0f05's CI red: a spaced placeholder hid the reminder's message.
@@ -537,8 +542,10 @@ class FastRows(unittest.TestCase):
                              "cas-cli/src/builtins/skills/example/SKILL.md:6: coordination action=remind: missing remind_message")
 
     def push(self, **env):
+        fixture_env = {key: value for key, value in os.environ.items() if key != "ZERO_BASE_REF"}
         return command(self.repo, "git", "push", "origin", "HEAD:refs/heads/factory/lane",
-                       env=dict(os.environ, CARGO=str(self.repo / "cargo-tripwire"), **env))
+                       env={**fixture_env, "CARGO": str(self.repo / "cargo-tripwire"),
+                            "CAS_ROOT": str(self.repo / ".cas"), **env})
 
     def install_hooks(self, **overrides):
         # The installer is operator-only. Its fixture must not inherit this
@@ -555,6 +562,35 @@ class FastRows(unittest.TestCase):
         for source in (ROOT / ".githooks").glob("*"):
             self.write(".githooks/" + source.name, source.read_text())
             (self.repo / ".githooks" / source.name).chmod(source.stat().st_mode)
+
+    def test_first_push_uses_task_epic_when_main_has_moved_cas_0d8d(self):
+        remote = Path(self.scratch.name) / "remote.git"
+        command(self.repo, "git", "init", "-q", "--bare", str(remote))
+        command(self.repo, "git", "remote", "add", "origin", str(remote))
+        self.copy_hook_installer()
+        self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^10.0.0\n')
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/epic/train", "HEAD")
+        self.write("cas-cli/tests/sample.rs", '// dependency fixture: vite ^9.99.0\n')
+        self.commit()
+        command(self.repo, "git", "update-ref", "refs/remotes/origin/main", "HEAD")
+        command(self.repo, "git", "checkout", "-qb", "factory/lane", "origin/epic/train")
+        self.assertEqual(self.install_hooks().returncode, 0)
+        self.write("scripts/example.py", "# unrelated lane\n")
+        self.commit()
+        root = self.repo / ".cas"
+        root.mkdir()
+        with sqlite3.connect(root / "cas.db") as db:
+            db.execute("CREATE TABLE tasks (status TEXT, deliverables TEXT)")
+            db.execute("INSERT INTO tasks VALUES (?, ?)", ("in_progress", json.dumps({
+                "work_target": {"target_branch": "epic/train"},
+                "factory_branch_start": {"branch": "factory/lane"},
+            })))
+        pushed = self.push()
+        self.assertEqual(pushed.returncode, 0, pushed.stderr)
+        _, path = self.receipt()
+        # pin: the fast-row receipt records the comparison ref actually used by the push.
+        self.assertIn("base=origin/epic/train ", path.read_text())
 
     def test_pre_push_refuses_a_failing_factory_tip_and_logs_an_override_cas_043b(self):
         remote = Path(self.scratch.name) / "remote.git"

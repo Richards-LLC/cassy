@@ -150,7 +150,8 @@ pub use delivery_store::{
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
-    list_worker_delivery_events, record_observed_delivery_merge,
+    list_worker_delivery_events, observed_delivery_merges_into, record_observed_delivery_merge,
+    ObservedDeliveryMerge,
     record_pending_observed_delivery_merge, transition_worker_delivery,
     transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
 };
@@ -257,6 +258,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
+    extend_verification_dispatch_deadline, rebind_approved_verification_dispatch,
     get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
     get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
     has_active_verification_dispatch, import_peer_premerge_verification, inspect_bound_server_verifier_handoff,

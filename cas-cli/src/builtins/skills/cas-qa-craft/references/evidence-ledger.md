@@ -70,3 +70,31 @@ threshold is a defect row. For terminal states, dump visible text from every
 surface and record claims that cannot both be true. File one task per defect;
 never fix code from the QA pass. Put the ledger path in the task note and close
 reason.
+
+## Server read-back and harness failures
+
+Grade paid and account routes on server state. Use the UI to trigger the action;
+capture one settled frame as evidence, rather than grading success by a toast,
+selector or settle timeout. Bind read-back to the exact actor, workspace, item and
+operation from this attempt, at the served build. Record expected and observed
+values for the applicable invariants: job/operation terminal status, persisted
+item/account fields and ownership, credit consumption and grant rows with balance,
+and Stripe TEST subscription or charge status. A prior successful attempt is not
+evidence for this one. Use read-only access and the journey's safety policy.
+
+When automation fails, adjudicate the product outcome in the same sweep:
+
+- Matching server read-back with no visible product defect: record `PASS` for the
+  product, retain the original timeout/selector/settle failure capture and the
+  read-back in the row, and link a harness defect task. This harness-only red does
+  not block promotion or require a product fix or whole-sweep rerun.
+- Read-back mismatch or a visible product defect: record `FAIL` with a product
+  defect task, even if a success toast appeared or server state otherwise matches.
+  These failures block promotion under the existing batch fix/re-walk policy.
+- Missing, stale or ambiguous read-back: record `NOT EXERCISED: <reason>` and keep
+  the evidence owed. An unverified result cannot become a product PASS.
+
+The supervisor records this evidence-backed ruling in the release ledger before
+the batch receipt. Preserve native runner exit codes, failed attempts and CI
+receipts; a product ruling never rewrites an automated failure into a green run
+or bypasses a required mechanical gate.

@@ -889,7 +889,7 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                 let mut supervisor = agents.get("single-sup").unwrap();
                 // Native observation selects live Active/Stale registrations.
                 supervisor.status = cas_types::AgentStatus::Active;
-                let account = root.path().join("codex-account");
+                let account = root.path().canonicalize().unwrap().join("codex-account");
                 supervisor.metadata.insert("worker_cli".into(), "codex".into());
                 supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
                 supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
@@ -980,6 +980,8 @@ async fn cas_aa152_codex_dispatch_enforces_sender_policy_during_tools_and_idle()
                     assert_eq!(readable.len(), 1, "{context}: explicit inbox read stays available");
                     assert_eq!(readable[0].prompt, body, "{context}");
                 }
+                // Reap each fixture before the next row; live cats retain PTY readers/fds.
+                daemon.app.mux.get_mut(&name).unwrap().kill_tree(true).await;
             }
         }
     }

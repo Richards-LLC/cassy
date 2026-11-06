@@ -3017,7 +3017,7 @@ fn managed_sync_commits_on_named_branches_cas_10ad() {
         }
         if can_commit {
             assert!(cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty(), "{branch}");
-            assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{before}..HEAD")]).trim(), "1");
+            assert_eq!(cas_6718_git(&project, &["rev-list", "--count", &format!("{}..HEAD", before.trim())]).trim(), "1");
         }
         assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
         if !can_commit && report.commit.is_none() {

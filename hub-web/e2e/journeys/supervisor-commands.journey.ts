@@ -30,6 +30,46 @@ async function captureReload(page: Page, name: string, width: number): Promise<v
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
     test.use({ viewport, colorScheme: viewport.width === 390 ? "dark" : "light" });
+    test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {
+      const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
+      const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN],
+        fleet: { [PELICAN]: { agents: [], tasks: [], epics: [], focused_epic: null, spawnNames: [],
+          supervisor_phase: { event_id: "completed-turn", kind: "notice", lifecycle: { id: "prior-turn", stage: "end", outcome: "success" }, observed_at: journeyStamp(), stale: false } } },
+        history: { [PELICAN]: [{ has_earlier: false, replies: [], messages: [{ notification_id: 9907, target: "terminal-history", device_id: "terminal", operator_label: "Terminal", stamped: false, state: "acknowledged", at: journeyStamp(-1000),
+          text: "<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>reconnect cas</command-args>" }] }] },
+      });
+      await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
+        await journey.open();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+        await expect(page.locator(".working-turn .phase-line")).toContainText("Turn completed");
+        const receipt = page.locator(".native-command-receipt");
+        await expect(receipt).toContainText("/mcp reconnect cas");
+        await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");
+        await expect(receipt).not.toHaveClass(/bub/);
+      });
+      await journey.stage("Reload Cassy once from the idle Claude supervisor", async () => {
+        const input = page.locator("#message-text");
+        await input.fill("/mcp"); await input.press("Enter");
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(1);
+        const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+        expect(frames).toHaveLength(1);
+        const request = frames[0]!.body as { client_ref: string; command: string };
+        expect(request.command).toBe("mcp");
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/mcp" })).toHaveAttribute("data-phase", "observed");
+        expect(hub.sends).toHaveLength(0);
+      });
+      await journey.stage("Exit once after the native turn has completed", async () => {
+        const input = page.locator("#message-text");
+        await input.fill("/exit"); await input.press("Enter");
+        await page.getByRole("alertdialog").getByRole("button", { name: "Exit", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
+        expect(frames).toHaveLength(2);
+        expect(frames[1]!.body).toMatchObject({ command: "exit", confirmed: true });
+        expect(hub.sends).toHaveLength(0);
+      });
+    });
     test("HUB-J27 reload Claude's Cassy server and read its replacement process", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const, mcp_version: "9.99.1", installed_version: "9.99.2" })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN] });

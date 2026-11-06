@@ -5,7 +5,7 @@ use cas_store::PromptQueueStore;
 ///
 /// Emitted by `handle_user_prompt_submit` when `is_factory_agent && role==supervisor`.
 /// Refreshes Hard Rules every turn to prevent mid-session drift where supervisors
-/// forget their role and start using incorrect tools (e.g. `AskUserQuestion` for workers,
+/// forget their role and use incorrect tools (e.g. `AskUserQuestion` for workers,
 /// or `SendMessage` instead of coordination).
 ///
 /// Identity is resolved at call time from process env vars set by the factory daemon:
@@ -23,8 +23,8 @@ pub(crate) fn build_supervisor_reminder() -> String {
     format!(
         "[supervisor reminder]\n\
          You are {name}, supervisor of team {team}. Hard rules:\n\
-         \u{2022} AskUserQuestion is BLOCKED in factory mode: ask humans in plain text and end your turn; teammates \u{2192} {prefix}coordination action=message.\n\
-         \u{2022} Never SendMessage. Never close worker tasks. Never implement non-trivial work yourself.\n\
+         \u{2022} AskUserQuestion is BLOCKED: answer the operator in the pane and end your turn; ask unprompted with kind=ask; teammates \u{2192} {prefix}coordination action=message.\n\
+         \u{2022} Never SendMessage. Never close worker tasks. Never implement tasks yourself.\n\
          \u{2022} Never poll/monitor/sleep. End your turn after assigning. Wait for messages."
     )
 }

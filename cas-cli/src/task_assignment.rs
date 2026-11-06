@@ -15,10 +15,10 @@ pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the f
 pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
     "Fewest tests: cas-tdd (task start states the principle). Assignment authorizes and requires those ",
     "tests covering the lines touched, which you run yourself per cas-worker ",
-    "references/discipline.md. The merge queue runs the full suite once; never run it locally. ",
+    "references/discipline.md. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. ",
     "Docs-only and no-code tasks prove their acceptance check instead (e.g. ",
     "markdownlint, `cas codemap status`, a published artifact); don't add code tests to them. ",
-    "Close your own task; never ask the supervisor to close it."
+    "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you."
 );
 
 /// Queue the assignment once for the current worker in its factory session. This
@@ -86,7 +86,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
          Successful task action=start is authoritative assignment acceptance; no prose ACK is required.\n\
          {}\n\
          While working, post progress notes with {prefix}task action=notes.\n\
-         If blocked, set status=blocked and send {prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\".",
+         If blocked, add a blocker note, set status=blocked, then send {prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\".",
         task.id,
         task.title,
         task.id,

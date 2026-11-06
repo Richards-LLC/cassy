@@ -468,7 +468,7 @@ pub(crate) fn pushed_branch_tip(repo: &Path, branch: &str) -> Option<String> {
 
 /// Whether `tip` is a rebased copy of `recorded` against `target`: `recorded`
 /// is no longer on `tip`'s history, and the change each brings over its
-/// merge-base with `target` has the same `git patch-id --stable`.
+/// merge-base with `target` has the same whitespace-exact patch-id.
 pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> bool {
     let on_branch = Command::new("git")
         .args(["merge-base", "--is-ancestor", recorded, tip])
@@ -484,13 +484,30 @@ pub fn is_rebased_copy(repo: &Path, recorded: &str, tip: &str, target: &str) -> 
     }
 }
 
-/// `git patch-id --stable` of everything `head` brings over its merge-base
-/// with `target`. `None` when it cannot be computed or the change is empty.
+/// Patch-id of everything `head` brings over its merge-base with `target`.
+/// `None` when it cannot be computed or the change is empty.
 fn change_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
     change_patch_id_excluding(repo, head, target, &[])
 }
 
-/// [`change_patch_id`] leaving out `excluded` paths (cas-0c988).
+/// git in `repo` itself, never an inherited `GIT_DIR` or work tree.
+fn repo_git(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE");
+    command
+}
+
+/// cas-aedd (GH #1476): the cas-d4b7 comparison. A whitespace-exact
+/// (`--verbatim`), full-context (`-U3`) patch-id over the whole repository
+/// (top-anchored pathspecs, whatever directory `repo` names), leaving out
+/// `excluded` paths. `--stable` ignored whitespace, and the relative `.`
+/// pathspec cut the patch to the caller's directory.
 fn change_patch_id_excluding(
     repo: &Path,
     head: &str,
@@ -498,24 +515,21 @@ fn change_patch_id_excluding(
     excluded: &[&str],
 ) -> Option<String> {
     use std::io::Write;
-    let base = Command::new("git").args(["merge-base", head, target]).current_dir(repo).output().ok()?;
+    let base = repo_git(repo).args(["merge-base", head, target]).output().ok()?;
     if !base.status.success() {
         return None;
     }
     let base = String::from_utf8_lossy(&base.stdout).trim().to_string();
-    let mut args = vec!["diff".to_string(), "--no-color".to_string(), base, head.to_string()];
-    if !excluded.is_empty() {
-        args.push("--".to_string());
-        args.push(".".to_string());
-        args.extend(excluded.iter().map(|path| format!(":(exclude){path}")));
-    }
-    let diff = Command::new("git").args(&args).current_dir(repo).output().ok()?;
+    let mut diff = repo_git(repo);
+    diff.args(["diff", "--binary", "--no-color", "--no-renames", "--no-ext-diff"])
+        .args(["--no-textconv", "-U3", &base, head, "--", ":(top)"])
+        .args(excluded.iter().map(|path| format!(":(top,exclude){path}")));
+    let diff = diff.output().ok()?;
     if !diff.status.success() || diff.stdout.is_empty() {
         return None;
     }
-    let mut child = Command::new("git")
-        .args(["patch-id", "--stable"])
-        .current_dir(repo)
+    let mut child = repo_git(repo)
+        .args(["patch-id", "--verbatim"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -530,23 +544,86 @@ fn change_patch_id_excluding(
 /// merging. A delivery's reviewed content never includes it.
 pub const GENERATED_ARTIFACT_PATHS: &[&str] = &["hub-web/dist"];
 
-/// `git patch-id --stable` of the change `head` brings over its merge-base
-/// with `target`, leaving out [`GENERATED_ARTIFACT_PATHS`]. Two tips with the
-/// same id carry the same reviewed source, whatever their build output.
+fn is_generated_artifact(path: &str) -> bool {
+    GENERATED_ARTIFACT_PATHS.iter().any(|generated| {
+        path.strip_prefix(generated)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Patch-id of the change `head` brings over its merge-base with `target`,
+/// leaving out [`GENERATED_ARTIFACT_PATHS`]. Two tips with the same id carry
+/// the same reviewed source, whatever their build output.
 pub fn source_patch_id(repo: &Path, head: &str, target: &str) -> Option<String> {
     change_patch_id_excluding(repo, head, target, GENERATED_ARTIFACT_PATHS)
 }
 
+/// cas-aedd (GH #1476): why `head` carries the source reviewed at
+/// `reviewed`, or `None`. A descendant carries only when `reviewed..head`
+/// changes nothing but generated build output; comparing each tip with a
+/// moving target hid a follow-up commit. A rewritten tip carries only on
+/// the same whitespace-exact source patch against `target`; with no known
+/// target it never carries.
+fn unchanged_source_reason(
+    repo: &Path,
+    reviewed: &str,
+    head: &str,
+    target: Option<&str>,
+) -> Option<String> {
+    let descends = repo_git(repo)
+        .args(["merge-base", "--is-ancestor", reviewed, head])
+        .status()
+        .is_ok_and(|status| status.success());
+    let generated = GENERATED_ARTIFACT_PATHS.join(", ");
+    if descends {
+        let changed = repo_git(repo)
+            .args(["diff", "--name-only", "-z", "--no-renames", reviewed, head])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())?;
+        let source_changed = changed
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .any(|path| !is_generated_artifact(&String::from_utf8_lossy(path)));
+        return (!source_changed).then(|| {
+            format!("the commits since the reviewed tip change only generated build output ({generated})")
+        });
+    }
+    let head_patch = source_patch_id(repo, head, target?)?;
+    (source_patch_id(repo, reviewed, target?)? == head_patch).then(|| {
+        format!(
+            "the reviewed source patch is byte-identical (verbatim patch-id {}); only generated build output ({generated}) differs",
+            &head_patch[..head_patch.len().min(12)],
+        )
+    })
+}
+
+/// cas-aedd: the branch a delivery merges into: its parent epic's branch,
+/// else its recorded work target. `None` when neither is recorded.
+pub(crate) fn recorded_target_branch(task: &Task, epic_branch: Option<String>) -> Option<String> {
+    epic_branch
+        .or_else(|| {
+            task.deliverables
+                .work_target
+                .as_ref()
+                .map(|target| target.target_branch.clone())
+        })
+        .map(|branch| branch.trim().to_string())
+        .filter(|branch| !branch.is_empty())
+}
+
 /// cas-0c988: carry a passed or waived verdict from an earlier tip of this
-/// delivery to `head` when both carry the same source patch against
-/// `target`. Records the carried round and logs it; returns it.
+/// delivery to `head` when the reviewed source is unchanged (see
+/// [`unchanged_source_reason`]). Records the carried round and logs it;
+/// returns it.
 pub fn carry_verdict(
     cas_root: &Path,
     repo: &Path,
     task: &Task,
     passes: &[QaPass],
     head: &str,
-    target: &str,
+    target: Option<&str>,
 ) -> Option<QaPass> {
     if passes
         .iter()
@@ -554,22 +631,16 @@ pub fn carry_verdict(
     {
         return None;
     }
-    let head_patch = source_patch_id(repo, head, target)?;
-    let from = passes
+    let (from, reason) = passes
         .iter()
         .filter(|pass| {
             !pass.is_withdrawn()
                 && pass.state.satisfies_gate()
                 && !same_sha(&pass.bound_head, head)
         })
-        .find(|pass| {
-            source_patch_id(repo, &pass.bound_head, target).as_deref() == Some(head_patch.as_str())
+        .find_map(|pass| {
+            unchanged_source_reason(repo, &pass.bound_head, head, target).map(|reason| (pass, reason))
         })?;
-    let reason = format!(
-        "the reviewed source patch is byte-identical (patch-id {}); only generated build output ({}) differs",
-        &head_patch[..head_patch.len().min(12)],
-        GENERATED_ARTIFACT_PATHS.join(", "),
-    );
     let carried = match cas_store::carry_qa_pass(
         cas_root,
         from,
@@ -747,12 +818,14 @@ fn branch_merge_refusal_in_repo(
             .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
             .filter(|sha| !sha.is_empty());
         let refusal = match head {
-            // cas-0c988: a rebased tip carrying the reviewed source patch byte
-            // for byte keeps the verdict (logged). A raw `git merge` merges
-            // into the checked-out branch, so that is the target.
-            Some(head) => merge_gate(task, &qa, &passes, &head)
-                .err()
-                .filter(|_| carry_verdict(cas_root, &repo, task, &passes, &head, "HEAD").is_none()),
+            // cas-0c988: a tip carrying the reviewed source unchanged keeps
+            // the verdict (logged). cas-aedd: compare against the delivery's
+            // recorded target, never whatever `HEAD` this checkout holds.
+            Some(head) => merge_gate(task, &qa, &passes, &head).err().filter(|_| {
+                let epic = task_store.get_parent_epic(&task.id).ok().flatten();
+                let target = recorded_target_branch(task, epic.and_then(|epic| epic.branch));
+                carry_verdict(cas_root, &repo, task, &passes, &head, target.as_deref()).is_none()
+            }),
             None => Some(format!(
                 "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
                 task.id
@@ -2666,7 +2739,7 @@ mod tests {
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
         let qa = QaConfig::default();
         assert!(merge_gate(&task, &qa, &passes, &rebased).is_err(), "not yet carried");
-        let carried = carry_verdict(cas.path(), repo, &task, &passes, &rebased, "main")
+        let carried = carry_verdict(cas.path(), repo, &task, &passes, &rebased, Some("main"))
             .expect("the verdict carries to the rebased tip");
         assert_eq!(carried.bound_head, rebased);
         assert_eq!(carried.state, cas_types::QaPassState::Passed);
@@ -2677,7 +2750,15 @@ mod tests {
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
         assert_eq!(merge_gate(&task, &qa, &passes, &rebased), Ok(()));
         // Idempotent: the tip is covered now, nothing more is recorded.
-        assert!(carry_verdict(cas.path(), repo, &task, &passes, &rebased, "main").is_none());
+        assert!(carry_verdict(cas.path(), repo, &task, &passes, &rebased, Some("main")).is_none());
+        // cas-aedd: a follow-up commit that only regenerates the build output
+        // carries with no target, from the tip it descends from.
+        std::fs::write(repo.join("hub-web/dist/app.js"), "gap=8 rows=5 min\n").unwrap();
+        git(&["commit", "-q", "-am", "rebuild"]);
+        let rebuilt = git(&["rev-parse", "HEAD"]);
+        let carried = carry_verdict(cas.path(), repo, &task, &passes, &rebuilt, None)
+            .expect("a build-output-only follow-up keeps the verdict");
+        assert_eq!(carried.bound_head, rebuilt);
     }
 
     /// cas-0c988: a rebase that also changed the reviewed source keeps no
@@ -2699,7 +2780,7 @@ mod tests {
         let changed = git(&["rev-parse", "HEAD"]);
         assert_ne!(source_patch_id(repo, &reviewed, "main"), source_patch_id(repo, &changed, "main"));
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
-        assert!(carry_verdict(cas.path(), repo, &task, &passes, &changed, "main").is_none());
+        assert!(carry_verdict(cas.path(), repo, &task, &passes, &changed, Some("main")).is_none());
 
         let mut failed = passes.clone();
         for pass in &mut failed {
@@ -2711,6 +2792,65 @@ mod tests {
         let same_source = git(&["rev-parse", "HEAD"]);
         assert_ne!(same_source, reviewed);
         assert_eq!(source_patch_id(repo, &reviewed, "main"), source_patch_id(repo, &same_source, "main"));
-        assert!(carry_verdict(cas.path(), repo, &task, &failed, &same_source, "main").is_none());
+        assert!(carry_verdict(cas.path(), repo, &task, &failed, &same_source, Some("main")).is_none());
+    }
+
+    /// Open and approve a QA round for `head`.
+    fn approve(cas: &Path, head: &str) -> Vec<QaPass> {
+        dispatch(cas, head);
+        let now = chrono::Utc::now();
+        cas_store::claim_qa_pass(cas, "cas-ui1", "reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(cas, "cas-ui1", "reviewer",
+            cas_types::QaVerdict::Approved, "ok", None, "/l/LEDGER.md", now).unwrap();
+        cas_store::list_qa_passes(cas, "cas-ui1").unwrap()
+    }
+
+    /// GH #1476 replay: the reviewed tip gets a follow-up commit changing
+    /// middleware outside the directory the merge runs from. The verdict
+    /// used to carry, because both patches were cut to that directory.
+    #[test]
+    fn a_follow_up_source_commit_never_carries_the_qa_verdict_gh_1476() {
+        let (dir, git) = dist_repo();
+        let root = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let passes = approve(cas.path(), &reviewed);
+        std::fs::create_dir_all(root.join("server/middleware")).unwrap();
+        std::fs::write(root.join("server/middleware/auth.ts"), "export const open = true;\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "middleware"]);
+        let follow_up = git(&["rev-parse", "HEAD"]);
+        for repo in [root.to_path_buf(), root.join("hub-web")] {
+            assert!(
+                carry_verdict(cas.path(), &repo, &parked(&reviewed), &passes, &follow_up, Some("main")).is_none(),
+                "{}: a source change opens a new QA round",
+                repo.display()
+            );
+        }
+    }
+
+    /// GH #1476: `patch-id --stable` ignores whitespace, so a whitespace-only
+    /// change, as a follow-up commit or an amended tip, kept the verdict.
+    #[test]
+    fn a_whitespace_only_change_never_carries_the_qa_verdict_gh_1476() {
+        let (dir, git) = dist_repo();
+        let repo = dir.path();
+        let cas = tempfile::tempdir().unwrap();
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        let passes = approve(cas.path(), &reviewed);
+        let composer = repo.join("hub-web/src/composer.ts");
+        std::fs::write(&composer, "export const gap  = 8;\n").unwrap();
+        git(&["commit", "-q", "-am", "follow-up spacing"]);
+        let follow_up = git(&["rev-parse", "HEAD"]);
+        git(&["reset", "-q", "--hard", &reviewed]);
+        std::fs::write(&composer, "export const gap\t= 8;\n").unwrap();
+        git(&["commit", "-q", "-a", "--amend", "-m", "composer spacing, amended"]);
+        let amended = git(&["rev-parse", "HEAD"]);
+        for tip in [follow_up, amended] {
+            assert!(
+                carry_verdict(cas.path(), repo, &parked(&reviewed), &passes, &tip, Some("main")).is_none(),
+                "@{tip}: whitespace is reviewed content"
+            );
+        }
     }
 }

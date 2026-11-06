@@ -2756,6 +2756,79 @@ async fn cas_4af9_approval_survives_target_moves_that_keep_the_candidate_tree() 
     }
 }
 
+/// cas-015e replays cas-f43d: review accidentally used an unpublished local
+/// main merge, then resetting that merge made a normal origin advance look
+/// like a non-ancestral target replacement. The delivered source never moves.
+#[tokio::test]
+async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
+    let mut env = test_env();
+    for unpublished_merge in [true, false] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        std::fs::write(fixture.cas_root.join("config.toml"),
+            "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
+        let tasks = open_task_store(&fixture.cas_root).unwrap();
+        let mut task = tasks.get("cas-e429").unwrap();
+        task.depth = TaskDepth::Deep;
+        task.status = TaskStatus::AwaitingMerge;
+        task.labels = vec!["force-verifier".into()];
+        task.deliverables.factory_branch_anchor = Some(fixture.tip.clone());
+        task.deliverables.parked_branch = Some(fixture.branch.clone());
+        tasks.update(&task).unwrap();
+        let published_base = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        let target = fixture.cas_root.join("target-writer");
+        run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
+        if unpublished_merge {
+            run_git(&["checkout", "-b", "unpublished-sibling"], &target);
+            std::fs::write(target.join("unpublished.txt"), "Never published\n").unwrap();
+            run_git(&["add", "unpublished.txt"], &target);
+            run_git(&["commit", "-m", "Unpublished sibling"], &target);
+            run_git(&["checkout", "epic/rebound"], &target);
+            run_git(&["merge", "--no-ff", "-m", "Local merge before rejected publication", "unpublished-sibling"], &target);
+        }
+        let local_review_base = git_stdout(&target, &["rev-parse", "HEAD"]);
+        let mut merge = coord_req("worktree_merge");
+        merge.id = Some(fixture.branch.clone());
+        merge.task_id = Some(task.id.clone());
+        merge.cleanup = Some(false);
+        let _ = fixture.service.factory(Parameters(merge.clone())).await;
+        let dispatch = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        let proof = dispatch.repository.as_ref().unwrap();
+        let bound_base = git_stdout(&fixture.repo.root, &["rev-parse", &format!("{}^1", proof.head_commit)]);
+        eprintln!("cas-f43d replay: source={} local_target={} published_target={} bound_target={}",
+            fixture.tip, local_review_base, published_base, bound_base);
+        let approved = fixture.service.verification(Parameters(verification_req(serde_json::json!({
+            "action": "add", "task_id": task.id, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "Approve this delivered patch once",
+        })))).await.unwrap();
+        assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
+        let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
+        // Roll back the unpublished local merge, then let a disjoint delivery
+        // advance the published target, exactly as soundwave's main reflog did.
+        run_git(&["reset", "--hard", &published_base], &target);
+        std::fs::write(target.join("published-sibling.txt"), "Published sibling\n").unwrap();
+        run_git(&["add", "published-sibling.txt"], &target);
+        run_git(&["commit", "-m", "Published target advances"], &target);
+        run_git(&["push", "origin", "epic/rebound"], &target);
+        let next_base = git_stdout(&target, &["rev-parse", "HEAD"]);
+        let result = fixture.service.factory(Parameters(merge)).await;
+        let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
+        assert_eq!(latest.id, dispatch.id,
+            "unpublished_merge={unpublished_merge}: target {bound_base} -> {next_base}, unchanged source {}; normal published progress must not dispatch another review: {result:?}", fixture.tip);
+        assert_eq!(bound_base, published_base, "review binds the published base even when local target is ahead");
+        assert_eq!(serde_json::to_value(cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(&verdict).unwrap(), "carry-forward cannot mutate the original verdict");
+        assert_eq!(latest.repository, dispatch.repository, "the original proof remains immutable");
+        assert_eq!(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]), fixture.tip,
+            "candidate preparation never rewrites the worker source");
+        let published = git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
+        run_git(&["merge-base", "--is-ancestor", &fixture.tip, &published], &fixture.repo.root);
+        let queue = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap();
+        assert_eq!(queue.peek_all(100).unwrap().iter()
+            .filter(|row| row.source.starts_with("verification-dispatch:")).count(), 1,
+            "no second verifier handoff is sent");
+    }
+}
+
 #[tokio::test]
 async fn cas_e051_transactional_receipt_reviews_the_unpublished_merge_candidate_once() {
     let mut env = test_env();
@@ -4938,6 +5011,25 @@ async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
     protected_main_fixture_cas_d6cf("moved", false).await;
 }
 
+/// cas-662e: replay Nov 5, 23:03Z. A merge-queue probe that fails is not
+/// "no queue": the merge refuses before any local merge, so the operator's
+/// edit in the main checkout is untouched and main is never pushed.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_queue_probe_refuses_before_local_merge_cas_662e() {
+    protected_main_fixture_cas_d6cf("probe_failed", false).await;
+}
+
+/// cas-662e: replay Nov 5, 7:09 PM ET. "canonical GitHub repository lookup
+/// failed for origin Richards-LLC/cassy" left no slug, so the queue was never
+/// asked and the merge went local into GH013. A GitHub origin whose canonical
+/// lookup fails refuses the same way.
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_canonical_lookup_refuses_before_local_merge_cas_662e() {
+    protected_main_fixture_cas_d6cf("lookup_failed", false).await;
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
@@ -4946,7 +5038,7 @@ async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
 
 #[cfg(unix)]
 async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
-    let queued = matches!(mode, "queued" | "moved");
+    let queued = matches!(mode, "queued" | "moved" | "probe_failed" | "lookup_failed");
     let moved = mode == "moved";
     let mut env = test_env();
     let repo = GitRepo::new();
@@ -4991,13 +5083,23 @@ done
 [ -z "$(git status --porcelain --untracked-files=no)" ] || exit 1
 "#));
         let reported_head = if moved { "0".repeat(40) } else { source.clone() };
+        let repo_view = if mode == "lookup_failed" {
+            "exit 1".to_string()
+        } else {
+            r#"printf '%s\n' '{"nameWithOwner":"org/protected"}'"#.to_string()
+        };
+        let queue_probe = if mode == "probe_failed" {
+            "exit 1".to_string()
+        } else {
+            r#"printf '%s\n' '{"data":{"repository":{"mergeQueue":{"id":"queue-main"}}}}'"#.to_string()
+        };
         let gh = env.home().join("protected-gh");
         cas::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> '{calls}'
 pr='{{"number":37,"url":"{url}","state":"OPEN","headRefOid":"{reported_head}","headRefName":"factory/bob","baseRefName":"main"}}'
 case "$1 $2" in
-'repo view') printf '%s\n' '{{"nameWithOwner":"org/protected"}}' ;;
-'api graphql') printf '%s\n' '{{"data":{{"repository":{{"mergeQueue":{{"id":"queue-main"}}}}}}}}' ;;
+'repo view') {repo_view} ;;
+'api graphql') {queue_probe} ;;
 'api '*) printf '%s\n' '{{"check_runs":[{{"name":"Scoped Validation (factory/PR)","status":"completed","conclusion":"success"}}]}}' ;;
 'pr list') if [ -f '{exists}' ]; then printf '[%s]\n' "$pr"; else printf '[]\n'; fi ;;
 'pr create') touch '{exists}'; printf '%s\n' '{url}' ;;
@@ -5028,6 +5130,17 @@ printf '%s\n' "$peer" > '{}'
     request.allow_trunk = Some(true);
     request.cleanup = Some(cleanup);
     let result = service.factory(Parameters(request.clone())).await;
+    if matches!(mode, "probe_failed" | "lookup_failed") {
+        let refusal = result.expect_err("an unknown queue state must refuse");
+        // pin: the refusal must name the unknown queue so the supervisor retries.
+        assert!(refusal.message.contains("merge queue state unknown"), "{refusal:?}");
+        // pin: no push of refs/heads/main is the refuse-before-local-merge contract.
+        assert!(!std::fs::read_to_string(&pushed_refs).unwrap_or_default().contains("refs/heads/main"),
+            "no local merge may be published: {refusal:?}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+        assert_eq!(std::fs::read_to_string(repo.root.join("README.md")).unwrap(), operator_edit);
+        return;
+    }
     if moved {
         let refusal = result.expect_err("a changed PR head cannot acquire auto-merge authority");
         assert!(!armed.exists(), "{refusal:?}");

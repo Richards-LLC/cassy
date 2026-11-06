@@ -4,24 +4,27 @@ Read for a rejection, blocked work, interruption or branch transition.
 
 ## MERGE REQUIRED
 
+A successful park is not this refusal. The park relay is the completion signal; send merge_request=true only for local_merge.
+
 Drain `coordination action=inbox_poll` to `No unread messages`, follow
 unread supervisor messages and re-read task state: the tip may have landed.
 Capture `git rev-parse factory/<name>` (or the active per-task branch). For
-`local_merge`, keep the local commit; otherwise push that branch. Send
+`local_merge`, keep the local commit and send
 `coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`.
-Its verdict closes or reopens the task; do not re-close. For an epic, request
-the merge rather than `gh pr create --base epic/...`. Forward a rejection's exact
-error; never bypass close with `status=closed` or an invented verification record.
+Otherwise push that branch and retry close once. Never open or merge a PR
+yourself (`gh pr create`). If rejected, fix what the exact error names; never
+bypass close with `status=closed` or an invented verification record.
 
 ### While the merge is pending
 
-The supervisor owns the landing signal; polls spend your context.
+Park releases your lease, and the merge verdict wakes you once: it closes the
+task or reopens it with findings. Every poll spends your context.
 
+- Wait on an event reminder, never a timed poll. For `local_merge`, one
+  `branch_contained_in` reminder for the delivered SHA and target is that event.
 - Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
   supervisor message, never in a self-reminder loop.
-- Until the supervisor acknowledges the request, keep one `branch_contained_in`
-  reminder for the delivered SHA and target, never a delay reminder.
-- When it says it owns the merge or close, cancel those reminders
+- When the supervisor says it owns the merge, cancel reminders
   (`coordination action=remind_cancel`) and stay idle until it messages you.
 
 ## Queued successor and branch reuse
@@ -59,10 +62,9 @@ When required supervisor review, approval or another decision blocks work:
 
 ## Verification-required close
 
-Workers close their own tasks. When close returns VERIFICATION REQUIRED naming a
-dispatch, forward it once to the supervisor with the delivery SHA, set
-`status=blocked`, record exactly this one-line blocker note, wait, and retry
-close after the verdict:
+When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
+verdict closes the task; never re-close. Send only the blocker the refusal
+names, if any, set `status=blocked` and record exactly this one-line blocker note:
 `Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
 Any other text wakes the supervisor as a real blocker. Start no other task
 meanwhile; after five minutes without a needed response, read task state and
@@ -86,13 +88,14 @@ fails, report the error.
 
 - Reassignment or stand-down: checkpoint authorized work, push unless
   local_merge, note done and remaining work with the SHA, and stop editing.
-- Low context: at 80% by Cassy's `context used: N%` notice (`context used:
-  unknown` is not exhaustion), commit and push unless local_merge, write
-  `HANDOFF.md` in the task artifact directory (SHAs, remaining steps, next
-  command, open questions), cite it in a progress note and request respawn.
+- Low context: At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+  Read 80% from Cassy's `context used: N%` notice (`context used: unknown` is
+  not exhaustion). `HANDOFF.md` goes in the task artifact directory (SHAs,
+  remaining steps, next command, open questions); the respawned worker resumes from it.
 - Conflict: checkpoint before rebasing onto the supervisor's named branch;
   resolve owned conflicts and escalate unowned ones with files and hashes.
 - Failure outside your diff: run the same check on the base when permitted and
-  report which side failed.
+  report which side failed. Rust checks/tests follow [discipline.md](discipline.md).
+  Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
 - Missing submodule: inspect the main checkout's copy first; never silently
   change dependencies.

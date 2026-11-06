@@ -837,7 +837,7 @@ impl CasCore {
                 task,
                 &prior,
                 head,
-                &freshest_target_ref(repo, parent_branch),
+                Some(&freshest_target_ref(repo, parent_branch)),
             )
             .map(|carried| {
                 format!(
@@ -1241,16 +1241,17 @@ impl CasCore {
             ));
         };
         let refusal = crate::qa_pass::merge_gate(&task, &qa, &passes, &head).err()?;
-        // cas-0c988: the delivery was rebased (its build output regenerated)
-        // without changing the reviewed source: the verdict carries, logged.
-        let target = self
+        // cas-0c988: the reviewed source is unchanged at this tip: the
+        // verdict carries, logged. cas-aedd: no recorded target means no
+        // rebase comparison, never one against this checkout's `HEAD`.
+        let epic_branch = self
             .open_task_store()
             .ok()
             .and_then(|store| store.get_parent_epic(task_id).ok().flatten())
-            .and_then(|epic| epic.branch)
-            .map(|branch| freshest_target_ref(repo, &branch))
-            .unwrap_or_else(|| "HEAD".to_string());
-        if crate::qa_pass::carry_verdict(&self.cas_root, repo, &task, &passes, &head, &target)
+            .and_then(|epic| epic.branch);
+        let target = crate::qa_pass::recorded_target_branch(&task, epic_branch)
+            .map(|branch| freshest_target_ref(repo, &branch));
+        if crate::qa_pass::carry_verdict(&self.cas_root, repo, &task, &passes, &head, target.as_deref())
             .is_some()
         {
             return None;

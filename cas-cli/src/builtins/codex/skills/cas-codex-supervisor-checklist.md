@@ -12,7 +12,7 @@ metadata:
 - Codex runs Cassy's lifecycle hooks once they are installed and trusted (`cas update` writes and trusts them; spawns refuse while they are untrusted). Hooks only orient and guard. Codex loads no `.md` agents, so call the Cassy tools explicitly with the Codex prefix. Triage from the supervisor core in your developer instructions; after a compaction continue from it. Open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 - Coordinate workers; never implement a worker's task yourself or close one outside the Cassy lifecycle.
 - Answer verified Commander questions once in your final pane reply, shaped by the [reply contract](../cas-supervisor/references/operator-reply.md); unprompted updates follow the [routing policy](../cas-supervisor/references/reference.md#verified-commander-messages).
-- Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
+- Every spawn passes `lane=` (preferred) or a complete `cli=`, `model=`, and `effort=` recipe ([workflow.md](../cas-supervisor/references/workflow.md)).
 - Read and post Slack only through the `violet` skill (`violet.violet_read` / `violet.violet_post`), never the Codex Slack app; an older or untrusted hook install does not enforce this.
 
 ## Session Start
@@ -37,4 +37,4 @@ Run the [intake gate](../cas-supervisor/references/intake.md); log any user over
 
 ## Before Closing an EPIC
 
-Require **Phase outcome met (plan metric receipt)**, then close out once, in order: freeze scope; one full review with the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck); one batch fix; re-review only the fix diff; one QA round with the [epic flow walk](../cas-supervisor/references/epic-flow-walk.md) when a child has a demo statement; enqueue. Epic close verification uses `verification_type=epic`.
+Require **Phase outcome met (plan metric receipt)**, then close out once, in order: freeze scope; one full review with the [interim queue precheck](../cas-supervisor/references/workflow.md#interim-queue-precheck); one batch fix; re-review only the fix diff; the [batch QA round](../cas-supervisor/references/epic-flow-walk.md); enqueue. In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task. Epic close verification requires the release `batch_receipt` ledger and uses `verification_type=epic`.

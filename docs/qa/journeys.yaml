@@ -13,7 +13,7 @@ seeded_from:
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
   approved-dispatch-close-owner:
-    title: An approved exact dispatch leaves remaining close recovery with the supervisor and never asks the worker to retry
+    title: Approved dispatch and batch receipt recovery use ordinary close gates without worker retries or repeated covered QA offers
     tasks: [cas-abb0]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]

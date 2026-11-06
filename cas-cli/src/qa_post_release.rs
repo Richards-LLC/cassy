@@ -950,6 +950,11 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         let (Some(anchor), Some(tip)) = (delivery_anchor(&repo, &task), commit(&repo, &format!("origin/{target}"))) else {
             continue;
         };
+        if crate::qa_batch::satisfying_receipt(cas_root, &task, &repo, &target, &anchor)
+            .map_err(anyhow::Error::msg)?.is_some()
+        {
+            continue;
+        }
         if ancestor(&repo, &anchor, &tip) == Some(true) {
             live.entry((target, tip)).or_default().push(id);
         }
@@ -965,13 +970,14 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
             continue;
         }
         let detail = format!(
-            "{} parked deliver{} already live on origin/{target} at {tip}: {}. They stay AwaitingMerge until their batch QA receipt is recorded. \
+            "{} parked deliver{} already live on origin/{target} at {tip}: {}. {batch_close} \
              Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
              Cassy did not record it: a receipt needs a supervisor recorder and an independent ledger author.",
             ids.len(),
             if ids.len() == 1 { "y is" } else { "ies are" },
             ids.join(", "),
             ids.join(","),
+            batch_close = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::BATCH_CLOSE_RULE,
         );
         let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
         let recipient = crate::supervisor_notices::resolve(&agents, None, None);

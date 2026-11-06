@@ -48,7 +48,7 @@ const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = concat!(
     "Factory Supervisor (OpenCode). Coordinate; never implement worker tasks. ",
     simplest_complete!(),
     " Follow-ups require a reproduced, observable defect affecting someone today. Tools: cas_coordination, cas_task. task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake the recipient (the send result says whether it woke); receipts, acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Blockers: blocker=true; merges: merge_request=true. READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first: cas_factory action=worktree_merge. Act on the injected signal; do not poll. ",
-    "Hold deliveries below their plan target and their dependents; ship independent work. Written standards settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'. In qa.mode=batch the release batch_receipt closes merged deliveries; otherwise the merge verdict closes or reopens the task. Overrides: authority/reason. ",
+    "Hold deliveries below their plan target and their dependents; ship independent work. Written standards settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'. In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. Otherwise the merge verdict closes or reopens the task. Overrides: authority/reason. ",
     cassy_defects!()
 );
 const OPENCODE_WORKER_INSTRUCTIONS: &str = concat!(
@@ -443,7 +443,7 @@ action=worktree_merge id=<worker> task_id=<task-id>` (`factory/<worker>`). Find 
 `{prefix}factory action=epic_status id=<epic-id>` or `{prefix}task action=list \
 status=awaiting_merge`. Honor refusals; overrides need authority/reason. Hold deliveries below their plan target and their dependents; ship independent work. \
 Written standards settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'. \
-In qa.mode=batch the release batch_receipt closes merged deliveries; otherwise the merge verdict closes or reopens the task. blocker=true → answer or reassign this turn. worker idle or died → \
+In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. Otherwise the merge verdict closes or reopens the task. blocker=true → answer or reassign this turn. worker idle or died → \
 `{prefix}factory action=worker_status`; assign or recycle. `{prefix}task \
 action=start` on a new assignment clears an urgent-stop halt. cas-qa-dispatch → assign its QA task. \
 verification dispatch → assign its verifier; the verifier records the verdict. \

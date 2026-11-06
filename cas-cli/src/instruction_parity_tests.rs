@@ -20,8 +20,7 @@ const HARNESSES: [&str; 4] = ["claude", "codex", "grok", "opencode"];
 const SUPERVISOR_RECOVERY: &str = "Cassy closes eligible merged deliveries on the verdict; the supervisor owns any remaining close recovery, including no-code deliveries, and the worker never re-closes.";
 const CLOSE: &str = "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you.";
 const SIGNAL: &str = "The park relay is the completion signal; send merge_request=true only for local_merge.";
-const BATCH_CLOSE: &str = "In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.";
-const SUP_BATCH_CLOSE: &str = "In qa.mode=batch the release batch_receipt closes merged deliveries";
+const BATCH_CLOSE: &str = "In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.";
 const QA_TIMING: &str = "In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.";
 const FULL_SUITE: &str = "The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic.";
 const ASK_OPERATOR: &str = "Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs.";
@@ -153,6 +152,7 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
         ("worker close-gate", skill("skills/cas-worker/references/close-gate.md").to_string()),
         ("worker recovery", skill("skills/cas-worker/references/recovery.md").to_string()),
         ("dispatch gate", dispatch_gate(true)),
+        ("failed dispatch handoff", dispatch_gate(false)),
         ("pending dispatch", gate_text::worker_pending_dispatch("cas-0000", "vd-1", "o", "d", "")),
     ] {
         carries(surface, &text, "remaining close recovery owner", SUPERVISOR_RECOVERY);
@@ -167,7 +167,7 @@ fn contested_instructions_have_one_answer_on_every_surface_cas_5597() {
         carries(surface, text, "who closes in batch mode", BATCH_CLOSE);
     }
     for (h, text) in &supervisors {
-        carries(h, text, "who closes in batch mode", SUP_BATCH_CLOSE);
+        carries(h, text, "who closes in batch mode", BATCH_CLOSE);
     }
     for path in [
         "skills/cas-worker/references/close-gate.md",

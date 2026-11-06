@@ -18,8 +18,7 @@ waiver ends that per-task obligation; deferred batch evidence is still owed.
 Once per release, at the frozen tip after the fix-diff re-review, the supervisor
 builds a candidate, walks the combined batch matrix and records the reviewed
 revision.
-In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. Until that receipt exists,
-a deferred delivery reports "waiting for batch receipt". The supervisor gets one
+In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing. A deferred delivery reports its remaining QA or release-review gate. Recording QA retries ordinary close and reports any release verdict still owed. Covered QA anchors are not offered again. The supervisor gets one
 offer per distinct uncovered delivery set. Advancing main alone stays quiet; a
 changed set receives an offer naming the current published tip in its receipt call.
 

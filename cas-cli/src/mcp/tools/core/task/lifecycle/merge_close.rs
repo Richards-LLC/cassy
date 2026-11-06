@@ -510,12 +510,12 @@ impl CasCore {
     }
 
     /// cas-f497: a recorded release verdict closes the deliveries it owns. A QA
-    /// receipt does too once a verdict already covers them, since either may be
-    /// recorded first. Tier 0, Tier 2 and `force-verifier` deliveries keep their
-    /// own path. Returns the report for the receipt's response.
+    /// receipt retries ordinary close too: its existing review gates either
+    /// finish the delivery or name the remaining verdict. QA never replaces
+    /// release review or a dedicated task review. Returns the report for the receipt's response.
     pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
         let recording_verdict = receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA;
-        let (mut closed, mut already, mut own_review, mut held) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut closed, mut already, mut own_review_rows, mut held) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let Ok(store) = self.open_task_store() else {
             return "\nNo delivery was closed: the task store is unreadable; retry task close.".to_string();
         };
@@ -549,28 +549,38 @@ impl CasCore {
                     continue;
                 }
             };
-            if let Some(review) = super::review_tier::own_review(&self.cas_root, &task, &repo) {
+            let own_review = super::review_tier::own_review(&self.cas_root, &task, &repo);
+            if let Some(review) = own_review.as_ref() && recording_verdict {
                 record(&format!("keeps its own review: {review}"));
-                if recording_verdict {
-                    own_review.push(format!("- {task_id}: {review}"));
-                }
+                own_review_rows.push(format!("- {task_id}: {review}"));
                 continue;
             }
             // cas-bc15: after request_changes the retired anchor is the delivery.
             let anchor = crate::qa_batch::delivery_anchor(&repo, &task).unwrap_or_default();
-            let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {
-                Ok(Some(verdict)) => verdict,
+            let verdict = match if own_review.is_some() { Ok(None) } else { crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) } {
+                Ok(Some(verdict)) => Some(verdict),
                 Ok(None) if recording_verdict => {
                     hold("this verdict does not cover the delivery's current anchor; review it again");
                     continue;
                 }
-                Ok(None) => continue,
+                Ok(None) => None,
                 Err(error) => {
                     hold(&error);
                     continue;
                 }
             };
-            match self.close_after_release_verdict(task_id, &verdict).await {
+            let outcome = if let Some(verdict) = verdict.as_ref() {
+                self.close_after_release_verdict(task_id, verdict).await
+            } else if task.status == TaskStatus::AwaitingMerge
+                && task.deliverables.effective_merge_ci_admission() != cas_types::MergeCiAdmission::Override
+            {
+                // QA attests the walk, never the review. Ordinary close may
+                // finish a dedicated review or report the missing release verdict.
+                self.close_merged_delivery(store.as_ref(), task.clone(), &receipt.staging_sha, None).await
+            } else {
+                CassyMergeClose::NotEligible
+            };
+            match outcome {
                 CassyMergeClose::Closed { notice } => {
                     record(&format!("closed; {notice}"));
                     closed.push(task_id.as_str());
@@ -580,8 +590,8 @@ impl CasCore {
                 }
                 CassyMergeClose::Held(text) => hold(&text),
                 CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&format!(
-                    "this verdict covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
-                    verdict.staging_sha
+                    "this receipt covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
+                    receipt.staging_sha
                 )),
                 CassyMergeClose::NotEligible => {
                     hold("not parked, or merged under a CI override; it needs its own close")
@@ -595,8 +605,8 @@ impl CasCore {
         if !already.is_empty() {
             report.push_str(&format!("\nAlready closed: {}.", already.join(", ")));
         }
-        if !own_review.is_empty() {
-            report.push_str(&format!("\nKeeps its own review ({}):\n{}", own_review.len(), own_review.join("\n")));
+        if !own_review_rows.is_empty() {
+            report.push_str(&format!("\nKeeps its own review ({}):\n{}", own_review_rows.len(), own_review_rows.join("\n")));
         }
         if !held.is_empty() {
             report.push_str(&format!("\nStill held ({}):\n{}", held.len(), held.join("\n")));

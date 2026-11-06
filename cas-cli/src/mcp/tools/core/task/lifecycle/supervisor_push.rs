@@ -436,8 +436,9 @@ pub(crate) fn queue_approved_verification_close_recovery(
         .map(|proof| format!(" Bound head: {}.", proof.head_commit))
         .unwrap_or_default();
     let detail = format!(
-        "Verification approved for task {} (exact dispatch {dispatch_id}).{head} Supervisor recovery: inspect the live task and run {prefix}task action=close id={} through the ordinary gates, without supervisor_override. Resolve any independent hold first. The worker must never re-close; do not ask it to retry.",
+        "Verification approved for task {} (exact dispatch {dispatch_id}).{head} Supervisor recovery: inspect the live task and run {prefix}task action=close id={} through the ordinary gates, without supervisor_override. Resolve any independent hold first. {recovery}",
         task.id, task.id,
+        recovery = super::close_ops::gate_text::SUPERVISOR_CLOSE_RECOVERY,
     );
     crate::supervisor_notices::enqueue(
         cas_root, &recipient, "verification_close_recovery", &detail, dispatch_id,

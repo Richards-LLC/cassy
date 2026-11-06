@@ -3997,6 +3997,41 @@ mod tests {
         assert_eq!(config.cols, 80);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopted_pty_keeps_io_geometry_and_child_wait_status() {
+        use std::os::fd::BorrowedFd;
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "printf 'before-adopt\\n'; read line; stty size; printf 'after:%s\\n' \"$line\"; exit 23"]);
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().unwrap();
+        let fd = unsafe { BorrowedFd::borrow_raw(pair.master.as_raw_fd().unwrap()) }
+            .try_clone_to_owned().unwrap();
+        drop(pair);
+        drop(child); // no wait: the same process remains the parent after exec.
+        let mut pty = Pty::adopt(fd, pid, pid).unwrap();
+        assert_eq!(pty.process_group_id(), Some(pid));
+        pty.resize(31, 97).unwrap();
+        assert_eq!(pty.winsize().unwrap(), (31, 97));
+        pty.write(b"handoff-input\n").await.unwrap();
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+        loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Output(data)) => output.extend(data),
+                Some(PtyEvent::Exited(code)) => { assert_eq!(code, Some(23)); break; }
+                event => panic!("adopted PTY failed: {event:?}"),
+            }
+        }
+        let output = String::from_utf8_lossy(&output);
+        assert!(output.contains("before-adopt"), "{output}");
+        assert!(output.contains("31 97"), "{output}");
+        assert!(output.contains("after:handoff-input"), "{output}");
+        assert_eq!(unsafe { libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
     #[tokio::test]
     async fn exited_event_preserves_child_exit_code() {
         let config = PtyConfig {

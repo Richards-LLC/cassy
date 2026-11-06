@@ -27,7 +27,7 @@ def report(value):
         raise ValueError("active rules incomplete; no additional request made")
     queue = [r for r in rules["nodes"] if r["type"] == "MERGE_QUEUE"]
     if not queue:
-        return f"merge queue not configured on {branch}; expected build>=5, merge>=5, ALLGREEN (report only)"
+        return None
     warnings = []
     for rule in queue:
         params = rule["parameters"]
@@ -42,8 +42,6 @@ def report(value):
             raise ValueError("ruleset id invalid")
         if source["__typename"] == "Repository" and slug_ok(source["nameWithOwner"]):
             endpoint = f"repos/{source['nameWithOwner']}/rulesets/{identifier}"
-        elif source["__typename"] == "Organization" and slug_ok(source["login"] + "/repo"):
-            endpoint = f"orgs/{source['login']}/rulesets/{identifier}"
         else:
             raise ValueError("ruleset source unavailable")
         update = ('{name,target,enforcement,conditions,bypass_actors,rules} | '
@@ -66,7 +64,7 @@ def preflight(worktree, gh):
         result = subprocess.run([gh, "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}",
                                  "-f", "query=" + QUERY], cwd=worktree,
                                 env={**os.environ, "GH_HOST": "github.com"},
-                                capture_output=True, text=True, timeout=2)
+                                capture_output=True, text=True, timeout=5)
         if result.returncode:
             # Do not expose provider stderr, which can carry credentials.
             raise ValueError("authentication, rate limit or provider failure")

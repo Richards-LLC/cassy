@@ -2132,13 +2132,8 @@ merge request after correcting the cause.
 
 ## Advisory merge-queue health
 
-Setup with a project and doctor share a single GitHub read for origin identity
-and active default-branch rules. Queue limits below 5 builds or 5 merges, or a
-strategy other than ALLGREEN, produce drift advice with an operator-run repair
-command that preserves other rules and higher limits. Missing, malformed,
-partial or rate-limited responses remain unavailable. The release preflight uses
-the same query once and only warns; none of these paths writes rulesets or blocks
-a release on this check. See [branch protection](../../docs/branch-protection/README.md).
+See the [branch-protection health policy](../../docs/branch-protection/README.md#2-merge-queue)
+for setup, doctor and release-preflight diagnostics and manual repair.
 
 ## Build, assembly and CI policy
 

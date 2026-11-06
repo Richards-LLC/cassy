@@ -641,7 +641,7 @@ fn viktor_step(args: &SetupArgs) -> SetupStep {
 fn project_step(args: &SetupArgs) -> SetupStep {
     let mut step = initialize_project_step(args);
     if !args.dry_run && let Some(project) = args.project.as_deref() {
-        let timeout = std::time::Duration::from_secs(2);
+        let timeout = std::time::Duration::from_secs(5);
         let report = match crate::github_repo::origin_slug(project, timeout) {
             Ok(Some(origin)) => match crate::github_repo::repository_health(
                 &origin, project, &crate::github_repo::gh_binary(), timeout,

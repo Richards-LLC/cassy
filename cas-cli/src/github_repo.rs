@@ -243,13 +243,6 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
                     .ok_or("ruleset source invalid")?;
                 format!("repos/{slug}/rulesets/{id}")
             }
-            Some("Organization") => {
-                let org = source["login"]
-                    .as_str()
-                    .filter(|s| valid_slug(&format!("{s}/repo")))
-                    .ok_or("ruleset source invalid")?;
-                format!("orgs/{org}/rulesets/{id}")
-            }
             _ => return Err("ruleset source unsupported"),
         };
         // Print only. Read the complete current ruleset before an operator's
@@ -267,10 +260,8 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
     }
     if !nodes.iter().any(|r| r["type"] == "MERGE_QUEUE") {
         return Ok(QueueReport {
-            warning: true,
-            message: format!(
-                "merge queue not configured on {branch}; expected build>=5, merge>=5, ALLGREEN (report only)"
-            ),
+            warning: false,
+            message: format!("merge queue not configured on {branch}; advisory not applicable"),
         });
     }
     Ok(QueueReport {

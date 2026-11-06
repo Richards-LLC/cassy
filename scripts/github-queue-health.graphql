@@ -21,7 +21,6 @@ query($owner: String!, $name: String!) {
             source {
               __typename
               ... on Repository { nameWithOwner }
-              ... on Organization { login }
             }
           }
         }

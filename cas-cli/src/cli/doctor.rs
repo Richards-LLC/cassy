@@ -4357,7 +4357,7 @@ fn registered_project_root_checks(current_project_root: &Path) -> Vec<Check> {
 
 /// A moved origin is diagnostic, never an automatic remote rewrite.
 fn github_origin_check(project: &Path) -> Option<Check> {
-    let timeout = Duration::from_secs(2);
+    let timeout = Duration::from_secs(5);
     let origin = match crate::github_repo::origin_slug(project, timeout) {
         Ok(Some(origin)) => origin,
         Ok(None) => return None,

@@ -608,6 +608,12 @@ async fn independent_task_ids_share_normalized_source_claims_cas_12c1() {
 /// asking the receiver to override a still-live supervisor (cas-5b76).
 #[tokio::test]
 async fn github_source_handoff_allows_peer_assignment_without_override() {
+    async fn release(machine: &Machine, request: serde_json::Value) -> Result<serde_json::Value, String> {
+        let response = factory_service(machine).factory(Parameters(
+            serde_json::from_value(request).unwrap(),
+        )).await.map_err(|error| error.message.to_string())?;
+        serde_json::from_str(&extract_text(response)).map_err(|error| error.to_string())
+    }
     let mut env = TestEnvGuard::temp_home();
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     let cloud = FakeCloud::start();
@@ -641,25 +647,25 @@ async fn github_source_handoff_allows_peer_assignment_without_override() {
     let keys: Vec<String> = serde_json::from_str(
         agents.get(&alpha.agent_id).unwrap().metadata.get(cas::cloud::peer_claims::META_SOURCE_CLAIMS).unwrap(),
     ).unwrap();
-    let release = serde_json::json!({
+    let release_request = serde_json::json!({
         "action":"release_claim", "resource_id":"https://github.com/acme/widget/pull/1565/files?view=all",
     });
     // A competing supervisor cannot release the owner, and no other role can
     // use its supervisor-only handoff even on the owner's machine.
-    let result = factory(&factory_service(&bravo), release.clone()).await.unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&result).unwrap()["code"], "not_held");
+    let result = release(&bravo, release_request.clone()).await.unwrap();
+    assert_eq!(result["code"], "not_held");
     for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Worker] {
         let mut actor = agents.get(&alpha.agent_id).unwrap();
         actor.role = role;
         agents.update(&actor).unwrap();
-        assert!(factory(&factory_service(&alpha), release.clone()).await.is_err(), "{role}");
+        assert!(release(&alpha, release_request.clone()).await.is_err(), "{role}");
         assert_eq!(cloud.active_lock(&keys[0]).unwrap().1.agent_id, alpha.agent_id);
     }
     let mut actor = agents.get(&alpha.agent_id).unwrap();
     actor.role = AgentRole::Supervisor;
     agents.update(&actor).unwrap();
-    let result = factory(&factory_service(&alpha), release).await.unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&result).unwrap()["code"], "released");
+    let result = release(&alpha, release_request).await.unwrap();
+    assert_eq!(result["code"], "released");
     assert!(!open_task_store(&alpha.cas_dir).unwrap().get(&task.id).unwrap().is_terminal());
     let heartbeat = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
     assert_eq!(heartbeat.renewed, 0, "the old open card must not reclaim its source: {heartbeat:?}");

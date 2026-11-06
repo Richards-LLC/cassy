@@ -10,8 +10,9 @@ const epic = (key: string, overrides: Partial<ProjectEpic> = {}): ProjectEpic =>
 });
 
 it("reads status only for the selected project's sessions on every machine", () => {
-  const sessions = new Map([["soundwave", [{ name: "a", project_dir: "/p/cas-src" }, { name: "b", project_dir: "/p/gabber" }]], ["prowl", [{ name: "c", project: "cas-src" }]]]);
-  const key = (_: string, session: { project?: string; project_dir?: string }) => session.project ?? session.project_dir!.split("/").at(-1)!;
+  type Session = { name: string; project?: string; project_dir?: string };
+  const sessions = new Map<string, Session[]>([["soundwave", [{ name: "a", project_dir: "/p/cas-src" }, { name: "b", project_dir: "/p/gabber" }]], ["prowl", [{ name: "c", project: "cas-src" }]]]);
+  const key = (_: string, session: Session) => session.project ?? session.project_dir!.split("/").at(-1)!;
   expect(projectSessions(sessions, "cas-src", key).map(item => `${item.machineId}:${item.session.name}`)).toEqual(["soundwave:a", "prowl:c"]);
   expect(projectSessions(sessions, undefined, key)).toEqual([]);
 });

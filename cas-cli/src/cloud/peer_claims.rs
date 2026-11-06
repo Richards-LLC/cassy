@@ -2415,11 +2415,23 @@ mod tests {
             retired_local: HashMap::new(), budget: None,
         };
         tokio::task::spawn_blocking(move || {
-            for (holder_session, same_session) in [(Some("session-a"), true), (Some("session-b"), false), (None, false)] {
+            // A reset changes the harness registration, but preserves the
+            // canonical worker/task owner (GH #1563, cas-9aa1).
+            for (holder_session, reader_name, reader_task, retired, same_owner) in [
+                (Some("session-a"), "reader-worker", "cas-reader", false, false),
+                (Some("session-b"), "reader-worker", "cas-reader", false, false),
+                (None, "reader-worker", "cas-reader", false, false),
+                (Some("session-a"), "holder-worker", "cas-other-task", false, false),
+                (Some("session-a"), "reader-worker", "cas-real-task", false, false),
+                (Some("session-a"), "holder-worker", "cas-real-task", false, true),
+                (Some("session-b"), "holder-worker", "cas-real-task", false, true),
+                (Some("session-a"), "holder-worker", "cas-real-task", true, true),
+            ] {
+                let same_session = holder_session == Some("session-a");
                 let dir = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(dir.path()).unwrap();
                 let agents = crate::store::open_agent_store(&root).unwrap();
-                for (id, name, session) in [("reader", "reader-worker", Some("session-a")), ("holder", "holder-worker", holder_session)] {
+                for (id, name, session) in [("reader", reader_name, Some("session-a")), ("holder", "holder-worker", holder_session)] {
                     let Some(session) = session else { continue };
                     let mut agent = crate::types::Agent::new(id.into(), name.into());
                     agent.factory_session = Some(session.into());
@@ -2427,7 +2439,19 @@ mod tests {
                 }
                 let path = "web/DESIGN.md";
                 assert_eq!(claim_with(&claims, &root, "holder", "holder-worker", "cas-real-task", path), FileLease::Mine);
-                let FileLease::HeldBy(holder) = claim_with(&claims, &root, "reader", "reader-worker", "cas-reader", path) else {
+                let mut resumed_claims = claims.clone();
+                if retired {
+                    agents.unregister("holder").unwrap();
+                    resumed_claims.retired_local = retired_local_agents(&root);
+                }
+                let answer = claim_with(&resumed_claims, &root, "reader", reader_name, reader_task, path);
+                if same_owner {
+                    assert_eq!(answer, FileLease::Mine,
+                        "reset/re-take must not report self collision: {holder_session:?}, retired={retired}");
+                    assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
+                    continue;
+                }
+                let FileLease::HeldBy(holder) = answer else {
                     panic!("expected a contended file for {holder_session:?}");
                 };
                 let note = collision_note(path, &holder);

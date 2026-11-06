@@ -12,6 +12,31 @@ function setup() {
 beforeEach(() => localStorage.clear());
 
 describe("project-first navigation", () => {
+  it("keeps Reload Cassy on skewed supervisor cards and in Session actions with honest receipts", () => {
+    const nav = setup();
+    const navigation = new ProjectNavigation();
+    const reload = vi.fn();
+    const open = vi.fn();
+    for (const harness of ["claude", "codex", "grok", undefined] as const) {
+      const supervisor = row("reload", { harness, machine_online: true, mcp_version: "4.0.0", installed_version: "4.1.0" });
+      navigation.render(nav, [supervisor], open, undefined, { reload });
+      const action = nav.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!;
+      expect(action).not.toBeNull();
+      expect(action.hidden).toBe(false);
+      expect(action.disabled).toBe(harness !== "claude");
+      if (harness === "claude") {
+        action.click(); expect(reload).toHaveBeenLastCalledWith(expect.objectContaining({ key: supervisor.key }));
+        action.focus(); navigation.render(nav, [supervisor], open, undefined, { reload });
+        expect(document.activeElement).toBe(action);
+      } else expect(nav.textContent).toContain("requires Claude Code");
+    }
+    const current = row("reload", { harness: "claude", machine_online: true, mcp_version: "4.1.0", installed_version: "4.1.0", reloadReceipt: { client_ref: "r", command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 4.1.0", output: "", interactive: false } });
+    navigation.render(nav, [current], open, undefined, { reload });
+    expect(nav.querySelector<HTMLButtonElement>('[data-reload-cassy="direct"]')!.hidden).toBe(true);
+    expect(nav.querySelector("details summary")?.textContent).toBe("Session actions");
+    expect(nav.querySelector(".conversation-reload-receipt")?.textContent).toContain("version 4.1.0");
+    expect(open).not.toHaveBeenCalled();
+  });
   it("compares published versions numerically without inventing updates for unknown runtimes", () => {
     for (const [current, latest, newer] of [
       ["3.9.0", "v3.10.0", true], ["3.87.0", "3.87.1", true],

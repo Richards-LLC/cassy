@@ -515,7 +515,17 @@ hotfix_fallback() {
 }
 check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
 check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
-check 'hotfix_fallback tracking_unavailable 1' 'cas-61e0: a tracking failure cannot prevent a hotfix push and enqueue'
+freeze_failure_stops_publication() {
+    local fixture="$tmp/cut-failure" status=0
+    clone_epic "$fixture" epic/cut-failure cut-failure
+    write_valid_draft "$tmp/cut-failure.md"
+    : >"$FAKE_GH_LOG"
+    FAKE_TRACK_EXIT=1 run "$fixture" --no-watch --notes "$tmp/cut-failure.md" >"$tmp/cut-failure.log" 2>&1 || status=$?
+    [[ "$status" -ne 0 ]] && grep -qi 'freeze.*retry\|freeze.*Retry' "$tmp/cut-failure.log" &&
+        ! grep -q '^pr create\|^pr merge' "$FAKE_GH_LOG" &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/cut-failure
+}
+check 'freeze_failure_stops_publication' 'cas-2b8d: a matched train that cannot freeze stops before push or enqueue and names its retry'
 
 echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}' >"$tmp/pending-auto.json"
 echo '[{"name":"required CI","bucket":"fail"}]' >"$tmp/checks-red.json"

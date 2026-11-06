@@ -51,6 +51,7 @@ mod cases {
         assert_eq!(pane.kind(), &PaneKind::Director);
         assert_eq!(pane.title(), "Director");
         assert!(!pane.has_exited());
+        assert_eq!(pane.input_byte_counts(), (0, 0));
     }
 
     #[test]

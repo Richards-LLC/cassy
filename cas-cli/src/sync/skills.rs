@@ -318,6 +318,10 @@ impl SkillSyncer {
 
     /// Keep project-owned directories while the builtin writer prunes its own.
     pub fn sync_all_preserving(&self, skills: &[Skill], retained: &HashSet<String>) -> Result<SkillSyncReport, CasError> {
+        self.sync_all_preserving_excluding(skills, retained, &HashSet::new())
+    }
+
+    pub(crate) fn sync_all_preserving_excluding(&self, skills: &[Skill], retained: &HashSet<String>, excluded: &HashSet<String>) -> Result<SkillSyncReport, CasError> {
         let mut report = SkillSyncReport::default();
 
         // Collect names of enabled skills
@@ -329,7 +333,7 @@ impl SkillSyncer {
 
         // Sync enabled skills
         for skill in skills {
-            if self.sync_skill(skill)? {
+            if !excluded.contains(&skill_dir_name(&skill.name)) && self.sync_skill(skill)? {
                 report.synced += 1;
                 report.synced_names.push(skill.name.clone());
             }
@@ -348,7 +352,7 @@ impl SkillSyncer {
                         .unwrap_or_default();
 
                     // Only remove cas-* prefixed directories that we manage
-                    if name.starts_with("cas-") && !enabled_names.contains(name) && !retained.contains(name) {
+                    if name.starts_with("cas-") && !enabled_names.contains(name) && !retained.contains(name) && !excluded.contains(name) {
                         // Check if this is a builtin skill (has managed_by: cas marker)
                         let skill_file = path.join("SKILL.md");
                         if skill_file.exists() {

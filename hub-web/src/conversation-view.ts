@@ -1,6 +1,6 @@
 import { appendEmojiText } from "./emoji-text";
 import { updateCommandReceipts, type CommandReceipt, type CommandKey } from "./supervisor-commands";
-import { sentAttachments, sentMessageLabel } from "./sent-attachments";
+import { nativeCommandReceipt, sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
@@ -160,6 +160,7 @@ export interface ConversationViewOptions {
   sessionLive?: () => boolean;
   commandReceipts?: () => readonly CommandReceipt[];
   commandStep?: (clientRef: string, key: CommandKey) => void;
+  commandDismiss?: (clientRef: string) => void;
   /**
    * The device holding control when this one cannot take it over. A control
    * refusal then names it and says to take control once it is released, as
@@ -746,7 +747,7 @@ export class ConversationView {
     if (signature === this.commandSignature) return;
     this.commandSignature = signature;
     this.commands.hidden = !receipts.length;
-    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key));
+    updateCommandReceipts(this.commands, receipts, (ref, key) => this.options.commandStep?.(ref, key), this.options.commandDismiss);
   }
 
   /** Scroll-only window changes reuse the last data/state presentation. */
@@ -1582,6 +1583,14 @@ export class ConversationView {
   }
 
   private renderSend(document: Document, turn: ThreadTurn, send: ConversationSend, run?: UnconfirmedRun): HTMLElement {
+    const command = send.deviceLabel === "Terminal" && !send.stamped ? nativeCommandReceipt(send.text) : undefined;
+    if (command) {
+      const receipt = document.createElement("div"); receipt.className = "native-command-receipt phase-line";
+      const label = document.createElement("span"); label.textContent = command.label;
+      const body = document.createElement("code"); body.textContent = command.text;
+      receipt.append(label, document.createTextNode(" · "), body);
+      return receipt;
+    }
     const bubble = document.createElement("div");
     bubble.className = "bub";
     bubble.dataset.state = send.state;

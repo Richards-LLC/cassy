@@ -986,6 +986,12 @@ pub struct PaneInfo {
     pub title: String,
     /// Whether the pane process has exited
     pub exited: bool,
+    /// Bytes accepted by the pane's PTY input queue, including control replies.
+    #[serde(default)]
+    pub input_bytes_received: u64,
+    /// Bytes physically written to the PTY master (not proof of child consumption).
+    #[serde(default)]
+    pub input_bytes_written: u64,
 }
 
 /// Per-pane attach metadata. This deliberately contains no terminal content.

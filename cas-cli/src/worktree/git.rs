@@ -1232,6 +1232,7 @@ impl GitOperations {
     /// refuse to run the real merge when this returns any paths, so the
     /// failing case never enters the working tree at all.
     pub fn preflight_merge_conflicts(&self, target: &str, source: &str) -> Result<Vec<String>> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("merge-tree");
         let output = Command::new("git")
             .args(["merge-tree", "--write-tree", target, source])
             .current_dir(&self.repo_root)

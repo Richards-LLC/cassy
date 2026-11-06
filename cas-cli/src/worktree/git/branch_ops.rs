@@ -229,34 +229,51 @@ impl GitOperations {
         timeout: Duration,
     ) -> std::io::Result<Output> {
         use std::io::Read;
+        use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+
+        fn drain(mut pipe: impl Read + Send + 'static) -> Receiver<std::io::Result<Vec<u8>>> {
+            let (send, receive) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+                let _ = send.send(result);
+            });
+            receive
+        }
 
         let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let deadline = Instant::now() + timeout;
+        // Drain both pipes before waiting: either full pipe can prevent exit.
+        let stdout = drain(child.stdout.take().expect("stdout is piped"));
+        let stderr = drain(child.stderr.take().expect("stderr is piped"));
+        let timed_out = || std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("command timed out after {timeout:?}"),
+        );
 
         loop {
             if let Some(status) = child.try_wait()? {
-                let mut stdout = Vec::new();
-                let mut stderr = Vec::new();
-                if let Some(mut s) = child.stdout.take() {
-                    let _ = s.read_to_end(&mut stdout);
-                }
-                if let Some(mut s) = child.stderr.take() {
-                    let _ = s.read_to_end(&mut stderr);
-                }
+                // A descendant may still hold a pipe after the child exits.
+                // Keep output collection under the same deadline; never join
+                // a reader that might still be waiting for EOF.
+                let collect = |receiver: Receiver<std::io::Result<Vec<u8>>>| {
+                    receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                        .map_err(|error| match error {
+                            RecvTimeoutError::Timeout => timed_out(),
+                            RecvTimeoutError::Disconnected => std::io::Error::other("command output reader stopped"),
+                        })?
+                };
                 return Ok(Output {
                     status,
-                    stdout,
-                    stderr,
+                    stdout: collect(stdout)?,
+                    stderr: collect(stderr)?,
                 });
             }
 
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    format!("command timed out after {timeout:?}"),
-                ));
+                return Err(timed_out());
             }
 
             std::thread::sleep(Duration::from_millis(20));
@@ -1085,6 +1102,7 @@ impl GitOperations {
     }
 
     pub fn publish_branch_to_origin(&self, branch: &str) -> TargetPushOutcome {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
         self.publish_branch_to_origin_bounded(branch, PUSH_TIMEOUT)
     }
 

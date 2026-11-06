@@ -266,6 +266,24 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
 
 }
 
+/// Select close's current proof cycle without granting approval or changing state.
+/// A pending/new dispatch prevents an older legacy row from authorizing close.
+/// Daemon merge relays use the same selection before asking a worker to close;
+/// repository, promotion and all other close gates remain authoritative.
+pub(crate) fn close_cycle_verdict(
+    root: &std::path::Path,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    legacy: Option<&cas_types::Verification>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
+    match dispatch {
+        Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+        }
+        None => Ok(legacy.filter(|row| row.dispatch_id.is_none()).cloned()),
+        _ => Ok(None),
+    }
+}
+
 fn delivery_audit_text_is_portable(value: &str) -> bool {
     delivery_audit_text_rejection(value).is_none()
 }
@@ -6541,6 +6559,12 @@ impl CasCore {
             // cas-ec74: `updated_at` is store-owned; derive the occurrence from
             // the stamp the store persisted, not from the pre-write value.
             Ok(persisted_at) => {
+                crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+                    &task.id,
+                    &format!("task `{}` parked awaiting_merge on {} at {}", task.id,
+                        parked.deliverables.parked_branch.as_deref().unwrap_or("recorded delivery branch"),
+                        parked.deliverables.factory_branch_anchor.as_deref().unwrap_or("recorded delivery tip")),
+                );
                 self.retire_delivered_worker_cache(&parked);
                 // cas-3a82 / P1.5: a successful park produces one AwaitingMerge
                 // relay. A refused close stays a tool error for the worker.
@@ -6723,11 +6747,11 @@ impl CasCore {
             return Some(candidate);
         }
         let foreign_since = self.sibling_lease_boundary(task_store, task);
-        parked_anchor_advance_with_target_is_attributable(
+        parked_anchor_advance_for_task_is_attributable(
             repo_path,
             recorded,
             &candidate,
-            &task.id,
+            task,
             foreign_since,
             &target,
         )
@@ -7070,11 +7094,11 @@ impl CasCore {
                 recorded,
                 measured_tip,
                 named_final_tip,
-            ) && parked_anchor_advance_with_target_is_attributable(
+            ) && parked_anchor_advance_for_task_is_attributable(
                 repo_path,
                 recorded,
                 &tip,
-                &task.id,
+                task,
                 self.sibling_lease_boundary(task_store, task),
                 &target,
             )
@@ -7149,8 +7173,8 @@ impl CasCore {
         let (target, _) = preferred_live_target_ref_for_delivery(repo, parent_branch, task.delivery_mode);
         (self.tip_is_own_task_lineage_with_receipt(
             task_store, task, repo, Some(&branch), recorded, Some(&tip), true,
-        ) && parked_anchor_advance_with_target_is_attributable(
-            repo, recorded, &tip, &task.id,
+        ) && parked_anchor_advance_for_task_is_attributable(
+            repo, recorded, &tip, task,
             self.sibling_lease_boundary(task_store, task), &target,
         )).then(|| format!(
             "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the locally measured attributable delivery tip is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
@@ -7240,11 +7264,11 @@ impl CasCore {
         else {
             return false;
         };
-        parked_anchor_advance_with_target_is_attributable(
+        parked_anchor_advance_for_task_is_attributable(
             repo_path,
             &fork,
             tip,
-            &task.id,
+            task,
             self.sibling_lease_boundary(task_store, task),
             target,
         ) && no_other_open_anchor_between(task_store, task, repo_path, &fork, tip)
@@ -7722,6 +7746,7 @@ impl CasCore {
         inline_external_ref: Option<String>,
         inline_execution_note: Option<String>,
     ) -> Result<CallToolResult, McpError> {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("close_gates");
         let caller_task = format!("{}task", self.guidance_prefix());
         if let Some(message) = [req.reason.as_deref(), req.stranded_branch_override.as_deref()]
             .into_iter()
@@ -9471,6 +9496,7 @@ impl CasCore {
                     if !gate_refusals.is_empty() {
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
+                    drop(_phase);
                     if task.status != TaskStatus::AwaitingMerge {
                         // cas-00eb: a commit-time anchor recorded earlier in
                         // this cycle survives the park (`record_park`). When
@@ -9679,6 +9705,17 @@ impl CasCore {
                 policy.task_required()
             };
 
+        // Classify before orphan recovery: losing the implementer's session
+        // cannot waive an enforcement delivery's own adversarial review.
+        let delivery_verification_tier = (verification_enabled
+            && !depth_light
+            && close_disposition.requires_delivery_gates())
+        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
+        .flatten();
+        let tier_two = delivery_verification_tier.as_ref().is_some_and(|decision| {
+            decision.tier == super::review_tier::VerificationTier::Adversarial
+        });
+
         // Skip verification for orphaned tasks: if caller is supervisor and the
         // task's assignee is inactive (heartbeat expired or lease gone), allow
         // close without verification. cas-3bd4: compute the reason as a typed
@@ -9693,10 +9730,10 @@ impl CasCore {
         } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
             // cas-eda0: Cassy's own post-merge close never takes the
             // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic {
+            if task.task_type == TaskType::Epic || tier_two {
                 // Ownership admits this caller; the assembled epic still needs
-                // its own dispatch/verdict. Epics normally have no assignee,
-                // which is not orphan recovery and cannot imply verification.
+                // its own dispatch/verdict, as does a Tier 2 delivery whose
+                // assignee has retired. Only an explicit override waives it.
                 if req.supervisor_override.unwrap_or(false) {
                     VerificationSkipReason::SupervisorBypass
                 } else {
@@ -9782,12 +9819,7 @@ impl CasCore {
         // cas-5207: a delivery that changes nothing that runs has no independent
         // verifier. An existing dispatch or verdict keeps its authority, and the
         // delivery, CI and QA gates all sit outside this decision.
-        let verification_tier = (verification_enabled
-            && !skip_verification
-            && !depth_light
-            && close_disposition.requires_delivery_gates())
-        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
-        .flatten();
+        let verification_tier = delivery_verification_tier.filter(|_| !skip_verification);
         let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
             decision.tier == super::review_tier::VerificationTier::Mechanical
         }) && no_verification_on_record && !fast_lane_receipt_passed;
@@ -9953,24 +9985,11 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = match typed_dispatch.as_ref() {
-                    Some(dispatch)
-                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
-                    {
-                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-                    }
-                    // Pre-m213 tasks have no typed dispatch boundary. Preserve
-                    // their legacy close behavior, but only for rows that also
-                    // lack dispatch provenance. As soon as any typed dispatch
-                    // exists, this fallback is unreachable and can never
-                    // authorize that current cycle.
-                    None => match task_wide_latest.as_ref() {
-                        Ok(Some(row)) if row.dispatch_id.is_none() => Ok(Some(row.clone())),
-                        Ok(_) => Ok(None),
-                        Err(_) => Ok(None),
-                    },
-                    _ => Ok(None),
-                };
+                let latest = close_cycle_verdict(
+                    &self.cas_root,
+                    typed_dispatch.as_ref(),
+                    task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()),
+                );
 
                 // Typed state is authoritative for new dispatches. The legacy
                 // Error row remains a readable fallback for pre-m211 databases,
@@ -10242,8 +10261,21 @@ impl CasCore {
                         // task's local commit — as a delivered anchor, and a
                         // rebase of that next task voided the verdict
                         // (cas-3e66, cas-ba4a).
-                        let merged_receipt = if post_merge_target.is_none() {
-                            req.commit_receipt.as_deref().and_then(|receipt| {
+                        let supervisor_tier_two_recovery = tier_two
+                            && !in_cassy_merge_close()
+                            && self.resolve_live_supervisor_authority().is_ok()
+                            && matches!(self.compute_verification_skip_reason(&task, &req),
+                                VerificationSkipReason::NoAssignee
+                                    | VerificationSkipReason::AssigneeInactive { .. }
+                                    | VerificationSkipReason::AssigneeUnknown);
+                        // A retired worker's recorded delivery is the recovery
+                        // boundary even when close supplies no new receipt.
+                        // It must still be proven on the declared target below.
+                        let recovery_anchor = verification_tier.as_ref()
+                            .filter(|_| supervisor_tier_two_recovery)
+                            .map(|decision| decision.tip.as_str());
+                        let merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
+                            req.commit_receipt.as_deref().or(recovery_anchor).and_then(|receipt| {
                                 let resolved =
                                     resolve_task_commit_receipt_sha(&close_project_root, receipt)
                                         .ok()?;
@@ -10310,6 +10342,7 @@ impl CasCore {
                         }
 
                         if !is_epic && !empty_delivery
+                            && !(supervisor_tier_two_recovery && merged_receipt.is_some())
                             && task.deliverables.factory_branch_anchor.is_some()
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))
@@ -12036,7 +12069,10 @@ impl CasCore {
         // Everything below is post-commit work (indexing, reminders, the
         // lifecycle outbox, dependents, leases); the dispatch may answer
         // the caller while it finishes.
-        crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
+        drop(_phase);
+        crate::mcp::tools::service::mutation_receipt::task_disposition_committed(
+            &req.id, &format!("task `{}` closed", req.id),
+        );
 
         let epic_override_note_pending = deferred_epic_override_note.is_some();
         if let Some(note) = deferred_epic_override_note {
@@ -13309,16 +13345,30 @@ impl CasCore {
                 format!("task request_changes requires registered supervisor identity: {error}"),
             )
         })?;
+        // Only this supervisor request is a command. QA/verifier findings and
+        // queue-ejection detail reach the store as inert review text.
+        let source_commits = req.reason.split_whitespace()
+            .filter_map(|word| word.strip_prefix("merge_source="))
+            .map(|source| {
+                if !matches!(source.len(), 40 | 64)
+                    || !source.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                        "merge_source requires a full immutable commit SHA"));
+                }
+                Ok(source.to_ascii_lowercase())
+            }).collect::<Result<Vec<_>, _>>()?;
 
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
         // proof boundary was merged, unbound, or legacy — exactly the states a
         // failed review produces. Boundary shape is reported, never gating.
-        let outcome = cas_store::request_changes_for_parked_delivery(
+        let outcome = cas_store::request_changes_for_parked_delivery_with_merge_sources(
             &self.cas_root,
             &task.id,
             &supervisor_id,
             &req.reason,
+            &source_commits,
         )
         .map_err(|error| {
             Self::error(
@@ -14627,6 +14677,29 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+const REFERENCE_HISTORY_REGEN_SUBJECT: &str = "build(builtins): regenerate reference-history from merged history";
+
+/// The required post-merge ledger refresh cites its generator's task, rather
+/// than the worker's. Bind that exception to the actual merge and ledger-only
+/// diff; ordinary source commits cannot borrow the generator's attribution.
+fn is_reference_history_regeneration(repo: &std::path::Path, commit: &str) -> bool {
+    let Ok(metadata) = git_stdout_lines(repo, &["show", "-s", "--format=%P%x1f%B", commit]) else {
+        return false;
+    };
+    let metadata = metadata.join("\n");
+    let Some((parents, message)) = metadata.split_once('\u{1f}') else {
+        return false;
+    };
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [merged] = parents.as_slice() else { return false; };
+    if message != format!("{REFERENCE_HISTORY_REGEN_SUBJECT}\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9]) {
+        return false;
+    }
+    git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", merged])
+        .is_ok_and(|lines| lines.len() == 1 && lines[0].split_whitespace().count() == 3)
+        && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", merged, commit, "--"])
+            .is_ok_and(|paths| paths == [REFERENCE_HISTORY_LEDGER])
+}
 #[derive(serde::Deserialize)]
 struct ReferenceHistory {
     version: u64,
@@ -20369,6 +20442,7 @@ fn update_close_snapshot_preserving_notes(
 }
 
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("notes");
     if task.notes.contains(note) {
         return false;
     }
@@ -22269,6 +22343,8 @@ pub(crate) fn render_epic_status_report_with_stack(
         statuses,
         stacked_on,
         None,
+        &[],
+        false,
     )
 }
 
@@ -22280,6 +22356,8 @@ pub(crate) fn render_epic_status_collection(
     parent_branch: &str,
     collection: &EpicStatusCollection,
     stacked_on: &[String],
+    retained_tasks: &[String],
+    retained_inventory_partial: bool,
 ) -> String {
     render_epic_status_report_with_stack_and_view(
         epic_id,
@@ -22287,6 +22365,8 @@ pub(crate) fn render_epic_status_collection(
         &collection.statuses,
         stacked_on,
         Some(collection),
+        retained_tasks,
+        retained_inventory_partial,
     )
 }
 
@@ -22296,6 +22376,8 @@ fn render_epic_status_report_with_stack_and_view(
     statuses: &[EpicChildBranchStatus],
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
+    retained_tasks: &[String],
+    retained_inventory_partial: bool,
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -22375,6 +22457,8 @@ fn render_epic_status_report_with_stack_and_view(
             "content dropped".to_string()
         } else if s.content_check_error.is_some() {
             "content unknown".to_string()
+        } else if retained_tasks.contains(&s.task_id) {
+            "retained local work".to_string()
         } else if s.content_evolution_note.is_some() {
             "merged (content evolved)".to_string()
         } else if s.merge_evidence_note.is_some() {
@@ -22403,6 +22487,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let reconciled = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.merge_evidence_note.as_deref())
         .collect::<Vec<_>>();
     if !reconciled.is_empty() {
@@ -22413,6 +22498,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let evolved = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.content_evolution_note.as_deref())
         .collect::<Vec<_>>();
     if !evolved.is_empty() {
@@ -22468,6 +22554,10 @@ fn render_epic_status_report_with_stack_and_view(
             "\n⚠️  {stranded} child task(s) carry stranded factory commits. \
              Epic close will be hard-blocked until they are merged.\n",
         ));
+    } else if !retained_tasks.is_empty() {
+        out.push_str("\n⚠️ Retained worker local work needs review; historical delivery proofs do not account for it.\n");
+    } else if retained_inventory_partial || view.is_some_and(|view| view.budget_exhausted) {
+        out.push_str("\n⚠️ Inventory incomplete; merge state is not fully known.\n");
     } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
     } else {
@@ -22643,11 +22733,26 @@ fn own_lane_subjects(
         excluded.push("refs/remotes/origin/HEAD".to_string());
     }
     let range = format!("{recorded}..{tip}");
-    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let mut args = vec!["log", "--no-merges", "--format=%H%x1f%s", range.as_str()];
     let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
     args.extend(negated.iter().map(String::as_str));
+    let upstream = task.deliverables.work_target.as_ref()
+        .map(|target| task_attribution::upstream_refs(repo_path, &target.target_branch, task))
+        .unwrap_or_default();
+    args.extend(upstream.iter().map(String::as_str));
     args.push("--");
-    git_stdout_lines(repo_path, &args)
+    let mut subjects = Vec::new();
+    for record in git_stdout_lines(repo_path, &args)? {
+        let (commit, subject) = record.split_once('\u{1f}')
+            .ok_or_else(|| "cannot read authored commit subject".to_string())?;
+        if subject == REFERENCE_HISTORY_REGEN_SUBJECT
+            && is_reference_history_regeneration(repo_path, commit)
+        {
+            continue;
+        }
+        subjects.push(subject.to_string());
+    }
+    Ok(subjects)
 }
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
@@ -25176,6 +25281,35 @@ fn parked_anchor_advance_with_target_is_attributable(
     foreign_since: Option<i64>,
     target_ref: &str,
 ) -> bool {
+    let upstream: Vec<_> = task_attribution::released_trunk_ref(repo_path, target_ref).into_iter().collect();
+    parked_anchor_advance_with_upstream_is_attributable(
+        repo_path, recorded, candidate, task_id, foreign_since, target_ref, &upstream,
+    )
+}
+
+fn parked_anchor_advance_for_task_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task: &Task,
+    foreign_since: Option<i64>,
+    target_ref: &str,
+) -> bool {
+    let upstream = task_attribution::upstream_refs(repo_path, target_ref, task);
+    parked_anchor_advance_with_upstream_is_attributable(
+        repo_path, recorded, candidate, &task.id, foreign_since, target_ref, &upstream,
+    )
+}
+
+fn parked_anchor_advance_with_upstream_is_attributable(
+    repo_path: &std::path::Path,
+    recorded: &str,
+    candidate: &str,
+    task_id: &str,
+    foreign_since: Option<i64>,
+    target_ref: &str,
+    upstream: &[String],
+) -> bool {
     if parked_anchor_advance_is_attributable(repo_path, recorded, candidate, task_id, foreign_since)
     {
         return true;
@@ -25192,7 +25326,7 @@ fn parked_anchor_advance_with_target_is_attributable(
         .args([
             "log",
             "--first-parent",
-            "--format=%P%x1f%ct%x1f%B%x1e",
+            "--format=%H%x1f%P%x1f%ct%x1f%B%x1e",
             &format!("{recorded}..{candidate}"),
             "--",
         ])
@@ -25209,9 +25343,11 @@ fn parked_anchor_advance_with_target_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (commit, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (parents, rest) = rest.split_once('\u{1f}')?;
             let (epoch, message) = rest.split_once('\u{1f}')?;
             Some((
+                commit,
                 parents.split_whitespace().collect::<Vec<_>>(),
                 epoch.trim().parse::<i64>().ok()?,
                 message,
@@ -25223,22 +25359,24 @@ fn parked_anchor_advance_with_target_is_attributable(
     };
     // cas-3d57: a sync merge of the released trunk after park is upstream,
     // under the same rule cas-985f applies before park.
-    let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
-    commits.last().is_some_and(|(parents, _, _)| {
+    commits.last().is_some_and(|(_, parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
-    }) && commits.iter().all(|(parents, epoch, message)| {
+    }) && commits.iter().all(|(commit, parents, epoch, message)| {
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
-                    || released.as_deref().is_some_and(|upstream| {
-                        git_commit_is_ancestor(repo_path, parent, upstream)
+                    || upstream.iter().any(|reference| {
+                        git_commit_is_ancestor(repo_path, parent, reference.trim_start_matches('^'))
                     })
             });
         (target_import
-            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            || (parents.len() == 1
+                && (!message_claims_other_task(message, Some(task_id))
+                    || (message.starts_with(REFERENCE_HISTORY_REGEN_SUBJECT)
+                        && is_reference_history_regeneration(repo_path, commit)))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })
@@ -39452,14 +39590,14 @@ mod epic_status_gate_tests {
         assert!(collection.statuses[0].merge_evidence_note.is_none());
         assert!(collection.statuses[0].content_check_error.is_none());
 
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
         assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
     }
 
     #[test]
     fn epic_status_budget_guard_labels_unchecked_children() {
-        let dir = init_epic_repo(&[("alpha", 1)]);
+        let dir = init_epic_repo(&[("alpha", 0)]);
         let subtasks = vec![
             child("cas-c1", TaskStatus::Closed, Some("alpha")),
             child("cas-c2", TaskStatus::Closed, Some("missing")),
@@ -39478,9 +39616,25 @@ mod epic_status_gate_tests {
 
         assert!(collection.statuses.is_empty());
         assert!(collection.budget_exhausted);
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
+
+        // A retained-worktree scan can fail even when the child branch read
+        // succeeded. Unknown local work must suppress that branch's all-clear.
+        let collection = collect_epic_branch_statuses_with_options(
+            &subtasks[..1], "main", dir.path(), EpicStatusOptions::full_unbounded(),
+        );
+        for inventory_partial in [true, false] {
+            let report = render_epic_status_collection(
+                "cas-epic", "main", &collection, &[], &[], inventory_partial,
+            );
+            assert_eq!(
+                report.contains("All child factory branches are merged"),
+                !inventory_partial,
+                "unknown inventory must not claim all-clear: {report}",
+            );
+        }
     }
 
     #[test]
@@ -39570,7 +39724,7 @@ mod epic_status_gate_tests {
             started.elapsed()
         );
         if collection.budget_exhausted {
-            let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[], false);
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }

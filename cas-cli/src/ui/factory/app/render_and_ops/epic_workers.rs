@@ -2087,6 +2087,7 @@ pub(crate) fn recycle_resume_brief(
     let mut brief =
         "Your context was reset; your worktree and every task binding were kept.\n"
             .to_string();
+    brief.push_str(&crate::finding_triage::focus_brief(cas_dir));
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
     for task in held
         .iter()

@@ -1986,6 +1986,8 @@ async fn h1_real_daemon_connector_transforms_welcome_preserves_output_and_one_up
                 focused: true,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             }],
             epic_id: Some("cas-epic".into()),
             epic_title: Some("Commander".into()),
@@ -2105,6 +2107,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: false,
                 title: "Worker 1".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );
@@ -2123,6 +2127,8 @@ async fn h1_aggregate_events_cover_session_and_pane_lifecycle() {
                 focused: true,
                 title: "Supervisor".into(),
                 exited: false,
+                input_bytes_received: 0,
+                input_bytes_written: 0,
             },
         },
     );
@@ -5486,6 +5492,7 @@ async fn ended_dismissal_is_shared_durable_and_generation_bound() {
     ended.ended = Some(crate::ui::factory::SessionEndOutcome {
         at: "2026-10-31T11:00:00Z".into(), reason: "prompt_input_exit".into(),
         workers_stopped: vec![], orphans: vec![], unverified: vec![],
+        worker_states: vec![],
     });
     let app = |auth: AuthStore, rows: Vec<HubSession>| router(HubState::new(
         SessionCatalog::new(RecordingReadModel::with_sessions(rows)), Arc::new(PreAuthAuthorizer),
@@ -6549,6 +6556,7 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
         at: "2026-10-28T15:24:00Z".into(), reason: "prompt_input_exit".into(),
         workers_stopped: vec!["worker-a".into(), "worker-b".into()],
         orphans: vec!["worker-c".into()], unverified: vec!["worker-d".into()],
+        worker_states: vec!["worker-a: tasks=[cas-work in_progress]; dirty_files=1; unpushed_commits=1; stopped".into()],
     };
     manager.record_ended(&metadata.name, outcome.clone()).unwrap();
     let rows = LocalSessionReadModel::default().list_sessions().unwrap();

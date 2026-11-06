@@ -337,7 +337,7 @@ impl QualityPayload {
                 if !matches!(subject_kind.as_str(),"pipeline"|"task"|"epic"|"release") || !is_slug(subject)
                     || !matches!(recipient.as_str(),"operator"|"client")
                     || !typical_minutes.is_finite() || *typical_minutes<0.0 || !bad_day_minutes.is_finite() || bad_day_minutes<typical_minutes
-                    || *evidence_count==0 || references.is_empty() || references.len()>5 || references.len() as u64>*evidence_count
+                    || *evidence_count==0 || references.len() as u64 != (*evidence_count).min(5)
                     || references.iter().any(|r|!is_slug(&r.id) || !r.minutes.is_finite() || r.minutes<0.0) {
                     return Err("invalid estimate metrics or evidence".into());
                 }
@@ -868,7 +868,7 @@ mod tests {
         for (key, payload) in [
             ("estimate", serde_json::json!({"kind":"estimate", "subject_kind":"pipeline",
                 "subject":"merge_queue:abc1234", "typical_minutes":16.0, "bad_day_minutes":31.0,
-                "evidence_count":5, "references":[{"id":"run:1","minutes":16.0}], "recipient":"operator"})),
+                "evidence_count":1, "references":[{"id":"run:1","minutes":16.0}], "recipient":"operator"})),
             ("outcome", serde_json::json!({"kind":"estimate_outcome", "estimate_id":"estimate-id",
                 "subject":"merge_queue:abc1234", "actual_minutes":12.0, "inside_range":true,
                 "below_typical":true, "reason":"below_typical"})),

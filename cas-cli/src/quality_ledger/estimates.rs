@@ -678,72 +678,7 @@ mod tests {
         );
         assert_eq!(task.reference_details.len(), 5);
     }
-    #[test]
-    fn estimate_outcomes_link_promises_and_count_early_hits_without_friction() {
-        let (_temp, root, _env) = fixture();
-        for (i, m) in [8.0, 12.0, 16.0, 20.0, 31.0].into_iter().enumerate() {
-            sample(&root, m, &format!("ref-{i}"));
-        }
-        let early = estimate(
-            &root,
-            "pipeline",
-            "merge_queue",
-            Some("early"),
-            "client",
-            20,
-            true,
-        )
-        .unwrap();
-        let late = estimate(
-            &root,
-            "pipeline",
-            "merge_queue",
-            Some("late"),
-            "operator",
-            20,
-            true,
-        )
-        .unwrap();
-        let at = Utc::now() + chrono::Duration::minutes(60);
-        for _ in 0..2 {
-            complete(
-                &root,
-                "pipeline",
-                "merge_queue:early",
-                at,
-                Some(10.0),
-                Some("v1.2.3"),
-            );
-            complete(
-                &root,
-                "pipeline",
-                "merge_queue:late",
-                at,
-                Some(45.0),
-                Some("v1.2.3"),
-            );
-        }
-        let events = cas_store::quality_events_between(&root, None, None).unwrap();
-        let tally = calibration(&events);
-        assert_eq!(
-            (
-                tally.completed,
-                tally.hits,
-                tally.below_typical,
-                tally.hit_rate
-            ),
-            (2, 1, 1, Some(0.5))
-        );
-        assert_eq!(tally.misses[0].estimate_id, late.estimate_id.unwrap());
-        assert!(events.iter().any(|e| matches!(&e.payload,QualityPayload::EstimateOutcome { estimate_id,inside_range:true,below_typical:true,.. } if Some(estimate_id)==early.estimate_id.as_ref())));
-        assert_eq!(
-            events
-                .iter()
-                .filter(|e| matches!(e.payload, QualityPayload::Friction { .. }))
-                .count(),
-            1
-        );
-    }
+
     #[test]
     fn historical_task_backfill_is_idempotent_and_never_invents_promises() {
         let (_temp, root, _env) = fixture();

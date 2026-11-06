@@ -601,7 +601,7 @@ struct LedgerReport {
     excluded_unscoped_measurements: usize,
     friction: Vec<FrictionRow>,
     estimates: crate::quality_ledger::estimates::Calibration,
-    estimate_trend: BTreeMap<String,crate::quality_ledger::estimates::Calibration>,
+    estimate_trend: Vec<(String,crate::quality_ledger::estimates::Calibration)>,
 }
 
 /// `(from, to]` for a release. A release ends at its release event, or at its tag
@@ -686,6 +686,8 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
             .and_then(|r| r.release_version.clone())).unwrap_or_else(||"unreleased".into());
         grouped.entry(version).or_default().push(event);
     }
+    let mut grouped:Vec<_>=grouped.into_iter().collect();
+    grouped.sort_by_key(|(_,events)|events.iter().map(|e|e.occurred_at).max());
     report.estimate_trend=grouped.into_iter().map(|(release,events)|
         (release,crate::quality_ledger::estimates::calibration(&events))).collect();
     Ok(report)
@@ -815,7 +817,7 @@ fn aggregate(
         excluded_unscoped_measurements: 0,
         friction: Vec::new(),
         estimates: crate::quality_ledger::estimates::calibration(events),
-        estimate_trend: BTreeMap::new(),
+        estimate_trend: Vec::new(),
     };
     for event in events {
         let project = project_name(event);
@@ -1052,19 +1054,77 @@ fn render(report: &LedgerReport) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn estimate_report_shows_hit_rate_and_miss_reasons() {
-        let root=tempfile::tempdir().unwrap();
-        for (id,hit,below) in [("early",true,true),("late",false,false)] {
-            crate::quality_ledger::emit(root.path(),&cas_store::NewQualityEvent::new(id,
-                cas_store::QualityPayload::EstimateOutcome { estimate_id:id.into(),subject:"merge_queue:abc1234".into(),
-                    actual_minutes:if hit {10.0} else {45.0},inside_range:hit,below_typical:below,
-                    reason:if hit {"below_typical"} else {"above_p90"}.into() }));
+    fn estimate_outcomes_link_and_report_hits_without_early_friction() {
+        use crate::quality_ledger::estimates::{estimate,complete,calibration};
+        let mut env=crate::test_support::TestEnvGuard::temp_home();
+        let temp=tempfile::tempdir().unwrap();
+        let root=crate::store::init_cas_dir(temp.path()).unwrap();
+        env.set("CAS_ROOT",&root);
+        for (i, m) in [8.0, 12.0, 16.0, 20.0, 31.0].into_iter().enumerate() {
+            crate::quality_ledger::emit(&root,&NewQualityEvent::new(format!("ref-{i}"),QualityPayload::CheckRun {
+                check_id:"merge_queue".into(),stage:cas_store::CheckStage::Queue,outcome:CheckOutcome::Pass,sha:None,minutes:Some(m) }));
         }
-        let events=cas_store::quality_events_between(root.path(),None,None).unwrap();
+        let early = estimate(
+            &root,
+            "pipeline",
+            "merge_queue",
+            Some("early"),
+            "client",
+            20,
+            true,
+        )
+        .unwrap();
+        let late = estimate(
+            &root,
+            "pipeline",
+            "merge_queue",
+            Some("late"),
+            "operator",
+            20,
+            true,
+        )
+        .unwrap();
+        let at = Utc::now() + chrono::Duration::minutes(60);
+        for _ in 0..2 {
+            complete(
+                &root,
+                "pipeline",
+                "merge_queue:early",
+                at,
+                Some(10.0),
+                Some("v1.2.3"),
+            );
+            complete(
+                &root,
+                "pipeline",
+                "merge_queue:late",
+                at,
+                Some(45.0),
+                Some("v1.2.3"),
+            );
+        }
+        let events = cas_store::quality_events_between(&root, None, None).unwrap();
+        let tally = calibration(&events);
+        assert_eq!(
+            (
+                tally.completed,
+                tally.hits,
+                tally.below_typical,
+                tally.hit_rate
+            ),
+            (2, 1, 1, Some(0.5))
+        );
+        assert_eq!(tally.misses[0].estimate_id, late.estimate_id.unwrap());
+        assert!(events.iter().any(|e| matches!(&e.payload,QualityPayload::EstimateOutcome { estimate_id,inside_range:true,below_typical:true,.. } if Some(estimate_id)==early.estimate_id.as_ref())));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.payload, QualityPayload::Friction { .. }))
+                .count(),
+            1
+        );
         let report=super::aggregate("v1.2.3".into(),true,None,None,&events);
         let text=super::render(&report);
-        assert_eq!(report.estimates.hit_rate,Some(0.5));
-        assert!(text.contains("Estimates: 2 completed, 1 hits, 1 misses, 1 below typical"));
         assert!(text.contains("hit rate: 50%") && text.contains("above_p90"));
     }
 

@@ -443,7 +443,7 @@ async fn unsupported_estimates_hold_their_cursor_without_blocking_other_events()
         let syncer=machine(&root,&endpoint,"acme/estimates");
         let event=NewQualityEvent::new("estimate",QualityPayload::Estimate {
             subject_kind:"pipeline".into(),subject:"merge_queue:abc1234".into(),typical_minutes:16.0,bad_day_minutes:31.0,
-            evidence_count:5,references:vec![cas_store::EstimateReference { id:"run:1".into(),minutes:16.0 }],recipient:"client".into() });
+            evidence_count:1,references:vec![cas_store::EstimateReference { id:"run:1".into(),minutes:16.0 }],recipient:"client".into() });
         cas_store::record_quality_event(&root,&event).unwrap();
         cloud.0.lock().unwrap().reject_estimates=true;
         emit(&root,"ordinary");

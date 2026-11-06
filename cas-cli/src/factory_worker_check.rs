@@ -3261,13 +3261,18 @@ printf '%s\n' "$@" > target/cargo-args"#);
         const PROBE: &str = "CAS_CFA7_TEMP_PROBE";
         if let Some(expected) = std::env::var_os(PROBE) {
             let expected = PathBuf::from(expected);
-            assert_eq!(std::env::temp_dir(), expected, "native test temporary HOME must use worker scratch");
+            let actual = std::env::temp_dir();
+            assert!(actual.starts_with(expected.join("t")), "native temporary HOME must use short scratch: {actual:?}");
             for key in ["TMPDIR", "TMP", "TEMP"] {
-                assert_eq!(std::env::var_os(key).as_deref(), Some(expected.as_os_str()), "{key}");
+                assert_eq!(std::env::var_os(key).as_deref(), Some(actual.as_os_str()), "{key}");
             }
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&actual).unwrap().permissions().mode() & 0o777, 0o700);
+            let _socket = std::os::unix::net::UnixListener::bind(actual.join("native-probe.sock")).unwrap();
+            std::fs::write(std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap().join("observed-tmp"), actual.as_os_str().as_encoded_bytes()).unwrap();
             // Replay an abandoned temporary HOME without copying a multi-GB binary.
             let temporary = tempfile::tempdir().unwrap().keep();
-            assert!(temporary.starts_with(&expected));
+            assert!(temporary.starts_with(&actual));
             std::fs::write(temporary.join("temporary-home-binary"), b"fixture").unwrap();
             return;
         }
@@ -3306,12 +3311,13 @@ printf '%s\n' "$@" > target/cargo-args"#);
     [ -f "$CARGO_TARGET_DIR/{}" ] || exit 5
     echo run >> "$CARGO_TARGET_DIR/runs"
 else
-    export {PROBE}="$CARGO_TARGET_DIR/tmp"
+    export {PROBE}={:?}
     {:?} --exact factory_worker_check::tests::scratch_root_worker_check_builds_into_relocated_target --nocapture || exit 6
     printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
 fi"#,
             expected.display().to_string(),
             crate::factory_target_cache::owner::MARKER,
+            scratch.display().to_string(),
             std::env::current_exe().unwrap().display().to_string(),
         ));
         execute_at(&root, &["-p".into(), "cas".into(), "--lib".into()], &repo, &cargo).unwrap();
@@ -3320,17 +3326,22 @@ fi"#,
         assert!(passing_receipt(&root, &repo, &fixture_head(&repo)).is_some());
         let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
         execute_at(&root, &args, &repo, &cargo).unwrap();
-        assert!(expected.join("tmp").read_dir().unwrap().next().is_some());
+        let worker_tmp = PathBuf::from(std::fs::read_to_string(expected.join("observed-tmp")).unwrap());
+        assert!(worker_tmp.starts_with(scratch.join("t")));
         crate::store::open_task_store(&root).unwrap()
             .add(&crate::types::Task::new("cas-temp-proof".into(), "temp proof".into())).unwrap();
         execute_verifier_at(&root, "cas-temp-proof", None, &head, &args, &project, &cargo, None).unwrap();
         let review = scratch.join(cas_types::factory_scratch::project_key(&root))
-            .join("verify/cas-temp-proof").join(format!("walk-{head}/repo/target/tmp"));
-        assert!(review.read_dir().unwrap().next().is_some(), "verifier uses managed scratch too");
+            .join("verify/cas-temp-proof").join(format!("walk-{head}/repo/target/observed-tmp"));
+        let review_tmp = PathBuf::from(std::fs::read_to_string(review).unwrap());
+        assert!(review_tmp.starts_with(scratch.join("t")), "verifier uses managed short scratch too");
+        assert_ne!(review_tmp, worker_tmp, "reviewer and worker temporaries stay isolated");
         let mut retired = crate::types::Agent::new("retired".into(), "worker".into());
         retired.metadata.insert("clone_path".into(), repo.to_str().unwrap().into());
         assert!(crate::factory_target_cache::retirement::retire_worker_with_snapshot(&root, &retired, &[]).unwrap());
-        assert!(!expected.exists(), "GC reclaims abandoned temporary HOME with retired target");
+        assert!(!expected.exists(), "GC reclaims retired target");
+        assert!(!worker_tmp.exists(), "GC reclaims short temporary HOME");
+        assert!(review_tmp.exists(), "another lane's temporaries remain intact");
         assert!(repo.join(".git").is_file(), "retirement retains worker source");
         assert_eq!(std::env::var_os("TMPDIR").unwrap(), ambient.as_os_str(), "parent environment stays unchanged");
     }

@@ -386,6 +386,12 @@ pub(crate) struct MergeQueueEjection {
     pub pr_number: u64,
     pub failed_run_id: Option<u64>,
     pub occurrence: String,
+    /// The PR head at the exit; a repair cycle is keyed on run and head.
+    pub head_sha: String,
+    /// cas-25ce: the failed merge_group run of the PR this group entry was
+    /// built on (GitHub names it in `pr-<n>-<base sha>`), which may be the
+    /// real cause of this failure.
+    pub ahead_failed_run_id: Option<u64>,
 }
 
 /// cas-e369: a supervisor-owned PR (an open epic's `epic/` branch) that the
@@ -1210,7 +1216,9 @@ pub(crate) fn collect_merge_queue_ejections_with_arm_state(
 pub(crate) struct GithubPoll {
     pub failures: Vec<CiFailure>,
     pub queue_poll: MergeQueuePoll,
-    pub ejections: Vec<(MergeQueueEjection, Option<String>)>,
+    /// Each ejection with its failing job and whether the run ahead of it
+    /// failed the same job (cas-25ce).
+    pub ejections: Vec<(MergeQueueEjection, Option<String>, bool)>,
     pub delivery_pr_observations: Vec<DeliveryPrObservation>,
     pub ci_wakes: (Vec<CiWake>, bool),
 }
@@ -1245,7 +1253,12 @@ pub(crate) fn read_github(
         .into_iter()
         .map(|ejection| {
             let job = super::merge_queue_ejection::failing_job(&transport, ejection.failed_run_id);
-            (ejection, job)
+            let group_mate = super::merge_queue_ejection::ahead_failed_same_job(
+                &transport,
+                ejection.failed_run_id,
+                ejection.ahead_failed_run_id,
+            );
+            (ejection, job, group_mate)
         })
         .collect();
     let delivery_pr_observations = collect_delivery_pr_observations(&transport, &deliveries)?;
@@ -1311,7 +1324,20 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             poll.queued_prs.insert(pr.number);
             continue;
         }
-        let failed_run_id = failed_runs.get(&pr.number).map(|run| run.id);
+        let failed_run = failed_runs.get(&pr.number);
+        let failed_run_id = failed_run.map(|run| run.id);
+        let ahead_failed_run_id = failed_run
+            .and_then(|run| run.head_branch.rsplit_once("/pr-"))
+            .and_then(|(_, suffix)| suffix.split_once('-'))
+            .and_then(|(_, base)| {
+                runs.iter().find(|ahead| {
+                    ahead.event == "merge_group"
+                        && ahead.conclusion.as_deref() == Some("failure")
+                        && ahead.head_sha == base
+                        && merge_group_pr_number(&ahead.head_branch) != Some(pr.number)
+                })
+            })
+            .map(|ahead| ahead.id);
         let arm_vanished = pr.head_branch.starts_with("factory/")
             && previously_armed.contains(&pr.number)
             && !pr.auto_merge_armed()
@@ -1344,6 +1370,8 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
             pr_number: pr.number,
             failed_run_id,
             occurrence,
+            head_sha: pr.head_sha.clone(),
+            ahead_failed_run_id,
         });
     }
     poll.pr_lane_failures = collect_pr_lane_failures(transport, deliveries, &pulls, &runs)?;
@@ -1521,12 +1549,20 @@ pub(crate) fn mark_merged_failures(project: &Path, mut failures: Vec<CiFailure>)
 /// Extract the common Rust/nextest failure shape without treating log parsing
 /// as authoritative.  Missing or unfamiliar logs simply omit the test name.
 pub(crate) fn first_failing_test(log: &str) -> Option<String> {
-    log.lines().find_map(|line| {
-        let line = line.trim();
-        let test = line.strip_prefix("test ")?;
-        let (name, outcome) = test.rsplit_once(" ... ")?;
-        (outcome.contains("FAILED")).then(|| name.trim().to_string())
-    })
+    failing_tests(log).next()
+}
+
+/// Every failing test in log order, each once (cas-25ce).
+pub(crate) fn failing_tests(log: &str) -> impl Iterator<Item = String> + '_ {
+    let mut seen = std::collections::HashSet::new();
+    log.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let test = line.strip_prefix("test ")?;
+            let (name, outcome) = test.rsplit_once(" ... ")?;
+            (outcome.contains("FAILED")).then(|| name.trim().to_string())
+        })
+        .filter(move |name| seen.insert(name.clone()))
 }
 
 pub(crate) fn relay_body(failure: &CiFailure) -> String {
@@ -2450,8 +2486,10 @@ mod tests {
             Some("failure"),
         );
         failed.event = "merge_group".to_string();
+        let mut ahead = run_with("gh-readonly-queue/main/pr-555-trunk", "base", 900, Some("failure"));
+        ahead.event = "merge_group".to_string();
         let ejected = FakeTransport {
-            runs: vec![failed.clone()],
+            runs: vec![failed.clone(), ahead],
             pulls: vec![pull(556, &delivery.branch, false, "2026-08-20T15:32:03Z")],
             delivery_pulls: Vec::new(),
             job: String::new(),
@@ -2466,6 +2504,9 @@ mod tests {
         .unwrap();
         assert_eq!(first.ejections.len(), 1);
         assert_eq!(first.ejections[0].failed_run_id, Some(901));
+        // cas-25ce: a failed group entry ahead (the run whose head is this
+        // entry's `pr-556-<base>`) is named as the possible cause.
+        assert_eq!(first.ejections[0].ahead_failed_run_id, Some(900));
         assert_eq!(first.ejections[0].occurrence, "queue-exit:2026-08-20T15:32:03Z");
 
         let observed_exit = collect_merge_queue_ejections(

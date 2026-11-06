@@ -60,6 +60,16 @@ case "$1 $2" in
 esac
 EOF
 chmod +x "$tmp/bin/gh"
+cat >"$tmp/bin/cas" <<'EOF'
+#!/usr/bin/env bash
+cat "${FAKE_RELEASE_CONTEXT_JSON:-/dev/null}"
+EOF
+chmod +x "$tmp/bin/cas"
+export CAS_BIN="$tmp/bin/cas"
+cat >"$tmp/context.json" <<'EOF'
+{"first_child_epoch":1792077438,"first_child_commit":"cccccccccccccccccccccccccccccccccccccccc"}
+EOF
+export FAKE_RELEASE_CONTEXT_JSON="$tmp/context.json"
 export GH_BIN="$tmp/bin/gh"
 export RELEASE_REPO=Richards-LLC/cassy
 export FAKE_GH_LOG="$tmp/gh.log"
@@ -114,6 +124,9 @@ out="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
     FAKE_MERGE_GROUP_RUNS_JSON="$merge_group_runs" \
     FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
     "$receipt" v3.55.0)"
+expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS 1800 'cas-61e0: first child commit to actual mergedAt is measured against thirty minutes'
+expect_field "$out" MAIN_TO_PUBLISHED_SECONDS 616 'cas-61e0: actual mergedAt to publishedAt is measured against twenty minutes'
+expect_field "$out" QUEUE_RUNS_USED 3 'cas-61e0: count all associated CI attempts before landing, including a different tree'
 expect_field "$out" PUBLISH_START_KIND gate-green 'main-push release uses authoritative merge-queue green'
 expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:08Z 'green timing starts at the successful merge-queue CI completion'
 expect_field "$out" GATE_GREEN_EPOCH 1792079228 'receipt records the authoritative gate-green epoch'
@@ -168,6 +181,7 @@ out="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
     FAKE_MERGE_GROUP_RUNS_JSON="$empty_runs" \
     FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
     "$receipt" v3.55.0)"
+expect_field "$out" QUEUE_RUNS_USED unavailable 'cas-61e0: absent queue evidence never invents a clean run count'
 expect_field "$out" PUBLISH_START_KIND main-landed 'missing merge-queue evidence selects the main-landing fallback'
 expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:18Z 'fallback endpoint is the merged PR timestamp'
 expect_field "$out" MAIN_LANDED_EPOCH 1792079238 'fallback receipt records main landing epoch'

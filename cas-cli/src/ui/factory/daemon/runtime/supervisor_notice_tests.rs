@@ -127,7 +127,7 @@ fn ct2_p3_dead_owner_notice_rerouted() {
             12,
             Some(stage),
             &format!("run-{stage}"),
-            Some("Fast Validation › publication fixture"),
+            Some("Fast Validation › publication fixture"), super::lifecycle::MergeQueueExit::default()
         );
         if stage == 3 {
             // The ejection outlives its factory. Reuse the existing Commander
@@ -176,7 +176,7 @@ fn ct2_p3_dead_owner_notice_rerouted() {
     for _ in 0..2 {
         let replay = enqueue_merge_queue_ejection_relay(
             &root, "cas-route-1", "", 12, Some(1), "run-1",
-            Some("Fast Validation › publication fixture"),
+            Some("Fast Validation › publication fixture"), super::lifecycle::MergeQueueExit::default()
         );
         assert!(matches!(replay, WorkerAttentionRelayOutcome::Persisted { .. }));
         crate::supervisor_notices::adopt_operator_notices(&root, "connected-observer-session")

@@ -11,6 +11,7 @@ use crate::ui::factory::daemon::runtime::ci_watch::{
 struct Fake {
     job: Option<&'static str>,
     step: Option<&'static str>,
+    log: Option<&'static str>,
 }
 
 impl CiTransport for Fake {
@@ -30,7 +31,7 @@ impl CiTransport for Fake {
         }
     }
     fn failed_log(&self, _: u64) -> Result<Option<String>, CiWatchError> {
-        Ok(None)
+        Ok(self.log.map(str::to_string))
     }
     fn merge_queue_pull_requests(&self) -> Result<Vec<MergeQueuePullRequest>, CiWatchError> {
         Ok(Vec::new())
@@ -45,14 +46,27 @@ fn failing_job_names_the_job_and_its_failed_step() {
     let with_step = Fake {
         job: Some("Fast Validation — CI tiers"),
         step: Some("Test release publication guards"),
+        log: None,
     };
     assert_eq!(
         failing_job(&with_step, Some(38647056637)).as_deref(),
         Some("Fast Validation — CI tiers › Test release publication guards")
     );
+    // cas-25ce: the log's failing tests ride along, each once, for the
+    // worker's one batched repair.
+    let with_tests = Fake {
+        job: Some("Rust Suite"),
+        step: Some("nextest"),
+        log: Some("test a::passes ... ok\ntest a::red ... FAILED\ntest b::red ... FAILED\ntest a::red ... FAILED\n"),
+    };
+    assert_eq!(
+        failing_job(&with_tests, Some(1)).as_deref(),
+        Some("Rust Suite › nextest (failing tests: a::red, b::red)")
+    );
     let job_only = Fake {
         job: Some("macOS Check"),
         step: None,
+        log: None,
     };
     assert_eq!(
         failing_job(&job_only, Some(1)).as_deref(),
@@ -65,6 +79,7 @@ fn failing_job_degrades_to_none_without_a_run_or_a_readable_job() {
     let job = Fake {
         job: Some("macOS Check"),
         step: None,
+        log: None,
     };
     assert_eq!(
         failing_job(&job, None),
@@ -74,6 +89,7 @@ fn failing_job_degrades_to_none_without_a_run_or_a_readable_job() {
     let offline = Fake {
         job: None,
         step: None,
+        log: None,
     };
     assert_eq!(
         failing_job(&offline, Some(1)),

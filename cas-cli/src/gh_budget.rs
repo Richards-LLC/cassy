@@ -380,9 +380,10 @@ pub(crate) fn ci_watch_dry_run(cas_dir: &Path, session: &str, minutes: u64) -> a
     let started = Instant::now();
     let window = Duration::from_secs(minutes * 60);
     let (mut queued, mut armed, mut held) = Default::default();
+    let lookups = crate::ui::factory::daemon::runtime::merge_queue_ejection::FailedRunLookups::default();
     let mut polls = 0;
     while started.elapsed() < window {
-        let poll = ci_watch::read_github(cas_dir, project, session, &watched, &queued, &armed, &held);
+        let poll = ci_watch::read_github(cas_dir, project, session, &watched, &queued, &armed, &held, &lookups);
         polls += 1;
         let pending = match poll {
             Ok(poll) => {

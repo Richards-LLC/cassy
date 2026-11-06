@@ -273,6 +273,21 @@ test(
           await countAttached(welcomes.at(-1)!);
         },
       );
+      await stage("Update the daemon in place without losing the conversation", async () => {
+        const before = welcomes.length;
+        const daemonPid = fixture!.daemonPid;
+        const updated = await command("daemon-reexec");
+        expect(updated.daemonPid).toBe(daemonPid);
+        expect(updated.receipt.pid).toBe(daemonPid);
+        expect(updated.receipt.panes_adopted).toBeGreaterThan(0);
+        await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
+        await expect(header).toContainText("Live");
+        await countAttached(welcomes.at(-1)!);
+        await expect(page.getByRole("log").getByText("Real supervisor queue is connected.", { exact: true })).toHaveCount(1);
+        await command("queue", { message: "Queued after the in-place daemon update." });
+        await replay("Queued after the in-place daemon update.");
+        expect(navigations, "in-place daemon update must not reload the phone").toBe(0);
+      });
       await stage("Replace the daemon without losing the open phone", async () => {
         const before = welcomes.length;
         const stopped = await command("daemon-stop");

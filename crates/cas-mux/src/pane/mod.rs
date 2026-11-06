@@ -5,6 +5,10 @@
 //! - A ghostty_vt Terminal for state management
 //! - Metadata (agent name, role, etc.)
 
+#[cfg(unix)]
+mod handoff;
+#[cfg(unix)]
+pub use handoff::{PaneHandoff, PtyHandoff};
 mod snapshot;
 mod style;
 mod tests;
@@ -60,7 +64,7 @@ pub enum UserInputKind {
 pub type PaneId = String;
 
 /// The kind of pane
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaneKind {
     /// Worker agent (Claude/Codex CLI)
     Worker,
@@ -166,6 +170,7 @@ pub struct Pane {
     pub(crate) cols: u16,
     /// Optional recording writer for session capture
     recorder: Option<Arc<Mutex<RecordingWriter>>>,
+    handoff_recording_path: Option<PathBuf>,
     /// Whether to force all rows dirty on next take (for new client sync)
     force_all_dirty: bool,
     /// Last known total scrollback lines (for scroll detection)
@@ -291,6 +296,7 @@ impl Pane {
             rows,
             cols,
             recorder: None,
+            handoff_recording_path: None,
             force_all_dirty: true,
             last_total_scrollback: info.total_scrollback,
             seq_counter: 0,
@@ -1233,6 +1239,18 @@ impl Pane {
         // already moved ownership out. drain_buf capacity is donated to the
         // caller but re-grows cheaply on the next cycle.
         (coalesced, other_events)
+    }
+
+    /// Total bytes accepted by the PTY input queue and physically written.
+    /// Includes harness/control writes; panes without a PTY report zero.
+    pub fn input_byte_counts(&self) -> (u64, u64) {
+        match &self.backend {
+            PaneBackend::Pty(pty) => {
+                let input = pty.input();
+                (input.bytes_received(), input.bytes_written())
+            }
+            PaneBackend::None => (0, 0),
+        }
     }
 
     pub async fn write(&self, data: &[u8]) -> Result<()> {

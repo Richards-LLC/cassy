@@ -377,7 +377,7 @@ pub fn run_internal_provisioner(input: &Path, output: &Path) -> anyhow::Result<(
     let input_data: ProvisionerInput = serde_json::from_reader(std::fs::File::open(input)?)?;
     anyhow::ensure!(
         input_data.build_hash == build_hash(),
-        "provision_build_mismatch: daemon build {} differs from provisioner build {}; restart the factory after update",
+        "provision_build_mismatch: daemon build {} differs from provisioner build {}; run cas factory reexec after update",
         input_data.build_hash,
         build_hash()
     );

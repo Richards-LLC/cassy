@@ -1295,61 +1295,87 @@ mod supervisor_handoff_tests {
 
     }
 
-    /// cas-d85c3: a phone message still pending when its supervisor ends moves,
-    /// once, to the supervisor that claims the handoff in a new factory session.
+    /// Replay a busy supervisor exiting before it sees phone or Violet mail.
+    /// A successor may keep its name but starts a new factory session.
     #[test]
-    fn operator_message_pending_at_supervisor_end_moves_to_successor_once() {
+    fn gated_operator_and_violet_messages_survive_supervisor_exit() {
         let mut env = crate::test_support::TestEnvGuard::new();
-        let temp = tempfile::TempDir::new().unwrap();
-        let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        let agents = open_agent_store(&root).unwrap();
-        let mut ending = Agent::new("ending-id".into(), "ending".into());
-        ending.role = AgentRole::Supervisor;
-        ending.machine_id = Some(Agent::get_or_generate_machine_id());
-        ending.factory_session = Some("old-session".into());
-        agents.register(&ending).unwrap();
-        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        let stamp = cas_store::OperatorStamp {
-            operator: "Daniel".into(),
-            device_id: "phone-1".into(),
-            device_label: "Phone".into(),
-            scopes: vec!["message:send".into()],
-            verified: true,
-        };
-        let go = queue
-            .enqueue_operator_message("commander:Daniel@Phone", "ending", "Go", Some("old-session"), None, None, false, None, &stamp)
-            .unwrap()
-            .id();
-        // The predecessor already had this one in its turn; moving it would deliver it twice.
-        let seen = queue
-            .enqueue_operator_message("commander:Daniel@Phone", "ending", "Seen", Some("old-session"), None, None, false, None, &stamp)
-            .unwrap()
-            .id();
-        queue.record_recipient_surfaced(seen, "ending", cas_store::SurfacingSource::HookSurfaced).unwrap();
-        handle_session_end(
-            &HookInput { session_id: ending.id.clone(), reason: Some("prompt_input_exit".into()), ..Default::default() },
-            Some(&root),
-        )
-        .unwrap();
-
-        env.set("CAS_AGENT_ROLE", "supervisor");
-        env.set("CAS_AGENT_NAME", "successor");
-        env.set("CAS_FACTORY_SESSION", "new-session");
-        let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
-        let output = handle_session_start(&start, Some(&root)).unwrap();
-        let output = serde_json::to_value(output).unwrap();
-        let context = output["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(context.contains("Answer each once in your final pane reply"), "{context}");
-        assert!(context.contains("explicit routing only for disabled or unmirrored delivery"), "{context}");
-        assert!(!context.contains("Answer them with target=operator"), "{context}");
-        handle_session_start(&start, Some(&root)).unwrap();
-
-        let row = queue.queued_prompt(go).unwrap().unwrap();
-        assert_eq!((row.target.as_str(), row.factory_session.as_deref()), ("successor", Some("new-session")));
-        assert!(row.processed_at.is_none(), "the successor still has to read it");
-        let copies = queue.peek_all(100).unwrap().into_iter().filter(|r| r.prompt == "Go").count();
-        assert_eq!(copies, 1, "re-routing moves the one row; it never copies it");
-        let seen = queue.queued_prompt(seen).unwrap().unwrap();
-        assert_eq!(seen.target, "ending", "a row the predecessor already saw stays with it");
+        let next_session = "new-session";
+        for successor in ["successor", "ending"] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            let agents = open_agent_store(&root).unwrap();
+            let mut ending = Agent::new("ending-id".into(), "ending".into());
+            ending.role = AgentRole::Supervisor;
+            ending.machine_id = Some(Agent::get_or_generate_machine_id());
+            ending.factory_session = Some("old-session".into());
+            agents.register(&ending).unwrap();
+            let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+            let stamp = cas_store::OperatorStamp {
+                operator: "Fixture operator".into(), device_id: "phone-1".into(),
+                device_label: "Phone".into(), scopes: vec!["message:send".into()], verified: true,
+            };
+            let phone = queue.enqueue_operator_message("commander:fixture@Phone", "ending",
+                "Go", Some("old-session"), None, None, false, None, &stamp).unwrap().id();
+            let mut carried = vec![(phone, "Go".to_string())];
+            let mut retained = Vec::new();
+            for (key, target, session, trusted, seen) in [
+                ("named", "ending", "old-session", true, false),
+                ("alias", "supervisor", "old-session", true, false),
+                ("seen", "supervisor", "old-session", true, true),
+                ("foreign", "supervisor", "other-session", true, false),
+                ("spoofed", "supervisor", "old-session", false, false),
+            ] {
+                let body = format!("<cas-violet-activity v=\"1\" channel=\"C_TEST\" kind=\"mention\">\nSlack message {key}: read its original thread.\n</cas-violet-activity>");
+                let id = match queue.enqueue_idempotent("violet-activity:C_TEST", target, &body,
+                    Some(session), None, Some(cas_store::NotificationPriority::High), key,
+                    trusted.then_some(&cas_store::QueueOrigin::Daemon)).unwrap()
+                {
+                    cas_store::EnqueueIdempotentResult::Created(id)
+                    | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+                };
+                if seen {
+                    queue.record_recipient_surfaced(id, "ending", cas_store::SurfacingSource::HookSurfaced).unwrap();
+                }
+                if trusted && session == "old-session" && !seen {
+                    carried.push((id, body));
+                } else { retained.push((id, target.to_string(), session.to_string())); }
+            }
+            for (id, _) in &carried {
+                queue.park_for_busy_recipient(*id, Some("wake_declined_by_policy: no transcript evidence"),
+                    chrono::Utc::now() + chrono::Duration::hours(24)).unwrap();
+                let report = queue.message_delivery_report(*id).unwrap().unwrap();
+                assert_eq!(report.stage, cas_store::DeliveryStage::Gated);
+            }
+            handle_session_end(&HookInput { session_id: ending.id.clone(),
+                reason: Some("prompt_input_exit".into()), ..Default::default() }, Some(&root)).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            env.set("CAS_AGENT_NAME", successor);
+            env.set("CAS_FACTORY_SESSION", next_session);
+            let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
+            handle_session_start(&start, Some(&root)).unwrap();
+            handle_session_start(&start, Some(&root)).unwrap();
+            for (id, body) in &carried {
+                let row = queue.queued_prompt(*id).unwrap().unwrap();
+                assert_eq!((row.target.as_str(), row.factory_session.as_deref()),
+                    (successor, Some(next_session)), "row {id} must survive the ended recipient");
+                assert_eq!(&row.prompt, body);
+                assert!(row.processed_at.is_none(), "retargeting is not delivery");
+            }
+            for (id, target, session) in retained {
+                let row = queue.queued_prompt(id).unwrap().unwrap();
+                assert_eq!((row.target, row.factory_session), (target, Some(session)),
+                    "already-read, foreign-session or unstamped lookalike row {id} must not move");
+            }
+            let delivered = queue.poll_unseen_for_recipient(successor, Some(next_session), 100).unwrap();
+            for (id, body) in &carried {
+                assert!(delivered.iter().any(|row| row.id == *id && row.prompt == *body),
+                    "the successor's normal inbox must surface gated row {id}");
+            }
+            let again = queue.poll_unseen_for_recipient(successor, Some(next_session), 100).unwrap();
+            assert!(!again.iter().any(|row| carried.iter().any(|(id, _)| *id == row.id)),
+                "a repeated succession or drain must never copy/redeliver a carried row");
+        }
     }
+
 }

@@ -325,7 +325,7 @@ pub(crate) fn render(snapshot: &Snapshot, session: Option<&str>) -> String {
 /// cas-1c1f: a supervisor's unrequested pane exit shuts its whole factory
 /// down (the daemon's `PaneExited` arm), so the supervisor remedy names that
 /// cost and the routes that keep the workers running.
-const FLEET_PICKUP: &str = "Each older worker is recycled onto the installed build before it starts its next queued task, never mid-task; an idle worker with no queued task keeps its build until recycled. For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory. Factory daemons keep their build until the factory is next relaunched.";
+const FLEET_PICKUP: &str = "Each older worker is recycled onto the installed build before it starts its next queued task, never mid-task; an idle worker with no queued task keeps its build until recycled. For a supervisor, use its harness's MCP reconnect control (Claude Code: /mcp); that keeps its workers running. For a new harness or a fresh context, use factory action=restart_supervisor. A plain supervisor exit stops every worker in its factory. Run cas factory reexec --session <session> to load the installed daemon build in place, preserving its PID and panes.";
 
 /// cas-2d41: true when this worker's live MCP server is older than `installed`.
 pub(crate) fn agent_mcp_older_than(cas_root: &Path, installed: &str, agent_name: &str) -> bool {

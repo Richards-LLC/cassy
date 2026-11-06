@@ -37,6 +37,8 @@ pub(crate) mod delivery_evidence;
 mod assignment_evidence_tests;
 mod director_refresh;
 mod imports;
+#[cfg(unix)]
+pub(crate) mod handoff;
 mod init;
 mod merge_alert;
 #[cfg(test)]

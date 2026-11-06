@@ -34,9 +34,16 @@ fn command(output: &Path) -> Result<Command, String> {
         .map_err(|e| e.to_string())?;
     let model = route.spec.model.ok_or("verifier route has no model")?;
     let effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    let harness = |name: &str| {
+        #[cfg(test)]
+        if let Some(binary) = std::env::var_os("CAS_TEST_PREMERGE_HARNESS") {
+            return Command::new(binary);
+        }
+        Command::new(name)
+    };
     let mut command = match route.spec.cli {
         cas_mux::SupervisorCli::Codex => {
-            let mut command = Command::new("codex");
+            let mut command = harness("codex");
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
                 .arg("--model")
@@ -49,7 +56,7 @@ fn command(output: &Path) -> Result<Command, String> {
             command
         }
         cas_mux::SupervisorCli::Claude => {
-            let mut command = Command::new("claude");
+            let mut command = harness("claude");
             command.args(["-p", "--model"]).arg(model).args([
                 "--effort",
                 effort.as_str(),
@@ -394,19 +401,11 @@ mod tests {
             let response_path = directory.join("provider-response.json");
             std::fs::write(&response_path, response).unwrap();
             env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
-            let bin = directory.join("bin");
-            std::fs::create_dir(&bin).unwrap();
-            for harness in ["codex", "claude"] {
-                use std::os::unix::fs::PermissionsExt;
-                let script = bin.join(harness);
-                std::fs::write(&script, "#!/bin/sh\ncat \"$CAS_TEST_VERIFIER_RESPONSE\"\n")
-                    .unwrap();
-                std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            let original_path = std::env::var_os("PATH").unwrap();
-            let mut paths = vec![bin];
-            paths.extend(std::env::split_paths(&original_path));
-            env.set("PATH", std::env::join_paths(paths).unwrap());
+            use std::os::unix::fs::PermissionsExt;
+            let script = directory.join("fixture-provider");
+            std::fs::write(&script, "#!/bin/sh\ncat \"$CAS_TEST_VERIFIER_RESPONSE\"\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            env.set("CAS_TEST_PREMERGE_HARNESS", &script);
             // Exercise the dispatch handler used by worktree_merge, replacing
             // only the external provider executable in this isolated fixture.
             let handle = core

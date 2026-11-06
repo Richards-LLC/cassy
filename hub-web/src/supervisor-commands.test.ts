@@ -129,6 +129,23 @@ describe("supervisor slash commands", () => {
 });
 
 describe("supervisor command receipts", () => {
+  it("dismisses status without cancelling queued reloads or admitting a second command", async () => {
+    vi.useFakeTimers();
+    try {
+      const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send: () => true, changed: () => {} });
+      await commands.run("mcp", false);
+      const ref = [...commands.receipts.keys()][0]!;
+      commands.receive({ client_ref: ref, command: "mcp", phase: "queued", detail: "Wait for the current turn", output: "", interactive: false });
+      commands.dismiss(ref);
+      expect(commands.visibleReceipts).toEqual([]);
+      await expect(commands.run("mcp", false)).rejects.toThrow("Wait for the current command");
+      commands.receive({ client_ref: ref, command: "mcp", phase: "observed", detail: "Replacement process observed", output: "", interactive: false });
+      expect(commands.receipts.get(ref)?.phase).toBe("observed");
+      expect(commands.visibleReceipts).toEqual([]);
+      await commands.run("mcp", false);
+      expect(commands.visibleReceipts).toHaveLength(1);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
   it("keeps output open and keyboard focus through receipt updates", () => {
     const parent = document.createElement("section"); document.body.replaceChildren(parent);
     const receipt: CommandReceipt = { client_ref: "cmd-1", command: "usage", phase: "observed", detail: "Usage shown", output: "Usage", interactive: false };

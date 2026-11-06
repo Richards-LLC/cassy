@@ -24,6 +24,10 @@ No new server command, daemon relaunch, guessed success, polling owner or second
 
 Reuse the card's observed MCP/installed versions from factory_binary_skew. Card controls are siblings of the navigation button, never nested buttons. A native details control exposes Session actions; a skewed card shows its Reload Cassy action directly. Keep keyed controls and focus across catalog refreshes. Pending requests are bound to the selected session birth and cancelled on selection change or failed attachment. Both card and typed /mcp use the existing mcp command and receipt. The application requires JavaScript for authenticated session control; existing print and reduced-motion behavior applies.
 
+## Header and receipt follow-through
+
+The header slash button opens the same palette directly below itself, inside viewport bounds, with Escape returning focus to the opener. Typing stays attached to the composer. Completed/refused receipts replace pending text; Dismiss command status hides the presentation without cancelling a command or allowing a concurrent mutation. A later accepted retry removes its earlier refused busy row.
+
 ## Validation
 
 Extend keyed card coverage for skew/current/unknown versions, supported and unsupported harnesses, receipt phases and stable focus. Preserve and extend typed /mcp coverage; extend the existing HUB-J27 reload journey at desktop and phone to use both card and composer, assert no chat send, and wait for actual observed receipt/catalog evidence.

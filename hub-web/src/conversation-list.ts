@@ -431,6 +431,12 @@ export class ConversationList {
       const spoken = conversationRowSpokenName(row);
       if (node.getAttribute("aria-label") !== spoken) node.setAttribute("aria-label", spoken);
       ordered.push(node);
+      if (row.canEnd && end) {
+        const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
+        this.renderEnd(control, row, end);
+        ordered.push(control);
+
+      }
       if (reload && !row.ended) {
         const control = extra(`reload:${row.key}`, () => {
           const node = document.createElement("div"); node.className = "conversation-reload";
@@ -455,12 +461,7 @@ export class ConversationList {
         status.hidden = !status.textContent;
         ordered.push(control);
       }
-      if (row.canEnd && end) {
-        const control = extra(`end:${row.key}`, () => { const node = document.createElement("div"); node.className = "conversation-end"; return node; });
-        this.renderEnd(control, row, end);
-        ordered.push(control);
 
-      }
     }
     for (const [key, node] of this.extras) {
       if (!extrasKept.has(key)) { node.remove(); this.extras.delete(key); }

@@ -3530,6 +3530,14 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   padding: var(--space-3); background: var(--bg-raised); color: var(--ink); box-shadow: var(--lift);
 }
 .supervisor-command-palette[hidden] { display: none; }
+.supervisor-command-dropdown { position: fixed; inset: auto; width: min(26rem, calc(100vw - var(--space-4))); }
+.conversation-reload { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: 0 var(--space-3) var(--space-2); color: var(--ink-mid); font-size: var(--fs-xs); }
+.conversation-reload button, .conversation-reload summary { min-height: var(--rail-item-min); padding: var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--color-action); font: inherit; cursor: pointer; }
+.conversation-reload details { min-width: 0; }
+.conversation-reload details button { margin-top: var(--space-1); }
+.conversation-reload p { margin: 0; overflow-wrap: anywhere; }
+.conversation-reload-receipt { flex-basis: 100%; }
+.conversation-reload button:disabled { color: var(--ink-mid); cursor: default; }
 .supervisor-command-palette > strong { display: block; margin-block-end: var(--space-2); font-size: var(--fs-meta); }
 .supervisor-command-palette > button {
   display: flex; flex-direction: column; align-items: start; width: 100%; min-height: 44px;

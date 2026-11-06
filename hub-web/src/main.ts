@@ -613,7 +613,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // The header's own state: a send that expired waiting for the session
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
-      commandReceipts: () => [...supervisorCommandSession(threadMachineId, threadSession).receipts.values()],
+      commandReceipts: () => supervisorCommandSession(threadMachineId, threadSession).visibleReceipts,
+      commandDismiss: ref => supervisorCommandSession(threadMachineId, threadSession).dismiss(ref),
       commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device
@@ -754,6 +755,7 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (pendingReload && (next?.machineId !== pendingReload.machineId || next.session !== pendingReload.session)) pendingReload = undefined;
   if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
     releasePaneControl(selectedMachineId, selectedSession);
   }
@@ -4885,7 +4887,7 @@ function renderConversationList(): void {
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, reloadReceipt: [...(supervisorCommands.get(key)?.receipts.values() ?? [])].filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5819,7 +5821,7 @@ function bindEvents(): void {
   const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
   if (commands) commands.onclick = () => {
     const input = document.querySelector<HTMLTextAreaElement>("#message-text");
-    if (input) { bindSlashCommands(input); slashCommands?.palette.show(); }
+    if (input) { bindSlashCommands(input); slashCommands?.palette.show(commands); }
   };
   const interrupt = document.querySelector<HTMLButtonElement>("#conversation-interrupt");
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };

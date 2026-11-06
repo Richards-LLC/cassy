@@ -994,7 +994,7 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
                     root.clone(),
                     "lead".into(),
                     vec![],
-                    Instant::now()
+                    started + Duration::from_millis(1)
                 )
                 .is_some()
         );
@@ -1006,7 +1006,6 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
         !preparation.allows_delivery(later),
         "expired evidence cannot authorize transport"
     );
-    std::thread::sleep(Duration::from_millis(110));
     assert!(
         preparation
             .advance(
@@ -1015,7 +1014,7 @@ fn cas_7b6b_wake_snapshot_reuses_fresh_inputs_and_refreshes_after_cadence() {
                 root,
                 "lead".into(),
                 vec![],
-                Instant::now()
+                later
             )
             .is_some()
     );

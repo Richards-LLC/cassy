@@ -7,14 +7,13 @@ metadata:
 
 # Delivery QA evidence
 
-`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery reviews.
+In qa.mode=batch (the default) the release's batch QA round at the frozen tip is the only walk; per-task QA evidence applies only in qa.mode=per_task.
 Start with the [batch flow](references/independent-pass.md#batch-default).
 Prove the named build's demo, `qa.user_facing_paths`, `qa.api_paths` and impacted journeys.
 API globs declare non-rendered server code, including server-only TSX; rendered paths need visual evidence.
-This evidence pass does not replace fixture, unit or integration tests. Time-box it to **30 minutes**;
-an honest incomplete ledger beats a late, invented result. For an epic with child demos, use the
-supervisor's [epic flow walk](../cas-supervisor/references/epic-flow-walk.md): one combined matrix
-with a **60-minute** box. On a `qa-pass` task you review someone else's delivery: use the API path
+This evidence pass does not replace fixture, unit or integration tests. Time-box every pass, batch
+round included, to `qa.pass_timeout_mins`; an honest incomplete ledger beats a late, invented result.
+For an epic with child demos, the batch round walks one combined [epic matrix](../cas-supervisor/references/epic-flow-walk.md). On a `qa-pass` task you review someone else's delivery: use the API path
 below for API-only reasons; otherwise use [the independent pass](references/independent-pass.md).
 Record its verdict with `verification action=qa_record`, naming the round's `LEDGER.md`.
 
@@ -56,7 +55,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
 5. Capture rendered cells with screenshots, CLI cells with terminal captures, and API cells with
    HTTP transcripts. Choose evidence labels by how the result was obtained using
    the scaffold and [evidence guidance](references/evidence-ledger.md). When
-   the 30-minute box expires, mark every unrun cell `NOT EXERCISED: <reason>`. For rendered web/hub cells,
+   the box expires, mark every unrun cell `NOT EXERCISED: <reason>`. For rendered web/hub cells,
    write the **evidence bundle** to `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its trace, ARIA and
    polish requirements even when `visual_change: false`. For a visual change, also write its
@@ -72,7 +71,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    contract. For terminal states, dump all visible text across surfaces and flag
    contradictory claims. Run the [walk rules](#walk-rules) sweep for controls the user can't act on.
 7. Run `cas qa ledger check <path> --task <id>` and repair every structural
-   diagnostic before submitting evidence. Record one task per defect found; do not patch from this QA pass. Add the ledger path, build
+   diagnostic before submitting evidence. A qa-pass task records one task per defect; implementers fix their own delivery. Add the ledger path, build
    revision, label split, and verdict counts to a task note and the `task action=close` reason. Stop
    registered servers before close.
 
@@ -100,7 +99,7 @@ These hold for every walk, task pass or [independent pass](references/independen
 
 ## Close gate
 
-Close enforces fresh, commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need
+In qa.mode=per_task only: close enforces fresh, commit-bound evidence (`qa.evidence_gate`). Rendered surfaces need
 `qa/bundle.json`, cited in a `platform_proof` note as `qa-bundle: <abs path>/bundle.json`; follow
 its contract, including passing `Expect`, visual QA, critique floors and base-build comparison for
 scoped findings. API-only changes need `LEDGER.md` and `contracts.diff`; demo-only non-web changes
@@ -108,6 +107,7 @@ need a fresh `LEDGER.md` with a `PASS` / `real-build` row, plus a cas-cli-craft 
 report under `<task-id>/terminal-qa/` when the diff touches `qa.terminal_render_paths` (`node
 <skills-dir>/cas-cli-craft/scripts/terminal-qa.mjs --label <cmd> --out <dir> -- <cmd>`).
 `<skills-dir>` is the harness skill directory: `.claude/skills`, `.codex/skills` or `.grok/skills`.
+
 Any delivery that adds `test.fixme`, `.skip` or `.only` is refused unless the marker or the line
 above it carries `cas-allow-skip: <reason>`. Rejections name the exact command that produces what is
 missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, release, close gate) needs a ledger row starting `Adversarial probe:`. Findings stay in your verdict unless they are a reproduced, observable defect affecting someone today.

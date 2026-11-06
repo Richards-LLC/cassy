@@ -461,6 +461,20 @@ pub fn handle_session_start(
         );
     }
 
+    // cas-3199: a managed-file conflict skips the project's whole skill sync.
+    if let Some(banner) =
+        crate::hooks::handlers::session_hygiene::build_session_start_managed_conflict_banner_sized(
+            cas_root,
+        )
+    {
+        assembler.append_degradable_with_priority(
+            "Skill sync blocked",
+            banner.full,
+            banner.compact,
+            DegradationPriority::Context,
+        );
+    }
+
     // cas-20f27: issue-filing detectors. Both are surfaced to every role — a
     // worker is as likely as a supervisor to be the one who staged the report,
     // and the filing directive is a standing one for both. Appended below

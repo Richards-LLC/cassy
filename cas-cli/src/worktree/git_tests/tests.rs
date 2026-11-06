@@ -1543,14 +1543,35 @@ fn publish_branch_to_origin_never_creates_an_absent_remote_branch() {
 
 #[test]
 fn publish_branch_to_origin_is_already_current_when_nothing_to_push() {
-    let (_temp, _origin_path, local_path) = create_repo_with_origin();
-    let git = GitOperations::new(local_path);
-
-    let sha = git.resolve_commit("main").unwrap();
-    assert_eq!(
-        git.publish_branch_to_origin("main"),
-        TargetPushOutcome::AlreadyCurrent { sha }
-    );
+    for state in ["unchanged", "moved", "deleted", "offline"] {
+        let (_temp, origin, local) = create_repo_with_origin();
+        let git = GitOperations::new(local.clone());
+        let old = git.resolve_commit("main").unwrap();
+        commit_file(&local, "new.txt", "new work\n");
+        assert!(Command::new("git").args(["push", "origin", "main"])
+            .current_dir(&local).output().unwrap().status.success());
+        let sha = git.resolve_commit("main").unwrap();
+        assert_eq!(git.resolve_commit("origin/main"), Some(sha.clone()));
+        let change = match state {
+            "moved" => Command::new("git").args(["--git-dir", origin.to_str().unwrap(),
+                "update-ref", "refs/heads/main", &old]).output().unwrap(),
+            "deleted" => Command::new("git").args(["--git-dir", origin.to_str().unwrap(),
+                "update-ref", "-d", "refs/heads/main"]).output().unwrap(),
+            "offline" => Command::new("git").args(["remote", "set-url", "origin",
+                origin.with_extension("gone").to_str().unwrap()]).current_dir(&local).output().unwrap(),
+            _ => Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&local).output().unwrap(),
+        };
+        assert!(change.status.success());
+        let outcome = git.publish_branch_to_origin("main");
+        match state {
+            "unchanged" => assert_eq!(outcome, TargetPushOutcome::AlreadyCurrent { sha }),
+            "moved" => assert_eq!(outcome, TargetPushOutcome::Pushed { sha }),
+            "deleted" => assert_eq!(outcome, TargetPushOutcome::RemoteBranchAbsent),
+            "offline" => assert!(!outcome.is_published(),
+                "a stale equal tracking ref cannot prove origin publication: {outcome:?}"),
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// AC1 + AC2: the merged-locally-but-origin-behind case is repaired by the

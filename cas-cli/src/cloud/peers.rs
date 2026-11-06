@@ -92,6 +92,9 @@ pub struct Peer {
     /// receives is read. Such a peer is never `live`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub harness_auth_failed: Option<String>,
+    /// Last advertised build-guard sample; absent on older peers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_capacity: Option<serde_json::Value>,
 }
 
 impl Peer {
@@ -273,6 +276,8 @@ fn supervisor_row(agent: &AgentInfo, now: DateTime<Utc>) -> Option<Peer> {
         branch: agent_meta(agent, META_BRANCH),
         own: None,
         harness_auth_failed: agent_meta(agent, META_HARNESS_AUTH_FAILED),
+        build_capacity: agent_meta(agent, crate::factory_build_routing::CAPACITY_META)
+            .and_then(|value| serde_json::from_str(&value).ok()),
     })
 }
 

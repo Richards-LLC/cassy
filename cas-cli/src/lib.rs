@@ -55,6 +55,7 @@ pub use light_lane::run_detached_worker;
 pub mod factory_auth_health;
 pub mod factory_hook_canary;
 pub(crate) mod factory_build_guard;
+pub(crate) mod factory_build_routing;
 pub(crate) mod factory_build_memory;
 pub(crate) mod factory_candidate_queue;
 #[doc(hidden)]
@@ -105,6 +106,8 @@ pub(crate) mod ops;
 pub mod qa_evidence;
 pub mod qa_ledger;
 pub(crate) mod quality_ledger;
+pub(crate) mod peer_ask_gate;
+pub(crate) mod ci_waste;
 pub mod opencode_preflight;
 pub(crate) mod prompt_revalidation;
 pub(crate) mod task_assignment;
@@ -137,6 +140,8 @@ pub mod tracing;
 pub mod ui;
 pub mod worktree;
 
+#[cfg(test)]
+mod instruction_parity_tests;
 #[cfg(test)]
 mod test_env_guard;
 

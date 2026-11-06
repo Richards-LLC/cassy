@@ -731,6 +731,15 @@ async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt
             .contains(&f.predecessor)
     );
     assert!(reopened.notes.contains(OLD_BRANCH), "{}", reopened.notes);
+    // cas-cff4: the assignee is told once, with the decision and branch handling.
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let notices = queue.peek_for_targets(&[WORKER], None, 10).unwrap();
+    assert_eq!(notices.len(), 1, "{verdict}");
+    // pin: the supervisor must see which prompt carried the decision, never an implied handoff.
+    assert!(verdict.contains(&format!("Assignee {WORKER} notified (prompt {})", notices[0].id)), "{verdict}");
+    // pin: the worker notice must carry the supervisor's decision text verbatim.
+    assert!(notices[0].prompt.contains("Rebase the reviewed correction"), "{}", notices[0].prompt);
+    assert!(notices[0].prompt.contains(OLD_BRANCH), "{}", notices[0].prompt);
     env.set("CAS_AGENT_ROLE", "worker");
     let started = text(
         f.core
@@ -1437,14 +1446,16 @@ async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
             ],
         );
         env.set("CAS_AGENT_ROLE", "worker");
-        f.core
-            .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+        let start = || {
+            f.core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
                 id: TASK.into(),
                 brief: Some(true),
                 force: None,
             }))
-            .await
-            .unwrap();
+        };
+        // cas-cff4: the first start surfaces the queued request_changes notice.
+        assert!(start().await.is_err(), "the worker must see the decision before restarting");
+        start().await.unwrap();
         close(&f).await;
         let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
         assert_eq!(

@@ -23,7 +23,8 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
 1. Start from the epic branch only after closeout is complete: one full review,
    one batch fix, fix-diff re-review, one QA round (cas-supervisor Phase 4). CHANGELOG `[Unreleased]` and the
    `changelog.d/` fragments hold the release entries. `scripts/release.sh --next-version` prints the version and
-   the draft path; write the Slack draft there per
+   the draft path. The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
+   Write the Slack draft there per
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's

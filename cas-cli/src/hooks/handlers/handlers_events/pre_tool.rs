@@ -593,7 +593,6 @@ fn handle_pre_tool_use_inner(
     // In a workspace that is not fmt-clean, either shape spills unrelated
     // changes. Workers use scoped format commands and may run only capped,
     // package-scoped cargo check --lib or --tests (cas-3efd, cas-3051).
-    // Workers run targeted tests; the supervisor runs the full suite at assembly.
     // Hoist this before the cas_root early return and factory Bash auto-allow so
     // an unscoped run always gets the loud, actionable refusal.
     // ========================================================================
@@ -627,10 +626,11 @@ fn handle_pre_tool_use_inner(
                 "deny",
                 &format!(
                     "🚫 NO WORKER RUST BUILDS: `{what}` is outside the capped worker exceptions. \
-                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed, optionally with log redirection and backgrounding. Choose one target flag. \
-                     The hook runs it under max_concurrent_builders using your private seeded target cache. \
+                     Use exactly `cargo check -p <crate> [-p <crate> ...] --lib` for lib-only edits or `--tests` when test files changed. Choose one target flag. \
+                     The hook runs it under max_concurrent_builders. \
                      Commit first so a successful check records `check: PASS <sha>`. \
-                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused. Full builds and suites remain supervisor-only at epic assembly (cas-4cbb)."
+                     Targeted tests use exactly `cargo nextest run -p <crate> [--lib|--test <harness>] -E 'test(module::name)'`; an omitted target selects --lib. Empty/all() filters, repeated packages, broad flags and compound commands are refused (cas-4cbb). \
+                     Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic."
                 ),
             ));
         }
@@ -881,6 +881,47 @@ fn handle_pre_tool_use_inner(
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
         && let Some(refusal) =
             crate::qa_pass::github_merge_refusal(root, std::path::Path::new(&input.cwd), cmd)
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
+    // cas-bddf9: a supervisor's raw PR merge waits on its own unanswered ask
+    // to a peer about that PR, unless the ask is visibly overridden.
+    if tool_name == "Bash"
+        && crate::harness_policy::is_supervisor(input)
+        && let Some(root) = cas_root
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal(
+            root,
+            std::path::Path::new(&input.cwd),
+            cmd,
+            &crate::hooks::handlers::handlers_state::current_agent_id(input),
+            &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        )
+    {
+        return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
+    }
+
+    // cas-fee3: an epic PR opens as a draft so every merge into the epic does
+    // not rerun its full CI; the release PR is the one gate.
+    if tool_name == "Bash"
+        && let Some(cmd) = input
+            .tool_input
+            .as_ref()
+            .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
+        && let Some(refusal) = crate::ci_waste::epic_pr_draft_refusal(cmd, || {
+            std::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&input.cwd)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        })
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &refusal));
     }

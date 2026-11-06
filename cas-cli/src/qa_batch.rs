@@ -71,6 +71,18 @@ pub(crate) fn integration_state(repo: &Path, head: &str, target: &str) -> Option
     }
 }
 
+/// cas-4b22: a parked task's ACTIVE delivery anchor once it is integrated on
+/// its own target, as close's merge gate measures it. History never counts: a
+/// task reopened for rework after an earlier merge has not shipped its rework.
+pub(crate) fn shipped_anchor(root: &Path, task: &Task) -> Option<String> {
+    if task.status != cas_types::TaskStatus::AwaitingMerge {
+        return None;
+    }
+    let (repo, target) = task_context(root, task).ok()?;
+    let anchor = commit(&repo, task.deliverables.factory_branch_anchor.as_deref()?)?;
+    (integration_state(&repo, &anchor, &target) == Some(true)).then_some(anchor)
+}
+
 /// Use exactly close's target inheritance and repository resolver.
 pub(crate) fn task_context(root: &Path, task: &Task) -> Result<(PathBuf, String), String> {
     use crate::mcp::tools::core::task::{lifecycle::close_ops, repo_context};

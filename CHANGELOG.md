@@ -7,6 +7,168 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.0.5] - 2026-11-06
+
+### Fixed — Factory
+
+- **Reviews follow the published target** — Candidate review now uses the fetched target on origin even when the local branch has an unpublished merge. Rolling that local merge back no longer triggers another verifier when the published target advances without changing the reviewed delivery. Source, plan, evidence and delivery-content checks still apply; merge-queue CI checks interactions with other deliveries.
+- **Build disk no longer fills with worker and verifier caches** — Was: worker Cargo caches and verifier walks were freed only once disk use reached the build-admission watermark and lanes were already refused, and on hosts with other users' processes the in-use check counted every unreadable process (and any process working in the checkout) as a user, so nothing was deleted. Now: parking a delivery trims the retained cache to its compiled dependencies (dropping `incremental/` and per-commit test executables) and prunes parked caches beyond retention; after every park and every 15 minutes, Cassy reclaims relocated worker targets idle for 30 minutes without waiting for disk pressure, keeping the newest idle cache warm. A cache counts as in use only when a process's working directory, executable, arguments, mappings or open files are inside the cache itself. Verifier walks superseded by a newer walk of the same task are reclaimed without waiting for the task to close. Park markers for removed worktrees are swept, and freed space is logged in GB.
+- **Idle workers with queued work can take new tasks** — Assigning a task to a clean, idle worker no longer fails with "N commits behind main, ask the worker to rebase" just because another task is queued for that worker but not yet started. `task start` cuts each task's branch from its own target. A worker that is mid-task or has uncommitted changes is still refused.
+- **Requested changes reach the worker** — A supervisor's `request_changes` now sends the assigned worker one waking message with the decision and branch handling. Its output says which prompt carried it, or why no worker was told, instead of implying a handoff. Previously the task reopened silently and the worker sat idle until someone messaged it.
+- **Stall alerts for sandboxed Claude workers** — Stall detection no longer counts a sandboxed worker's own harness process as a background job. Previously every Claude worker launched under a sandbox wrapper looked permanently busy, so neither the in-progress nor the assigned-but-unstarted stall alert could fire for it.
+
+### Fixed — Verification
+
+- **Queue-landed deliveries can close** — A premerge approval now recognizes the bound delivery tip after the merge queue publishes its own merge commit. Close checks current source ancestry and the complete reviewed patch at its first landing, so later edits to the same lines retain approval; dropping merges and another task's proof still refuse.
+- **Late pre-merge reviews stay usable** — An already-bound task verifier with unexpired authority can record a completed review after its dispatch deadline when the same source and candidate tree remain current. Changed or superseded candidates still refuse, and the original handoff remains one-use.
+- **Read-only investigations stay verified while the epic moves** — A close that Cassy measures as delivering nothing, from a clean checkout, now pins its verification to the exact commit it was reviewed at, whether or not it declared `no_delivery`. This applies to factory tasks with a recorded lane; legacy tasks keep the strict proof. A sibling merge into the epic, the worker starting its next task, or uncommitted notes in the checkout no longer invalidate the verifier's dispatch and force a second review.
+
+### Fixed — Commander
+
+- **Reload Cassy from a phone** — `/mcp` and **Reload Cassy** in a Claude supervisor's command menu reconnect its Cassy MCP server through Claude's native command, verified on Claude Code 2.1.311, 2.1.316 and 2.1.318. Versions older than 2.1.311 or unknown running Claude versions are refused as unverified. The receipt confirms the replacement process ID and its recorded version; command output alone never proves reload. Codex, Grok and unknown harnesses receive a named refusal. The owning factory daemon must already run this build; an older daemon needs its normal update/relaunch before it can handle the action. Automatic updates without reconnect remain follow-up work.
+- **Grok replies in conversation** — Completed Grok supervisor replies now appear in Commander and remain in conversation history after reconnect. Answers link to the originating terminal question or verified Commander send; thought chunks, tool progress and cancelled turns stay out of the reply. Native synthetic prompts cannot claim an operator question, and image pastes keep the text prompt for answer threading.
+
+### Fixed — Closes
+
+- **Closes track what has already shipped** — Parked deliveries whose code was already live on staging or main used to sit in AwaitingMerge until someone noticed that no batch QA receipt had been recorded. The background release runner now sends the supervisor one notice per release SHA. The notice lists those deliveries and gives the exact `verification action=batch_receipt` call to record. Cassy still does not record the receipt itself, because a receipt needs an independent ledger author.
+- **One supervisor close for shipped work** — A parked blocker whose current delivery is already on its target no longer holds a dependent task's close; a blocker reopened for rework still holds it. A supervisor override close with the task's own delivery or merge SHA on origin/<target> now passes a timed-out verifier dispatch, if the task has a merged PR or merge-queue run and the reason names that dispatch. Ordinary closes keep every timeout, and the timeout refusal now names this route.
+
+### Fixed — Factory instructions
+
+- **One answer per contested factory rule** — worker and supervisor rules now say the same thing in the skills, launch contracts, assignment text and refusal messages. A worker's close parks the delivery and the merge verdict closes it. The park relay is the only completion signal. The supervisor merges with `worktree_merge`, decides within its authority and asks the operator only for policy calls. Batch QA is the only epic walk, and the full suite runs once on the landing tree. A successful park now reads "PARKED … nothing more to do" instead of telling the worker to merge and retry. A new parity test keeps retired answers from coming back.
+
+### Added — Factory
+
+- **Place build overflow on your other machine** — Supervisors publish builder slots, load and pressure in peer presence. When spawn admission is saturated, a new task can go to a fresh supervisor of the same account and repository, with its full brief and capacity receipt. Each peer gets at most one new route per 90 seconds. Routes expire after 15 minutes or when the peer goes stale; disabling `factory.auto_route_builds` also releases them to local admission. Existing worker assignments stay local.
+
+## [4.0.4] - 2026-11-05
+
+### Fixed — CI
+
+- **Keep macOS runner waits out of queue admission** — Release queue entries no longer request the advisory macOS Check runner. GitHub-hosted macOS capacity gaps previously cancelled an unstarted required check and ejected green releases. Fast Validation is the sole queue gate; Release Prebuild still builds macOS and publication still audits its packaged artifact. Queue receipts no longer claim standalone macOS gate proof, and docs-only timing requires only Fast Validation.
+- **Queue notices match the remaining check** — Removed the stale claim that macOS Check still runs in merge-queue reuse notices, its dead full-gate predicate, and its required-check mention in the reviewer-eval seed. Fast Validation remains the only required check; remaining macOS event routing is unchanged.
+
+### Fixed — Release validation
+
+- **Source-only Commander delivery** — The queue accepts source lanes without generated bundle commits. Release-version and bundle changes still require committed assets to match a fresh build, including version-only changes that previously skipped web validation.
+- **Portable release fixtures** — The release self-test rewrites fixture files without GNU-only `sed -i`, allowing macOS pre-push checks to run with native sed.
+
+### Fixed — Diagnostics
+
+- **Retired MCP references** — `cas doctor` lists rules, skills, memories and brief templates that explicitly name absent or disabled MCP servers, with each record ID or file and line for review. The check preserves guidance and reports unreadable inputs instead of claiming a complete scan.
+
+### Fixed — Factory
+
+- **Closing a session can no longer lose or misreport a worker's unsaved work** — `worker_status` now shows the worktree's real HEAD and says `[pushed: origin/<branch> as of last fetch]` only when every HEAD commit is on that remote-tracking branch; otherwise it says `[NOT PUSHED: N commit(s) not on origin/<branch> as of last fetch]`. A git status it cannot read shows `[dirty state unknown]` instead of `[clean]`, and a non-empty stash gets its own line. A parked tip that differs from HEAD gets its own warning line instead of standing in for HEAD. `shutdown_workers` refusals name each worker's branch and exact remedy. A forced shutdown first saves unpushed commits and uncommitted files to `refs/cas/rescue/<worker>/<time>-<sha>`, pushes that ref to origin, and lists it in the receipt. Worktree removal after shutdown or `/exit` does the same before deleting a branch whose commits are on no remote, and names the ref, so it no longer leaves stranded commits. `/finish` now waits up to 10 minutes for workers to push and park, prints one line per worker, and does not report the session finished while any worker still holds unpushed or uncommitted work.
+- **Routine supervisor decisions** — Supervisors ship work settled by written standards, reserve operator questions for policy calls, and expire instructions scoped to a completed step, and route around Cassy worker glitches without asking for an operator go.
+- **Immediate Cassy defect reports** — Apologies, workarounds, missed relays and false tool output trigger an immediate report with evidence and a suggested fix; Cassy source fixes are tasked and staffed immediately.
+- **"Still reviewing" no longer releases a merge hold** — A peer's progress reply (`kind=status`, such as "reviewing, ETA 1h") to a supervisor's open question no longer counts as an answer. The merge it is about stays held, the same as after a bare "ok". Only an answer, or a reply with no kind, releases it.
+- **Peer asks wake an idle supervisor promptly** — A supervisor that finished its turn but kept repainting (a running background task) never passed the 2-second pane-silence check, so peer asks, directed messages and lifecycle wakes sat until something else woke it: 76 s for one replayed ask, about 2 minutes on average that day. A transcript that shows the turn ended now clears that check for every supervisor wake, as it already did for the supervisor's own reminders. A declined wake comes back to fresh selection after 10 s, doubling up to the old 2 minutes, where it used to wait 2 minutes on a stale snapshot.
+- **Wake cap no longer holds asks, answers or blockers** — The six-per-hour sender-pair wake cap now applies only to status traffic. Peer `ask`, `answer` and `blocker` messages, and blocker envelopes, wake the supervisor even after the cap is spent.
+- **Urgent messages wait for an in-flight tool call** — An urgent message no longer presses Escape into a recipient's running tool call, which Claude Code shows as the operator rejecting it. The row is held for up to 60 s and surfaces when the call ends. Past that limit the interrupt opens with "Cassy interrupted your in-flight tool call to deliver this; this was not the operator."
+- **Supervisors no longer get notices that ask nothing of them** — A worker that spawns successfully, a clean shutdown that freed no task, and a purely informational spawn note (base chosen, refreshed, materialized, ready or preserved) are recorded in the spawn audit instead of sent. Failures, shutdowns that released tasks, and every other spawn warning (an unpublished or diverged base, a base mismatch, a fallback base or a stale build cache) still reach the supervisor. An idle-worker relay now names its next action. A PR that leaves the merge queue with no failed run is reported only if it is still out of the queue on the next check, and a failed run listed later belongs to the same notice instead of a second one.
+- **Cross-machine approval closes** — A worker can close a delivery whose pre-merge approval was recorded on another machine. Confirmed publication shares an authenticated peer receipt that the receiving daemon validates and keeps in its existing verification records, independently of mailbox prompt retention. Changed delivery identities, forged senders, non-approved verdicts and replay into a new proof cycle remain refused. Peer failures leave publication successful and other sends continue; permanent receipt refusals are acknowledged instead of repeatedly retried.
+- **Urgent messages hold during active tool calls** — Single-target urgent messages hold while the recipient's tool call is in flight, up to 60 s, then interrupt with a notice. An urgent message to all workers no longer presses Escape into a running tool call: each such worker gets the message when its call ends, and after 60 s it is interrupted with "Cassy interrupted your in-flight tool call to deliver this; this was not the operator."
+- **Worker asks and answers wake the supervisor sooner** — A worker's `kind=ask` or `kind=answer` message now keeps its kind. The six-per-hour wake cap no longer holds it, so a seventh ask in an hour no longer waits up to an hour. Asks, answers and blockers also skip the 20-second burst debounce. A truly idle supervisor wakes in about 0.1–0.3 s. A supervisor with recent activity can still wait up to 120 s after its last recorded activity, plus up to 30 s of decline backoff.
+- **Declined supervisor wakes recheck within 30 s** — The backoff after a declined wake is now 10, 20, then 30 s, capped at 30 s instead of 2 minutes.
+- **Urgent broadcasts keep the 60 s bound for every busy worker** — When an urgent message went to all workers and one was mid tool call, the message was marked delivered as soon as the others got it. The busy worker then saw it only when its call ended: no 60-second interrupt, and no notice. The message now stays open while any worker is held. It is rechecked every 5 s. Workers that already have it are not sent it again, and the busy worker is interrupted after 60 s with "Cassy interrupted your in-flight tool call; this was not the operator."
+- **Less wasted CI from the factory** — A gabber audit of 1,000 CI runs found three Cassy-shaped sources of waste:
+  - **Epic PRs open as drafts.** Opening an epic PR without `--draft` is now refused, because every merge into a ready epic PR reran its full CI (43% of gabber's CI). The release PR is the gate. GitHub still runs CI on drafts unless the project's workflow skips them, so the workflow must also list `ready_for_review` in its `pull_request` types for the checks to run when the PR is marked ready.
+  - **Workers run the project's local gate before pushing.** `factory.worker_local_gate` (for example `pnpm ci:local`) now runs before a worker's push leaves the machine, so lint and test failures stop there instead of costing a CI run. It runs nothing unless set, only the operator can set it, and a gate that runs past 10 minutes stops the push.
+  - **Rapid merges get a batching notice.** After 3 or more merges into one branch within 30 minutes, `worktree_merge` reports a batching notice. Each such push reruns the branch PR's CI and cancels the previous run.
+
+### Changed — Factory
+
+- **Workers pick up an installed release between tasks** — A worker whose MCP server is older than the installed Cassy is now recycled onto the new build before it starts its next queued task, on the same path as `factory.restart_worker_between_tasks`. A worker is never recycled mid-task. The post-install notice now says what happens to each older process: workers move at their next queued task; an idle worker keeps its build until recycled; supervisors use `/mcp` or `restart_supervisor`; factory daemons keep their build until the factory is next relaunched. It no longer ends with "No process was recycled automatically".
+- **Workers prove only what they touched** — Worker instructions now say: run the tests that cover the code you touched, plus the new red-green test, which replays the real incident. The full suite runs once on the tree that lands: in the merge queue, else CI, else one supervisor run per epic. The supervisor no longer runs a full-suite precheck before the queue or reruns the whole gate after a fix. Briefs and acceptance criteria name the touched tests, never suites or evals. QA walks affected journeys once per release batch. The new wording is shorter than the old.
+- **Plain time reminders** — `coordination action=remind remind_delay_secs=<n>` is no longer refused when its message mentions CI, a task, a merge or the inbox. A time reminder is a valid backstop; event reminders remain the better wait.
+
+### Fixed — Skill sync
+
+- **Shared account skills stay current** — Was: `cas update --user` refreshed
+  the full builtin set only in `~/.claude`, which no account reads, so the
+  shared `~/.cas/claude-base` and `~/.cas/codex-base` skills every account loads
+  stayed frozen. Now: both shared bases receive the full builtin set.
+- **Cassy's own retired ignore lines no longer freeze a project** — Was: when a
+  release retired builtin files, Cassy's earlier uncommitted `.gitignore` block
+  still listed them and was read as a user edit, so that project's whole skill
+  sync was skipped while the summary reported it refreshed. Now: lines naming
+  files Cassy once shipped are repaired; a real conflict fails the project's
+  skills phase by path, and SessionStart reports the blocked sync. The
+  unattended release install still completes once the binary is current.
+- **Cassy-source tooling stays out of other projects' skills** — Was: factory
+  skills told every project to use Cassy's own Cargo, `journey-eval.sh`,
+  `assembly-proof.py`, hub-web, lane fast-row and merge-queue steps. Now: that text installs
+  only in the Cassy source checkout; other projects get a step that points at
+  their own CLAUDE.md or AGENTS.md commands.
+
+### Fixed — Releases
+
+- **Require the fixes claimed by a release** — One Git-only check during preparation verifies task fragments and trailing task IDs on non-merge commits. It accepts equivalent cherry-picks despite later edits, ignores epic merge subjects and passing mentions, and reports every missing task together.
+
+### Fixed — tool status text names the evidence it actually observed
+
+- **Status words follow their evidence** — Committed writes with unfinished follow-up no longer say the action is done.
+Inbox suppression names obsolete instructions and current task states;
+tracked-only assignment checks and stored worktree merge/removal records name
+their scope. Merge publication verifies an equal cached ref against live origin
+and reports unavailable publication as unconfirmed. Release reports count listed
+changes, and doctor names local release-tag containment. Hook cleanup JSON uses
+`no_candidates_found`/`processed` and `candidates` instead of `clean`/`done` and
+the incorrect zero `files_checked`. See `docs/status-words.md` for definitions,
+source checks, compatibility notes and named regressions.
+
+### Fixed — Messaging
+
+- **Expire old transcript mirrors** — Completed supervisor reply copies leave the pending queue after twenty-four hours. Real operator messages and independent durable delivery snapshots remain available.
+
+### Fixed — MCP
+
+- **MCP calls no longer stall for up to a minute every five minutes** — Each `cas serve` runs a history provenance repair every five minutes. For each of 500 commits it re-read every task twice and compared every worker commit record, about 40 seconds on a large store, while holding the server's shared database connection. Any tool call that arrived during that time waited behind it, often past the 55-second response deadline. Even a refused message took 53 seconds. The repair now reads tasks once per batch and looks up commit records by prefix, taking 1.4 seconds instead of 41 to 63.
+
+### Fixed — Commander
+
+- **Commander tables line up by column** — A table cell that looked like a number used to right-align on its own, so a column mixing "17%" with "8.3 h" zig-zagged, and its header no longer sat over its values. Each column now takes one alignment for its header and every cell. A Markdown alignment row (`:--`, `--:`, `:--:`) sets it; otherwise a column right-aligns only when every value in it is a number. Tables also size to their content instead of stretching one column across the message.
+
+### Fixed — Merge publication
+
+- **A post-merge regeneration commit no longer blocks the landing check** — When `worktree_merge` regenerated generated artifacts (reference history, the task-verifier projections or the hub-web bundle) on top of a delivery merge, landing verification read that commit as later target progress and refused to publish. The local target was left ahead of origin until a supervisor pushed by hand. Verification now checks the delivery merge beneath such commits, and any other commit on top is still refused.
+
+### Added — Ledger
+
+- **Every identified Cassy problem is a friction-ledger row** — Filing a bug task in the Cassy repository, or filing an issue on the Cassy tracker through `system action=report_cas_bug`, now records a friction row automatically; nobody has to remember the ledger. `cas ledger report` has a "Friction found" section with a count by state and one line per problem showing whether it is open, in progress, fixed in vX.Y.Z or closed. An issue whose fix task has its own row is counted once. `cas ledger backfill` imports earlier Cassy bug tasks and, through `gh`, issues on `issues.components.cassy`, and says why when `gh` is unavailable. Friction rows stay on this machine until Cloud accepts the kind.
+
+### Added — Factory
+
+- **An unanswered peer question holds the merge it is about** — When a supervisor asks a peer supervisor a question (`kind=ask`, or a message sent with `blocker=true`) that names a task or PR, Cassy now refuses that supervisor's `worktree_merge` of the task, or its `gh pr merge` of the PR, until the peer replies. To merge anyway, the supervisor adds a task note `PEER ASK OVERRIDE <ask id>: <reason>`. Cassy then lets the merge through, counts it in the friction ledger and sends the operator a one-line notice.
+- **Progress watchdog** — A factory session with open work and no task, lane or message change for 45 minutes now wakes its supervisor once with what is waiting on whom. If nothing moves in another 45 minutes, the operator is paged once in Commander. Heartbeats and liveness never count as progress, so a live but silent peer no longer stalls a factory overnight unnoticed.
+
+### Fixed — Commander and factory
+
+- **Show the old process, not a false update** — Commander re-reads a machine's hub version when its event stream reconnects, so a hub that `cas update` restarted no longer keeps showing the replaced version. `/v1/machine` now reports `installed_version`, the binary a hub restart would run. A hub older than that binary reads "Hub 4.0.0 · installed 4.0.2 · Run cas hub restart" instead of "Update available → 4.0.2", and a published release is offered only beyond what is installed. The factory status bar names an installed binary the running daemon has not loaded ("installed v4.0.2 · restart factory to load") and stops advertising a release that is already installed.
+
+### Changed — Agent instructions
+
+- **Agent instructions build the simplest complete thing** — Supervisor, worker and reviewer instructions are about a third shorter and open with one rule: hit every mark, delete before you add, and treat speed as part of done. They no longer restate gates the tools already refuse and explain, and they now agree that workers close their own tasks and that the send result reports whether a message woke its recipient.
+- **The task verifier sends overbuilt work back** — It now asks whether work is overbuilt, whether a smaller change fully solves it, and whether it slows the flow without catching a real failure. A named smaller sufficient change, or an unearned wait, is rejected like broken work.
+- **`/finish` has workers push and park first** — It never forces a shutdown past unsaved work without the operator, and it names any kept worker's unsaved work before the operator exits.
+
+### Added — Friction ledger
+
+- **Release speed and complexity in `cas ledger report`** — Each release shows commit-to-main time (median and p90), main-to-publish time, and the complexity it added: lines added and removed, new config keys and new checks. Missing data reads as unknown with a reason.
+
+### Fixed — Supervisor wake warning
+
+- **The "no wake source" warning only appears with open work** — A supervisor turn with no parked delivery and no live worker no longer gets the reminder nag.
+
+### Docs — Release preparation
+
+- **Communication release inventory** — Was: the communication changes and newer main fixes had no combined release inventory. Now: the release draft, changelog coverage and module map identify the assembled changes and the remaining publication prerequisites.
+
+### Tests — Image credential validation
+
+- **Capture credentials before curl exits** — Was: the image-command credential check could inspect the process after it exited and fail despite unchanged source. Now: its fixture captures the arguments and credential-file permissions while the process is running.
+
 ## [4.0.3] - 2026-11-05
 
 ### Fixed — Peer supervisor messages

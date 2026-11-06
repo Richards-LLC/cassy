@@ -727,6 +727,8 @@ pub const OPERATOR_ONLY_CONFIG_KEYS: &[&str] = &[
     "secrets.destination",
     // cas-2f55: whether pasted secrets are deleted is the operator's choice.
     "secrets.auto_delete",
+    // cas-fee3: every worker push runs this shell command.
+    "factory.worker_local_gate",
 ];
 
 /// Whether `key` is operator-only (cas-0d4f0), including `factory.write_roots`.
@@ -1347,6 +1349,8 @@ mod tests {
             ("qa.mode", "per_task"),
             ("release.claude_account_allowlist", "agent@example.com"),
             ("peers.same_repo_scope", "own"),
+            // cas-fee3: the worker push runs this command.
+            ("factory.worker_local_gate", "pnpm ci:local"),
         ] {
             assert!(is_operator_only_config_key(key), "{key}");
             let mut changed = before.clone();

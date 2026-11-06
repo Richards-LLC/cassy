@@ -3,31 +3,22 @@
 use cas_types::{AgentRole, Task, TaskStatus, TaskType};
 use std::path::Path;
 
-/// The one-line form of cas-tdd's "Fewest tests" principle. A macro so the
-/// assignment policy below can `concat!` it.
-macro_rules! test_principle {
-    () => {
-        "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
-         through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
-         instead of retrying it (cas-tdd, Fewest tests)."
-    };
-}
+/// The one-line form of cas-tdd's "Fewest tests" principle, carried once by
+/// every task start (cas-5a52).
+pub(crate) const TEST_PRINCIPLE: &str = "Elegant tests, not copious: write the fewest tests that fail without the change, one per behaviour, \
+     through the real path, replaying the real incident; extend an existing test before adding one, and fix or delete a flaky test \
+     instead of retrying it (cas-tdd, Fewest tests).";
 
-/// Carried by every assignment, spawn brief and task start (cas-5a52).
-pub(crate) const TEST_PRINCIPLE: &str = test_principle!();
-
+/// Carried by every assignment and spawn brief. It points at the principle
+/// rather than repeating it, since the task start the worker runs next
+/// carries it (cas-d9db).
 pub(crate) const WORKER_ASSIGNMENT_TEST_POLICY: &str = concat!(
-    test_principle!(),
-    " Assignment authorizes and requires those tests and running the change's affected targeted tests (",
-    "`node --test`, `vitest`, `tsc`, or capped Cargo tests per CONTRIBUTING). ",
-    "Factory workers run the targeted tests for their change themselves. ",
-    "For Rust, use one package, a named-test `-E` filter, and the capped runner; ",
-    "JS, TS, and Python tests run directly in the worker. ",
-    "The merge queue runs the full suite once; never run it locally. ",
-    "Only `--full` Playwright and the Rust full suite are reserved for the merge queue. ",
+    "Fewest tests: cas-tdd (task start states the principle). Assignment authorizes and requires those ",
+    "tests covering the lines touched, which you run yourself per cas-worker ",
+    "references/discipline.md. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. ",
     "Docs-only and no-code tasks prove their acceptance check instead (e.g. ",
     "markdownlint, `cas codemap status`, a published artifact); don't add code tests to them. ",
-    "Workers close their own tasks; never ask the supervisor to close your task on their behalf."
+    "Your close parks the delivery; the merge verdict closes it. Never re-close, spawn a verifier or ask anyone to close for you."
 );
 
 /// Queue the assignment once for the current worker in its factory session. This
@@ -95,7 +86,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
          Successful task action=start is authoritative assignment acceptance; no prose ACK is required.\n\
          {}\n\
          While working, post progress notes with {prefix}task action=notes.\n\
-         If blocked, set status=blocked and send {prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\".",
+         If blocked, add a blocker note, set status=blocked, then send {prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\".",
         task.id,
         task.title,
         task.id,

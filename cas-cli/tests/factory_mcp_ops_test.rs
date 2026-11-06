@@ -7142,6 +7142,66 @@ async fn test_gc_preserves_active_review_target_cas_f275() {
     assert!(failures.is_empty(), "wrong dispatch target eligibility: {}", failures.join("\n"));
 }
 
+/// cas-49163: a task waiting in awaiting_merge keeps only its newest walk.
+/// Each re-walk of a new head used to keep every earlier full checkout and
+/// target until the task closed (25 GB for one task on the live store).
+#[tokio::test]
+async fn test_gc_reclaims_superseded_walk_of_open_task_cas_49163() {
+    let env = review_target_env();
+    init_sync_repo(&env, "superseded-walk");
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(project.join(".git/info/exclude"), "target/\n").unwrap();
+    let task = Task::new("cas-awaiting-merge".into(), "re-walked delivery".into());
+    env.task_store().add(&task).unwrap();
+    let first = git_stdout(project, &["rev-parse", "HEAD"]);
+    let status = std::process::Command::new("git")
+        .current_dir(project)
+        .args(["commit", "--allow-empty", "-qm", "second head"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let second = git_stdout(project, &["rev-parse", "HEAD"]);
+    // The newest walk is younger than the 2-hour source window, so only its
+    // target is reclaimable once the verdict lands.
+    let recent = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    let mut walks = Vec::new();
+    for (head, used) in [(&first, "2020-01-01T00:00:00Z"), (&second, recent.as_str())] {
+        let managed =
+            cas::factory_review_scratch::create(&env.cas_root, project, &task.id, None, head).unwrap();
+        let checkout = managed.path.clone();
+        drop(managed);
+        std::fs::create_dir_all(checkout.join("target/debug")).unwrap();
+        std::fs::write(checkout.join("target/debug/output"), b"walk proof").unwrap();
+        let marker = checkout.parent().unwrap().join("owner.json");
+        let mut owner: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        owner["created_at"] = serde_json::json!(used);
+        owner["last_used_at"] = serde_json::json!(used);
+        std::fs::write(marker, serde_json::to_vec(&owner).unwrap()).unwrap();
+        walks.push(checkout);
+    }
+    // Candidate walks carry no dispatch id; the task's verification dispatch
+    // decides whether the newest walk is still needed.
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &env.cas_root, &task.id, "test-supervisor-id", "test-supervisor-id",
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::hours(1), false,
+    ).unwrap();
+    let mut cleanup = factory_req("gc_cleanup");
+    cleanup.full = Some(true);
+    cleanup.force = Some(true);
+    cleanup.dry_run = Some(false);
+    let result = env.service.factory_request(Parameters(cleanup.clone())).await.unwrap();
+    assert!(!walks[0].join("target").exists(), "superseded walk target must be reclaimed: {}", get_text(&result));
+    assert!(walks[1].join("target/debug/output").is_file(), "pending dispatch keeps the newest walk: {}", get_text(&result));
+    let conn = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(&conn, &dispatch.id, "test-supervisor-id", None, true).unwrap();
+    drop(conn);
+    let result = env.service.factory_request(Parameters(cleanup)).await.unwrap();
+    assert!(!walks[1].join("target").exists(), "a resolved verdict frees the newest walk's target: {}", get_text(&result));
+    assert!(walks[1].join(".git").exists(), "the newest walk's source stays: {}", get_text(&result));
+}
+
 /// A terminal task must not leave a registered proof checkout and its target
 /// behind forever. The fixture uses the managed ownership record, real Git,
 /// SQLite task state and the public factory GC handler.
@@ -8178,7 +8238,7 @@ async fn inbox_poll_withholds_superseded_awaiting_merge_relay() {
     );
     assert!(text.contains(task_id), "withheld row must be named: {text}");
     assert!(
-        text.contains("already done"),
+        text.contains("superseded by current task state") && !text.contains("already done"),
         "stale reason must be explicit: {text}"
     );
     assert!(
@@ -11810,10 +11870,30 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         active.assignee = Some(worker.to_string());
         active.status = TaskStatus::InProgress;
         env.task_store().add(&active).unwrap();
-        let busy = assign(&env, &task_b, assignee)
-            .await
-            .expect_err("a mid-task worker must still be refused");
-        assert!(busy.contains("commits behind"), "{busy}");
+        // cas-8aa1: parked and queued work do not hold the checkout; started
+        // work still does, even when the agent's registry status says Idle.
+        for (prior_status, accepted) in [
+            (TaskStatus::AwaitingMerge, true),
+            (TaskStatus::InProgress, false),
+            (TaskStatus::Open, true),
+        ] {
+            active.status = prior_status;
+            store.update(&active).unwrap();
+            let result = assign(&env, &task_b, assignee).await;
+            if accepted {
+                let assigned = result.unwrap_or_else(|error| {
+                    panic!("{prior_status:?} work must not make an idle worker stale: {error}")
+                });
+                assert!(!assigned.contains("commits behind"), "{assigned}");
+                assert_eq!(store.get(&task_b).unwrap().assignee.as_deref(), Some(worker));
+                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), clean_tip);
+                store.update(&targeted).unwrap();
+            } else {
+                let busy = result.expect_err("a mid-task worker must still be refused");
+                assert!(busy.contains("commits behind"), "{busy}");
+                assert!(store.get(&task_b).unwrap().assignee.is_none());
+            }
+        }
         active.status = TaskStatus::Closed;
         env.task_store().update(&active).unwrap();
 
@@ -11830,6 +11910,7 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
         std::fs::write(worker_path.join("unmerged.txt"), "earlier PR work\n").unwrap();
         git_stdout(&worker_path, &["add", "unmerged.txt"]);
         git_stdout(&worker_path, &["commit", "-m", "unmerged worker change"]);
+        std::fs::write(worker_path.join("untracked-draft.txt"), "untracked work\n").unwrap();
         let beside = assign(&env, &task_b, assignee)
             .await
             .expect("a clean idle worker with an earlier PR on its lane may take new work");
@@ -11838,6 +11919,10 @@ async fn test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f() {
                 && beside.contains("epic/foreign"),
             "{beside}"
         );
+        assert!(beside.contains("tracked files unchanged") && !beside.contains("its clean"),
+            "the assignment check excludes untracked files and cannot claim a clean worktree: {beside}");
+        assert!(worker_path.join("untracked-draft.txt").exists());
+        std::fs::remove_file(worker_path.join("untracked-draft.txt")).unwrap();
         store.update(&targeted).unwrap();
         git_stdout(&worker_path, &["reset", "--hard", &clean_tip]);
 
@@ -13815,14 +13900,15 @@ async fn cas99d2_inbox_poll_withholds_a_consumed_assignment_gh127() {
          re-rendered verbatim: {text}"
     );
     assert!(
-        text.contains(&format!("{assignment_id}")) && text.contains("already done"),
+        text.contains(&format!("{assignment_id}")) && text.contains("task status in_progress"),
         "the withheld row must be named, not silently dropped: {text}"
     );
+    assert!(!text.contains("already done"), "an in-progress task is not done: {text}");
 }
 
 /// cas-8aee (GH #336): a task can reach a terminal state while an assignment
 /// or spawn-intro prompt is queued. `inbox_poll` must name each withheld row
-/// and say it is already done, but must never repeat its task-start imperative.
+/// and name its current status, but must never repeat its task-start imperative.
 #[tokio::test]
 async fn cas8aee_inbox_poll_names_terminal_assignment_and_spawn_intro_gh336() {
     let _guard = EnvGuard::set(&[
@@ -13894,7 +13980,8 @@ async fn cas8aee_inbox_poll_names_terminal_assignment_and_spawn_intro_gh336() {
         );
     }
     assert!(
-        text.contains("already done"),
+        text.contains("task status closed") && text.contains("task status cancelled")
+            && !text.contains("already done"),
         "a terminal assignment must explain why it is not actionable: {text}"
     );
     assert!(

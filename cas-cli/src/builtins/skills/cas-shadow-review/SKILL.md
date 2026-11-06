@@ -11,7 +11,7 @@ metadata:
 
 # Shadow review
 
-Run this on a parked delivery with a legacy verification dispatch. Keep the
+Run this only on a delivery with a verification dispatch (Tier 2 or `qa.mode=per_task`). Keep the
 existing task-verifier running: shadow verdicts have no merge-gate authority.
 CLI parity is `cas factory shadow-review --request <JSON-file>` with the same
 registered caller identity, request shape and JSON response as the MCP action.
@@ -81,6 +81,6 @@ registered caller identity, request shape and JSON response as the MCP action.
    Request a fresh legacy dispatch for the changed delivery and follow the
    existing verification/merge path. Shadow results never replace its proof.
 8. Before enabling any policy that consumes these verdicts, collect at least
-   three real delivery comparisons plus assembly proof for the shadow API.
+   three real delivery comparisons for the shadow API.
    Record source task/dispatch ids and the comparison JSON in the epic evidence.
    Synthetic contract tests prove behavior, not review accuracy.

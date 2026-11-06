@@ -2,146 +2,100 @@
 
 Read for a rejection, blocked work, interruption or branch transition.
 
-- [Merge required](#merge-required)
-- [Queued successor and branch reuse](#queued-successor-and-branch-reuse)
-- [Blockers and review waits](#blockers-and-review-waits)
-- [Verification-required close](#verification-required-close)
-- [Connectivity failure](#universal-denial-or-connectivity-failure)
-- [Tool loading](#toolsearch-resolved-the-tool-but-you-still-cant-call-it)
-- [Interrupted assignment or checkout](#interrupted-assignment-or-checkout)
-
 ## MERGE REQUIRED
 
-Drain `coordination action=inbox_poll` to `No unread messages`; follow
-unread supervisor messages, re-read task state and confirm whether the tip already
-landed before sending a merge request or making a corrective commit.
-Capture `git rev-parse factory/<name>` (or the active per-task branch).
+A successful park is not this refusal. The park relay is the completion signal; send merge_request=true only for local_merge.
 
-For `local_merge`, keep the local commit. Otherwise push that branch. Send
+Drain `coordination action=inbox_poll` to `No unread messages`, follow
+unread supervisor messages and re-read task state: the tip may have landed.
+Capture `git rev-parse factory/<name>` (or the active per-task branch). For
+`local_merge`, keep the local commit and send
 `coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`.
-Do not re-close after the merge: its verdict closes the task, or reopens it to
-you with findings. For an epic,
-request supervisor merge rather than `gh pr create --base epic/...`.
-A squash/cherry-pick mismatch may need `commit_receipt`; transactional
-`completion_receipt` accepts an unpublished source tip and binds its merge candidate
-to the same required verification before publication. See [close-gate.md](close-gate.md)
-for receipt fields. If rejected, forward the exact error and receipt identity;
-never bypass close with `status=closed` or an invented verification record.
+Otherwise push that branch and retry close once. Never open or merge a PR
+yourself (`gh pr create`). If rejected, fix what the exact error names; never
+bypass close with `status=closed` or an invented verification record.
+
+### While the merge is pending
+
+Park releases your lease, and the merge verdict wakes you once: it closes the
+task or reopens it with findings. Every poll spends your context.
+
+- Wait on an event reminder, never a timed poll. For `local_merge`, one
+  `branch_contained_in` reminder for the delivered SHA and target is that event.
+- Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
+  supervisor message, never in a self-reminder loop.
+- When the supervisor says it owns the merge, cancel reminders
+  (`coordination action=remind_cancel`) and stay idle until it messages you.
 
 ## Queued successor and branch reuse
 
-A queued successor may already be started by Cassy on its task branch. Inspect
-its task and branch, then continue that assignment. Checkpoint dirty work before
-changing history. If a task branch has a recorded parked delivery anchor, merge
-the target into it; never rebase it. On other reused checkouts where rebasing is
-allowed, checkpoint before `git rebase <target>`.
-
-A fresh task whose checkout still holds an earlier PR (open, or squash-merged
-so its commits never reach the target) starts on `factory/<name>-<task>` from
-the target. Push that branch for its own PR; leave the earlier branch alone.
+Cassy may already have started a queued successor on its task branch; continue
+it. Checkpoint dirty work before changing history. Merge the target
+into a branch with a recorded parked delivery anchor; never rebase it. Elsewhere,
+checkpoint before an allowed `git rebase <target>`. A fresh task whose checkout
+still holds an earlier PR starts on `factory/<name>-<task>` from the target and
+leaves the earlier branch alone.
 
 ### Returned delivery with a queued successor
 
 When the supervisor returns delivery A while queued successor B is running:
 
-1. Checkpoint B's unfinished changes as B's commits.
-2. Run `task action=update id=B status=blocked`; this releases its lease while
-   preserving its current queue slot.
-3. Find A's recorded delivery branch with `task action=show id=A full=true`.
-   Switch to that branch, run `task action=start id=A`, then correct and
-   re-deliver A. Preserve its parked ancestry by merging its target.
-4. After A closes or parks, switch to B's recorded branch, run
+1. Checkpoint B's changes as B's commits, then `task action=update id=B status=blocked`
+   (this keeps B's queue slot).
+2. Switch to A's branch from `task action=show id=A full=true`, run
+   `task action=start id=A`, then correct and re-deliver A, merging its target.
+3. After A closes or parks, switch to B's branch, run
    `task action=update id=B status=open`, then `task action=start id=B`.
-
-Pending work remains behind held B. The start refusal names the exact hold
-command when another queue task is active.
-
-### While the merge is pending
-
-The supervisor owns the landing signal. Queue attempts take minutes, it sees
-landing and ejection events you cannot, and every poll spends your context,
-which is scarcest late in a lane.
-
-- Check ancestry (`git merge-base --is-ancestor <tip> <target>`) once per
-  supervisor message you receive, never in a self-reminder loop.
-- While the supervisor has not acknowledged your merge request, use one
-  `branch_contained_in` reminder for the delivered SHA and target; never a delay
-  reminder that rechecks merge status.
-- When the supervisor says it owns the merge or the close, or asks you to stop
-  polling, cancel those reminders (`coordination action=remind_cancel`) and
-  stay idle until it messages you.
 
 ## Blockers and review waits
 
-For build-admission capacity refusals, use [Capacity waits](discipline.md#capacity-waits)
-before this sequence.
+Capacity refusals follow [Capacity waits](discipline.md#capacity-waits) instead.
+When required supervisor review, approval or another decision blocks work:
 
-When required supervisor review or approval blocks work (e.g. publication),
-enter awaiting supervisor review:
-
-1. Add a `note_type=blocker` task note with the required decision, blocked next
+1. Add a `note_type=blocker` note with the decision needed, the blocked next
    action, commit and proof; run `task action=update id=<task-id> status=blocked`.
 2. Send `coordination action=message target=supervisor task_id=<task-id> blocker=true summary="Review required" message="..."`
-   using the return contract with `status: blocked` and `blocker: <cause>`.
-   Omit `kind`: `kind=status|ready` cannot accompany `blocker=true`.
-3. Save the notification ID; wait for the review reply. Record its ID and actual
-   decision/action. Clear the review hold with
-   `task action=update id=<task-id> status=open`, then
-   `task action=start id=<task-id>` before resuming.
-   Track transport delivery and inbox receipt separately with `message_status`.
-   Mark unobserved model action NOT VERIFIED; the supervisor owns that proof.
-
-Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
-Wake eligibility never guarantees a turn.
+   as the return contract with `status: blocked` and `blocker: <cause>`; omit `kind`.
+3. Wait for the reply and record its decision. Then `task action=update
+   id=<task-id> status=open` and `task action=start id=<task-id>` before resuming.
+   Mark model action you did not observe NOT VERIFIED.
 
 ## Verification-required close
 
-Forward the exact task-scoped guidance once with delivery SHA and proof ownership.
-This hands the task to the supervisor; start no other task until that handoff is
-recorded. Verification waits do not authorize self-dispatch. Stay available for
-assigned work. Before resending a delayed or replayed outbox message, read task
-state: it may already be closed. After five minutes without a needed response,
-read state and send one follow-up, rather than polling or repeating idle notices.
+When close returns VERIFICATION REQUIRED naming a dispatch, that dispatch's
+verdict closes the task; never re-close. Send only the blocker the refusal
+names, if any, set `status=blocked` and record exactly this one-line blocker note:
+`Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
+Any other text wakes the supervisor as a real blocker. Start no other task
+meanwhile; after five minutes without a needed response, read task state and
+send one follow-up.
 
 ## Universal denial or connectivity failure
 
-If all MCP calls are denied or fail, preserve the error and inspect `.mcp.json`
-and the `cas serve` process. Report to the supervisor through available
-coordination; a stale runtime may need rebuild/respawn. Do not edit SQLite or
-change identity/environment to bypass a denial.
-For workspace-path denial, use the worktree for source/check output, configured
-task artifacts for durable proof and harness scratchpad for ephemeral notes.
-A `/dev/null` denial is a guard defect to report, not a reason to retry that path.
-For a supposedly fixed CAS bug recurring, report the observed runtime/source
-mismatch before creating a duplicate fix task.
+If every MCP call is denied or fails, keep the error, inspect `.mcp.json` and the
+`cas serve` process, and report it; a stale runtime may need a respawn. Never
+edit SQLite or change identity or environment to bypass a denial. A
+workspace-path denial means using the worktree, task artifacts directory or
+harness scratchpad. A recurring "fixed" CAS bug is a runtime/source mismatch to
+report before filing a duplicate.
 
 ## ToolSearch resolved the tool but you still can't call it
 
-Do not re-run ToolSearch for a tool it already resolved. Make a *separate* call to that tool by its full prefixed name and actual arguments. If the call itself
-fails, report that error rather than repeating schema lookup.
+Do not re-run ToolSearch for a tool it already resolved. Make a *separate* call to that tool by its full prefixed name and actual arguments. If that call
+fails, report the error.
 
 ## Interrupted assignment or checkout
 
-- Reassignment or stand-down: checkpoint authorized WIP, push unless local_merge,
-  note completed/remaining work and send its SHA; stop edits on that task.
-- Low context: at 80% measured context used, commit and push unless local_merge,
-  using Cassy's `context used: N%` notice from harness accounting. Never infer
-  occupancy from cumulative billing tokens, tool-output size or a guessed
-  model window; `context used: unknown` is not evidence of exhaustion.
-  Queued tasks keep their context by default. Only an explicit
-  `factory.restart_worker_between_tasks=true` opts in to fresh conversations
-  between tasks; automatic task-boundary restarts default off. Context-used
-  notices work either way. Do not request an early
-  recycle just because a prior task was long. Then
-  write `HANDOFF.md` in the task artifact directory: done work with SHAs,
-  remaining steps, the next command and open questions. Cite it in a progress
-  note and request respawn; the respawned worker resumes from it. Do not keep
-  working into compaction.
-- Dependency/conflict failure: compare manifests and target state against the
-  supervisor's named branch. Checkpoint before rebasing. Resolve owned conflicts;
-  escalate unowned ones with affected files and hashes.
-- Failure outside your diff: compare the same check on the base when permitted;
-  report exact output and which side failed. Rust checks/tests follow
-  [discipline.md](discipline.md); an older runtime denial requires supervisor proof.
-- Missing submodule: inspect the main checkout's initialized copy before choosing
-  the project-supported linking/init route. Do not silently change dependencies.
+- Reassignment or stand-down: checkpoint authorized work, push unless
+  local_merge, note done and remaining work with the SHA, and stop editing.
+- Low context: At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+  Read 80% from Cassy's `context used: N%` notice (`context used: unknown` is
+  not exhaustion). `HANDOFF.md` goes in the task artifact directory (SHAs,
+  remaining steps, next command, open questions); the respawned worker resumes from it.
+- Conflict: checkpoint before rebasing onto the supervisor's named branch;
+  resolve owned conflicts and escalate unowned ones with files and hashes.
+- Failure outside your diff: run the same check on the base when permitted and
+  report which side failed. Rust checks/tests follow [discipline.md](discipline.md).
+  Every changed Rust crate needs a capped test receipt at the delivered tip; a runner denial is a blocker, not a deferral.
+- Missing submodule: inspect the main checkout's copy first; never silently
+  change dependencies.

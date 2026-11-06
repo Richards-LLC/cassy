@@ -196,6 +196,10 @@ impl Config {
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
+                "factory.worker_local_gate".to_string(),
+                factory.worker_local_gate.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.design_review_bug_threshold".to_string(),
                 factory.design_review_bug_threshold.to_string(),
             ),
@@ -226,6 +230,10 @@ impl Config {
             (
                 "factory.max_concurrent_builders".to_string(),
                 factory.max_concurrent_builders.to_string(),
+            ),
+            (
+                "factory.auto_route_builds".to_string(),
+                factory.auto_route_builds.to_string(),
             ),
             ("factory.build_guard.max_load_ratio".to_string(), format!("{:?}", factory.build_guard.max_load_ratio)),
             ("factory.build_guard.max_cpu_pressure_percent".to_string(), format!("{:?}", factory.build_guard.max_cpu_pressure_percent)),

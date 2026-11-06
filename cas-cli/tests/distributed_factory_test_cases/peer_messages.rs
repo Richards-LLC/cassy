@@ -2032,3 +2032,113 @@ async fn gh1319_a_logged_out_supervisor_is_refused_not_delivered() {
     );
     assert!(mailbox.lock().unwrap().is_empty());
 }
+
+/// The incident: two workers on different machines exchange a contract under
+/// one epic without a supervisor relay. Cloud identity/claims stay authoritative.
+#[tokio::test]
+async fn same_epic_workers_exchange_contracts_with_quiet_supervisor_copies_cas_cc770() {
+    use cas::cloud::{CloudConfig, CloudCoordinator};
+    use cas::types::{Dependency, DependencyType, Task, TaskType};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let alpha = TestMachine::new("machine-alpha");
+    let beta = TestMachine::new("machine-beta");
+    for machine in [&alpha, &beta] {
+        seed_project(machine, &server.uri(), "github.com/acme/widgets");
+        let tasks = cas::store::open_task_store(&machine.cas_dir).unwrap();
+        let mut epic = Task::new("cas-shared".into(), "Shared epic".into());
+        epic.task_type = TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        for id in ["cas-contract-a", "cas-contract-b"] {
+            tasks.add(&Task::new(id.into(), "Contract work".into())).unwrap();
+            tasks.add_dependency(&Dependency::new(id.into(), epic.id.clone(), DependencyType::ParentChild)).unwrap();
+        }
+    }
+    let (a, b) = (alpha.cas_dir.clone(), beta.cas_dir.clone());
+    let (aa, bb) = (a.clone(), b.clone());
+    tokio::task::spawn_blocking(move || {
+        for (root, machine, id, worker_id) in [(&aa, "machine-alpha", "a", "wa"), (&bb, "machine-beta", "b", "wb")] {
+            supervisor_at(root, machine, id);
+            let mut worker = Agent::new(worker_id.into(), format!("worker-{id}"));
+            worker.role = AgentRole::Worker;
+            worker.machine_id = Some(machine.into());
+            worker.factory_session = Some(format!("factory-{id}"));
+            open_agent_store(root).unwrap().register(&worker).unwrap();
+            CloudCoordinator::new(CloudConfig::load_from_cas_dir(root).unwrap()).unwrap()
+                .with_canonical_id(Some("github.com/acme/widgets".into()))
+                .register_with_focus(&worker, None).unwrap();
+        }
+    }).await.unwrap();
+    for agent in registry.lock().unwrap().values_mut() {
+        agent["user_id"] = json!("own-account");
+    }
+    let locks = Arc::new(Mutex::new(json!([
+        {"id":"la", "task_id":cas::cloud::peer_claims::claim_key("github.com/acme/widgets", "cas-contract-a"), "agent_id":"wa", "status":"active", "renewed_at":chrono::Utc::now().to_rfc3339(), "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), "renewal_count":0},
+        {"id":"lb", "task_id":cas::cloud::peer_claims::claim_key("github.com/acme/widgets", "cas-contract-b"), "agent_id":"wb", "status":"active", "renewed_at":chrono::Utc::now().to_rfc3339(), "expires_at":(chrono::Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(), "renewal_count":0}
+    ])));
+    let lock_response = locks.clone();
+    Mock::given(method("GET")).and(path("/api/agents/locks"))
+        .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_json(json!({"locks":lock_response.lock().unwrap().clone()})))
+        .mount(&server).await;
+    let sender = service_for(&a, "wa");
+    let receiver = service_for(&b, "wb");
+    coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"contract", "message":"notice API uses stable train IDs"})).await.unwrap();
+    let bb = b.clone();
+    let report = tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    let worker_rows: Vec<_> = inbox(&b).into_iter().filter(|r| r.target == "worker-b").collect();
+    assert_eq!(worker_rows.len(), 1, "{report:?}");
+    assert!(worker_rows[0].prompt.ends_with("notice API uses stable train IDs"));
+    assert_eq!(parse_envelope(&worker_rows[0].prompt).unwrap().sender_agent_id, "wa");
+    let aa = a.clone();
+    tokio::task::spawn_blocking(move || tick(&aa, "a")).await.unwrap();
+    for (root, target) in [(&a, "sup-a"), (&b, "sup-b")] {
+        let copies: Vec<_> = inbox(root).into_iter().filter(|r| r.target == target).collect();
+        assert_eq!(copies.len(), 1, "one copy for {target}: {copies:?}");
+        assert!(copies[0].prompt.contains("notice API uses stable train IDs"));
+        assert!(!parse_envelope(&copies[0].prompt).unwrap().wakes_idle(), "supervisor copy must be inbox-only");
+    }
+    coordinate(&receiver, json!({"action":"message", "target":"worker-a@machine-alpha", "summary":"agreed", "message":"contract agreed", "kind":"answer", "in_reply_to":worker_rows[0].id})).await.unwrap();
+    let aa = a.clone();
+    let report = tokio::task::spawn_blocking(move || tick(&aa, "a")).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert!(inbox(&a).iter().any(|r| r.target == "worker-a" && r.prompt.ends_with("contract agreed")));
+    // Re-deliver the same cloud message: worker and both supervisor copies stay once.
+    for row in mailbox.lock().unwrap().iter_mut() { row["status"] = json!("queued"); }
+    let bb = b.clone();
+    let report = tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    assert_eq!(inbox(&b).iter().filter(|r| r.target == "worker-b").count(), 1);
+    assert_eq!(inbox(&b).iter().filter(|r| r.target == "sup-b" && r.prompt.contains("notice API uses stable train IDs")).count(), 1);
+    for flags in [json!({"urgent":true}), json!({"blocker":true}), json!({"merge_request":true}), json!({"kind":"status"}), json!({"kind":"secret"})] {
+        let before = mailbox.lock().unwrap().len();
+        let mut request = json!({"action":"message", "target":"worker-b@machine-beta", "summary":"forbidden", "message":"cannot escalate a peer"});
+        request.as_object_mut().unwrap().extend(flags.as_object().unwrap().clone());
+        assert!(coordinate(&sender, request).await.is_err());
+        assert_eq!(mailbox.lock().unwrap().len(), before);
+    }
+    // Authority pairs: neither endpoint may change account, role, repo,
+    // heartbeat or active epic claim and retain the cross-machine channel.
+    for id in ["wa", "wb"] {
+        for (field, value) in [
+            ("/user_id", json!("foreign-account")),
+            ("/metadata/role", json!("primary")),
+            ("/metadata/canonical_id", json!("github.com/acme/elsewhere")),
+            ("/last_heartbeat", json!((chrono::Utc::now()-chrono::Duration::hours(1)).to_rfc3339()))
+        ] {
+            let old = registry.lock().unwrap()[id].pointer(field).unwrap().clone();
+            *registry.lock().unwrap().get_mut(id).unwrap().pointer_mut(field).unwrap() = value;
+            let before = mailbox.lock().unwrap().len();
+            assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"refused", "message":"out of scope"})).await.is_err(), "{id} {field}");
+            assert_eq!(mailbox.lock().unwrap().len(), before, "{id} {field}");
+            *registry.lock().unwrap().get_mut(id).unwrap().pointer_mut(field).unwrap() = old;
+        }
+    }
+    // Claim expires after send, before receive: the daemon must revalidate.
+    coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"expires", "message":"must not arrive"})).await.unwrap();
+    locks.lock().unwrap()[0]["expires_at"] = json!((chrono::Utc::now()-chrono::Duration::seconds(1)).to_rfc3339());
+    let bb = b.clone();
+    tokio::task::spawn_blocking(move || tick(&bb, "b")).await.unwrap();
+    assert!(!inbox(&b).iter().any(|r| r.prompt.contains("must not arrive")));
+    assert!(coordinate(&sender, json!({"action":"message", "target":"worker-b@machine-beta", "summary":"expired", "message":"no claim"})).await.is_err());
+}

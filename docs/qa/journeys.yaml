@@ -1084,6 +1084,7 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - cas-cli/src/hooks/handlers/handlers_events/message_display.rs
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts
   - hub-web/src/conversation-view.ts
@@ -1135,6 +1136,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE

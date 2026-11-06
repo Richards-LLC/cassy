@@ -2246,7 +2246,11 @@ async fn test_worktree_merge_keeps_cut_trains_frozen_after_landing_cas_2b8d() {
         epic.status = status;
         tasks.update(&epic).unwrap();
         let held = svc.factory(Parameters(request())).await.unwrap_err();
-        assert!(held.message.contains("RELEASE TRAIN CUT") && held.message.contains("next train"), "{status:?}: {held:?}");
+        if status == TaskStatus::Closed {
+            assert!(held.message.contains("is Closed") && held.message.contains("refusing to advance"), "{held:?}");
+        } else {
+            assert!(held.message.contains("RELEASE TRAIN CUT") && held.message.contains("next train"), "{held:?}");
+        }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "a landed cut lane stays frozen even after closure");
         assert!(worker.join("late.txt").is_file(), "late work remains available for retargeting");
     }

@@ -396,8 +396,8 @@ fn require_print_tools() -> anyhow::Result<()> {
 }
 
 /// Print every requested paper; `Some(message)` when the page reached for
-/// the network. Without a resolvable Playwright module, installs one into the
-/// disposable workspace (npm exec does not expose it to an external script).
+/// the network. The printer resolves an explicit or repository-local
+/// Playwright installation and its matching Chromium, without runtime installs.
 fn print(
     workspace: &Workspace,
     request: &FinalizeRequest,
@@ -405,54 +405,37 @@ fn print(
     pdf_dir: &Path,
 ) -> anyhow::Result<Option<String>> {
     let papers: Vec<&str> = request.papers.iter().map(|paper| paper.as_str()).collect();
-    let command = |module: Option<&Path>| {
-        let mut command = Command::new("node");
-        command
-            .arg(workspace.path(PRINT.path))
-            .arg(html)
-            .arg(pdf_dir)
-            .arg(papers.join(","));
-        if let Some(author) = &request.author {
-            command.arg(author);
-        }
-        if let Some(module) = module {
-            command
-                .env("NODE_PATH", module.parent().unwrap_or(module))
-                .env("PLAYWRIGHT_MODULE", module);
-        }
-        command
-    };
-    let mut output = asset::run(&mut command(None), PDF_TIMEOUT, "node")?;
-    if !output.status.success()
-        && playwright_module_missing(&String::from_utf8_lossy(&output.stderr))
-    {
-        let mut install = Command::new("npm");
-        install
-            .current_dir(workspace.path(""))
-            .args(["install", "--no-save", "playwright"]);
-        let installed = asset::run(&mut install, PDF_TIMEOUT, "npm install")?;
-        if !installed.status.success() {
-            return Err(UsageError(format!(
-                "print: Playwright unavailable: {}; remedy `npm install --no-save playwright`",
-                asset::last_line(&installed)
-            ))
-            .into());
-        }
-        let module = workspace.path("node_modules/playwright");
-        output = asset::run(&mut command(Some(&module)), PDF_TIMEOUT, "node")?;
-    }
+    let mut command = Command::new("node");
+    command
+        .arg(workspace.path(PRINT.path))
+        .arg(html)
+        .arg(pdf_dir)
+        .arg(papers.join(","))
+        .arg(request.author.as_deref().unwrap_or_default())
+        .arg(&request.root);
+    let output = asset::run(&mut command, PDF_TIMEOUT, "node")?;
     match output.status.code() {
         Some(0) => Ok(None),
         Some(3) => Ok(Some(asset::last_line(&output))),
-        _ => Err(UsageError(format!("print failed: {}", asset::last_line(&output))).into()),
+        _ => {
+            // Playwright's message and remedy precede its stack frames. Keep
+            // those first lines for both human and JSON error renderers.
+            let detail = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n")
+                .chars()
+                .take(4_000)
+                .collect::<String>();
+            let detail = if detail.trim().is_empty() {
+                asset::last_line(&output)
+            } else {
+                detail
+            };
+            Err(UsageError(format!("print failed: {detail}")).into())
+        }
     }
-}
-
-fn playwright_module_missing(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("playwright is not installed")
-        || detail.contains("cannot find module 'playwright'")
-        || detail.contains("cannot find module \"playwright\"")
 }
 
 #[cfg(test)]
@@ -488,25 +471,26 @@ module.exports = { chromium: {
             author: None,
         };
         let workspace = Workspace::materialize(&[PRINT]).unwrap();
-        let error = print(&workspace, &request, &request.draft, &root.path().join("pdf"))
-            .unwrap_err();
-        for message in [crate::cli::human_error_message(&error), crate::cli::json_error_message(&error)] {
-            assert!(message.contains("browserType.launch: Executable doesn't exist"), "{message}");
+        let error = print(
+            &workspace,
+            &request,
+            &request.draft,
+            &root.path().join("pdf"),
+        )
+        .unwrap_err();
+        for message in [
+            crate::cli::human_error_message(&error),
+            crate::cli::json_error_message(&error),
+        ] {
+            assert!(
+                message.contains("browserType.launch: Executable doesn't exist"),
+                "{message}"
+            );
             assert!(message.contains("launch diagnostic retained"), "{message}");
-            assert!(message.contains("install chromium-headless-shell"), "{message}");
+            assert!(
+                message.contains("install chromium-headless-shell"),
+                "{message}"
+            );
         }
-    }
-
-    #[test]
-    fn playwright_module_failure_is_selected_for_npm_fallback() {
-        assert!(playwright_module_missing(
-            "Playwright is not installed: Cannot find module 'playwright'"
-        ));
-        assert!(playwright_module_missing(
-            "Error: Cannot find module \"playwright\""
-        ));
-        assert!(!playwright_module_missing(
-            "browserType.launch: Executable doesn't exist"
-        ));
     }
 }

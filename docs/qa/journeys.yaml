@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  unread-supervisor-mail-succession:
+    title: Gated Commander and Violet mail reaches the next project supervisor once after its recipient ends
+    tasks: [cas-f575]
+    invariants: [HUB-J5-UNREAD-SUCCESSION]
+    journeys: [HUB-J5]
   peer-replay-catalog-control-fanout:
     title: A peer replay catalog refresh does not invalidate an unchanged selected session's controls
     tasks: [cas-c4b7]
@@ -402,6 +407,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-UNREAD-SUCCESSION:
+    statement: Unread Commander and daemon-stamped Violet messages survive supervisor exit with their content and routing intact; a same-name replacement in a new session can read each once, while live recipients and received or unrelated mail stay protected.
+    check: Run supervisor_handoff_tests::gated_operator_and_violet_messages_survive_supervisor_exit through SessionEnd, SessionStart and normal inbox polling, plus violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims for the alias liveness and receipt guards.
+    bug: {task: cas-f575}
   HUB-J5-SECRET-SHAPES:
     statement: Mirrored replies preserve disk-limit, risk-label, ask-me and task-id verbatim while long key-shaped SK credentials remain redacted.
     check: Run message_display::inner_tests::sk_token_redacted_without_mangling_words_cas_c1ff and the MessageDisplay hook tests; on the batch candidate compare those ordinary words and a synthetic key in the native reply with Commander history.
@@ -1187,6 +1196,7 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
+  - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE
   - HUB-J5-DRAFT-HOLD

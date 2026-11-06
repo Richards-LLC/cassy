@@ -87,6 +87,8 @@ def test_workflow_command():
             ('assert!(valid, r#"The prompt must preserve the original content, routing, and useful context."#);', False),
             (f'assert_eq!(prompt, {message}, "unexpected value");', True),
             (f'assert_eq!({message}, prompt, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), {message}, "unexpected value");', True),
+            (f'assert_eq!(prompt::<A, B>(), body, {message});', False),
         ]
         for assertion, expected_pin in cases:
             with self.subTest(assertion=assertion):

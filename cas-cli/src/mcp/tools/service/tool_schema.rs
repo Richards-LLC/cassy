@@ -83,7 +83,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("action", "inbox=inbox_poll; interrupt=message urgent=true."),
-    ("id", "Agent id (self); message_status: message id."),
+    ("id", "Agent id (self); message_status: id."),
     ("target", "To: agent|supervisor|all_workers|operator|commander:<label>; remind=self."),
     ("message", "Caps: message 1200, blocker/merge 2500, notes 1500 (configurable). Over-cap operator/Commander refused; supervisor spills to artifact."),
     ("urgent", "Interrupt; discard in-flight work and inject next."),

@@ -12547,6 +12547,17 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 /// closes the task with no source commit.
 #[tokio::test]
 async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
+    verification_wait_close_fixture(false, false).await;
+}
+
+#[tokio::test]
+async fn approved_no_delivery_wait_closes_without_worker_retry_cas_842d() {
+    for independent_hold in [false, true] {
+        verification_wait_close_fixture(true, independent_hold).await;
+    }
+}
+
+async fn verification_wait_close_fixture(no_delivery: bool, independent_hold: bool) {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, _core) = setup_cas(&mut test_env);
     let repo = temp.path();
@@ -12586,8 +12597,10 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
     task.status = TaskStatus::InProgress;
     task.task_type = TaskType::Chore;
     task.assignee = Some("worker-7fc3".into());
-    task.execution_note = Some("no-code".into());
-    task.external_ref = Some("artifact:cas-7fc3/report".into());
+    if !no_delivery {
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("artifact:cas-7fc3/report".into());
+    }
     task.risk = vec![cas::types::TaskRisk::None];
     task.deliverables.work_target = Some(WorkTarget {
         repo_selector: "project:cas-7fc3-fixture".into(),
@@ -12596,9 +12609,11 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
     tasks.add(&task).unwrap();
 
     let reason = "Published the artifact; no source change";
+    let mut request = close_request(&task.id, reason);
+    request.no_delivery = no_delivery.then_some(true);
     let first = extract_text(
         worker_core
-            .cas_task_close(Parameters(close_request(&task.id, reason)))
+            .cas_task_close(Parameters(request))
             .await
             .unwrap(),
     );
@@ -12617,24 +12632,46 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
         dispatch.id
     ));
     tasks.update(&waiting).unwrap();
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+        "reason": if independent_hold { "Operator decision still required" } else { "Task explicitly set to status=blocked." },
+        "who": "worker-7fc3", "when": chrono::Utc::now().to_rfc3339(),
+    }})).unwrap();
 
+    let approval = || VerificationAddRequest {
+        task_id: task.id.clone(), status: "approved".into(),
+        summary: "Artifact reviewed; no-code delivery approved".into(),
+        confidence: Some(0.9), issues: None, files_reviewed: None, duration_ms: None,
+        verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+    };
     let approved = extract_text(
         supervisor_core
-            .cas_verification_add(Parameters(VerificationAddRequest {
-                task_id: task.id.clone(),
-                status: "approved".into(),
-                summary: "Artifact reviewed; no-code delivery approved".into(),
-                confidence: Some(0.9),
-                issues: None,
-                files_reviewed: None,
-                duration_ms: None,
-                verification_type: None,
-                verifier_capability: None,
-                dispatch_id: Some(dispatch.id.clone()),
-            }))
+            .cas_verification_add(Parameters(approval()))
             .await
             .expect("supervisor approves the exact dispatch"),
     );
+    if no_delivery {
+        let current = tasks.get(&task.id).unwrap();
+        let expected = if independent_hold { TaskStatus::Blocked } else { TaskStatus::Closed };
+        assert_eq!(current.status, expected, "approval must finish only its exact no-delivery wait: {approved}");
+        if independent_hold {
+            let state = tasks.get_execution_state(&task.id).unwrap().unwrap();
+            assert_eq!(state["blocked_hold"]["reason"], "Operator decision still required");
+        } else {
+            assert_eq!(current.close_reason.as_deref(), Some(reason));
+            assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("blocked_hold").is_none());
+        }
+        let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(50).unwrap();
+        // pin: the worker contract forbids a second close after its verdict.
+        assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains("Retry task close")));
+        supervisor_core.cas_verification_add(Parameters(approval())).await.expect("identical verdict retry is idempotent");
+        let again = tasks.get(&task.id).unwrap();
+        assert_eq!(again.status, expected);
+        assert_eq!(again.closed_at, current.closed_at);
+        assert_eq!(queue.peek_all(50).unwrap().len(), rows.len(), "duplicate approval cannot enqueue another close or completion");
+        assert_eq!(head(), starting_head, "no-delivery authored no commit");
+        return;
+    }
     assert!(approved.contains("Close retry queued for the assigned worker"), "{approved}");
     assert!(!approved.contains("No close retry was queued"), "{approved}");
     let rows = cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap();

@@ -97,12 +97,13 @@
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task presentation and action-relay admission; internal parked-task lists stay complete.
 
 - `cas-cli/src/supervisor_message_wakes.rs` - typed wake limits and ask/answer/blocker exemptions; runtime queue selection rechecks declined wakes.
-- `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence.
+- `cas-cli/src/peer_ask_gate.rs` - unanswered peer-question merge holds, answer matching and explicit override evidence. `cloud/peer_mailbox/outbox.rs::open_asks` correlates arrived answers with peer identity, explicit references or a single open question and retains unlinked-answer evidence.
 - `cas-cli/src/worktree/git/rescue.rs` - rescue refs for unsaved work before shutdown and worktree removal.
 
 ## MCP, storage and delivery gates
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - MCP transport and server composition.
+- `cas-cli/src/mcp/server/front.rs`, `cas-cli/src/mcp/server/backend.rs`, `cas-cli/src/mcp/server/front/tests.rs` - stable stdio framing, standby backend activation, compatible replacement and protocol regression fixtures.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - core operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - shared render-time host-local clock and message provenance for queue delivery, hook digests, inbox reads and peer messages.
 - `cas-cli/src/mcp/tools/service/factory_ops.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - harness token-accounting readers, measured worker context notices and authenticated response context.

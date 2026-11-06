@@ -158,6 +158,49 @@ fn expire(
     Ok(())
 }
 
+/// Revalidate unsent asks at mailbox duty, independently of another spawn.
+pub(crate) fn reconcile_retry(root: &Path, sender: &str, key: &str, send_failed: bool) -> Result<bool, String> {
+    let task_id = key.rsplit(':').next().ok_or("build route has no task id")?;
+    let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    let expected = match tasks.get(task_id) {
+        Ok(task) => task,
+        Err(crate::store::StoreError::TaskNotFound(_) | crate::store::StoreError::NotFound(_)) => {
+            crate::cloud::peer_mailbox::cancel_build_route(root, sender, key)?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let plan = expected.notes.lines().find_map(|line| {
+        serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+            .filter(|plan| plan.key == key && plan.sender_agent_id == sender)
+    });
+    let Some(plan) = plan else {
+        crate::cloud::peer_mailbox::cancel_build_route(root, sender, key)?;
+        return Ok(true);
+    };
+    let enabled = crate::config::Config::load(root).map_err(|error| error.to_string())?.factory().auto_route_builds;
+    let conn = rusqlite::Connection::open(root.join("cas.db")).map_err(|error| error.to_string())?;
+    cas_store::shared_db::install_busy_handler(&conn).map_err(|error| error.to_string())?;
+    // Batch spawns reserve a task before a worker has an assignee. Bound
+    // backlogs retain that reservation after the spawn request is processed.
+    let queued: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM spawn_queue s LEFT JOIN spawn_task_queues q ON q.request_id=s.id
+         WHERE s.action='spawn' AND (s.processed_at IS NULL OR s.spawn_state IN ('queued','provisioning','launched'))
+         AND (s.task_id=?1 OR EXISTS(SELECT 1 FROM json_each(q.task_ids) WHERE value=?1)))
+         OR EXISTS(SELECT 1 FROM worker_task_queues w WHERE json_extract(w.state,'$.current_task')=?1
+         OR EXISTS(SELECT 1 FROM json_each(w.state,'$.pending') WHERE value=?1))",
+        [task_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let cause = if send_failed { "send_failed" }
+        else if !enabled { "routing_disabled" }
+        else if expected.assignee.is_some() || expected.status != cas_types::TaskStatus::Open || queued { "staffed_locally" }
+        else { return Ok(false) };
+    let mut task = expected.clone();
+    expire(root, &mut task, &plan, cause)?;
+    tasks.update_if_current(&task, &expected).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn prepare(
     root: &Path,
     sender: &cas_types::Agent,
@@ -325,10 +368,13 @@ pub(crate) fn route(
                 .map_err(|error| error.to_string())?;
             Ok(None)
         }
-        Err(error) => Err(format!(
-            "Build route to {} retained; local dispatch withheld: {error}",
-            plan.recipient
-        )),
+        Err(error) => {
+            let current = tasks.get(task_id).map_err(|error| error.to_string())?;
+            if current.notes.lines().any(|line| line.starts_with(&format!("{EXPIRED_MARKER}{} ", plan.key))) {
+                return Ok(None);
+            }
+            Err(format!("Build route to {} retained; local dispatch withheld: {error}", plan.recipient))
+        }
     }
 }
 
@@ -362,6 +408,127 @@ mod tests {
     fn directory(mut peers: Vec<serde_json::Value>) -> serde_json::Value {
         peers.push(peer("local-sup", 0, 0.0, 0));
         serde_json::json!({"agents": peers})
+    }
+
+    async fn failed_route_fixture(server: &MockServer, project: &Path) -> (std::path::PathBuf, cas_types::Agent) {
+        let root = crate::store::init_cas_dir(project).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, REPO).unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+        }.save_to_cas_dir(&root).unwrap();
+        let mut sender = cas_types::Agent::new("local-sup".into(), "local-sup".into());
+        sender.role = cas_types::AgentRole::Supervisor;
+        sender.factory_session = Some("local".into());
+        crate::store::open_agent_store(&root).unwrap().register(&sender).unwrap();
+        crate::store::open_task_store(&root).unwrap().add(&cas_types::Task::new(
+            "cas-retry".into(), "Failed build route".into(),
+        )).unwrap();
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 3, 4.0, 0)])))
+            .mount(server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(503)).mount(server).await;
+        (root, sender)
+    }
+
+    async fn retry_route(root: &Path, sender: &cas_types::Agent) -> Result<Option<String>, String> {
+        let (root, sender) = (root.to_path_buf(), sender.clone());
+        tokio::task::spawn_blocking(move || route(
+            &root, &sender, "cas-retry", None, &Default::default(),
+            &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
+        )).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_656d_persistent_send_failure_expires_and_restores_local_fallback() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        let (root, sender) = failed_route_fixture(&server, env.home()).await;
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for attempt in 1..=3 {
+            conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0", []).unwrap();
+            let result = retry_route(&root, &sender).await;
+            if attempt < 3 {
+                assert!(result.is_err(), "transient failure {attempt}: {result:?}");
+            } else {
+                assert!(matches!(result, Ok(None)), "persistent send failure must release local admission: {result:?}");
+            }
+        }
+        let task = crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap();
+        assert!(task.notes.contains("BUILD_ROUTE_EXPIRED:") && task.notes.contains("cause=send_failed"), "{}", task.notes);
+        let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
+        assert!(status.contains("abandoned") && status.contains("attempts: 3"), "{status}");
+        assert!(retry_route(&root, &sender).await.unwrap().is_none(), "expired routes must not replay");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_656d_mailbox_cancels_obsolete_routes_before_the_retry_is_due() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        for case in ["revalidation-error", "due-revalidation-error", "disabled", "assigned", "batch", "interrupted-cancel"] {
+            server.reset().await;
+            let project = env.home().join(case);
+            std::fs::create_dir_all(&project).unwrap();
+            let (root, sender) = failed_route_fixture(&server, &project).await;
+            assert!(retry_route(&root, &sender).await.is_err());
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            conn.execute("UPDATE peer_message_outbox SET next_attempt_at=?1", [Utc::now().timestamp() + 3600]).unwrap();
+            match case {
+                "disabled" => {
+                    let mut config = crate::config::Config::load(&root).unwrap();
+                    config.set("factory.auto_route_builds", "false").unwrap();
+                    config.save(&root).unwrap();
+                }
+                "assigned" | "interrupted-cancel" => {
+                    let tasks = crate::store::open_task_store(&root).unwrap();
+                    let mut task = tasks.get("cas-retry").unwrap();
+                    task.assignee = Some("local-worker".into());
+                    tasks.update(&task).unwrap();
+                    if case == "interrupted-cancel" {
+                        crate::cloud::peer_mailbox::cancel_build_route(&root, &sender.id, &format!("build-route:{REPO}:cas-retry")).unwrap();
+                    }
+                }
+                "revalidation-error" | "due-revalidation-error" => {
+                    let send_root = root.clone();
+                    assert!(tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::send_raw(
+                        &send_root, "local-sup", "best", "ordinary peer retry", None, None, "best@best",
+                    )).await.unwrap().is_err());
+                    conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0 WHERE id=2", []).unwrap();
+                    // Keep the route JSON valid/selectable, but make its typed
+                    // payload unreadable; the unrelated send behind it is due.
+                    conn.execute("UPDATE peer_message_outbox SET payload=json_remove(payload,'$.project_id') WHERE id=1", []).unwrap();
+                    if case == "due-revalidation-error" {
+                        conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0 WHERE id=1", []).unwrap();
+                    }
+                    server.reset().await;
+                    Mock::given(method("POST")).and(path("/api/peer-messages"))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"ordinary-sent", "status":"queued"})))
+                        .mount(&server).await;
+                }
+                _ => {
+                    crate::store::open_spawn_queue_store(&root).unwrap().enqueue_spawn_with_task_queue(
+                        1, &[], true, None, Some("local"), None, None, None, &["cas-retry".into()],
+                    ).unwrap();
+                }
+            }
+            let runtime = crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "local").unwrap();
+            tokio::task::spawn_blocking(move || runtime.tick_blocking()).await.unwrap();
+            let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
+            if case.ends_with("revalidation-error") {
+                let ordinary = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:2").unwrap().unwrap();
+                assert!(ordinary.contains(": sent"), "one bad route must not block ordinary peer retries: {ordinary}");
+                assert!(status.contains("retrying") && status.contains("attempts: 1"), "bad route must remain pending: {status}");
+                assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages").count(), 1);
+                continue;
+            }
+            assert!(status.contains("abandoned"), "{case}: cancel eagerly without another spawn or due retry: {status}");
+            let notes = crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap().notes;
+            assert!(notes.contains(EXPIRED_MARKER), "{case}");
+            if case == "interrupted-cancel" { assert!(notes.contains("cause=staffed_locally"), "{notes}"); }
+            assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages").count(), 1, "{case}: no obsolete retry may send");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

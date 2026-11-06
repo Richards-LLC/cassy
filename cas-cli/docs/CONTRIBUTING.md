@@ -2335,8 +2335,12 @@ key only while the peer is live, its heartbeat and sample remain fresh, and the
 route is less than 15 minutes old. Otherwise an expired note restores local
 admission; history still prevents routing onward. Unsent retry entries are
 cancelled when a route expires. A peer receiving a task with a route note staffs
-it locally or waits; it never routes it onward. A failed send retains the route for recovery and
-withholds local dispatch. `cas config set factory.auto_route_builds false`
+it locally or waits; it never routes it onward. A failed send retains the route for recovery;
+after three failed attempts (or a permanent refusal), the route expires with
+`cause=send_failed` and restores local admission. Mailbox duty rechecks routing
+config and local staffing before retries, cancelling obsolete asks even before
+their scheduled retry time. Ordinary peer messages retain their retry policy.
+`cas config set factory.auto_route_builds false`
 disables new automatic routes and releases existing routes to local admission.
 A forced local spawn also releases its prior automatic route.
 The peer supervisor still owns staffing and local admission; an ask grants no

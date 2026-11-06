@@ -10,11 +10,19 @@ use crate::store::open_agent_store;
 pub async fn run_server() -> anyhow::Result<()> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     return tokio::select! {
-        result = run_server_impl() => result,
+        result = run_transport() => result,
         () = super::memory::reclaim_when_idle() => unreachable!("allocator maintenance ended"),
     };
     #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-    run_server_impl().await
+    run_transport().await
+}
+
+
+async fn run_transport() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    { super::front::run().await }
+    #[cfg(not(unix))]
+    { run_server_impl().await }
 }
 
 // Startup pull is an apply-remote path: using the normal openers here wraps
@@ -135,15 +143,13 @@ fn startup_cloud_pull(
     )
 }
 
-/// Internal implementation for running the MCP server
-async fn run_server_impl() -> anyhow::Result<()> {
+/// Build the active service only after the stable front authorizes activation.
+pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Result<(crate::mcp::tools::CasService, Option<Arc<crate::mcp::daemon::EmbeddedDaemon>>)> {
     let enable_daemon = true;
     use crate::cloud::CloudConfig;
     use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
     use crate::mcp::tools::CasService;
-    use rmcp::ServiceExt;
 
-    let cas_root = resolve_mcp_serve_root()?;
     let cloud_sync_allowed =
         match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
             Ok(()) => true,
@@ -162,21 +168,6 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // output is lost — the MCP client only sees "Connection closed" and the
     // auto-respawn path gives us no diagnostic trail.
     install_serve_panic_hook(&cas_root);
-
-    // Parent-death watchdog (cas-82d6c). Armed before any store is opened so a
-    // startup that wedges *before* the transport exists is covered too. It
-    // must also precede schema migration: an orphaned worker can otherwise
-    // hold the database mid-migration indefinitely. See `parent_watchdog` for
-    // why stdin EOF is not sufficient and why the server reaps itself rather
-    // than being reaped.
-    let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
-
-    // cas-2a49 (GH #1143): start reading stdin now, ahead of the multi-second
-    // store, daemon and proxy boot. A client's pre-initialize version probe
-    // (Claude Code's `server/discover`) then gets an immediate Method-not-found
-    // reply instead of reaching rmcp first, which made this process exit.
-    let guarded_stdin =
-        crate::mcp::server::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
 
     // GH #1170: refuse a `.cas` without an initialized store before anything
     // opens `cas.db`. Opening it created an empty database here, which then
@@ -562,6 +553,30 @@ async fn run_server_impl() -> anyhow::Result<()> {
         if proxy_active { ", proxy active" } else { "" }
     );
 
+    Ok((service, daemon))
+}
+
+/// Direct transport for platforms without Unix backend control pipes.
+#[cfg(not(unix))]
+async fn run_server_impl() -> anyhow::Result<()> {
+    use rmcp::ServiceExt;
+    let cas_root = resolve_mcp_serve_root()?;
+    // Parent-death watchdog (cas-82d6c). Armed before any store is opened so a
+    // startup that wedges *before* the transport exists is covered too. It
+    // must also precede schema migration: an orphaned worker can otherwise
+    // hold the database mid-migration indefinitely. See `parent_watchdog` for
+    // why stdin EOF is not sufficient and why the server reaps itself rather
+    // than being reaped.
+    let parent_watchdog = crate::mcp::server::parent_watchdog::spawn();
+
+    // cas-2a49 (GH #1143): start reading stdin now, ahead of the multi-second
+    // store, daemon and proxy boot. A client's pre-initialize version probe
+    // (Claude Code's `server/discover`) then gets an immediate Method-not-found
+    // reply instead of reaching rmcp first, which made this process exit.
+    let guarded_stdin =
+        crate::mcp::server::pre_initialize_guard::spawn(tokio::io::stdin(), tokio::io::stdout());
+
+    let (service, daemon) = prepare_service(cas_root.clone()).await?;
     let server = service.serve((guarded_stdin, tokio::io::stdout())).await?;
     // Two ways out: the transport ends (stdin EOF / client disconnect), or the
     // watchdog proves the harness that spawned us is gone. The second exists
@@ -920,7 +935,7 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
 }
 
 /// Release all tasks claimed by an agent on shutdown and unregister the agent
-fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str, reason: &str) -> anyhow::Result<()> {
+pub(super) fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str, reason: &str) -> anyhow::Result<()> {
     crate::supervisor_continuity::record_end(cas_root, agent_id, Some(reason))?;
     let agent_store = open_agent_store(cas_root)?;
     agent_store.graceful_shutdown(agent_id)?;
@@ -1936,18 +1951,18 @@ url = "https://context7.invalid/mcp"
     }
 
     #[test]
-    // pin: The watchdog must be armed before blocking schema work; isolate run_server_impl so the test cannot match its own strings.
+    // pin: Parent death must remain observable before potentially blocking schema work.
     fn casb123_mcp_startup_arms_parent_watchdog_before_schema_migration() {
-        let source = include_str!("runtime.rs");
+        let source = include_str!("backend.rs");
         let body = source
-            .split_once("async fn run_server_impl()")
-            .expect("run_server_impl source")
+            .split_once("async fn run(fd:")
+            .expect("private backend startup source")
             .1;
         let watchdog = body
             .find("parent_watchdog::spawn()")
             .expect("startup watchdog arm");
         let migration = body
-            .find("ensure_mcp_schema(&cas_root)?")
+            .find("check_migrations(&root)")
             .expect("startup schema check");
         assert!(
             watchdog < migration,

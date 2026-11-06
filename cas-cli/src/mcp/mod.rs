@@ -54,6 +54,9 @@ pub(crate) mod viktor_watch;
 pub use server::CasCore;
 pub(crate) use server::AgentIdentitySource;
 pub use server::run_server;
+#[cfg(unix)]
+pub(crate) use server::run_backend;
+pub(crate) use server::serving_state;
 #[cfg(feature = "mcp-proxy")]
 pub use server::{
     ProxySnapshotCache, ProxySnapshotFailure, ProxySnapshotReadError, ProxySnapshotReadErrorKind,

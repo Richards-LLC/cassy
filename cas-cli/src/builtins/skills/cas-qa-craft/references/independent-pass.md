@@ -216,10 +216,11 @@ matching local run (see step 4). The files, all listed in `bundle.json`:
   `showRecordingChapter(page, 'F01 …', { duration: 1000 })` per finding. For
   other projects, copy the self-contained constructed-stylesheet helper from
   the [worked example](evidence-bundle.md#worked-example) into the evidence spec.
-  Commander-only, in the Cassy source checkout: import that helper from
-  `hub-web/e2e/journeys/receipt-directory.mjs`, adjusting the spec's relative
-  path. That repository file is not installed in other projects. Both routes
-  preserve `style-src 'self'`. Omit screencast and chapter calls for non-visual
+  <!-- cas-src:begin -->
+  In Cassy's source checkout, import
+  `hub-web/e2e/journeys/receipt-directory.mjs` instead, adjusting the relative path.
+  <!-- cas-src:end -->
+  The helper preserves `style-src 'self'`. Omit screencast and chapter calls for non-visual
   changes
 - `final.aria.yml` and `final.aria.json`
 - `F01.png`, `F02.png`, …: one capture per finding, listed in `files.cells`

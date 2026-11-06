@@ -12735,7 +12735,7 @@ async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
         .unwrap_or_else(|| panic!("close recovery row for the supervisor: {rows:?}"));
     // pin: recovery must identify the ordinary close command and its permitted owner.
     assert!(retry.prompt.contains("task action=close id=cas-7fc3-wait"), "{}", retry.prompt);
-    assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains("Retry task close")), "{rows:?}");
+    assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id)), "{rows:?}");
 
     let closed = extract_text(
         supervisor_core

@@ -2205,6 +2205,58 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 }
 
 #[tokio::test]
+async fn test_worktree_merge_keeps_cut_trains_frozen_after_landing_cas_2b8d() {
+    let repo = GitRepo::new();
+    let mut env = test_env();
+    let cas_root = init_cas_dir(&repo.root, &mut env).unwrap();
+    disable_system_a(&cas_root);
+    run_git(&["checkout", "-b", "epic/cut"], &repo.root);
+    std::fs::write(repo.root.join("release.txt"), "frozen release\n").unwrap();
+    run_git(&["add", "release.txt"], &repo.root);
+    run_git(&["commit", "-m", "freeze release"], &repo.root);
+    run_git(&["checkout", "main"], &repo.root);
+    let (epic_id, child_id) = create_epic_and_worker_task(&cas_root, "epic/cut", Some("alice"));
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut epic = tasks.get(&epic_id).unwrap();
+    epic.labels = vec!["release-train".into(), "release-train-cut".into()];
+    epic.deliverables.work_target = Some(WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() });
+    tasks.update(&epic).unwrap();
+    let worker = cas_root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    std::fs::write(worker.join("late.txt"), "next release\n").unwrap();
+    run_git(&["add", "late.txt"], &worker);
+    run_git(&["commit", "-m", "unfinished work"], &worker);
+    let before = git_stdout(&repo.root, &["rev-parse", "epic/cut"]);
+    let _cwd = env.enter_dir(&repo.root);
+    let svc = make_service(cas_root);
+    let request = || {
+        let mut req = coord_req("worktree_merge");
+        req.id = Some("factory/alice".into());
+        req.task_id = Some(child_id.clone());
+        req.force = Some(true);
+        req.cleanup = Some(false);
+        req
+    };
+    let held = svc.factory(Parameters(request())).await.unwrap_err();
+    assert!(held.message.contains("RELEASE TRAIN CUT") && held.message.contains("epic/cut") && held.message.contains("next train"), "{held:?}");
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "the cut lane stays frozen");
+    assert!(worker.join("late.txt").is_file(), "source work is preserved");
+    run_git(&["merge", "--no-ff", "epic/cut", "-m", "release lands"], &repo.root);
+    for status in [TaskStatus::Open, TaskStatus::Closed] {
+        epic.status = status;
+        tasks.update(&epic).unwrap();
+        let held = svc.factory(Parameters(request())).await.unwrap_err();
+        if status == TaskStatus::Closed {
+            assert!(held.message.contains("is Closed") && held.message.contains("refusing to advance"), "{held:?}");
+        } else {
+            assert!(held.message.contains("RELEASE TRAIN CUT") && held.message.contains("next train"), "{held:?}");
+        }
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "a landed cut lane stays frozen even after closure");
+        assert!(worker.join("late.txt").is_file(), "late work remains available for retargeting");
+    }
+}
+
+#[tokio::test]
 async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
     for (origin_only, target_valid) in [(false, true), (true, true), (true, false)] {
         let repo = GitRepo::new();

@@ -246,6 +246,7 @@ pub(crate) struct MergeRequestEnvelope {
 /// Daemon-authored lifecycle wake for a worker whose parked delivery PR has
 /// merged. The body deliberately names the exact close receipt so an idle
 /// worker can resume the terminal action without guessing which commit landed.
+/// The caller routes missing approval to supervisor reconciliation first.
 ///
 /// cas-d511: a delivery waiting on the release verdict owes the worker no
 /// close (it would only answer WAITING FOR RELEASE VERDICT), so that notice is

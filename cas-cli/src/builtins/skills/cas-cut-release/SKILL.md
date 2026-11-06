@@ -35,7 +35,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Cassy that has `release context`, `release track` and `release installed`
    (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
    train and integration branch, merges the base when behind, bumps versions,
-   promotes the changelog, builds Commander, commits and pushes. It reuses the
+   promotes the changelog, builds Commander, commits, marks the train cut and pushes. It reuses the
    train PR, requests auto-merge only when needed and checks admission once.
    An auto-merge request awaiting required checks is reported as not admitted;
    a red required-check snapshot exits nonzero without a CI polling loop.
@@ -43,8 +43,11 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    or PR polling stage runs: the queue proves the prepared tree once.
    A hotfix is a branch from `main` released with `scripts/release.sh --hotfix`
    (next patch), through the same queue. No train or a different train lane
-   keeps the caller's `--base` flow (default `main`); tracking is advisory and
-   cannot prevent the cut. Missing/unreachable owners use the shared resolver's
+   keeps the caller's `--base` flow (default `main`). A matched train must persist
+   its cut marker before push/enqueue; failure stops with a retry command. New
+   tasks join a fresh train, and unfinished deliveries need retargeting; merges
+   into the cut lane stay refused after landing too. Reminder tracking stays advisory.
+   Missing/unreachable owners use the shared resolver's
    peer fallback, or print one clear tracking-skipped message.
 3. The command automatically arms cross-session `branch_contained_in` for the
    release SHA and integration branch, plus `tag_exists` for the version, even

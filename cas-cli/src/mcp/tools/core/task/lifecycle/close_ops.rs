@@ -266,6 +266,24 @@ pub(crate) fn required_verification_type(task_type: TaskType) -> VerificationTyp
 
 }
 
+/// Select close's current proof cycle without granting approval or changing state.
+/// A pending/new dispatch prevents an older legacy row from authorizing close.
+/// Daemon merge relays use the same selection before asking a worker to close;
+/// repository, promotion and all other close gates remain authoritative.
+pub(crate) fn close_cycle_verdict(
+    root: &std::path::Path,
+    dispatch: Option<&cas_types::VerificationDispatch>,
+    legacy: Option<&cas_types::Verification>,
+) -> cas_store::Result<Option<cas_types::Verification>> {
+    match dispatch {
+        Some(dispatch) if dispatch.state == cas_types::VerificationDispatchState::Resolved => {
+            cas_store::get_verification_for_dispatch(root, &dispatch.id)
+        }
+        None => Ok(legacy.filter(|row| row.dispatch_id.is_none()).cloned()),
+        _ => Ok(None),
+    }
+}
+
 fn delivery_audit_text_is_portable(value: &str) -> bool {
     delivery_audit_text_rejection(value).is_none()
 }
@@ -9959,24 +9977,11 @@ impl CasCore {
                 // A verdict authorizes only the exact durable proof cycle it
                 // resolved. Task-wide rows remain readable for legacy timeout
                 // diagnostics but can never authorize a current close.
-                let latest = match typed_dispatch.as_ref() {
-                    Some(dispatch)
-                        if dispatch.state == cas_types::VerificationDispatchState::Resolved =>
-                    {
-                        cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
-                    }
-                    // Pre-m213 tasks have no typed dispatch boundary. Preserve
-                    // their legacy close behavior, but only for rows that also
-                    // lack dispatch provenance. As soon as any typed dispatch
-                    // exists, this fallback is unreachable and can never
-                    // authorize that current cycle.
-                    None => match task_wide_latest.as_ref() {
-                        Ok(Some(row)) if row.dispatch_id.is_none() => Ok(Some(row.clone())),
-                        Ok(_) => Ok(None),
-                        Err(_) => Ok(None),
-                    },
-                    _ => Ok(None),
-                };
+                let latest = close_cycle_verdict(
+                    &self.cas_root,
+                    typed_dispatch.as_ref(),
+                    task_wide_latest.as_ref().ok().and_then(|row| row.as_ref()),
+                );
 
                 // Typed state is authoritative for new dispatches. The legacy
                 // Error row remains a readable fallback for pre-m211 databases,
@@ -14647,6 +14652,29 @@ fn regenerable_build_artifact(repo_path: &std::path::Path, path: &str) -> bool {
 /// cas-2ea6: the builtin reference-history ledger and its generator.
 const REFERENCE_HISTORY_LEDGER: &str = "cas-cli/src/builtins/reference-history.json";
 const REFERENCE_HISTORY_GENERATOR: &str = "scripts/gen-builtin-reference-history.sh";
+const REFERENCE_HISTORY_REGEN_SUBJECT: &str = "build(builtins): regenerate reference-history from merged history";
+
+/// The required post-merge ledger refresh cites its generator's task, rather
+/// than the worker's. Bind that exception to the actual merge and ledger-only
+/// diff; ordinary source commits cannot borrow the generator's attribution.
+fn is_reference_history_regeneration(repo: &std::path::Path, commit: &str) -> bool {
+    let Ok(metadata) = git_stdout_lines(repo, &["show", "-s", "--format=%P%x1f%B", commit]) else {
+        return false;
+    };
+    let metadata = metadata.join("\n");
+    let Some((parents, message)) = metadata.split_once('\u{1f}') else {
+        return false;
+    };
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    let [merged] = parents.as_slice() else { return false; };
+    if message != format!("{REFERENCE_HISTORY_REGEN_SUBJECT}\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-fb11).", &merged[..9]) {
+        return false;
+    }
+    git_stdout_lines(repo, &["rev-list", "--parents", "-n", "1", merged])
+        .is_ok_and(|lines| lines.len() == 1 && lines[0].split_whitespace().count() == 3)
+        && git_stdout_lines(repo, &["diff", "--name-only", "--no-renames", merged, commit, "--"])
+            .is_ok_and(|paths| paths == [REFERENCE_HISTORY_LEDGER])
+}
 #[derive(serde::Deserialize)]
 struct ReferenceHistory {
     version: u64,
@@ -22289,6 +22317,7 @@ pub(crate) fn render_epic_status_report_with_stack(
         statuses,
         stacked_on,
         None,
+        &[],
     )
 }
 
@@ -22300,6 +22329,7 @@ pub(crate) fn render_epic_status_collection(
     parent_branch: &str,
     collection: &EpicStatusCollection,
     stacked_on: &[String],
+    retained_tasks: &[String],
 ) -> String {
     render_epic_status_report_with_stack_and_view(
         epic_id,
@@ -22307,6 +22337,7 @@ pub(crate) fn render_epic_status_collection(
         &collection.statuses,
         stacked_on,
         Some(collection),
+        retained_tasks,
     )
 }
 
@@ -22316,6 +22347,7 @@ fn render_epic_status_report_with_stack_and_view(
     statuses: &[EpicChildBranchStatus],
     stacked_on: &[String],
     view: Option<&EpicStatusCollection>,
+    retained_tasks: &[String],
 ) -> String {
     let mut out = String::new();
     out.push_str(&format!(
@@ -22395,6 +22427,8 @@ fn render_epic_status_report_with_stack_and_view(
             "content dropped".to_string()
         } else if s.content_check_error.is_some() {
             "content unknown".to_string()
+        } else if retained_tasks.contains(&s.task_id) {
+            "retained local work".to_string()
         } else if s.content_evolution_note.is_some() {
             "merged (content evolved)".to_string()
         } else if s.merge_evidence_note.is_some() {
@@ -22423,6 +22457,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let reconciled = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.merge_evidence_note.as_deref())
         .collect::<Vec<_>>();
     if !reconciled.is_empty() {
@@ -22433,6 +22468,7 @@ fn render_epic_status_report_with_stack_and_view(
     }
     let evolved = statuses
         .iter()
+        .filter(|s| !retained_tasks.contains(&s.task_id))
         .filter_map(|s| s.content_evolution_note.as_deref())
         .collect::<Vec<_>>();
     if !evolved.is_empty() {
@@ -22488,6 +22524,8 @@ fn render_epic_status_report_with_stack_and_view(
             "\n⚠️  {stranded} child task(s) carry stranded factory commits. \
              Epic close will be hard-blocked until they are merged.\n",
         ));
+    } else if !retained_tasks.is_empty() {
+        out.push_str("\n⚠️ Retained worker local work needs review; historical delivery proofs do not account for it.\n");
     } else if unresolved.is_empty() {
         out.push_str("\n✓ All child factory branches are merged into the parent epic branch.\n");
     } else {
@@ -22663,11 +22701,22 @@ fn own_lane_subjects(
         excluded.push("refs/remotes/origin/HEAD".to_string());
     }
     let range = format!("{recorded}..{tip}");
-    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let mut args = vec!["log", "--no-merges", "--format=%H%x1f%s", range.as_str()];
     let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
     args.extend(negated.iter().map(String::as_str));
     args.push("--");
-    git_stdout_lines(repo_path, &args)
+    let mut subjects = Vec::new();
+    for record in git_stdout_lines(repo_path, &args)? {
+        let (commit, subject) = record.split_once('\u{1f}')
+            .ok_or_else(|| "cannot read authored commit subject".to_string())?;
+        if subject == REFERENCE_HISTORY_REGEN_SUBJECT
+            && is_reference_history_regeneration(repo_path, commit)
+        {
+            continue;
+        }
+        subjects.push(subject.to_string());
+    }
+    Ok(subjects)
 }
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
@@ -25212,7 +25261,7 @@ fn parked_anchor_advance_with_target_is_attributable(
         .args([
             "log",
             "--first-parent",
-            "--format=%P%x1f%ct%x1f%B%x1e",
+            "--format=%H%x1f%P%x1f%ct%x1f%B%x1e",
             &format!("{recorded}..{candidate}"),
             "--",
         ])
@@ -25229,9 +25278,11 @@ fn parked_anchor_advance_with_target_is_attributable(
         .split('\u{1e}')
         .filter(|record| !record.trim().is_empty())
         .map(|record| {
-            let (parents, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (commit, rest) = record.trim_start().split_once('\u{1f}')?;
+            let (parents, rest) = rest.split_once('\u{1f}')?;
             let (epoch, message) = rest.split_once('\u{1f}')?;
             Some((
+                commit,
                 parents.split_whitespace().collect::<Vec<_>>(),
                 epoch.trim().parse::<i64>().ok()?,
                 message,
@@ -25245,11 +25296,11 @@ fn parked_anchor_advance_with_target_is_attributable(
     // under the same rule cas-985f applies before park.
     let released = task_attribution::released_trunk_ref(repo_path, target_ref);
     // An anchor reachable only through a side parent is a different delivery.
-    commits.last().is_some_and(|(parents, _, _)| {
+    commits.last().is_some_and(|(_, parents, _, _)| {
         parents
             .first()
             .is_some_and(|parent| commit_ids_match(parent, recorded))
-    }) && commits.iter().all(|(parents, epoch, message)| {
+    }) && commits.iter().all(|(commit, parents, epoch, message)| {
         let target_import = parents.len() > 1
             && parents.iter().skip(1).all(|parent| {
                 git_commit_is_ancestor(repo_path, parent, target_ref)
@@ -25258,7 +25309,10 @@ fn parked_anchor_advance_with_target_is_attributable(
                     })
             });
         (target_import
-            || (parents.len() == 1 && !message_claims_other_task(message, Some(task_id))))
+            || (parents.len() == 1
+                && (!message_claims_other_task(message, Some(task_id))
+                    || (message.starts_with(REFERENCE_HISTORY_REGEN_SUBJECT)
+                        && is_reference_history_regeneration(repo_path, commit)))))
             && foreign_since
                 .is_none_or(|since| *epoch < since.saturating_sub(COMMIT_RECEIPT_CLOCK_SKEW_SECS))
     })
@@ -39472,7 +39526,7 @@ mod epic_status_gate_tests {
         assert!(collection.statuses[0].merge_evidence_note.is_none());
         assert!(collection.statuses[0].content_check_error.is_none());
 
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
         assert!(report.contains("View: summary (ancestry-only; delivery-content proofs omitted)"));
         assert!(report.contains("Page: children 2–2 of 3 (1 before, 1 after not shown)"));
     }
@@ -39498,7 +39552,7 @@ mod epic_status_gate_tests {
 
         assert!(collection.statuses.is_empty());
         assert!(collection.budget_exhausted);
-        let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+        let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
         assert!(report.contains("Partial result"));
         assert!(report.contains("2 child task(s) not checked"));
     }
@@ -39590,7 +39644,7 @@ mod epic_status_gate_tests {
             started.elapsed()
         );
         if collection.budget_exhausted {
-            let report = render_epic_status_collection("cas-epic", "main", &collection, &[]);
+            let report = render_epic_status_collection("cas-epic", "main", &collection, &[], &[]);
             assert!(report.contains("Partial result"));
             assert!(report.contains("not checked"));
         }

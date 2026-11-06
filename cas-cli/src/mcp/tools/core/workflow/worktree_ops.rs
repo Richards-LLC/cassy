@@ -4720,6 +4720,9 @@ impl CasCore {
         worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
             &self.cas_root, &worktree.parent_branch,
         );
+        crate::mcp::tools::core::task::release_train::check_cut_merge(
+            &cas_root, &worktree.parent_branch,
+        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         // Both stored and inferred worktrees pass here. An explicit trunk
         // override cannot move main around an open train; the release script
@@ -4906,6 +4909,9 @@ impl CasCore {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Could not acquire merge target lock: {error}")), data: None,
         })?;
+        crate::mcp::tools::core::task::release_train::check_cut_merge(
+            &cas_root, &worktree.parent_branch,
+        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let pending_observation_recovery = if transactional_delivery.is_none() {
             has_pending_delivery_observation_recovery(

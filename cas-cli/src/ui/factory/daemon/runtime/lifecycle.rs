@@ -1148,6 +1148,52 @@ fn enqueue_delivery_pr_merged_wake(
         actor: None,
     });
 
+    // cas-ffd5: a merged receipt is not a reusable pre-merge approval. Use
+    // close's exact-cycle selection before issuing its worker instruction.
+    if !release_wait {
+        use crate::mcp::tools::core::task::lifecycle::close_ops::{
+            close_cycle_verdict, required_verification_type,
+        };
+        let task = crate::store::open_task_store_cached(cas_dir)
+            .map_err(|error| format!("could not open merged task store: {error}"))?
+            .get(task_id)
+            .map_err(|error| format!("could not read merged task: {error}"))?;
+        let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id)
+            .map_err(|error| format!("could not read merged delivery proof cycle: {error}"))?;
+        let verifications = crate::store::open_verification_store(cas_dir)
+            .map_err(|error| format!("could not open verification store: {error}"))?;
+        let legacy = if task.task_type == cas_types::TaskType::Epic {
+            verifications.get_latest_for_task_by_type(task_id, cas_types::VerificationType::Epic)
+        } else {
+            verifications.get_latest_for_task(task_id)
+        }.map_err(|error| format!("could not read merged delivery verdict: {error}"))?;
+        let verdict = close_cycle_verdict(cas_dir, dispatch.as_ref(), legacy.as_ref())
+            .map_err(|error| format!("could not resolve merged delivery verdict: {error}"))?;
+        let approved = verdict.is_some_and(|verdict| {
+            verdict.verification_type == required_verification_type(task.task_type)
+                && matches!(verdict.status,
+                    cas_types::VerificationStatus::Approved | cas_types::VerificationStatus::Skipped)
+        });
+        if !approved {
+            let branch = task.deliverables.parked_branch.as_deref()
+                .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
+                .unwrap_or(worker);
+            let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+            let detail = format!(
+                "PR #{pr_number} for {task_id} merged at {merge_commit}, but no reusable pre-merge verdict is recorded. Supervisor recovery: {prefix}factory action=worktree_merge id={branch} task_id={task_id} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {prefix}task action=request_changes id={task_id} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Do not ask the worker to repeat close; close cannot create approval."
+            );
+            let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
+            // Use the existing typed delivery-stall lane: an unknown kind
+            // would persist an inbox row without authorizing a supervisor wake.
+            return match enqueue_worker_attention_relay_detail_with_key(
+                cas_dir, "worker_delivery_stalled", worker, Some(task_id), None,
+                |_| detail.clone(), &key, Some(&key),
+            ) {
+                WorkerAttentionRelayOutcome::Persisted { .. } => Ok(()),
+                _ => Err("could not persist merged delivery approval recovery".into()),
+            };
+        }
+    }
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
     let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
@@ -1407,7 +1453,7 @@ fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
             continue;
         }
         let detail = format!(
-            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. The worker was already told to close; inspect or recover the task.",
+            "Delivery PR #{pr_number} for {} merged at {merge_commit}, but task remains {} after {}m. Inspect its pre-merge approval and reconcile the existing candidate and promotion before requesting another close.",
             task.id,
             task.status,
             age.as_secs() / 60,
@@ -1605,7 +1651,11 @@ fn enqueue_worker_attention_relay_inner(
         tracing::warn!("worker attention relay skipped: agent store unavailable");
         return (WorkerAttentionRelayOutcome::Pending, false, false, None);
     };
-    let factory_session = if matches!(kind, "pr_lane_failed" | "delivery_pr_merge_timeout") {
+    // Merged approval recovery reuses the typed delivery-stall lane, but
+    // belongs to the delivering worker's factory just like other PR relays.
+    let delivery_recovery = kind == "worker_delivery_stalled"
+        && stable_key.is_some_and(|key| key.starts_with("delivery-pr-merged:"));
+    let factory_session = if delivery_recovery || matches!(kind, "pr_lane_failed" | "delivery_pr_merge_timeout") {
         match delivery_relay_factory_session(agent_store.as_ref(), worker) {
             Ok(session) => session,
             Err(outcome) => return (outcome, false, false, None),
@@ -3626,6 +3676,10 @@ mod worker_attention_tests {
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.assignee = Some("delivery-worker".into());
             task_store.add(&task).unwrap();
+            let verifications = crate::store::open_verification_store(&cas_dir).unwrap();
+            verifications.add(&cas_types::Verification::approved(
+                "ver-merged".into(), task.id.clone(), "Existing pre-merge approval".into(),
+            )).unwrap();
             let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
                 task_id: task.id.clone(), worker: "delivery-worker".into(),
                 branch: "factory/delivery-worker".into(), pr_number: 932,
@@ -3653,6 +3707,44 @@ mod worker_attention_tests {
             assert!(rows[0].prompt.contains(&task.id));
             assert!(rows[0].prompt.contains(&format!("commit_receipt={}", observation.merge_commit.as_deref().unwrap())));
             assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+
+            // cas-ffd5: an absent verdict, or a new pending cycle after an older
+            // approval, cannot ask the worker for a close that the guard refuses.
+            for (id, old_approval) in [("cas-unreviewed", false), ("cas-new-cycle", true)] {
+                let mut missing = cas_types::Task::new(id.into(), "Merged without reusable approval".into());
+                missing.status = cas_types::TaskStatus::AwaitingMerge;
+                missing.assignee = task.assignee.clone();
+                missing.deliverables.factory_branch_anchor = Some("worker-tip".into());
+                missing.deliverables.parked_branch = Some(observation.branch.clone());
+                task_store.add(&missing).unwrap();
+                if old_approval {
+                    verifications.add(&cas_types::Verification::approved(
+                        "ver-old".into(), id.into(), "Older cycle".into(),
+                    )).unwrap();
+                    cas_store::create_verification_dispatch(
+                        &cas_dir, id, "worker-id", "supervisor-id",
+                        chrono::Utc::now() + chrono::Duration::minutes(10),
+                    ).unwrap();
+                }
+                let observed = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+                    task_id: id.into(), pr_number: 933, ..observation.clone()
+                };
+                apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+                apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+                let rows: Vec<_> = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(20).unwrap().into_iter()
+                    .filter(|row| row.prompt.contains(id)).collect();
+                assert_eq!(rows.len(), 1, "one recovery per immutable merge");
+                assert_eq!(rows[0].target, "supervisor", "missing approval belongs to supervisor recovery");
+                assert_eq!(rows[0].factory_session.as_deref(), Some("delivery-owner"));
+                assert!(crate::store::open_supervisor_queue_store(&cas_dir).unwrap().peek("watcher-id", 10).unwrap().is_empty(),
+                    "approval recovery must not wake the watcher supervisor");
+                // pin: executable supervisor recovery must bind the exact delivery branch and task.
+                assert!(rows[0].prompt.contains(&format!("factory action=worktree_merge id={} task_id={id}", observation.branch)));
+                // pin: the incident was an impossible executable worker close instruction.
+                assert!(!rows[0].prompt.contains(&format!("close {id} with commit_receipt=")));
+                assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
+                assert_eq!(task_store.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+            }
         }
     }
 
@@ -5053,9 +5145,24 @@ impl FactoryDaemon {
             .unwrap_or_default().into_iter()
             .filter(|record| record.factory_session == self.session_name)
             .collect::<Vec<_>>();
+        let mut names = worker_names;
+        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
+        names.sort(); names.dedup();
+        // Measure while registrations and worktrees still identify the work.
+        let agents = open_agent_store(self.app.cas_dir()).and_then(|store| Ok(store.list(None)?))
+            .unwrap_or_default();
+        let worker_states: Vec<_> = names.iter().map(|name| {
+            let rows: Vec<_> = agents.iter().filter(|agent| agent.name == *name
+                && agent.factory_session.as_deref() == Some(self.session_name.as_str())).collect();
+            let state = rows.iter().max_by_key(|agent| agent.last_heartbeat)
+                .map(|agent| crate::mcp::tools::service::factory_ops::worker_shutdown_state(self.app.cas_dir(), agent))
+                .unwrap_or_else(|| format!("{name}: tasks=unknown; dirty_files=unknown; unpushed_commits=unknown (registration unavailable)"));
+            (name.clone(), state, rows.iter().map(|agent| agent.id.clone()).collect::<Vec<_>>())
+        }).collect();
         let mut ended = crate::ui::factory::session::SessionEndOutcome {
             at: String::new(), reason: "unknown".into(),
             workers_stopped: Vec::new(), orphans: Vec::new(), unverified: Vec::new(),
+            worker_states: Vec::new(),
         };
         // Hooks may already have unregistered the supervisor; retain their original reason.
         if let Ok(store) = cas_store::SqliteAgentStore::open(self.app.cas_dir())
@@ -5074,21 +5181,30 @@ impl FactoryDaemon {
         for record in &ownership {
             self.app.untrack_worker_process_group_if_gone(record.pgid).await;
         }
-        let mut names = worker_names;
-        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
-        names.sort(); names.dedup();
-        for name in names {
+        for (name, state, agent_ids) in worker_states {
             let records: Vec<_> = ownership.iter().filter(|record| record.worker_name == name).collect();
             use crate::ui::factory::process_groups::{ProcessGroupStatus, status};
-            if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
-                ended.orphans.push(name);
+            let outcome = if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
+                ended.orphans.push(name.clone());
+                "still running; tasks retained".to_string()
             } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
-                ended.workers_stopped.push(name);
+                ended.workers_stopped.push(name.clone());
+                let release = |holder: &str| crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(self.app.cas_dir(), holder);
+                let released = release(&name) + agent_ids.iter().filter(|id| **id != name)
+                    .map(|id| release(id)).sum::<usize>();
+                format!("stopped; recovered_tasks={released}")
             } else {
-                ended.unverified.push(name);
-            }
+                ended.unverified.push(name.clone());
+                "stop unverified; tasks retained for recovery".to_string()
+            };
+            ended.worker_states.push(format!("{state}; {outcome}"));
         }
         ended.at = chrono::Utc::now().to_rfc3339();
+        let retained_workers: std::collections::HashSet<_> = ended.orphans.iter()
+            .chain(&ended.unverified).cloned().collect();
+        let shutdown_report = if ended.worker_states.is_empty() { String::new() } else {
+            format!("\r\nFactory session ended ({}).\r\n{}\r\n", ended.reason, ended.worker_states.join("\r\n"))
+        };
         if let Err(error) = self.session_manager.record_ended(&self.session_name, ended) {
             tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
@@ -5107,6 +5223,9 @@ impl FactoryDaemon {
             // to ensure we find all agents, including those registered after cache refresh
             if let Ok(all_agents) = agent_store.list(None) {
                 for name in &names_to_unregister {
+                    if retained_workers.contains(name) {
+                        continue; // Their task owner remains available for recovery.
+                    }
                     for agent in all_agents.iter().filter(|a| {
                         a.name == *name
                             && a.factory_session.as_deref() == Some(self.session_name.as_str())
@@ -5131,6 +5250,7 @@ impl FactoryDaemon {
         let cleanup = b"\x1b[?25h\x1b[?1049l";
         for client in self.clients.values_mut() {
             let _ = client.stream.write_all(cleanup);
+            let _ = client.stream.write_all(shutdown_report.as_bytes());
         }
 
         Ok(())
@@ -5951,6 +6071,117 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 
 #[cfg(test)]
 mod communication_summary_tests {
+    #[tokio::test]
+    async fn supervisor_exit_reports_and_releases_unfinished_worker_cas_affc() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        for owned in [true, false] {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("work.txt"), "parked\n").unwrap();
+        git(&["add", "work.txt"]);
+        git(&["commit", "-m", "parked"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
+        std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
+        git(&["commit", "-am", "local only"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(repo.join("dirty.txt"), "keep this\n").unwrap();
+        // Ignore the store so the only dirty input is the operator's file.
+        std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let session = daemon.session_name.clone();
+        let metadata = crate::ui::factory::session::create_metadata(
+            &session, std::process::id(), &supervisor, &[], None, None, None,
+        );
+        daemon.session_manager.save_daemon_metadata(metadata, &root).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut lead = cas_types::Agent::new("lead-affc".into(), supervisor.clone());
+        lead.role = cas_types::AgentRole::Supervisor;
+        lead.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        lead.factory_session = Some(session.clone());
+        agents.register(&lead).unwrap();
+        crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
+        let worker = "unfinished-worker";
+        let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+            command: "/bin/sleep".into(), args: vec!["300".into()], cwd: Some(repo.to_path_buf()),
+            env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let worker_pid = pty.process_group_id().unwrap();
+        if owned {
+            crate::ui::factory::process_groups::track(&root, worker, &session, worker_pid).unwrap();
+        }
+        daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        let mut agent = cas_types::Agent::new("worker-affc".into(), worker.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some(session.clone());
+        agent.pid = Some(worker_pid);
+        agent.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&agent).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-unfinished".into(), "Unfinished work".into());
+        task.assignee = Some(worker.into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, &agent.id, 1800, None).unwrap();
+        daemon.listener.set_nonblocking(true).unwrap();
+        let mut client = UnixStream::connect(root.join("test.sock")).unwrap();
+        daemon.accept_clients().unwrap();
+        daemon.handle_mux_event(cas_mux::MuxEvent::PaneExited {
+            pane_id: supervisor, exit_code: Some(0), exit_signal: None,
+        }).await;
+        assert!(daemon.shutdown.load(std::sync::atomic::Ordering::Relaxed));
+        daemon.cleanup().await.unwrap();
+        let receipt = daemon.session_manager.ended_sessions().unwrap().remove(0);
+        drop(daemon);
+        let mut output = String::new();
+        client.read_to_string(&mut output).unwrap();
+        let recovered = tasks.get(&task.id).unwrap();
+        let outcome = if owned { "stopped; recovered_tasks=1" }
+            else { "stop unverified; tasks retained for recovery" };
+        let mut failures = Vec::new();
+        if !(output.contains(worker) && output.contains(&task.id)
+            && output.contains("dirty_files=1") && output.contains("unpushed_commits=1")
+            && output.contains(outcome)) {
+            failures.push(format!("missing terminal teardown evidence: {output:?}"));
+        }
+        if owned && (recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some()) {
+            failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        }
+        if owned {
+            assert!(agents.get_lease(&task.id).unwrap().is_none(), "stopped worker's lease is released");
+        } else {
+            assert!(agents.get(&agent.id).is_ok(), "unverified stop retains its registered owner");
+            assert_eq!(recovered.assignee.as_deref(), Some(worker));
+        }
+        if receipt.ended.reason != "prompt_input_exit" {
+            failures.push(format!("wrong exit reason: {}", receipt.ended.reason));
+        }
+        let durable = serde_json::to_value(&receipt).unwrap();
+        if !durable["ended"]["worker_states"].as_array().is_some_and(|rows| rows.iter().any(|row| {
+            row.as_str().is_some_and(|line| line.contains(worker) && line.contains(&task.id)
+                && line.contains("dirty_files=1") && line.contains("unpushed_commits=1")
+                && line.contains(outcome))
+        })) {
+            failures.push(format!("missing durable worker state: {durable}"));
+        }
+        assert_eq!(std::fs::read_to_string(repo.join("dirty.txt")).unwrap(), "keep this\n");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        }
+    }
+
     #[tokio::test]
     async fn idle_control_ticks_adopt_staged_cleanup_cas_70a2() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

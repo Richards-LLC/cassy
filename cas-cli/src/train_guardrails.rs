@@ -333,7 +333,7 @@ pub(crate) fn notify_train_cuts(
     let mut sent = 0;
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
         let Some(train) = train_lane(&epic).map(str::to_string) else { continue };
-        if queued.contains(&train) {
+        if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }
         let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?
@@ -367,8 +367,8 @@ pub(crate) fn notify_train_cuts(
                 format!("max-age:{}", first.created_at.to_rfc3339()),
                 format!(
                     "Release train {train} ({}) reached its {max_age_hours} h max age: {} reviewed \
-                     fixes merged, first {} min ago; {in_flight} still in flight ride the next train. \
-                     Cut it: {cut}. Cassy never cuts on its own.",
+                     fixes merged, first {} min ago; {in_flight} still in flight remain assigned to this train. \
+                     Cut it: {cut}; retarget unfinished deliveries to the next train before merging them. Cassy never cuts on its own.",
                     epic.id,
                     merged.len(),
                     age.num_minutes()

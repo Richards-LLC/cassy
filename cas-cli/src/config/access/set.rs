@@ -281,6 +281,12 @@ impl Config {
                     MemError::Parse(format!("Invalid boolean value for factory.strict_cli: {value}"))
                 })?;
             }
+            "factory.release_train" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                factory.release_train = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for factory.release_train: {value}"))
+                })?;
+            }
             "factory.target_cache_high_watermark_percent" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.target_cache_high_watermark_percent = value.parse().map_err(|_| {

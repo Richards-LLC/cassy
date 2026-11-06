@@ -121,6 +121,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs` - confirmed-publication receipts over authenticated peer mail, durable import into existing dispatch/verdict records, local Git rebinding and exact close validation; queue retention carries no proof authority.
 - `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - exact-source PR creation/reuse and expected-head auto-merge for confirmed default-branch queues, before local merge mutation.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - audited supervisor-approved branch replacement.
+- `cas-cli/src/mcp/tools/core/task/release_train.rs` - release train as the default work target: a task created with no epic or target joins the open `release-train` epic cut from the integration branch; a landed train closes and the next opens on the next create.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs` - stakeholder-source preflight for creation, assignment, start/claim/transfer, ordered queues and spawning; existing Slack receipts and normalized GitHub claims, with recorded supervisor exceptions. `cas-cli/src/cloud/peer_claims.rs` renews sources for local nonterminal tasks and uses existing fenced release retries at close/cancel.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - agent retirement snapshots and persistent worker queues.

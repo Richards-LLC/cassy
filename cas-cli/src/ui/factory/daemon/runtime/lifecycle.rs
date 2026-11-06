@@ -714,6 +714,32 @@ pub(super) fn enqueue_worker_approval_pending_relay(
     )
 }
 
+/// Tasks replicate between machines; worker registrations do not. Delivery
+/// relays belong to the registered worker's factory, never an ambient watcher.
+/// Retired registrations still support successor/operator recovery. An empty
+/// worker is a supervisor-owned epic PR and retains ambient session routing.
+fn delivery_relay_factory_session(
+    agents: &dyn cas_store::AgentStore,
+    worker: &str,
+) -> Result<Option<String>, WorkerAttentionRelayOutcome> {
+    if worker.is_empty() {
+        return Ok(std::env::var("CAS_FACTORY_SESSION").ok());
+    }
+    agents
+        .list(None)
+        .map_err(|_| WorkerAttentionRelayOutcome::Pending)?
+        .into_iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Worker
+                && (agent.id == worker || agent.name == worker)
+        })
+        .max_by_key(|agent| (agent.id == worker, agent.registered_at))
+        .and_then(|agent| agent.factory_session)
+        .filter(|session| !session.trim().is_empty())
+        .map(Some)
+        .ok_or(WorkerAttentionRelayOutcome::Pending)
+}
+
 /// A parked delivery whose PR was ejected must wake the supervisor *and* put
 /// a durable instruction in the delivering worker's inbox. The occurrence is
 /// a failed merge-group run ID when available, so a requeue naturally arms a
@@ -742,29 +768,9 @@ pub(super) fn enqueue_merge_queue_ejection_relay(
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         return WorkerAttentionRelayOutcome::Pending;
     };
-    let factory_session = if worker.is_empty() {
-        std::env::var("CAS_FACTORY_SESSION").ok()
-    } else {
-        // Tasks replicate between machines; agent registrations do not. A
-        // foreign worker missing here belongs to its own daemon, never the
-        // watcher process's ambient supervisor. Retain retired registrations
-        // so the existing dead-owner successor/operator recovery still works.
-        let Ok(agents) = agent_store.list(None) else {
-            return WorkerAttentionRelayOutcome::Pending;
-        };
-        let session = agents
-            .into_iter()
-            .filter(|agent| {
-                agent.role == cas_types::AgentRole::Worker
-                    && (agent.id == worker || agent.name == worker)
-            })
-            .max_by_key(|agent| (agent.id == worker, agent.registered_at))
-            .and_then(|agent| agent.factory_session)
-            .filter(|session| !session.trim().is_empty());
-        let Some(session) = session else {
-            return WorkerAttentionRelayOutcome::Pending;
-        };
-        Some(session)
+    let factory_session = match delivery_relay_factory_session(agent_store.as_ref(), worker) {
+        Ok(session) => session,
+        Err(outcome) => return outcome,
     };
     crate::quality_ledger::queue_ejected(cas_dir, &crate::quality_ledger::QueueEjection {
         task_id: task_id.into(), pr_number, failed_run_id,
@@ -1118,6 +1124,10 @@ fn enqueue_delivery_pr_merged_wake(
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::LIFECYCLE_WAKE_SOURCE_PREFIX;
     use cas_store::NotificationPriority;
 
+    let agents = crate::store::open_agent_store(cas_dir)
+        .map_err(|error| format!("could not open agent store: {error}"))?;
+    let factory_session = delivery_relay_factory_session(agents.as_ref(), worker)
+        .map_err(|_| format!("could not resolve a local delivery owner for worker {worker}"))?;
     crate::quality_ledger::check_run(cas_dir, crate::quality_ledger::Check {
         natural_key: format!("merge_queue|{task_id}|{pr_number}|{merge_commit}"),
         check_id: crate::quality_ledger::MERGE_QUEUE_CHECK,
@@ -1132,7 +1142,6 @@ fn enqueue_delivery_pr_merged_wake(
 
     let queue = crate::store::open_prompt_queue_store(cas_dir)
         .map_err(|error| format!("could not open prompt queue: {error}"))?;
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
     let source = format!("{LIFECYCLE_WAKE_SOURCE_PREFIX}{key}");
     let prompt = crate::prompt_revalidation::delivery_pr_merged_envelope(
@@ -1584,10 +1593,17 @@ fn enqueue_worker_attention_relay_inner(
     };
     use cas_store::{NotificationPriority, NotifyIdempotentResult};
 
-    let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let Ok(agent_store) = crate::store::open_agent_store(cas_dir) else {
         tracing::warn!("worker attention relay skipped: agent store unavailable");
         return (WorkerAttentionRelayOutcome::Pending, false, false, None);
+    };
+    let factory_session = if matches!(kind, "pr_lane_failed" | "delivery_pr_merge_timeout") {
+        match delivery_relay_factory_session(agent_store.as_ref(), worker) {
+            Ok(session) => session,
+            Err(outcome) => return (outcome, false, false, None),
+        }
+    } else {
+        std::env::var("CAS_FACTORY_SESSION").ok()
     };
     let supervisor = resolve_notice_recipient(agent_store.as_ref(), factory_session.as_deref());
     let Ok(supervisor_queue) = crate::store::open_supervisor_queue_store(cas_dir) else {
@@ -3660,6 +3676,9 @@ mod worker_attention_tests {
         std::fs::write(cas_dir.join("config.toml"),
             "[project]\ncanonical_id='release-wait'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
         register_supervisor(&cas_dir, "release-wait");
+        let mut worker = Agent::new_with_role("worker-id".into(), "calm-octopus-51".into(), AgentRole::Worker);
+        worker.factory_session = Some("release-wait".into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&worker).unwrap();
         let task_store = crate::store::open_task_store_cached(&cas_dir).unwrap();
         let mut task = cas_types::Task::new("cas-7eb1".to_string(), "delivery".to_string());
         task.status = cas_types::TaskStatus::AwaitingMerge;

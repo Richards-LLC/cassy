@@ -24700,7 +24700,7 @@ pub(crate) fn stale_rebased_anchor_rejection(
     let retry = current_tip
         .map(|tip| {
             format!(
-                " The current worker branch tip is `{tip}`. If that commit carries this task's work, first merge it into `{parent_branch}`, then retry close with `{tool_prefix}task action=close id={task_id} commit_receipt={tip}`."
+                " The current worker branch tip is `{tip}`. If that commit carries this task's work, park it with `{tool_prefix}task action=close id={task_id} commit_receipt={tip}`; the supervisor merges the delivery into `{parent_branch}`."
             , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
         })
         .unwrap_or_else(|| {

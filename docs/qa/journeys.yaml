@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  registered-run-director-stall:
+    title: Live registered capped runs suppress director stall nudges and completion restores ordinary stall detection
+    tasks: [cas-54f2]
+    invariants: [HUB-J26-REGISTERED-RUN-STALL]
+    journeys: [HUB-J26]
   sandboxed-harness-stall-detection:
     title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
     tasks: [cas-cff4]
@@ -625,6 +630,10 @@ invariants:
     statement: A native background launch keeps its worker busy within the configured stall window and afterward while user-work descendants are CPU busy; a missing completion becomes Stalled when those jobs are quiet even if harness timers use CPU, while a matching completion returns the worker to Waiting.
     check: Run worker_liveness::tests (including process_evidence_busy_background_child_and_grandchild_keep_executing and process_evidence_silent_background_child_ignores_harness_cpu); compare Team worker liveness to native worker_status for busy children/grandchildren and quiet children under a ticking harness past the stall window on the release candidate.
     bug: {task: cas-185e}
+  HUB-J26-REGISTERED-RUN-STALL:
+    statement: A live worker/task/session-matched registered capped run suppresses direct director stall nudges after its launch tool returns, regardless of instantaneous CPU use; completion reaches its worker once, and a finished run cannot hide a subsequent stall.
+    check: Run stall_confirmation_real_codex_open_call_suppresses_then_cold_closed_call_recovers through the real director health probe; on the release candidate compare the direct worker-stall feed before and after a registered capped producer finishes. Quiet unregistered native jobs retain HUB-J26-BACKGROUND-BOUND behavior.
+    bug: {task: cas-54f2}
   HUB-J26-WORKER-BRIEF-PRIVATE:
     statement: Worker task text is delivered through a private file inside the worker worktree, so OpenCode external_directory denial permits reading it, never through process argv; unrelated process-name cleanup cannot match workers by words in their assignment. Initial and resumed workers receive the same brief and teardown removes it.
     check: Run cas-pty pty::tests::copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt; inspect live PTY argv with ps and the child-scoped pgrep full-command matcher, verify the path is inside the worktree plus exact brief bytes, mode 0600 and removal after teardown. Claude and Codex cover initial and resumed selectors; Grok and OpenCode cover initial launch.
@@ -2570,7 +2579,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

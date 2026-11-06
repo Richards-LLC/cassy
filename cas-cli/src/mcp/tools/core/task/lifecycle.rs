@@ -4592,6 +4592,17 @@ mod related_recall_response_tests {
         let staging_lane = staging_train.branch.clone().unwrap();
         assert_eq!(git(&["rev-parse", &staging_lane]), git(&["rev-parse", "staging"]));
         assert_eq!(task("Use staging").deliverables.work_target.unwrap().target_branch, staging_lane);
+
+        // release_train=false restores the per-task integration target.
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = false\n",
+        )
+        .unwrap();
+        let off = create("No train").await;
+        assert!(!off.contains("RELEASE TRAIN"), "{off}");
+        assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
+        assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
     }
 
     #[tokio::test]

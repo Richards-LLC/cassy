@@ -1864,6 +1864,9 @@ impl CasCore {
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
+        let triage_notice = if task.assignee.is_some() {
+            crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
+        } else { String::new() };
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
@@ -1984,7 +1987,7 @@ impl CasCore {
                                 assignee_receipt,
                                 related_context,
                                 no_code_external_ref_guidance(&task),
-                                assignment_warning,
+                                assignment_warning + &triage_notice,
                             )));
                         }
                     };

@@ -15727,7 +15727,7 @@ mod tests {
             chrono::Utc::now() + chrono::Duration::minutes(10), &worker.name, None, None, None,
         ).unwrap();
         let handoff = queue.peek_all(10).unwrap().into_iter()
-            .find(|row| row.recipient == "supervisor").unwrap();
+            .find(|row| row.target == "supervisor").unwrap();
         assert!(handoff.prompt.contains(focus), "{}", handoff.prompt);
         assert_eq!(super::latest_spawn_brief("no brief here"), None);
     }

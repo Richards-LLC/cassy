@@ -22640,7 +22640,9 @@ mod supervisor_notice_wake_tests {
 
     #[test]
     fn owner_notices_wake_only_with_daemon_authority() {
-        let body = "<cas-supervisor-notice kind=\"epic_orphaned\" notification_id=\"42\">\nAdopt cas-epic.\n</cas-supervisor-notice>";
+        for kind in ["epic_orphaned", "premerge_verification"] {
+        let body = format!("<cas-supervisor-notice kind=\"{kind}\" notification_id=\"42\">\nOwner action required.\n</cas-supervisor-notice>");
+        let body = body.as_str();
         assert_eq!(
             FactoryDaemon::supervisor_wake_class(
                 &WakeSender::Daemon,
@@ -22681,6 +22683,7 @@ mod supervisor_notice_wake_tests {
             ),
             None
         );
+        }
         // A release runs one QA round, so a queued hourly overdue row left by an
         // older daemon must not wake a supervisor to start another.
         assert_eq!(

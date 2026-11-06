@@ -3,7 +3,7 @@
 //!
 //! The gabber supervisor asked prowl to review PR #4249, then merged the PR
 //! to staging without the answer; the review later found two money P1s. The
-//! ask is already recorded in the peer outbox and any reply carries its id, so
+//! ask and incoming peer messages are already recorded locally, so
 //! no new gate object is needed: `worktree_merge` and a supervisor's raw
 //! `gh pr merge` are refused while the merging supervisor has an unanswered
 //! explicit ask to a peer that names the task or PR being merged.

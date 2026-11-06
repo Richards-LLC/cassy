@@ -98,6 +98,59 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// cas-d4b7: whitespace-exact, full-context (three-line) patch-id of the
+/// change `tree` adds to `target`. Patch-ids ignore hunk headers, so a
+/// zero-context id would hide a target edit beside a delivered hunk (`if ok`
+/// to `if !ok` two lines away); only full-context identity may rebind. An
+/// empty or unreadable patch is an error, never a match.
+fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let patch_id = |context: &str| -> Result<String, String> {
+        let isolated = |command: &mut Command| {
+            command
+                .arg("-C")
+                .arg(repo)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_INDEX_FILE");
+        };
+        let mut diff = Command::new("git");
+        isolated(&mut diff);
+        let diff = diff
+            .args(["diff", "--binary", "--no-color", "--no-renames", "--no-ext-diff"])
+            .args(["--no-textconv", context, target, tree])
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !diff.status.success() || diff.stdout.is_empty() {
+            return Err(format!("delivered patch {target}..{tree} is empty or unreadable"));
+        }
+        let mut hash = Command::new("git");
+        isolated(&mut hash);
+        let mut child = hash
+            .args(["patch-id", "--verbatim"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        child
+            .stdin
+            .take()
+            .ok_or("patch-id stdin missing")?
+            .write_all(&diff.stdout)
+            .map_err(|error| error.to_string())?;
+        let output = child.wait_with_output().map_err(|error| error.to_string())?;
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .filter(|_| output.status.success())
+            .map(str::to_string)
+            .ok_or_else(|| "git patch-id produced no id".to_string())
+    };
+    patch_id("-U3")
+}
+
 /// Review the fetched published target. An unpublished local merge can be
 /// rolled back after a failed push; binding its SHA would invalidate an
 /// approval when the published target later advances normally (cas-015e).
@@ -894,6 +947,11 @@ impl CasCore {
                     "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
                 ));
             }
+            if let Some(approval) =
+                self.rebind_unchanged_patch(task, repo, source, target, &digest, dispatch, &candidate)?
+            {
+                return Ok(Some(approval));
+            }
             cas_store::invalidate_verification_dispatch_for_repository_drift(
                 &self.cas_root,
                 &dispatch.id,
@@ -925,6 +983,101 @@ impl CasCore {
             "task {} requires candidate verdict on dispatch {} before merge",
             task.id, dispatch.id
         )))
+    }
+
+    /// cas-d4b7: the target moved under an approved candidate, so the reviewed
+    /// tree no longer recomputes. When the source tip, plan context and the
+    /// patch the merge adds to the new target are all unchanged, the approval
+    /// is rebound to the new candidate with a receipt and no verifier runs.
+    /// Any mismatch returns None and the caller dispatches a fresh review.
+    #[allow(clippy::too_many_arguments)]
+    fn rebind_unchanged_patch(
+        &self,
+        task: &Task,
+        repo: &Path,
+        source: &str,
+        target: &str,
+        digest: &str,
+        dispatch: &VerificationDispatch,
+        prior: &Candidate,
+    ) -> Result<Option<Approval>, McpError> {
+        let Some(verdict) = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
+            .map_err(fail)?
+            .filter(|verdict| verdict.status == VerificationStatus::Approved)
+        else {
+            return Ok(None);
+        };
+        let repository = repo.canonicalize().map_err(fail)?;
+        if dispatch.state != cas_types::VerificationDispatchState::Resolved
+            || dispatch.receipt_id.is_some()
+            || prior.context_digest != digest
+            || prior.repository != repository
+            || prior.source_branch != source
+            || prior.target_branch != target
+            || task.deliverables.factory_branch_anchor.as_deref() != Some(prior.source_sha.as_str())
+            || git(repo, &["rev-parse", source]).ok().as_deref() != Some(prior.source_sha.as_str())
+            || review_target(repo, target).ok().as_deref() == Some(prior.target_sha.as_str())
+        {
+            return Ok(None);
+        }
+        let Ok(approved) = delivered_patch_id(repo, &prior.target_sha, &prior.tree) else {
+            return Ok(None);
+        };
+        // The fresh-review path enforces this gate; a rebind may not skip it.
+        if crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
+            &self.cas_root,
+            task,
+            true,
+        )
+        .is_err()
+        {
+            return Ok(None);
+        }
+        let candidate =
+            self.build_verification_candidate(task, repo, source, target, digest.to_string())?;
+        if candidate.validate(&self.cas_root, task).is_err() {
+            return Ok(None);
+        }
+        let Ok(current) = delivered_patch_id(repo, &candidate.target_sha, &candidate.tree) else {
+            return Ok(None);
+        };
+        if current != approved {
+            return Ok(None);
+        }
+        let matched = format!("full-context patch-id {current}");
+        let receipt = format!(
+            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} unchanged, target {} -> {}, delivered {matched} identical.",
+            verdict.id,
+            dispatch.id,
+            candidate.proof.head_commit,
+            candidate.source_sha,
+            prior.target_sha,
+            candidate.target_sha,
+        );
+        let requester = self.get_agent_id()?;
+        let owner = self.verification_dispatch_owner(&requester)?;
+        let (rebound, approval) = cas_store::rebind_approved_verification_dispatch(
+            &self.cas_root,
+            &dispatch.id,
+            &verdict.id,
+            &requester,
+            &owner,
+            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &receipt,
+        )
+        .map_err(fail)?;
+        let store = self.open_task_store()?;
+        let mut current = store.get(&task.id).map_err(fail)?;
+        let expected = current.clone();
+        current.notes.push_str(&format!("\n\n{receipt} Rebound dispatch {}.", rebound.id));
+        if let Err(error) = store.update_if_current(&current, &expected) {
+            tracing::warn!(task_id = %task.id, %error, "cas-d4b7: verdict rebind receipt note not written");
+        }
+        Ok(Some(Approval {
+            candidate,
+            dispatch_id: rebound.id,
+            verdict_id: approval.id,
+        }))
     }
 
     pub(crate) fn build_completion_candidate(

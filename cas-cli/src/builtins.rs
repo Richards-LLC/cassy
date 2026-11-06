@@ -21,7 +21,7 @@ use cas_mux::SupervisorCli;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -3485,7 +3485,7 @@ fn sync_all_builtins_inner(
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
 ) -> std::io::Result<SyncResult> {
-    sync_all_builtins_with_finish_policy(target_dir, agents, skills, true)
+    sync_all_builtins_with_finish_policy(target_dir, agents, skills, true, &[])
 }
 
 fn sync_all_builtins_with_finish_policy(
@@ -3493,6 +3493,7 @@ fn sync_all_builtins_with_finish_policy(
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
     install_finish: bool,
+    excluded: &[PathBuf],
 ) -> std::io::Result<SyncResult> {
     let (agents, skills) = (&scoped_catalog(agents, target_dir), &scoped_catalog(skills, target_dir));
     let mut result = SyncResult::default();
@@ -3500,6 +3501,7 @@ fn sync_all_builtins_with_finish_policy(
 
     // Sync agents
     for builtin in agents {
+        if excluded_path(&target_dir.join(builtin.path), excluded) { continue; }
         let outcome = if is_native_agent(builtin) {
             sync_owned_reference(builtin, target_dir, &mut reference_state)?
         } else {
@@ -3524,13 +3526,17 @@ fn sync_all_builtins_with_finish_policy(
 
     // Retired agents: a managed agent file this catalog no longer ships is
     // listed in every session until something removes it (cas-57c02).
-    let keep_agents = builtin_agent_file_names(agents);
-    for name in prune_stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)? {
-        result.pruned_files.push(format!("agents/{name}"));
+    let mut keep_agents = builtin_agent_file_names(agents);
+    retain_excluded_names(&target_dir.join("agents"), excluded, &mut keep_agents);
+    if !excluded_path(&target_dir.join("agents"), excluded) {
+        for name in prune_stale_cas_agent_files(&target_dir.join("agents"), &keep_agents)? {
+            result.pruned_files.push(format!("agents/{name}"));
+        }
     }
 
     // Sync skills
     for builtin in skills {
+        if excluded_path(&target_dir.join(builtin.path), excluded) { continue; }
         if is_finish_entrypoint(builtin) && !install_finish {
             continue;
         }
@@ -3563,9 +3569,10 @@ fn sync_all_builtins_with_finish_policy(
         target_dir,
         skills,
         &mut reference_state,
+        excluded,
     )?);
 
-    for name in prune_retired_hub_skills(&target_dir.join("skills"))? {
+    for name in prune_retired_hub_skills_excluding(&target_dir.join("skills"), excluded)? {
         result.pruned_files.push(format!("skills/{name}"));
     }
     reference_state.save(target_dir)?;
@@ -3656,8 +3663,11 @@ fn prune_removed_owned_skill_files(
     target_dir: &Path,
     skills: &[BuiltinFile],
     state: &mut BuiltinReferenceState,
+    excluded: &[PathBuf],
 ) -> std::io::Result<Vec<String>> {
-    let removed = removed_owned_skill_files(target_dir, skills, state);
+    if excluded_path(&target_dir.join("skills"), excluded) { return Ok(Vec::new()); }
+    let removed: Vec<_> = removed_owned_skill_files(target_dir, skills, state).into_iter()
+        .filter(|relative| !excluded_path(&target_dir.join(relative), excluded)).collect();
     for relative in &removed {
         let path = target_dir.join(relative);
         std::fs::remove_file(&path)?;
@@ -3694,8 +3704,10 @@ fn sync_workflows(
     target_dir: &Path,
     workflows: &[BuiltinFile],
     result: &mut SyncResult,
+    excluded: &[PathBuf],
 ) -> std::io::Result<()> {
     for wf in workflows {
+        if excluded_path(&target_dir.join(wf.path), excluded) { continue; }
         let target = target_dir.join(wf.path);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
@@ -3721,8 +3733,9 @@ pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
         BUILTIN_AGENTS,
         BUILTIN_SKILLS,
         install_finish,
+        &[],
     )?;
-    sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result)?;
+    sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result, &[])?;
     let keep = builtin_workflow_names(BUILTIN_WORKFLOWS);
     prune_stale_cas_workflow_files(&claude_dir.join("workflows"), &keep)?;
     Ok(result)
@@ -3731,7 +3744,7 @@ pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
 /// Sync all built-in files to .codex/ directory
 pub fn sync_all_codex_builtins(codex_dir: &Path) -> std::io::Result<SyncResult> {
     let (install, policy) = prepare_finish(SupervisorCli::Codex, codex_dir)?;
-    let mut result = sync_all_builtins_with_finish_policy(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, install)?;
+    let mut result = sync_all_builtins_with_finish_policy(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, install, &[])?;
     result.pruned_files.extend(policy.pruned_files);
     result.warnings.extend(policy.warnings);
     Ok(result)
@@ -3773,6 +3786,13 @@ pub fn sync_all_builtins_for_project(
     harness: SupervisorCli,
     project_root: &Path,
 ) -> std::io::Result<SyncResult> {
+    sync_all_builtins_for_project_excluding(harness, project_root, &[])
+}
+
+/// Preserve the update preflight's exact conflicting paths in both writes and pruning.
+pub(crate) fn sync_all_builtins_for_project_excluding(
+    harness: SupervisorCli, project_root: &Path, excluded: &[PathBuf],
+) -> std::io::Result<SyncResult> {
     match harness {
         SupervisorCli::Claude => {
             let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
@@ -3782,15 +3802,16 @@ pub fn sync_all_builtins_for_project(
                 BUILTIN_AGENTS,
                 &skills,
                 Some(BUILTIN_WORKFLOWS),
+                excluded,
             )
         }
         SupervisorCli::Codex => {
             let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(harness, &project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None, excluded)
         }
         SupervisorCli::Grok => {
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(harness, &project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None, excluded)
         }
         // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
         // `.claude/skills`, so the `cas_` projection is written there. Agents
@@ -3798,7 +3819,7 @@ pub fn sync_all_builtins_for_project(
         // agent frontmatter does not fit it.
         SupervisorCli::OpenCode => {
             let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
-            sync_project_catalog(harness, &project_root.join(".opencode"), NO_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".opencode"), NO_AGENTS, &skills, None, excluded)
         }
     }
 }
@@ -3847,25 +3868,49 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
 /// workflow is retired today, so `BUILTIN_WORKFLOWS` is empty, and gating the
 /// prune on a non-empty catalog left the retired `cas-code-review.js` in about
 /// 20 projects after every sync.
+fn excluded_path(path: &Path, excluded: &[PathBuf]) -> bool {
+    excluded.iter().any(|conflict| path.starts_with(conflict))
+}
+
+fn retain_excluded_names(dir: &Path, excluded: &[PathBuf], keep: &mut HashSet<String>) {
+    for path in excluded {
+        if let Ok(relative) = path.strip_prefix(dir)
+            && let Some(name) = relative.components().next() {
+            keep.insert(name.as_os_str().to_string_lossy().into_owned());
+        }
+    }
+}
+
 fn sync_project_catalog(
     harness: SupervisorCli,
     target_dir: &Path,
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
     workflows: Option<&[BuiltinFile]>,
+    excluded: &[PathBuf],
 ) -> std::io::Result<SyncResult> {
-    let (install_finish, policy) = prepare_finish(harness, target_dir)?;
+    if excluded_path(target_dir, excluded) { return Ok(SyncResult::default()); }
+    let (install_finish, policy) = if ["commands/finish.md", "skills/finish/SKILL.md"].iter()
+        .any(|path| excluded_path(&target_dir.join(path), excluded)) {
+        (false, SyncResult::default())
+    } else { prepare_finish(harness, target_dir)? };
     let mut result =
-        sync_all_builtins_with_finish_policy(target_dir, agents, skills, install_finish)?;
+        sync_all_builtins_with_finish_policy(target_dir, agents, skills, install_finish, excluded)?;
     result.pruned_files.extend(policy.pruned_files);
     result.warnings.extend(policy.warnings);
     if let Some(workflows) = workflows {
-        sync_workflows(target_dir, workflows, &mut result)?;
-        let keep = builtin_workflow_names(workflows);
-        prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
+        sync_workflows(target_dir, workflows, &mut result, excluded)?;
+        let mut keep = builtin_workflow_names(workflows);
+        retain_excluded_names(&target_dir.join("workflows"), excluded, &mut keep);
+        if !excluded_path(&target_dir.join("workflows"), excluded) {
+            prune_stale_cas_workflow_files(&target_dir.join("workflows"), &keep)?;
+        }
     }
-    let keep = builtin_skill_dir_names(skills);
-    prune_stale_cas_skill_dirs(&target_dir.join("skills"), &keep)?;
+    let mut keep = builtin_skill_dir_names(skills);
+    retain_excluded_names(&target_dir.join("skills"), excluded, &mut keep);
+    if !excluded_path(&target_dir.join("skills"), excluded) {
+        prune_stale_cas_skill_dirs(&target_dir.join("skills"), &keep)?;
+    }
     Ok(result)
 }
 
@@ -4372,11 +4417,16 @@ pub fn prune_stale_cas_skill_dirs(
 /// Remove installed managed copies of the retired hub skills only. Personal
 /// skills and symlink destinations remain operator-owned.
 pub fn prune_retired_hub_skills(skills_dir: &Path) -> std::io::Result<Vec<String>> {
+    prune_retired_hub_skills_excluding(skills_dir, &[])
+}
+
+fn prune_retired_hub_skills_excluding(skills_dir: &Path, excluded: &[PathBuf]) -> std::io::Result<Vec<String>> {
     let contract = cas_types::violet_compatibility::violet_compatibility();
     let mut removed = Vec::new();
     for name in [&contract.retired_server, &contract.retired_post_skill] {
         let path = skills_dir.join(name);
-        if path.is_dir() && !path.is_symlink()
+        if !excluded.iter().any(|conflict| conflict.starts_with(&path) || path.starts_with(conflict))
+            && path.is_dir() && !path.is_symlink()
             && std::fs::read_to_string(path.join("SKILL.md")).is_ok_and(|body| is_managed_by_cas(&body)) {
             std::fs::remove_dir_all(path)?;
             removed.push(name.clone());

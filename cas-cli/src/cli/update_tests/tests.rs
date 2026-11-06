@@ -3442,7 +3442,7 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
             }
         );
         std::fs::write(&file, &working).unwrap();
-        let index = cas_6718_git(&project, &["ls-files", "--stage"]);
+        let index = cas_6718_git(&project, &["show", &format!(":{path}")]);
         let mut args = update_test_args();
         args.sync = true;
         let (result, output) =
@@ -3454,7 +3454,7 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
         if user_delta {
             assert!(conflicts.iter().any(|p| p == path), "{receipt}");
             assert_eq!(std::fs::read_to_string(&file).unwrap(), working);
-            assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);
+            assert_eq!(cas_6718_git(&project, &["show", &format!(":{path}")]), index);
         } else {
             assert!(
                 conflicts.is_empty(),
@@ -3470,7 +3470,7 @@ fn cas_9815_update_distinguishes_old_shipped_skill_from_user_delta() {
 /// cas-3199: gabber's frozen state. v3.82.0 retired four catalog paths, but the
 /// uncommitted managed `.gitignore` block from Cassy's own v3.81.0 sync still
 /// lists them; that earlier write must be repaired, not read as a user edit.
-/// A real edit still blocks, and fails loudly in the sweep and at SessionStart.
+/// A real edit is preserved alone and remains visible in the sweep and SessionStart.
 #[test]
 fn retired_cassy_ignore_lines_are_repaired_and_real_conflicts_fail_cas_3199() {
     let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -3485,6 +3485,24 @@ fn retired_cassy_ignore_lines_are_repaired_and_real_conflicts_fail_cas_3199() {
     result.unwrap();
     cas_6718_git(&project, &["add", "-A"]);
     cas_6718_git(&project, &["commit", "-qm", "commit Cassy's managed block", "--allow-empty"]);
+    // cas-c754: bootstrap pre-receipt installs from the exact known statusline
+    // projection while unchanged old hooks stay equal to their committed base.
+    let settings_path = project.join(".claude/settings.json");
+    let current_settings = std::fs::read_to_string(&settings_path).unwrap();
+    std::fs::write(&settings_path, current_settings.replace("cas statusline --with-session", "cas statusline")).unwrap();
+    cas_6718_git(&project, &["add", ".claude/settings.json"]);
+    cas_6718_git(&project, &["commit", "-qm", "prior statusline release"]);
+    std::fs::write(&settings_path, current_settings).unwrap();
+    let prior_receipt = root.join("cache/managed-project-writes.json");
+    if prior_receipt.exists() { std::fs::remove_file(prior_receipt).unwrap(); }
+    let config_path = root.join("config.toml");
+    let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&config_path).unwrap().parse().unwrap();
+    config["hooks"]["pre_tool_use"]["timeout"] = toml_edit::value(17);
+    std::fs::write(config_path, config.to_string()).unwrap();
+    let (result, output) = capture_phase(true, || execute(&args, &update_test_cli(true), Some(&root)));
+    result.unwrap();
+    let receipt: serde_json::Value = output.lines().last().unwrap().parse().unwrap();
+    assert_eq!(receipt["managed_files"]["conflicts"], serde_json::json!([]), "known statusline migration must not require an existing receipt: {receipt}");
     let retired = [
         "skills/cas-release-report/references/default-tokens.json",
         "skills/cas-release-report/scripts/check-pdf.py",
@@ -3509,7 +3527,7 @@ fn retired_cassy_ignore_lines_are_repaired_and_real_conflicts_fail_cas_3199() {
     let user_line = vec!["/user-owned-output".to_string()];
     std::fs::write(&gitignore, with_block_lines(&user_line)).unwrap();
     let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(true), &root, false));
-    let ProjectPhase::Failed(reason) = phase else { panic!("a skipped sync must fail: {phase:?}") };
+    let ProjectPhase::Warning(reason) = phase else { panic!("a partial sync must name its preserved conflict: {phase:?}") };
     assert!(reason.contains(".gitignore"), "{reason}");
     let banner = crate::hooks::handlers::session_hygiene::build_session_start_managed_conflict_banner_sized(&root)
         .expect("SessionStart must report the blocked sync");

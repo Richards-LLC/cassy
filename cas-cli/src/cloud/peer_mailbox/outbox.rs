@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 pub const OUTBOX_TTL_SECS: i64 = 15 * 60;
 const SEND_LEASE_SECS: i64 = 120;
+const BUILD_ROUTE_SEND_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PeerSendError {
@@ -165,6 +166,14 @@ fn attempt(
     now: i64,
 ) -> anyhow::Result<Option<Result<SendReceipt, PeerSendError>>> {
     let conn = connection(root)?;
+    let pending: Option<String> = conn.query_row(
+        "SELECT payload FROM peer_message_outbox WHERE id=?1 AND state IN ('pending','retrying')",
+        [id], |row| row.get(0),
+    ).optional()?;
+    if let Some(payload) = pending {
+        let message: PeerSend = serde_json::from_str(&payload)?;
+        if reconcile_build_route(root, &message, false)? { return Ok(None); }
+    }
     // Atomic lease prevents simultaneous MCP and daemon retries from owning a
     // row. The cloud key also protects against a crash after cloud acceptance.
     let claimed: Option<(String, u32)> = conn
@@ -189,13 +198,22 @@ fn attempt(
             Ok(Some(Ok(receipt)))
         }
         Err(cause) => {
-            let retryable = retryable(&cause);
+            let retryable = retryable(&cause)
+                && !(message.dedupe_key.starts_with("build-route:") && attempts >= BUILD_ROUTE_SEND_ATTEMPTS);
             let state = if retryable { "retrying" } else { "abandoned" };
             let delay = (5_i64 * (1_i64 << attempts.saturating_sub(1).min(3))).min(30);
             conn.execute("UPDATE peer_message_outbox SET state=?2,last_error=?3,next_attempt_at=?4 WHERE id=?1 AND state='retrying' AND attempts=?5", params![id,state,cause,now+delay,attempts])?;
+            if !retryable { reconcile_build_route(root, &message, true)?; }
             Ok(Some(Err(failed(cause, retryable.then_some(id)))))
         }
     }
+}
+
+fn reconcile_build_route(root: &Path, message: &PeerSend, send_failed: bool) -> anyhow::Result<bool> {
+    if !message.dedupe_key.starts_with("build-route:") { return Ok(false); }
+    crate::factory_build_routing::reconcile_retry(
+        root, &message.sender_agent_id, &message.dedupe_key, send_failed,
+    ).map_err(anyhow::Error::msg)
 }
 
 fn retryable(cause: &str) -> bool {
@@ -245,6 +263,23 @@ pub(super) fn tick(root: &Path, session: &str) -> Result<(), String> {
 fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
     let conn = connection(root)?;
     conn.execute("UPDATE peer_message_outbox SET state='abandoned',last_error=COALESCE(last_error,'mailbox unavailable') || '; retry TTL expired' WHERE state IN ('pending','retrying') AND created_at<=?1 AND next_attempt_at<=?2", params![now-OUTBOX_TTL_SECS,now])?;
+    // Cancellation must not wait for next_attempt_at or another spawn. Also
+    // recover an expiry interrupted between the terminal outbox write and note.
+    let routes = {
+        let mut stmt = conn.prepare("SELECT id,payload,state='abandoned' AND attempts>0 AND COALESCE(last_error,'')!='build route expired; local admission restored' FROM peer_message_outbox WHERE cloud_id IS NULL AND (state IN ('pending','retrying') OR (state='abandoned' AND notice_sent=0)) AND json_valid(payload) AND json_extract(payload,'$.dedupe_key') LIKE 'build-route:%'")?;
+        stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut failed_routes = std::collections::HashSet::new();
+    for (id, payload, send_failed) in routes {
+        if let Err(error) = serde_json::from_str::<PeerSend>(&payload)
+            .map_err(anyhow::Error::from)
+            .and_then(|message| reconcile_build_route(root, &message, send_failed))
+        {
+            tracing::warn!(outbox_id = id, %error, "build-route revalidation failed; leaving ask pending");
+            failed_routes.insert(id);
+        }
+    }
     let notices = {
         let mut stmt = conn.prepare("SELECT id,sender_agent_id,sender_name,sender_session,recipient,last_error FROM peer_message_outbox WHERE state='abandoned' AND notice_sent=0")?;
         stmt.query_map([], |r| {
@@ -278,8 +313,10 @@ fn tick_at(root: &Path, _session: &str, now: i64) -> anyhow::Result<()> {
         }
     }
     let due = {
-        let mut stmt = conn.prepare("SELECT id FROM peer_message_outbox WHERE state IN ('pending','retrying') AND next_attempt_at<=?1 ORDER BY id LIMIT 2")?;
+        let mut stmt = conn.prepare("SELECT id FROM peer_message_outbox WHERE state IN ('pending','retrying') AND next_attempt_at<=?1 ORDER BY id")?;
         stmt.query_map(params![now], |r| r.get::<_, i64>(0))?
+            .filter(|row| match row { Ok(id) => !failed_routes.contains(id), Err(_) => true })
+            .take(2)
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for id in due {

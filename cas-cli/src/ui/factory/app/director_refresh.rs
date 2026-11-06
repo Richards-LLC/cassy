@@ -77,6 +77,7 @@ pub(crate) struct DirectorRefreshRequest {
 
 /// The result of a director refresh read.
 pub(crate) struct DirectorRefreshLoad {
+    qa_progress: Option<crate::qa_walk_progress::Report>,
     fingerprint: CasDbFingerprint,
     git_due: bool,
     director: DirectorLoad,
@@ -192,6 +193,7 @@ impl DirectorRefreshRequest {
         };
         let assignment = self.stall.as_ref().and_then(|stall| stall.assignment_request(fresh));
         DirectorRefreshLoad {
+            qa_progress: crate::qa_walk_progress::read(&self.cas_dir, self.session.as_deref(), chrono::Utc::now()).ok(),
             fingerprint,
             git_due: self.git_due,
             director,
@@ -215,6 +217,7 @@ impl DirectorRefreshRequest {
 /// What the delivery stage's fresh read needs.
 #[derive(Debug, Clone)]
 pub(crate) struct DeliveryRequest {
+    qa_needed: bool,
     cas_dir: PathBuf,
     worktree_root: Option<PathBuf>,
     project_id: Option<String>,
@@ -262,6 +265,7 @@ impl IdleLivenessRequest {
 /// The delivery stage's fresh read: the unfiltered snapshot events are
 /// revalidated against, and the `Blocks` dependencies that gate dispatch.
 pub(crate) struct DeliveryInputs {
+    pub(super) qa_progress: Option<crate::qa_walk_progress::Report>,
     pub(super) answered_blocked_workers: std::collections::HashSet<String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
@@ -286,6 +290,7 @@ impl DeliveryInputs {
     #[cfg(test)]
     pub(crate) fn failed_for_test() -> Self {
         Self {
+            qa_progress: None,
             answered_blocked_workers: Default::default(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
@@ -317,6 +322,32 @@ impl DeliveryInputs {
 
     pub(crate) fn into_data(self) -> anyhow::Result<DirectorData> {
         self.data
+    }
+}
+
+#[cfg(test)]
+mod qa_walk_tests {
+    use super::*;
+
+    #[test]
+    fn qa_advisory_prompt_uses_fresh_progress_and_retracts_after_the_walk_moves_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = FactoryApp::for_test();
+        app.cas_dir = crate::store::init_cas_dir(tmp.path()).unwrap();
+        let event = DirectorEvent::QaWalkAttention { key: "qa-flat:cas-walk:stamp".into(), text: "old".into() };
+        let mut inputs = app.delivery_request(&[event.clone()]).read(None);
+        inputs.qa_progress = Some(crate::qa_walk_progress::Report {
+            lines: vec![], advisories: vec![crate::qa_walk_progress::Advisory {
+                key: event.debounce_key(), text: "QA output flat: fresh result age; native execution is separate".into(),
+            }],
+        });
+        let (_, prompts, _) = app.revalidate_and_prompt_for_delivery_from(&[event.clone()], inputs);
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].text.contains("fresh result age"));
+        assert_eq!(prompts[0].target, app.supervisor_name);
+        let inputs = app.delivery_request(&[event.clone()]).read(None);
+        let (_, prompts, _) = app.revalidate_and_prompt_for_delivery_from(&[event], inputs);
+        assert!(prompts.is_empty(), "a resumed ledger must retract an old alarm");
     }
 }
 
@@ -383,6 +414,8 @@ impl DeliveryRequest {
             data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
             .map(|request| request.read());
         DeliveryInputs {
+            qa_progress: self.qa_needed.then(|| crate::qa_walk_progress::read(
+                &self.cas_dir, self.session.as_deref(), chrono::Utc::now()).ok()).flatten(),
             answered_blocked_workers: data.as_ref().ok().map(|fresh| fresh.agents.iter()
                 .filter(|agent| self.idle_workers.contains(&agent.name) || self.blocked_tasks.iter().any(|id|
                     fresh.ready_tasks.iter().any(|task| task.id == *id
@@ -723,8 +756,10 @@ impl FactoryApp {
             .any(|event| matches!(event, DirectorEvent::SupervisorStalled { .. }))
             .then(|| self.stall_evidence_request())
             .flatten();
-        let session = stall.as_ref().and(self.factory_session.clone());
+        let qa_needed = events.iter().any(|event| matches!(event, DirectorEvent::QaWalkAttention { .. }));
+        let session = (stall.is_some() || qa_needed).then(|| self.factory_session.clone()).flatten();
         DeliveryRequest {
+            qa_needed,
             blocked_tasks: events.iter().filter_map(|event| match event {
                 DirectorEvent::TaskBlocked { task_id, .. } => Some(task_id.clone()),
                 _ => None,
@@ -766,6 +801,10 @@ impl FactoryApp {
             return Ok(Vec::new());
         }
         let git_due = load.git_due;
+        let qa_events = self.event_detector.debounce_events(load.qa_progress.into_iter()
+            .flat_map(|report| report.advisories).map(|advisory| DirectorEvent::QaWalkAttention {
+                key: advisory.key, text: advisory.text,
+            }).collect(), Instant::now());
         if let Some(project_id) = load.project_id
             && let Some(stores) = self.director_stores.as_mut()
         {
@@ -816,6 +855,7 @@ impl FactoryApp {
                 let mut events: Vec<_> = timed("supervisor stall", || self.detect_supervisor_stall())
                     .into_iter().collect();
                 events.extend(self.merge_alert_retry_events_at(self.merge_alert_retries.clock()));
+                events.extend(qa_events);
                 return Ok(events);
             }
         };
@@ -851,6 +891,7 @@ impl FactoryApp {
                 .detect_changes(&self.unfiltered_director_data, self.epic_state.epic_id())
         });
         events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
+        events.extend(qa_events);
         let retries = self.merge_alert_retry_events_at(self.merge_alert_retries.clock());
         for retry in retries {
             if !events.iter().any(|event| match (event, &retry) {

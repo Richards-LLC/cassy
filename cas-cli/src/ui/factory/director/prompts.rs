@@ -1653,6 +1653,11 @@ pub fn generate_prompt_at(
     let worker_prefix = worker_cli.backend().capabilities().tool_prefix;
 
     match event {
+        DirectorEvent::QaWalkAttention { text, .. } => Some(Prompt {
+            merge_ready: false, merge_alert: None, target: supervisor_name.into(), text: text.clone(),
+            stall_nudge_task: None, retract_worker: None, retract_task: None, retract_epic: None,
+            drop_if_worker_assigned: None, durable_retry: false,
+        }),
         DirectorEvent::SupervisorStalled { .. } => None,
         DirectorEvent::TaskAssigned {
             task_id,

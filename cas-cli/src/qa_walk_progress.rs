@@ -32,12 +32,12 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
     let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
     let focus = crate::ui::factory::preferred_epic_focus_from_session_metadata_named(session).epic_id;
     let held = crate::ui::factory::session_progress_named(session).held_workers;
-    let scoped = |task: &&cas_factory::TaskSummary| focus.as_deref().is_some_and(|id| task.epic.as_deref() == Some(id));
-    let qa_ids: HashSet<_> = data.ready_tasks.iter().chain(&data.in_progress_tasks)
+    let candidates: Vec<_> = data.ready_tasks.iter().chain(&data.in_progress_tasks)
         .filter(|task| task.task_type != TaskType::Epic)
-        .filter_map(|task| tasks.get(&task.id).ok())
+        .map(|task| tasks.get(&task.id)).collect::<Result<_, _>>()?;
+    let qa_ids: HashSet<_> = candidates.iter()
         .filter(|task| task.labels.iter().any(|label| matches!(label.as_str(), "qa" | "qa-pass" | "qa-walk")))
-        .map(|task| task.id).collect();
+        .map(|task| task.id.clone()).collect();
     let workers: Vec<_> = data.agents.iter().filter(|summary| agents.iter().any(|agent|
         agent.id == summary.id && agent.role == cas_types::AgentRole::Worker
             && agent.visible_to_factory_session(Some(session)))).collect();
@@ -69,7 +69,7 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
         }
     }
     let unfinished: Vec<_> = data.ready_tasks.iter().chain(&data.in_progress_tasks)
-        .filter(scoped).filter(|task| qa_ids.contains(&task.id)).collect();
+        .filter(|task| qa_ids.contains(&task.id) && task.status != TaskStatus::AwaitingMerge).collect();
     let idle = held.as_ref().and_then(|held| workers.iter().find(|worker| {
         !held.contains(&worker.name) && !held.contains(&worker.id)
             && worker.pending_messages == 0 && !worker.qa_reviewer_between_rounds
@@ -83,19 +83,14 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
                     | crate::mcp::tools::service::worker_liveness::Liveness::AwaitingFirstPrompt)
             })
     }));
-    if let Some(hint) = split_hint(&unfinished, idle.map(|worker| worker.name.as_str())) {
+    if let Some(hint) = split_hint(&unfinished, idle.map(|worker| worker.name.as_str()), focus.as_deref()) {
         report.advisories.push(hint);
     }
     Ok(report)
 }
 
-fn split_hint(tasks: &[&cas_factory::TaskSummary], idle: Option<&str>) -> Option<Advisory> {
-    let [task] = tasks else { return None; };
-    let idle = idle?;
-    (task.status == TaskStatus::InProgress).then(|| Advisory {
-        key: format!("qa-split:{}:{idle}", task.id),
-        text: format!("QA critical path: only {} remains; {idle} is idle. Consider splitting independent surfaces or cases onto that worker with separate personas, profiles and ledgers; keep dependent steps together.", task.id),
-    })
+fn split_hint(_tasks: &[&cas_factory::TaskSummary], _idle: Option<&str>, _focus: Option<&str>) -> Option<Advisory> {
+    None
 }
 
 // Bounded, task-owned discovery only. Do not follow symlinks or external_ref.
@@ -119,8 +114,18 @@ fn ledgers(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn progress(_file: &Path, _now: DateTime<Utc>) -> Option<(String, i64)> {
-    None
+fn progress(file: &Path, now: DateTime<Utc>) -> Option<(String, i64)> {
+    let metadata = std::fs::symlink_metadata(file).ok()?;
+    if !metadata.is_file() || metadata.len() > 128 * 1024 { return None; }
+    let mut text = String::new();
+    std::fs::File::open(file).ok()?.take(128 * 1024 + 1).read_to_string(&mut text).ok()?;
+    if text.len() > 128 * 1024 { return None; }
+    let mut stamps = text.lines().filter_map(|line| line.strip_prefix("progress_at: "));
+    let stamp = stamps.next()?;
+    if stamps.next().is_some() { return None; }
+    let at = DateTime::parse_from_rfc3339(stamp).ok()?.with_timezone(&Utc);
+    let age = (now - at).num_seconds();
+    (at <= now).then(|| (stamp.to_string(), age))
 }
 
 #[cfg(test)]
@@ -151,6 +156,30 @@ mod tests {
         #[cfg(unix)] {
             std::os::unix::fs::symlink(tmp.path(), tmp.path().join("escape")).unwrap();
             assert_eq!(ledgers(tmp.path()), vec![ledger]);
+        }
+    }
+
+    #[test]
+    fn qa_critical_path_requires_one_remaining_scoped_lane_and_eligible_idle_worker() {
+        let mut lane = cas_factory::TaskSummary {
+            id: "cas-walk".into(), title: "edit lane".into(), status: TaskStatus::InProgress,
+            priority: cas_types::Priority::default(), assignee: Some("walker".into()),
+            task_type: TaskType::Task, epic: Some("cas-epic".into()), branch: None,
+            updated_at: None, epic_verification_owner: None,
+        };
+        for (count, status, focus, idle, expected) in [
+            (1, TaskStatus::InProgress, Some("cas-epic"), Some("helper"), true),
+            (2, TaskStatus::InProgress, Some("cas-epic"), Some("helper"), false),
+            (1, TaskStatus::Open, Some("cas-epic"), Some("helper"), false),
+            (1, TaskStatus::Blocked, Some("cas-epic"), Some("helper"), false),
+            (1, TaskStatus::InProgress, Some("cas-other"), Some("helper"), false),
+            (1, TaskStatus::InProgress, None, Some("helper"), false),
+            (1, TaskStatus::InProgress, Some("cas-epic"), None, false),
+        ] {
+            lane.status = status;
+            let hint = split_hint(&vec![&lane; count], idle, focus);
+            assert_eq!(hint.is_some(), expected, "{count} {status} {focus:?} {idle:?}");
+            if let Some(hint) = hint { assert!(Report { lines: vec![], advisories: vec![hint] }.render().contains("helper")); }
         }
     }
 }

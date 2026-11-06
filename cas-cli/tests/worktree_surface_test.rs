@@ -3182,11 +3182,12 @@ async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
             run_git(&["push", "--force-with-lease", "origin", branch], &peer);
             env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(remote.path()));
             if branch.ends_with("-r12") {
+                let target_before_refusal = git_stdout(&repo.root, &["rev-parse", "epic/peer"]);
                 let refusal = svc.factory(Parameters(request)).await
                     .expect_err("new authored work after a target sync still needs a park");
                 assert!(refusal.message.contains("does not match task"), "{refusal}");
                 assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
-                assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), before);
+                assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/peer"]), target_before_refusal);
                 env.set_current_dir(&fixture_cwd);
                 continue;
             }

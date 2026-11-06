@@ -269,7 +269,7 @@ mod handoff_tests {
     fn handoff_preserves_hidden_primary_and_alternate() {
         unsafe {
             let old = ghostty_vt_terminal_new(24, 4);
-            let data = b"history-1\r\nhistory-2\r\nhistory-3\r\nhistory-4\r\nhistory-5\x1b[?1049halt-screen";
+            let data = b"history-1\r\nhistory-2\r\nhistory-3\r\nhistory-4\r\nhistory-5\x1b[?1049h\x1b[Halt-screen";
             ghostty_vt_terminal_feed(old, data.as_ptr(), data.len());
             let state = ghostty_vt_terminal_handoff(old);
             assert!(!state.is_null());

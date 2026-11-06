@@ -76,3 +76,6 @@ pub(crate) mod progress_watchdog;
 mod supervisor_single_turn_tests;
 
 pub(crate) mod supervisor_commands;
+
+#[cfg(test)]
+mod reexec_tests;

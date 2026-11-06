@@ -86,14 +86,14 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .map_err(|error| error.to_string())?;
     if !output.status.success() {
         // cas-c5db: `merge-base --is-ancestor` answers "no" with an empty
-        // stderr; name the whole command and its exit so a refusal is actionable.
+        // stderr; name the whole command, its exit and the recovery next step.
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let detail = if stderr.is_empty() {
             format!("exited with {} and no stderr", output.status)
         } else {
             stderr
         };
-        return Err(format!("candidate `git {}`: {detail}", args.join(" ")));
+        return Err(format!("candidate `git {}`: {detail}. Next step: fetch origin, reconcile the source and target refs, then retry worktree_merge.", args.join(" ")));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

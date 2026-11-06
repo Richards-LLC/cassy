@@ -2780,6 +2780,7 @@ impl CasCore {
                             ),
                         ));
                     }
+                    let mut reset_start_base = false;
                     let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
                         let identity =
                             close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
@@ -2800,9 +2801,12 @@ impl CasCore {
                                 .map(|parked| parked.task_id)
                             },
                         ) {
-                            Ok(ReusedFactoryBranchStart::Reset) => Some(format!(
-                                "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
-                            )),
+                            Ok(ReusedFactoryBranchStart::Reset) => {
+                                reset_start_base = true;
+                                Some(format!(
+                                    "\n\n🔄 REUSED FACTORY BRANCH RESET: {worker_branch} was already merged into `{target_branch}` and was reset to that target before starting."
+                                ))
+                            }
                             Ok(ReusedFactoryBranchStart::MovedFromParked {
                                 task_id,
                                 tip,
@@ -2841,12 +2845,14 @@ impl CasCore {
                         None
                     };
                     // Persist only with the successful InProgress transition
-                    // below. Repeated starts must never advance this boundary.
+                    // below. Repeated starts preserve this boundary unless
+                    // reconciliation actually reset the lane to its target;
+                    // then the old base would attribute target history to it.
                     current_checkout_branch = Some(
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    if task.deliverables.factory_branch_start.is_none()
+                    if (task.deliverables.factory_branch_start.is_none() || reset_start_base)
                         && crate::factory_isolation::branch_at(worker_checkout).as_deref()
                             == Some(worker_branch.as_str())
                     {

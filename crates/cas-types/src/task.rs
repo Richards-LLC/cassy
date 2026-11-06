@@ -612,6 +612,11 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_target: Option<WorkTarget>,
 
+    /// A supervisor explicitly corrected this target. Matching an epic's
+    /// default branch no longer makes this binding implicitly inherited.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub work_target_pinned: bool,
+
     /// cas-3b42: a live supervisor cleared this no-code task's code target
     /// (`proof_scope_fix target_repo=""`). Only then is the task's work
     /// target absent by review rather than by default, so only commits that
@@ -772,6 +777,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     work_target: Option<WorkTarget>,
     #[serde(default)]
+    work_target_pinned: bool,
+    #[serde(default)]
     work_target_cleared: bool,
     #[serde(default)]
     pre_close_hook: Option<PreCloseHookEvidence>,
@@ -825,6 +832,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             source_claim_override: value.source_claim_override,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
+            work_target_pinned: value.work_target_pinned,
             work_target_cleared: value.work_target_cleared,
             pre_close_hook: value.pre_close_hook,
             negative_result: value.negative_result,
@@ -1234,6 +1242,7 @@ impl TaskDeliverables {
         self.epic_branch_origin.is_none()
             && self.split_takeover.is_none()
             && self.work_target.is_none()
+            && !self.work_target_pinned
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
             && self.evidence_only.is_none()
@@ -1844,6 +1853,7 @@ mod tests {
             branch: "factory/worker".into(),
             base_sha: "b".repeat(40),
         });
+        task.deliverables.work_target_pinned = true;
         assert!(
             !task.deliverables.is_empty(),
             "start evidence alone must persist"
@@ -1857,6 +1867,7 @@ mod tests {
             "a".repeat(40)
         );
         let decoded: Task = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.deliverables.work_target_pinned);
         assert_eq!(
             decoded.deliverables.historical_factory_branch_anchors,
             vec!["a".repeat(40)]
@@ -1867,6 +1878,7 @@ mod tests {
             task.deliverables.factory_branch_start
         );
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.work_target_pinned);
         assert!(legacy.historical_factory_branch_anchors.is_empty());
         assert!(legacy.factory_branch_start.is_none());
     }

@@ -1227,8 +1227,15 @@ mod supervisor_handoff_tests {
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         // Ordinary handoff mail was already delivered during the held startup.
         let context = format!("{held}\n{context}");
+        // GH #1487: integration alone does not prove the remaining close gates.
+        for gate in ["ledger", "upkeep", "branch attribution"] {
+            assert!(context.contains(gate), "recovery must disclose {gate}: {context}");
+        }
         for id in ["cas-recover-one", "cas-recover-two", "cas-recover-three", "cas-dedicated", "cas-tier-zero", "cas-tier-two", "cas-unreadable", "cas-override"] {
             assert!(context.contains(&format!("task action=close id={id}")), "each integrated delivery needs one actionable startup row: {context}");
+            let row = context.lines().find(|line| line.starts_with(&format!("- {id}:"))).unwrap();
+            let anchor = tasks.get(id).unwrap().deliverables.factory_branch_anchor.unwrap();
+            assert!(row.contains(&format!("commit_receipt={anchor}")), "recovery must supply its immutable delivery receipt: {row}");
             assert_eq!(tasks.get(id).unwrap().status, TaskStatus::AwaitingMerge, "startup must not close or adopt implicitly");
         }
         let tier_two_row = context.lines().find(|line| line.starts_with("- cas-tier-two:")).unwrap();

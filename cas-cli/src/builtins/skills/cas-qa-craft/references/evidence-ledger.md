@@ -1,15 +1,13 @@
 # Evidence ledger
 
-Create the task ledger with `cas qa ledger init --task <id>`. It prints the
-project-scoped path, includes predicted live journeys, and preserves existing
-evidence. No-code deliveries start with route exclusions; live routes start
-unexercised. Edit the scaffold as you walk.
+`cas qa ledger init --task <id>` preserves existing evidence and scaffolds schema 2:
+no-code exclusions, live journeys unexercised. Keep its eight columns and counts.
+In schema 2, graded runtime expectations cite `path:line`; PASS observations begin
+`visible:`, `terminal:` or `http:` with captured output. Database read-back only
+corroborates. Uncited expectations are spec questions. Legacy schema 1 stays valid.
 
-Run `cas qa ledger check <path> --task <id>` before close or review. The CLI,
-close gate and verifier share one parser for fields, counts, labels, breadth,
-defect ownership and readable PASS captures. Repair each line/row diagnostic.
-The executable owns the grammar; use its scaffold instead of a copied table.
-A passing check proves structure and readability, not the expected user outcome.
+Run `cas qa ledger check <path> --task <id>` before close/review. CLI, close and
+verifier share diagnostics. A structural PASS never proves the visible outcome.
 
 Name the build revision, scope, surface and budget. For a served app, record
 backend and frontend SHAs at walk start and end, including mixed builds

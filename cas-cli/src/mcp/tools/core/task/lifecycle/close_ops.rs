@@ -39563,7 +39563,7 @@ mod epic_status_gate_tests {
         // A retained-worktree scan can fail even when the child branch read
         // succeeded. Unknown local work must suppress that branch's all-clear.
         let collection = collect_epic_branch_statuses_with_options(
-            &subtasks[..1], "main", dir.path(), EpicStatusOptions::default(),
+            &subtasks[..1], "main", dir.path(), EpicStatusOptions::full_unbounded(),
         );
         for inventory_partial in [true, false] {
             let report = render_epic_status_collection(

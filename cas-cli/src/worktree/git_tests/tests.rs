@@ -802,18 +802,18 @@ fn test_run_command_bounded_kills_hung_process_and_returns_promptly() {
 }
 
 #[test]
-fn test_run_command_bounded_returns_output_for_fast_process() {
+fn test_run_command_bounded_drains_large_output() {
     // Both pipes exceed their capacity: waiting for exit or draining them
     // sequentially can deadlock the producer (cas-a7369).
     let mut cmd = Command::new("sh");
-    cmd.args(["-c", "head -c 262144 /dev/zero; head -c 262144 /dev/zero >&2"]);
+    cmd.args(["-c", "head -c 8388608 /dev/zero; head -c 8388608 /dev/zero >&2"]);
 
     let output =
         GitOperations::run_command_bounded(cmd, std::time::Duration::from_secs(5)).unwrap();
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, vec![0; 262144]);
-    assert_eq!(output.stderr, vec![0; 262144]);
+    assert_eq!(output.stdout, vec![0; 8388608]);
+    assert_eq!(output.stderr, vec![0; 8388608]);
 }
 
 #[test]

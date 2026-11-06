@@ -5014,6 +5014,7 @@ mod catalog_visibility_tests {
         ended.ended = Some(crate::ui::factory::SessionEndOutcome {
             at: "2026-11-01T10:00:00Z".into(), reason: "exit".into(),
             workers_stopped: vec![], orphans: vec![], unverified: vec![],
+            worker_states: vec![],
         });
         let all = vec![live, dead, empty, missing, crashed, ended];
         let visible = supervisor_sessions(all.clone(), false);

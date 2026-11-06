@@ -55,6 +55,7 @@ Options:
 EOF
 }
 
+original_args=("$@")
 base="main"
 kind="minor"
 explicit_version=""
@@ -471,10 +472,12 @@ fi
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! "$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
-        --inputs "$release_input_report" --first-child "$first_child"; then
-        say "release tracking unavailable; continuing the cut without reminders"
+    if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+        --inputs "$release_input_report" --first-child "$first_child" 2>&1)"; then
+        retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
+        die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi
+    [[ -z "$tracking" ]] || say "$tracking"
 fi
 publish_branch
 repo_slug="$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner)"

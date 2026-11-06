@@ -1995,7 +1995,13 @@ impl CasCore {
                     // checkout sitting on the PREVIOUS epic branch must not
                     // silently strand that epic's commits — base from it, or
                     // say plainly what was left out.
-                    let base_choice = git_ops.resolve_epic_base(&resolved.branch_ref);
+                    // A fresh release train starts at integration even when
+                    // the caller is still on the frozen train's checkout.
+                    let base_choice = if super::release_train::is_release_train(&task) {
+                        crate::worktree::git::EpicBaseChoice::plain(&resolved.branch_ref)
+                    } else {
+                        git_ops.resolve_epic_base(&resolved.branch_ref)
+                    };
                     let base_ref = base_choice.base_ref.clone();
                     let base_sha = if base_choice.used_head {
                         git_ops.ref_sha(&base_ref).unwrap_or_default()

@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 use cas_mux::SupervisorCli;
 use serde::Serialize;
+use sha2::Digest;
 
 use crate::builtins::{
     self, BUILTIN_GITIGNORE_BEGIN as IGNORE_BEGIN, BUILTIN_GITIGNORE_END as IGNORE_END,
@@ -300,9 +301,32 @@ pub(crate) struct Report {
 }
 
 const CONFLICT_RECORD: &str = "cache/managed-file-conflicts.json";
+const WRITE_RECORD: &str = "cache/managed-project-writes.json";
 
-/// Persist the last sync's blocking conflicts so SessionStart can report them;
-/// an unblocked sync clears the record (cas-3199). Unattended syncs otherwise
+fn prior_writes(root: &Path) -> BTreeMap<String, String> {
+    std::fs::read(root.join(".cas").join(WRITE_RECORD)).ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn fragment_hash(fragment: &str) -> String {
+    format!("{:x}", sha2::Sha256::digest(fragment.as_bytes()))
+}
+
+// Bootstrap the statusline migration on pre-receipt installs: an owned
+// field may still be HEAD's value while another already equals this writer.
+fn matches_settings_projection(local: &str, baseline: &str, expected: &str) -> bool {
+    let values: Result<Vec<serde_json::Value>, _> = [local, baseline, expected]
+        .into_iter().map(serde_json::from_str).collect();
+    let Ok(values) = values else { return false; };
+    let Some(local) = values[0].as_object() else { return false; };
+    let Some(baseline) = values[1].as_object() else { return false; };
+    let Some(expected) = values[2].as_object() else { return false; };
+    local.keys().chain(baseline.keys()).chain(expected.keys()).all(|key|
+        local.get(key) == baseline.get(key) || local.get(key) == expected.get(key))
+}
+
+/// Persist the last sync's preserved conflicts so SessionStart can report them;
+/// a sync without conflicts clears the record (cas-3199). Unattended syncs otherwise
 /// leave the refusal only in a timer journal nobody reads.
 pub(crate) fn record_conflicts(cas_root: &Path, conflicts: &[String]) -> Result<()> {
     let path = cas_root.join(CONFLICT_RECORD);
@@ -337,11 +361,12 @@ pub(crate) struct Reconcile {
 impl Reconcile {
     /// Preflight before any writer, including malformed documents, unmerged
     /// files, symlinks and local edits to a managed body. Conflicts are visible
-    /// and leave this project's files and index untouched.
+    /// and preserve each conflicting path in both the worktree and index.
     pub(crate) fn begin(root: &Path, harnesses: &[SupervisorCli]) -> Result<Option<Self>> {
         if authoring(root) || !git_root(root) {
             return Ok(None);
         }
+        let writes = prior_writes(root);
         let mut index = BTreeMap::new();
         let mut conflicts = Vec::new();
         let index_signature = git(root, &["ls-files", "--stage", "-z"])?;
@@ -399,18 +424,15 @@ impl Reconcile {
         let mut before = BTreeMap::new();
         for path in candidates {
             let absolute = root.join(&path);
-            if absolute
-                .ancestors()
-                .take_while(|p| *p != root)
-                .any(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()))
-            {
-                conflicts.push(path.clone());
+            if let Some(link) = absolute.ancestors().take_while(|p| *p != root)
+                .find(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())) {
+                conflicts.push(link.strip_prefix(root)?.to_string_lossy().into_owned());
                 continue;
             }
             let working = std::fs::read(&absolute).ok();
             let indexed = index.get(&path).map(|(_, b)| b);
             let baseline = committed.get(&path);
-            if let Some(bytes) = &working {
+            for bytes in working.iter().chain(indexed) {
                 if builtins::project_managed_body(&path)
                     && !text(bytes).is_ok_and(builtins::is_managed_by_cas)
                     && !builtins::matches_shipped_project_file(&path, bytes)
@@ -487,7 +509,7 @@ impl Reconcile {
                 }
             }
             if path == ".codex/config.toml" {
-                if let Some(bytes) = &working {
+                for bytes in working.iter().chain(indexed) {
                     match toml::from_str::<toml::Value>(text(bytes)?) {
                         Ok(v) if v.is_table() => {
                             for key in ["cs", "cas"] {
@@ -506,12 +528,13 @@ impl Reconcile {
             }
             before.insert(path, working);
         }
-        if conflicts.is_empty() {
+        {
             let mut dirty = Vec::new();
             for path in TRACKED
                 .iter()
                 .filter(|p| p.ends_with(".json") || p.ends_with(".toml"))
             {
+                if conflicts.iter().any(|conflict| conflict == path) { continue; }
                 let Some(Some(bytes)) = before.get(*path) else {
                     continue;
                 };
@@ -519,9 +542,12 @@ impl Reconcile {
                     .get(*path)
                     .map(|b| b.as_slice())
                     .unwrap_or_default();
-                let local = owned_fragment(path, bytes)?;
-                if local != owned_fragment(path, indexed)? {
-                    dirty.push((path, local));
+                let baseline = owned_fragment(path, indexed)?;
+                for candidate in std::iter::once(bytes.as_slice()).chain(index.get(*path).map(|(_, bytes)| bytes.as_slice())) {
+                    let local = owned_fragment(path, candidate)?;
+                    if local != baseline && writes.get(*path) != Some(&fragment_hash(&local)) {
+                        dirty.push((path, local));
+                    }
                 }
             }
             if !dirty.is_empty() {
@@ -529,10 +555,13 @@ impl Reconcile {
                     .iter()
                     .filter_map(|(p, b)| b.clone().map(|b| (p.clone(), b)))
                     .collect();
-                let projected = configuration_projection(root, &seed)?;
+                let projected = configuration_projection_excluding(root, &seed, &conflicts)?;
                 for (path, local) in dirty {
                     let expected = std::fs::read(projected.path().join(path)).unwrap_or_default();
-                    if local != owned_fragment(path, &expected)? {
+                    let expected = owned_fragment(path, &expected)?;
+                    let baseline = owned_fragment(path, committed.get(*path).map(Vec::as_slice).unwrap_or_default())?;
+                    if local != expected && !(*path == ".claude/settings.json"
+                        && matches_settings_projection(&local, &baseline, &expected)) {
                         conflicts.push((*path).to_string());
                     }
                 }
@@ -559,8 +588,12 @@ impl Reconcile {
         }))
     }
 
-    pub(crate) fn blocked(&self) -> bool {
-        !self.report.conflicts.is_empty()
+    pub(crate) fn allows(&self, path: &str) -> bool {
+        !self.report.conflicts.iter().any(|conflict| Path::new(path).starts_with(conflict))
+    }
+
+    pub(crate) fn exclusions(&self) -> Vec<PathBuf> {
+        self.report.conflicts.iter().map(|path| self.root.join(path)).collect()
     }
 
     pub(crate) fn finish(mut self, harnesses: &[SupervisorCli], cas_root: &Path) -> Result<Report> {
@@ -572,11 +605,23 @@ impl Reconcile {
                 .push("index changed during update; rerun cas update".into());
             return Ok(self.report);
         }
-        builtins::ensure_builtin_gitignore(root, harnesses)?;
+        if self.allows(".gitignore") { builtins::ensure_builtin_gitignore(root, harnesses)?; }
+        let mut writes = prior_writes(root);
+        for path in TRACKED.iter().filter(|path| self.allows(path)) {
+            if let Ok(bytes) = std::fs::read(root.join(path)) {
+                writes.insert((*path).to_string(), fragment_hash(&owned_fragment(path, &bytes)?));
+            }
+        }
+        let receipt = root.join(".cas").join(WRITE_RECORD);
+        let body = serde_json::to_vec(&writes)?;
+        if std::fs::read(&receipt).ok().as_deref() != Some(body.as_slice()) {
+            std::fs::create_dir_all(receipt.parent().unwrap())?;
+            std::fs::write(receipt, body)?;
+        }
         let paths = ignored_paths(root, harnesses);
         let mut changed = BTreeSet::new();
         for (path, (_, bytes)) in &self.index {
-            if ignored(path, &paths) || (!root.join(path).exists() && cassy_body(path, bytes)) {
+            if self.allows(".gitignore") && self.allows(path) && (ignored(path, &paths) || (!root.join(path).exists() && cassy_body(path, bytes))) {
                 git(root, &["update-index", "--force-remove", "--", path])?;
                 self.report.untracked += 1;
                 changed.insert(path.clone());
@@ -590,9 +635,9 @@ impl Reconcile {
             .iter()
             .map(|(p, (_, b))| (p.clone(), b.clone()))
             .collect();
-        let temp = configuration_projection(root, &seed)?;
+        let temp = configuration_projection_excluding(root, &seed, &self.report.conflicts)?;
         for path in TRACKED {
-            if ignored(path, &paths) {
+            if !self.allows(path) || ignored(path, &paths) {
                 continue;
             }
             let indexed = self
@@ -625,7 +670,7 @@ impl Reconcile {
         for path in [".env.worktree.template", "scripts/worktree-boot.sh"] {
             // These become project-owned after creation. Only a file this
             // invocation created may be committed automatically.
-            if !self.index.contains_key(path) {
+            if self.allows(path) && !self.index.contains_key(path) {
                 if let Ok(bytes) = std::fs::read(root.join(path)) {
                     let expected = if path.ends_with(".sh") {
                         crate::cli::factory_tooling::BOOT_SCRIPT
@@ -651,7 +696,7 @@ impl Reconcile {
             } else {
                 "current"
             }
-        } else if self.staged_before
+        } else if self.staged_before || !self.report.conflicts.is_empty()
             || pending.iter().any(|p| !changed.contains(p))
             || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
                 self.report.commit_warning = Some(
@@ -702,6 +747,7 @@ impl Reconcile {
                 }
             }
         };
+        if !self.report.conflicts.is_empty() { self.report.outcome = "partial"; }
         Ok(self.report)
     }
 
@@ -736,12 +782,13 @@ impl Reconcile {
     }
 }
 
-fn configuration_projection(
-    root: &Path,
-    seed: &BTreeMap<String, Vec<u8>>,
+fn configuration_projection_excluding(
+    root: &Path, seed: &BTreeMap<String, Vec<u8>>, excluded: &[String],
 ) -> Result<tempfile::TempDir> {
+    let allowed = |path: &str| !excluded.iter().any(|conflict| Path::new(path).starts_with(conflict));
     let temp = tempfile::tempdir()?;
     for path in TRACKED {
+        if !allowed(path) { continue; }
         if let Some(bytes) = seed.get(*path) {
             let dest = temp.path().join(path);
             std::fs::create_dir_all(dest.parent().unwrap())?;
@@ -752,10 +799,12 @@ fn configuration_projection(
     if let Ok(config) = std::fs::read(root.join(".cas/config.toml")) {
         std::fs::write(temp.path().join(".cas/config.toml"), config)?;
     }
-    crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?;
-    crate::cli::hook::configure_mcp_server(temp.path())?;
+    if allowed(".claude/settings.json") { crate::cli::hook::configure_claude_hooks_for_index(temp.path(), root)?; }
+    if allowed(".mcp.json") { crate::cli::hook::configure_mcp_server(temp.path())?; }
     if root.join(".codex").is_dir() {
-        crate::cli::hook::config_gen::configure_codex_mcp_server(temp.path())?;
+        crate::cli::hook::config_gen::configure_codex_project_files(
+            temp.path(), !allowed(".codex/config.toml"), !allowed(".codex/hooks.json"),
+        )?;
     }
     Ok(temp)
 }
@@ -902,6 +951,7 @@ pub(crate) fn drift(root: &Path, harnesses: &[SupervisorCli]) -> Result<usize> {
         count += 1;
     }
     for path in TRACKED {
+        if !plan.allows(path) { continue; }
         let Some(Some(bytes)) = plan.before.get(*path) else {
             continue;
         };

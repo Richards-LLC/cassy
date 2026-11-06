@@ -1157,6 +1157,17 @@ mod tests {
     use crate::verification::*;
 
     #[test]
+    fn finding_triage_defaults_to_theoretical_and_is_persisted() {
+        let issue = VerificationIssue::new("src/save.rs".into(), "correctness".into(), "Code-read finding".into());
+        let value = serde_json::to_value(&issue).unwrap();
+        assert_eq!(value["triage"]["reach"], "theoretical");
+        let mut wire = value;
+        wire["triage"] = serde_json::json!({"severity":"money", "reach":"main", "journey":"save", "repro":"save charged twice"});
+        let restored: VerificationIssue = serde_json::from_value(wire).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap()["triage"]["journey"], "save");
+    }
+
+    #[test]
     fn test_verification_status_from_str() {
         assert_eq!(
             VerificationStatus::from_str("approved").unwrap(),

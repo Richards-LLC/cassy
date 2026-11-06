@@ -4951,17 +4951,26 @@ mod related_recall_response_tests {
                 .unwrap();
             let parent = store.get_parent_epic(&child.id).unwrap().map(|t| t.id);
             let inherits = matches!(case, "default" | "standalone-active");
+            // cas-1896: with no eligible binding the follow-up rides the release train.
+            let train = parent
+                .as_deref()
+                .and_then(|id| store.get(id).ok())
+                .filter(super::super::release_train::is_release_train);
+            let rides_train =
+                matches!(case, "no-lease" | "expired" | "blocked" | "other-agent" | "empty-epic");
+            assert_eq!(train.is_some(), rides_train, "{case}: {response}");
+            let train_lane = train.as_ref().and_then(|t| t.branch.clone()).unwrap_or_default();
             let expected_epic = match case {
                 "default" => Some(epic.id.clone()),
                 "explicit-epic" => Some(alternate.id.clone()),
-                _ => None,
+                _ => train.as_ref().map(|t| t.id.clone()),
             };
             assert_eq!(parent, expected_epic, "{case}: {response}");
             let expected_branch = match case {
                 "default" | "standalone-active" => LANE,
                 "explicit-epic" => "epic/alternate-release",
                 "explicit-target" => "release/operator",
-                _ => "main",
+                _ => train_lane.as_str(),
             };
             assert_eq!(
                 child

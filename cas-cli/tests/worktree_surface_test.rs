@@ -3031,6 +3031,8 @@ async fn cas_e051_changed_candidate_inputs_cannot_reuse_an_approval() {
                 tasks.update(&task).unwrap();
             }
             "target" => {
+                // cas-d4b7 carries only an unchanged full-context patch. This
+                // conflicting add/add changes the reviewed input and must invalidate.
                 let target = fixture.cas_root.join("target-writer");
                 run_git(&["worktree", "add", target.to_str().unwrap(), "epic/rebound"], &fixture.repo.root);
                 std::fs::write(target.join("delivery.txt"), "Sibling changed the reviewed file\n").unwrap();
@@ -5108,6 +5110,14 @@ async fn queued_main_uses_pr_before_local_merge_without_dispatch_cas_d6cf() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn pr_only_peer_ask_holds_worktree_merge_until_answered_cas_91c0() {
+    for mode in ["peer-known", "peer-discovered"] {
+        protected_main_fixture_cas_d6cf(mode, false).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn queued_pr_with_changed_head_cannot_arm_auto_merge_cas_d6cf() {
     protected_main_fixture_cas_d6cf("moved", false).await;
 }
@@ -5139,7 +5149,8 @@ async fn protected_refusal_keeps_subsequent_target_progress_cas_d6cf() {
 
 #[cfg(unix)]
 async fn protected_main_fixture_cas_d6cf(mode: &str, cleanup: bool) {
-    let queued = matches!(mode, "queued" | "moved" | "probe_failed" | "lookup_failed");
+    let peer_ask = matches!(mode, "peer-known" | "peer-discovered");
+    let queued = peer_ask || matches!(mode, "queued" | "moved" | "probe_failed" | "lookup_failed");
     let moved = mode == "moved";
     let mut env = test_env();
     let repo = GitRepo::new();
@@ -5164,6 +5175,7 @@ done
     let mut task = Task::new("cas-d6cf".into(), "Protected default delivery".into());
     task.assignee = Some("bob".into());
     task.depth = TaskDepth::Light;
+    task.deliverables.delivery_pr_number = (mode == "peer-known").then_some(37);
     tasks.add(&task).unwrap();
     let worker = cas_root.join("worktrees/bob");
     repo.add_worktree(&worker, "factory/bob");
@@ -5224,13 +5236,55 @@ printf '%s\n' "$peer" > '{}'
     let operator_edit = "unrelated operator edit\n";
     std::fs::write(repo.root.join("README.md"), operator_edit).unwrap();
     env.set_current_dir(&repo.root);
-    let service = make_service(cas_root.clone());
+    let service = if peer_ask {
+        let mut supervisor = Agent::new("merge-supervisor".into(), "merge-supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        open_agent_store(&cas_root).unwrap().register(&supervisor).unwrap();
+        cas::store::open_prompt_queue_store(&cas_root).unwrap();
+        let conn = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        for (cloud_id, kind) in [("context-pr37", "status"), ("ask-pr37", "ask")] {
+            let payload = serde_json::json!({
+                "body": cas::cloud::peer_mailbox::attach_message_intent("Can you review PR #37?", Some(kind), false).unwrap(),
+                "recipient_agent_id": "peer",
+            });
+            conn.execute(
+                "INSERT INTO peer_message_outbox (sender_agent_id, sender_name, recipient, payload, state, created_at, next_attempt_at, cloud_id)
+                 VALUES ('merge-supervisor', 'merge-supervisor', 'reviewer@prowl', ?1, 'sent', strftime('%s','now') - 60, 0, ?2)",
+                rusqlite::params![payload.to_string(), cloud_id],
+            ).unwrap();
+        }
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        CasService::new(core, None)
+    } else {
+        make_service(cas_root.clone())
+    };
     let mut request = coord_req("worktree_merge");
     request.id = Some("factory/bob".into());
     request.task_id = Some(task.id.clone());
     request.allow_trunk = Some(true);
     request.cleanup = Some(cleanup);
-    let result = service.factory(Parameters(request.clone())).await;
+    let mut result = service.factory(Parameters(request.clone())).await;
+    if peer_ask {
+        let refused = result.expect_err("a PR-only peer ask must hold worktree_merge");
+        assert!(refused.message.contains("UNANSWERED PEER ASK") && refused.message.contains("ask-pr37"), "{refused:?}");
+        assert!(!armed.exists(), "an unanswered ask must never arm auto-merge");
+        assert_eq!(pr_exists.exists(), mode == "peer-discovered");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "main"]), before);
+        use cas::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, render_envelope};
+        let answer = PeerEnvelope {
+            id: "review-answer".into(), sender_name: "reviewer".into(), sender_agent_id: "peer".into(),
+            machine: "prowl".into(), session: None, repo: "protected".into(),
+            in_reply_to: Some("ask-pr37".into()), kind: Some(PeerMessageKind::Answer), scope: PeerScope::Project,
+        };
+        rusqlite::Connection::open(cas_root.join("cas.db")).unwrap().execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:reviewer@prowl', 'merge-supervisor', ?1)",
+            [format!("{}\nReview complete", render_envelope(&answer))],
+        ).unwrap();
+        // The answer releases the ask; the remaining kind=status note cannot hold it.
+        result = service.factory(Parameters(request.clone())).await;
+    }
     if matches!(mode, "probe_failed" | "lookup_failed") {
         let refusal = result.expect_err("an unknown queue state must refuse");
         // pin: the refusal must name the unknown queue so the supervisor retries.

@@ -19,7 +19,9 @@ Once per release, at the frozen tip after the fix-diff re-review, the supervisor
 builds a candidate, walks the combined batch matrix and records the reviewed
 revision.
 In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing. Until that receipt exists,
-a deferred delivery reports "waiting for batch receipt".
+a deferred delivery reports "waiting for batch receipt". The supervisor gets one
+offer per distinct uncovered delivery set. Advancing main alone stays quiet; a
+changed set receives an offer naming the current published tip in its receipt call.
 
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. A non-implementer walks the frozen-tip candidate (or

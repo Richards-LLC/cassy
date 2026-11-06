@@ -185,7 +185,12 @@ pub(super) fn prepare(
 }
 
 /// A server-side expected-head check prevents arming a PR that moved after review.
-pub(super) fn arm(repo: &Path, pr: &PullRequest) -> Result<(), String> {
+pub(super) fn arm(core: &crate::mcp::CasCore, repo: &Path, pr: &PullRequest, task_id: Option<&str>) -> Result<(), String> {
+    // PR preparation can discover its number after worktree_merge's first
+    // check. Recheck the same ask gate before enabling server-side publication.
+    if let Some(refusal) = core.peer_ask_merge_refusal(task_id, Some(pr.number)) {
+        return Err(refusal);
+    }
     gh(
         repo,
         &[

@@ -4222,6 +4222,20 @@ impl CasCore {
         }
     }
 
+    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>) -> Option<String> {
+        let caller = self.get_agent_id().ok()?;
+        let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
+        crate::peer_ask_gate::merge_refusal(
+            &self.cas_root,
+            &caller,
+            agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
+            agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
+            &crate::peer_ask_gate::MergeSubject {
+                task_id: task_id.map(str::to_string), pr, any_pr: false,
+            },
+        )
+    }
+
     /// Merge worktree back to parent
     ///
     /// Resolves `id` against System A first (the `WorktreeStore`-tracked,
@@ -4407,20 +4421,10 @@ impl CasCore {
             crate::phase_outcome::check(&cas_root, tasks.as_ref(), task_id, true)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
             // cas-bddf9: the merging supervisor's own unanswered ask to a
-            // peer about this task holds the merge until answered or
+            // peer about this task or its PR holds the merge until answered or
             // visibly overridden.
-            if let Ok(caller) = self.get_agent_id()
-                && let Some(refusal) = {
-                    let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
-                    crate::peer_ask_gate::merge_refusal(
-                        &cas_root,
-                        &caller,
-                        agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
-                        agent.as_ref().and_then(|agent| agent.factory_session.as_deref()),
-                        &crate::peer_ask_gate::MergeSubject { task_id: Some(task_id.to_string()), pr: None, any_pr: false },
-                    )
-                }
-            {
+            let pr = scoped_task.as_deref().and_then(|task| task.deliverables.delivery_pr_number);
+            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
             }
         }
@@ -4716,6 +4720,42 @@ impl CasCore {
         worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
             &self.cas_root, &worktree.parent_branch,
         );
+
+        // Both stored and inferred worktrees pass here. An explicit trunk
+        // override cannot move main around an open train; the release script
+        // publishes the train through its normal PR/merge-queue path instead.
+        let target = worktree.parent_branch.strip_prefix("refs/heads/")
+            .unwrap_or(&worktree.parent_branch);
+        let target = target.strip_prefix("origin/").unwrap_or(target);
+        let integration = Config::configured_epic_base_branch(&cwd)
+            .unwrap_or_else(|| manager.git().detect_default_branch());
+        if matches!(target, "main" | "master" | "trunk")
+            || target == integration || target == manager.git().detect_default_branch()
+        {
+            let tasks = self.open_task_store()?;
+            let mut trains = tasks.list(None).map_err(|error| Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Cannot check open release trains before worktree_merge: {error}"),
+            ))?;
+            trains.sort_by_key(|task| task.created_at);
+            if let Some(train) = trains.iter().find(|task| {
+                crate::mcp::tools::core::task::release_train::is_release_train(task)
+                    && !task.is_terminal()
+                    && task.deliverables.work_target.as_ref().is_some_and(|target| {
+                        crate::mcp::tools::core::task::repo_context::repo_answers_to(
+                            &cwd, &target.repo_selector,
+                        )
+                    })
+            }) {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                    "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \
+                     trunk while this train is open, including with allow_trunk=true. \
+                     Merge work into the train. For a one-item hotfix train, run \
+                     `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path.",
+                    train.id, train.effective_epic_branch().unwrap_or(&train.title),
+                )));
+            }
+        }
 
         // Bind this mutation to the task's declared work repository before
         // merge/reachability checks. A cleaned-up source is the sole
@@ -5542,7 +5582,7 @@ impl CasCore {
                         store.update_if_current(&next, &current)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
-                    super::protected_pr::arm(&cwd, &pr)
+                    super::protected_pr::arm(self, &cwd, &pr, task_id)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                     return Ok(Self::success(format!(
                         "{ci_prefix}PR queued: {} (source {} at {source}, target {}). Auto-merge enabled for this exact head; no local merge or default-branch push was attempted. Source worktree retained. The merge queue owns landing; Cassy reconciles the task after publication.",

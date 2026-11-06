@@ -886,6 +886,9 @@ impl CasService {
 
     // Rule implementations
     pub(super) async fn rule_create(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        if req.scope.as_deref() == Some("global") {
+            return self.create_personal_rule(req).await;
+        }
         use crate::mcp::tools::RuleCreateRequest;
         let inner_req = RuleCreateRequest {
             stakeholder: req.stakeholder,
@@ -969,8 +972,21 @@ impl CasService {
         self.inner.cas_rule_restore(Parameters(inner_req)).await
     }
 
-    pub(super) async fn rule_list(&self, _req: RuleRequest) -> Result<CallToolResult, McpError> {
-        self.inner.cas_rules_list().await
+    pub(super) async fn rule_list(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let mut result = self.inner.cas_rules_list().await?;
+        let patterns = serde_json::from_value(serde_json::json!({
+            "action": "list", "status": "active", "limit": req.limit.unwrap_or(50),
+        })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        match self.pattern_list(patterns).await {
+            Ok(personal) => {
+                result.content.push(Content::text("Source: personal pattern (Cassy Cloud)"));
+                result.content.extend(personal.content);
+            }
+            Err(error) => result.content.push(Content::text(format!(
+                "Personal pattern source unavailable: {}", error.message
+            ))),
+        }
+        Ok(result)
     }
 
     pub(super) async fn rule_list_all(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {

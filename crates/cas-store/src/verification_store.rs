@@ -1518,6 +1518,122 @@ pub fn timeout_verification_dispatch(
     Ok(Some(timed_out))
 }
 
+/// cas-d4b7: move one active dispatch's deadline to `extend_to` while its
+/// verifier is still progressing. The deadline never passes
+/// `requested_at + hard_cap`, never shortens, and a resolved, timed-out or
+/// invalidated dispatch is never revived. Returns the extended dispatch.
+pub fn extend_verification_dispatch_deadline(
+    cas_dir: &Path,
+    dispatch_id: &str,
+    now: DateTime<Utc>,
+    extend_to: DateTime<Utc>,
+    hard_cap: Duration,
+) -> Result<Option<VerificationDispatch>> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let deadline = extend_to.min(dispatch.requested_at + hard_cap);
+    if !matches!(
+        dispatch.state,
+        VerificationDispatchState::Pending | VerificationDispatchState::Claimed
+    ) || deadline <= now
+        || deadline <= dispatch.deadline_at
+    {
+        tx.commit()?;
+        return Ok(None);
+    }
+    let changed = tx.execute(
+        "UPDATE verification_dispatches SET deadline_at = ?2
+         WHERE id = ?1 AND state IN ('pending', 'claimed') AND deadline_at = ?3",
+        params![
+            dispatch.id,
+            deadline.to_rfc3339(),
+            dispatch.deadline_at.to_rfc3339()
+        ],
+    )?;
+    let extended = (changed == 1)
+        .then(|| get_verification_dispatch_with_conn(&tx, dispatch_id))
+        .transpose()?;
+    tx.commit()?;
+    Ok(extended)
+}
+
+/// cas-d4b7: carry one exact approved verdict to a new candidate proof whose
+/// delivered patch the caller proved identical. In one transaction the prior
+/// cycle is retired, a new dispatch is bound to `boundary` and resolved, and a
+/// system-provenance approval naming the prior verdict (the `receipt`) is
+/// recorded on it. No verifier is dispatched. Only the latest task-only
+/// repository cycle, resolved with that exact approval, can be rebound.
+pub fn rebind_approved_verification_dispatch(
+    cas_dir: &Path,
+    prior_dispatch_id: &str,
+    prior_verdict_id: &str,
+    requester_agent_id: &str,
+    owner_agent_id: &str,
+    boundary: &VerificationProofBoundary,
+    receipt: &str,
+) -> Result<(VerificationDispatch, Verification)> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let prior = get_verification_dispatch_with_conn(&tx, prior_dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, &prior.task_id)?;
+    let verdict: Option<(String, String)> = tx
+        .query_row(
+            "SELECT id, status FROM verifications WHERE dispatch_id = ?1
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![prior.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    if latest.as_ref().map(|latest| latest.id.as_str()) != Some(prior.id.as_str())
+        || prior.state != VerificationDispatchState::Resolved
+        || prior.receipt_id.is_some()
+        || prior.delivery_transaction_id.is_some()
+        || prior.repository.is_none()
+        || boundary.receipt_id.is_some()
+        || boundary.delivery_transaction_id.is_some()
+        || boundary.repository.is_none()
+        || verdict.as_ref().map(|(id, status)| (id.as_str(), status.as_str()))
+            != Some((prior_verdict_id, VerificationStatus::Approved.storage_status()))
+    {
+        return Err(StoreError::Parse(
+            "verdict rebind requires the latest task-only dispatch resolved with this exact approval"
+                .to_string(),
+        ));
+    }
+    let now = Utc::now();
+    tx.execute(
+        "UPDATE verification_dispatches SET state = 'invalidated' WHERE id = ?1 AND state = 'resolved'",
+        params![prior.id],
+    )?;
+    let mut dispatch = create_verification_dispatch_bound_in_transaction(
+        &tx,
+        &prior.task_id,
+        requester_agent_id,
+        owner_agent_id,
+        boundary,
+        now,
+        false,
+    )?;
+    tx.execute(
+        "UPDATE verification_dispatches SET state = 'resolved', resolved_at = ?2 WHERE id = ?1",
+        params![dispatch.id, now.to_rfc3339()],
+    )?;
+    dispatch.state = VerificationDispatchState::Resolved;
+    dispatch.resolved_at = Some(now);
+    let mut verification = Verification::new(store.generate_id()?, prior.task_id.clone());
+    verification.agent_id = Some(owner_agent_id.to_string());
+    verification.issuer_agent_id = Some(requester_agent_id.to_string());
+    verification.provenance = VerificationProvenance::System;
+    verification.dispatch_id = Some(dispatch.id.clone());
+    verification.status = VerificationStatus::Approved;
+    verification.summary = receipt.to_string();
+    verification.created_at = now;
+    insert_verification_with_conn(&tx, &verification)?;
+    tx.commit()?;
+    Ok((dispatch, verification))
+}
+
 /// Invalidate a reusable resolved proof cycle when task rework begins.
 pub fn invalidate_verification_dispatch_for_new_cycle(
     cas_dir: &Path,

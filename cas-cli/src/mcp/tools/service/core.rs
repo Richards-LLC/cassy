@@ -265,7 +265,8 @@ impl CasService {
             &self.inner.load_config().qa().user_facing_labels,
         )
         .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-        // cas-0ad8: the review spawn threshold, for every project and role.
+        // Record finding provenance for every project and role; missing runtime
+        // evidence stays theoretical, and severity × reach derives priority.
         let reviewer_origin = self.caller_review_origin();
         let finding_origin = crate::mcp::tools::core::task::lifecycle::review_loop::spawn_gate(
             &crate::mcp::tools::core::task::lifecycle::review_loop::SpawnRequest {

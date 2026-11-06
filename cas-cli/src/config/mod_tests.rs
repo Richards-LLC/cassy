@@ -1087,6 +1087,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.worker_denied_mcp_tools", " *vercel*, mcp__neon__* ", "*vercel*,mcp__neon__*"),
         ("factory.design_review_bug_threshold", "3", "3"),
         ("factory.design_review_window_hours", "24", "24"),
+        ("factory.release_train_max_age_hours", "5", "5"),
         ("factory.supervisor_message_debounce_secs", "12", "12"),
         ("factory.supervisor_message_wakes_per_hour", "4", "4"),
         ("factory.message_max_chars", "3000", "3000"),

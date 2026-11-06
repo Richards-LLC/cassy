@@ -208,6 +208,10 @@ impl Config {
                 factory.design_review_window_hours.to_string(),
             ),
             (
+                "factory.release_train_max_age_hours".to_string(),
+                factory.release_train_max_age_hours.to_string(),
+            ),
+            (
                 "factory.supervisor_message_debounce_secs".to_string(),
                 factory.supervisor_message_debounce_secs.to_string(),
             ),

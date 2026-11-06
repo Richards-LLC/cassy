@@ -2551,7 +2551,7 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()),
             "cas-9533: first park must bind the pushed, validated HEAD, not the earlier attributed merge: {text}");
-        assert_eq!(parked.pre_close_hook_evidence.as_ref().and_then(|proof| proof.task_tip.as_deref()), Some(head.as_str()));
+        assert_eq!(parked.deliverables.pre_close_hook.as_ref().and_then(|proof| proof.task_tip.as_deref()), Some(head.as_str()));
         env.set_current_dir(&f.repo.root);
         let mut merge = coord_req("worktree_merge");
         merge.id = Some(f.branch.clone());

@@ -161,6 +161,8 @@ pub(crate) fn read(
         .and_then(|held| workers.iter().find(|worker| {
         !held.contains(&worker.name) && !held.contains(&worker.id)
             && worker.pending_messages == 0 && !worker.qa_reviewer_between_rounds
+            && crate::store::open_prompt_queue_store(cas_dir).ok().is_some_and(|queue|
+                queue.peek_for_targets(&[&worker.name, &worker.id], Some(session), 1).is_ok_and(|rows| rows.is_empty()))
             && worker.current_task.is_none() && worker.active_lease.is_none()
             && !data.ready_tasks.iter().chain(&data.in_progress_tasks).any(|task|
                 task.assignee.as_deref().is_some_and(|id| id == worker.id || id == worker.name))
@@ -441,7 +443,7 @@ mod tests {
             if case == "pending message" {
                 crate::store::open_prompt_queue_store(&cas_dir)
                     .unwrap()
-                    .enqueue_with_session("supervisor", "helper", "reserved work", Some(session))
+                    .enqueue_with_session("supervisor", "helper", "reserved work", session)
                     .unwrap();
             }
             let report = read(&cas_dir, Some(session), now).unwrap();

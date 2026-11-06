@@ -28,6 +28,7 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
+   The train's ready-to-cut notice prompts this preparation after review.
 2. Check out the train lane, then run `scripts/release.sh` with an installed
    Cassy that has `release context`, `release track` and `release installed`
    (`CAS_BIN` selects a candidate for the first cut). It validates the canonical
@@ -43,9 +44,9 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    duplicate CI/PR watcher. A missing admission is exit 3; resolve the named
    queue failure in one batch and rerun. If another version landed first,
    rerunning merges it and takes the next version. Exit 4 names a code conflict:
-   resolve it on the train, push and rerun. When one train child is the cause,
-   `cas factory train drop <task> --reason "<failing job>"` is the repair cycle:
-   it reverts the child, returns it to its worker and re-enqueues the train.
+   resolve it on the train, push and rerun. When train children are the cause,
+   `cas factory train drop <task>... --reason "<failing job>"` is the repair cycle:
+   it reverts them all, returns each to its worker and re-enqueues the train once.
    A second ejection is an operator P0.
 4. The merge queue runs required checks and starts Release Prebuild for the
    exact release tree. Commander journey shards run only for web product inputs.

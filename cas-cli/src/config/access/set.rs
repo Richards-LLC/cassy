@@ -492,6 +492,11 @@ impl Config {
                 let gate = value.trim();
                 factory.worker_local_gate = (!gate.is_empty()).then(|| gate.to_string());
             }
+            "factory.release_command" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let command = value.trim();
+                factory.release_command = (!command.is_empty()).then(|| command.to_string());
+            }
             "factory.scratch_root" => {
                 let root = value.trim();
                 if !root.is_empty() && !std::path::Path::new(root).is_absolute() {

@@ -877,6 +877,12 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_local_gate: Option<String>,
 
+    /// cas-d9d3c: the command that cuts or promotes a release from the
+    /// release train, named in the "train ready to cut" notice; never run by
+    /// Cassy. Unset names `scripts/release.sh` when the repository has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_command: Option<String>,
+
     /// Operator-only automatic supervisor replies in local history. Terminal
     /// questions and explicit operator messages are recorded separately. This
     /// does not enroll a cloud audience. Set false to opt out; re-enabling
@@ -1334,6 +1340,7 @@ impl Default for FactoryConfig {
             artifacts_root: None,
             scratch_root: None,
             worker_local_gate: None,
+            release_command: None,
             commander_mirror_enabled: true,
             design_review_bug_threshold: default_design_review_bug_threshold(),
             design_review_window_hours: default_design_review_window_hours(),

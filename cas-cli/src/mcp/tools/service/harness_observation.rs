@@ -810,9 +810,6 @@ mod tests {
                 r#"{"timestamp":"2026-07-31T20:01:02Z","type":"user","isSidechain":false,"message":{"role":"user","content":"<teammate-message teammate_id=\"supervisor\">interrupt now</teammate-message>"}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:03Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"text","text":"ack"}]}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:04Z","type":"system","subtype":"turn_duration"}"#,
-                r#"{"timestamp":"2026-07-31T20:01:05Z","type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>"}}"#,
-                r#"{"timestamp":"2026-07-31T20:01:06Z","type":"user","message":{"role":"user","content":"<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>reconnect cas</command-args>"}}"#,
-                r#"{"timestamp":"2026-07-31T20:01:07Z","type":"user","message":{"role":"user","content":"<local-command-stdout>Successfully reconnected to cas</local-command-stdout>"}}"#,
             ],
         );
 
@@ -857,6 +854,9 @@ mod tests {
                 r#"{"timestamp":"2026-07-31T20:01:02Z","type":"user","isSidechain":false,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:03Z","type":"assistant","isSidechain":false,"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"done"}]}}"#,
                 r#"{"timestamp":"2026-07-31T20:01:04Z","type":"system","subtype":"turn_duration"}"#,
+                r#"{"timestamp":"2026-07-31T20:01:05Z","type":"user","isMeta":true,"message":{"role":"user","content":"<local-command-caveat>The command below was run directly in Claude Code</local-command-caveat>"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:06Z","type":"user","message":{"role":"user","content":"<command-name>/mcp</command-name><command-message>mcp</command-message><command-args>reconnect cas</command-args>"}}"#,
+                r#"{"timestamp":"2026-07-31T20:01:07Z","type":"user","message":{"role":"user","content":"<local-command-stdout>Successfully reconnected to cas</local-command-stdout>"}}"#,
             ],
         );
 

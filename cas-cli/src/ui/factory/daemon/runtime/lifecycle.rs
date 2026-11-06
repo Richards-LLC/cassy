@@ -5865,6 +5865,95 @@ async fn persist_communication_session_summary(cas_dir: std::path::PathBuf, sess
 #[cfg(test)]
 mod communication_summary_tests {
     #[tokio::test]
+    async fn supervisor_exit_reports_and_releases_unfinished_worker_cas_affc() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let repo = project.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join("work.txt"), "parked\n").unwrap();
+        git(&["add", "work.txt"]);
+        git(&["commit", "-m", "parked"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["remote", "add", "origin", "https://example.invalid/fixture.git"]);
+        std::fs::write(repo.join("work.txt"), "unfinished\n").unwrap();
+        git(&["commit", "-am", "local only"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(repo.join("dirty.txt"), "keep this\n").unwrap();
+        // Ignore the store so the only dirty input is the operator's file.
+        std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let session = daemon.session_name.clone();
+        let metadata = crate::ui::factory::session::create_metadata(
+            &session, std::process::id(), &supervisor, &[], None, None, None,
+        );
+        daemon.session_manager.save_daemon_metadata(metadata, &root).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut lead = cas_types::Agent::new("lead-affc".into(), supervisor.clone());
+        lead.role = cas_types::AgentRole::Supervisor;
+        lead.factory_session = Some(session.clone());
+        agents.register(&lead).unwrap();
+        crate::supervisor_continuity::record_end(&root, &lead.id, Some("prompt_input_exit")).unwrap();
+        let worker = "unfinished-worker";
+        let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+            command: "/bin/sleep".into(), args: vec!["300".into()], cwd: Some(repo.to_path_buf()),
+            env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let worker_pid = pty.process_group_id().unwrap();
+        daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        let mut agent = cas_types::Agent::new("worker-affc".into(), worker.into());
+        agent.role = cas_types::AgentRole::Worker;
+        agent.factory_session = Some(session.clone());
+        agent.pid = Some(worker_pid);
+        agent.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&agent).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-unfinished".into(), "Unfinished work".into());
+        task.assignee = Some(worker.into());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        agents.try_claim(&task.id, &agent.id, 1800, None).unwrap();
+        daemon.listener.set_nonblocking(true).unwrap();
+        let mut client = UnixStream::connect(root.join("test.sock")).unwrap();
+        daemon.accept_clients().unwrap();
+        daemon.handle_mux_event(cas_mux::MuxEvent::PaneExited {
+            pane_id: supervisor, exit_code: Some(0), exit_signal: None,
+        }).await;
+        assert!(daemon.shutdown.load(std::sync::atomic::Ordering::Relaxed));
+        daemon.cleanup().await.unwrap();
+        let receipt = daemon.session_manager.ended_sessions().unwrap().remove(0);
+        drop(daemon);
+        let mut output = String::new();
+        client.read_to_string(&mut output).unwrap();
+        let recovered = tasks.get(&task.id).unwrap();
+        let mut failures = Vec::new();
+        if !(output.contains(worker) && output.contains(&task.id)
+            && output.contains("dirty_files=1") && output.contains("unpushed_commits=1")
+            && output.contains("stopped")) {
+            failures.push(format!("missing terminal teardown evidence: {output:?}"));
+        }
+        if recovered.status != cas_types::TaskStatus::Open || recovered.assignee.is_some() {
+            failures.push(format!("task stranded: {:?} {:?}", recovered.status, recovered.assignee));
+        }
+        if receipt.ended.reason != "prompt_input_exit" {
+            failures.push(format!("wrong exit reason: {}", receipt.ended.reason));
+        }
+        assert_eq!(std::fs::read_to_string(repo.join("dirty.txt")).unwrap(), "keep this\n");
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[tokio::test]
     async fn idle_control_ticks_adopt_staged_cleanup_cas_70a2() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();

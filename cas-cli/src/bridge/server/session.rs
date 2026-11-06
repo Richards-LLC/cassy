@@ -139,6 +139,7 @@ pub(crate) fn build_status_json(
         crate::cloud::resolve_canonical_id(cas_root).as_deref(),
     )?;
 
+    let counts = epic_counts(&data);
     let mut activity = data.activity;
     filter_events_for_session_agents(&mut activity, &allowed);
     let activity_limit = activity_limit.clamp(1, 200);
@@ -161,7 +162,6 @@ pub(crate) fn build_status_json(
     let agents = session_agents(session, cas_root, task_store.as_ref(), &held)?;
 
     let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
-    let counts = epic_counts(&data);
 
     let queue = open_prompt_queue_store(cas_root)?;
     let pending = queue.pending_count()?;

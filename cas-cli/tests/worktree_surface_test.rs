@@ -2543,12 +2543,22 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         }
         let head = git_stdout(&f.worker, &["rev-parse", "HEAD"]);
         run_git(&["push", "origin", &f.branch], &f.worker);
+        let local_before = git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]);
+        let remote_before = git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
         env.set_current_dir(&f.worker);
         let closed = delivery_service(&f.cas_root, "rebound-worker").task(Parameters(task_req(serde_json::json!({
             "action": "close", "id": task.id, "reason": format!("PASS {head}: fixture proof"),
         })))).await.unwrap();
         let text = get_text(&closed);
         let parked = tasks.get(&task.id).unwrap();
+        if continuation == "foreign" {
+            assert_eq!(parked.status, TaskStatus::InProgress, "{text}");
+            assert!(text.contains("DELIVERY BRANCH UNRESOLVED"), "{text}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
+            assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);
+            assert_eq!(git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), remote_before);
+            continue;
+        }
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
         env.set_current_dir(&f.repo.root);
         let mut merge = coord_req("worktree_merge");
@@ -2557,8 +2567,6 @@ async fn cas_9533_first_park_binds_pushed_freshness_and_generated_head() {
         merge.cleanup = Some(false);
         if continuation != "generated" {
             assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(attributed.as_str()));
-            let local_before = git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]);
-            let remote_before = git_stdout(f.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]);
             let refused = f.service.factory(Parameters(merge)).await.expect_err("foreign continuation must never land");
             assert!(refused.message.contains("PARKED DELIVERY SOURCE MOVED"), "{continuation}: {refused}");
             assert_eq!(git_stdout(&f.repo.root, &["rev-parse", "epic/rebound"]), local_before);

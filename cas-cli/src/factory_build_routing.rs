@@ -158,6 +158,49 @@ fn expire(
     Ok(())
 }
 
+/// Revalidate unsent asks at mailbox duty, independently of another spawn.
+pub(crate) fn reconcile_retry(root: &Path, sender: &str, key: &str, send_failed: bool) -> Result<bool, String> {
+    let task_id = key.rsplit(':').next().ok_or("build route has no task id")?;
+    let tasks = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
+    let expected = match tasks.get(task_id) {
+        Ok(task) => task,
+        Err(crate::store::StoreError::TaskNotFound(_) | crate::store::StoreError::NotFound(_)) => {
+            crate::cloud::peer_mailbox::cancel_build_route(root, sender, key)?;
+            return Ok(true);
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    let plan = expected.notes.lines().find_map(|line| {
+        serde_json::from_str::<RoutePlan>(line.strip_prefix(ROUTE_MARKER)?).ok()
+            .filter(|plan| plan.key == key && plan.sender_agent_id == sender)
+    });
+    let Some(plan) = plan else {
+        crate::cloud::peer_mailbox::cancel_build_route(root, sender, key)?;
+        return Ok(true);
+    };
+    let enabled = crate::config::Config::load(root).map_err(|error| error.to_string())?.factory().auto_route_builds;
+    let conn = rusqlite::Connection::open(root.join("cas.db")).map_err(|error| error.to_string())?;
+    cas_store::shared_db::install_busy_handler(&conn).map_err(|error| error.to_string())?;
+    // Batch spawns reserve a task before a worker has an assignee. Bound
+    // backlogs retain that reservation after the spawn request is processed.
+    let queued: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM spawn_queue s LEFT JOIN spawn_task_queues q ON q.request_id=s.id
+         WHERE s.action='spawn' AND (s.processed_at IS NULL OR s.spawn_state IN ('queued','provisioning','launched'))
+         AND (s.task_id=?1 OR EXISTS(SELECT 1 FROM json_each(q.task_ids) WHERE value=?1)))
+         OR EXISTS(SELECT 1 FROM worker_task_queues w WHERE json_extract(w.state,'$.current_task')=?1
+         OR EXISTS(SELECT 1 FROM json_each(w.state,'$.pending') WHERE value=?1))",
+        [task_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let cause = if send_failed { "send_failed" }
+        else if !enabled { "routing_disabled" }
+        else if expected.assignee.is_some() || expected.status != cas_types::TaskStatus::Open || queued { "staffed_locally" }
+        else { return Ok(false) };
+    let mut task = expected.clone();
+    expire(root, &mut task, &plan, cause)?;
+    tasks.update_if_current(&task, &expected).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn prepare(
     root: &Path,
     sender: &cas_types::Agent,
@@ -325,10 +368,13 @@ pub(crate) fn route(
                 .map_err(|error| error.to_string())?;
             Ok(None)
         }
-        Err(error) => Err(format!(
-            "Build route to {} retained; local dispatch withheld: {error}",
-            plan.recipient
-        )),
+        Err(error) => {
+            let current = tasks.get(task_id).map_err(|error| error.to_string())?;
+            if current.notes.lines().any(|line| line.starts_with(&format!("{EXPIRED_MARKER}{} ", plan.key))) {
+                return Ok(None);
+            }
+            Err(format!("Build route to {} retained; local dispatch withheld: {error}", plan.recipient))
+        }
     }
 }
 

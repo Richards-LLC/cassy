@@ -280,7 +280,11 @@ def verify_deliveries(base_ref, notes=None):
             git('fetch', '--quiet', '--no-tags', remote, f'+refs/heads/{name}:{resolved}')
         epic_history.setdefault(branch(resolved), set()).update(git('rev-list', resolved).splitlines())
     try:
-        floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', base_ref)
+        # Main may already have published this candidate under a newer queue
+        # merge. Inventory the candidate's own interval, not main's later tag.
+        floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', 'HEAD')
+        if git('rev-parse', f'{floor}^{{commit}}') == git('rev-parse', 'HEAD'):
+            floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', 'HEAD^')
     except ChangelogError:
         floor = base_ref  # Legacy/local fixture without release tags.
     previous = set(git('rev-list', floor).splitlines())

@@ -152,6 +152,10 @@ class CompletionTests(unittest.TestCase):
         f.git("checkout", "release-source")
         (f.worktree / "main-late.rs").write_text("main delivery after freeze\n")
         main_late = f.commit("main delivery included in candidate")
+        f.git("checkout", "main")
+        f.git("merge", "--no-ff", "release-source", "-m", "queue lands candidate after freeze")
+        f.git("tag", "v1.1.0")
+        f.git("checkout", "release-source")
         store = f.root / "task-store"
         store.mkdir()
         with sqlite3.connect(store / "cas.db") as db:
@@ -169,7 +173,7 @@ class CompletionTests(unittest.TestCase):
         report = f.root / "inputs.json"
         def audit(*extra):
             return subprocess.run([sys.executable, str(ROOT / "release_changelog.py"),
-                "verify-deliveries", base, *extra], cwd=f.worktree,
+                "verify-deliveries", "main", *extra], cwd=f.worktree,
                 env={**f.env, "CAS_ROOT": str(store),
                      "CAS_RELEASE_CONTEXT_JSON": json.dumps({"release_inputs": inputs})},
                 capture_output=True, text=True)

@@ -554,6 +554,9 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
             "type":"user", "timestamp":chrono::Utc::now().to_rfc3339(),
             "message":{"role":"user", "content":row.prompt}
         }))).unwrap();
+        assert_eq!(super::supervisor_commands::supervisor_transcript(
+            &cas, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude,
+        ), Some(path), "registered supervisor account and native session select the transcript");
         daemon.normal_delivery_probes.get_mut(&row.id).unwrap().next_check_at = Some(Instant::now());
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {

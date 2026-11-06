@@ -53,11 +53,11 @@ on:
 
 # cas-12ab: a newer push to the same factory/* branch cancels the run it
 # supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Every
-# other event gets a group of its own (the run id), so main, epic, tag, merge
-# queue, PR, schedule and manual runs are never queued or cancelled by this.
+# release-train push also replaces its older tip. Other events keep a run-id
+# group, so main, ordinary epics, tags and the merge queue remain independent.
 concurrency:
-  group: ${{ startsWith(github.ref, 'refs/heads/factory/') && format('ci-factory-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') }}
+  group: ${{ (startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && format('ci-branch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -260,7 +260,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
@@ -293,7 +294,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: ci-diff
     runs-on: ubuntu-latest
     outputs:
@@ -1135,7 +1137,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
       && (needs.fast-validation-runner-route.outputs.mode != 'self-hosted'
       || (github.event_name == 'merge_group'
       && github.repository == 'Richards-LLC/cassy'
@@ -1248,7 +1251,17 @@ jobs:
           if [[ -f scripts/cas-test-targets.py ]]; then
             python3 scripts/cas-test-targets.py cas-cli --check
           fi
-          cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst
+          mkdir -p target/train-suite-build
+          set -o pipefail
+          cargo nextest archive --workspace --archive-file fast-validation-suite.tar.zst 2>&1 | tee target/train-suite-build/build.log
+
+      - name: Preserve complete train suite build log
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-suite-build
+          path: target/train-suite-build/
+          if-no-files-found: warn
 
       # The archive carries test executables, but integration tests that spawn
       # `cas` resolve it from target/debug/. Package that runner separately:
@@ -1348,7 +1361,8 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
     needs: [ci-diff, fast-validation-suite-build, fast-validation-main-push-dedupe]
     strategy:
       fail-fast: false
@@ -1415,6 +1429,11 @@ jobs:
             --issues-repo Richards-LLC/cassy --out "target/queue-flakes/rust-$SHARD"
           suite_status=$?
           set -e
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/epic/release-train-* ]]; then
+            python3 scripts/train-ci.py shard --status "$suite_status" --shard "$SHARD/3" \
+              --log "$VERIFIED_TEST_LOG" --junit target/nextest/queue/junit.xml \
+              --out "target/train-suite/$SHARD"
+          fi
           initial_status="$suite_status"
           if [[ "$GITHUB_EVENT_NAME" == merge_group && -f "target/queue-flakes/rust-$SHARD/receipt.json" ]]; then
             initial_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["initial_status"])' "target/queue-flakes/rust-$SHARD/receipt.json")"
@@ -1426,6 +1445,14 @@ jobs:
               --elapsed "$((SECONDS - start_seconds))"
           fi
           exit "$suite_status"
+
+      - name: Preserve complete train shard evidence
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-suite-shard-${{ matrix.shard }}
+          path: target/train-suite/
+          if-no-files-found: warn
 
       - name: Publish full-suite recall evidence
         if: always()
@@ -1521,10 +1548,38 @@ jobs:
       || github.event_name == 'merge_group'
       || (github.event_name == 'push'
       && (github.ref == 'refs/heads/main'
-      || startsWith(github.ref, 'refs/tags/'))))
-    needs: [ci-diff, fast-validation-suite-shards, fast-validation-main-push-dedupe]
+      || startsWith(github.ref, 'refs/tags/')
+      || startsWith(github.ref, 'refs/heads/epic/release-train-'))))
+    needs: [ci-diff, fast-validation-suite-build, fast-validation-suite-shards, fast-validation-main-push-dedupe]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        with:
+          pattern: train-suite-*
+          path: target/train-suite-evidence
+      - name: Record train full-suite result
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        env:
+          GITHUB_EVENT_BEFORE: ${{ github.event.before }}
+          BUILD_RESULT: ${{ needs.fast-validation-suite-build.result }}
+          SHARDS_RESULT: ${{ needs.fast-validation-suite-shards.result }}
+        run: |
+          python3 scripts/train-ci.py collect --evidence target/train-suite-evidence \
+            --build-status "$BUILD_RESULT" --shards-status "$SHARDS_RESULT"
+      - name: Publish train receipt and complete logs
+        if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')
+        uses: actions/upload-artifact@v4
+        with:
+          name: train-rust-suite
+          path: target/train-suite-evidence/
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 90
       - name: Report Rust short-circuit
         if: needs.ci-diff.outputs.rust-unaffected == 'true'
         env:

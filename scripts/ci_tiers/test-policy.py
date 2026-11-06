@@ -272,7 +272,11 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
     def gh_value(expression, context):
         """Evaluate a GitHub expression over a flat context mapping."""
         import re
+        if isinstance(expression, bool):
+            return expression
         body = expression.strip()
+        if body in ('true', 'false'):
+            return body == 'true'
         if body.startswith('${{') and body.endswith('}}'):
             body = body[3:-2]
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):

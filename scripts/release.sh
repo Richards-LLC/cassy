@@ -464,6 +464,12 @@ fi
 fetch_base
 train_base="$(git merge-base "$remote/$base" HEAD)"
 first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
+# The starting train tip, before version preparation, must already have its
+# CI suite receipt. The queue alone proves the subsequent release commit.
+if [[ "$branch" == epic/release-train-* ]]; then
+    python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$(git rev-parse HEAD)" --gh "$gh_bin" \
+        || die "train full-suite receipt is not green; no release commit was prepared"
+fi
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"

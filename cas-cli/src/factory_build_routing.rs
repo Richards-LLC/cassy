@@ -364,6 +364,98 @@ mod tests {
         serde_json::json!({"agents": peers})
     }
 
+    async fn failed_route_fixture(server: &MockServer, project: &Path) -> (std::path::PathBuf, cas_types::Agent) {
+        let root = crate::store::init_cas_dir(project).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, REPO).unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+        }.save_to_cas_dir(&root).unwrap();
+        let mut sender = cas_types::Agent::new("local-sup".into(), "local-sup".into());
+        sender.role = cas_types::AgentRole::Supervisor;
+        sender.factory_session = Some("local".into());
+        crate::store::open_agent_store(&root).unwrap().register(&sender).unwrap();
+        crate::store::open_task_store(&root).unwrap().add(&cas_types::Task::new(
+            "cas-retry".into(), "Failed build route".into(),
+        )).unwrap();
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(directory(vec![peer("best", 3, 4.0, 0)])))
+            .mount(server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages"))
+            .respond_with(ResponseTemplate::new(503)).mount(server).await;
+        (root, sender)
+    }
+
+    async fn retry_route(root: &Path, sender: &cas_types::Agent) -> Result<Option<String>, String> {
+        let (root, sender) = (root.to_path_buf(), sender.clone());
+        tokio::task::spawn_blocking(move || route(
+            &root, &sender, "cas-retry", None, &Default::default(),
+            &crate::factory_build_guard::evaluate(8, Some(24.0), 5, 1, 5),
+        )).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_656d_persistent_send_failure_expires_and_restores_local_fallback() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        let (root, sender) = failed_route_fixture(&server, env.home()).await;
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for attempt in 1..=3 {
+            conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0", []).unwrap();
+            let result = retry_route(&root, &sender).await;
+            if attempt < 3 {
+                assert!(result.is_err(), "transient failure {attempt}: {result:?}");
+            } else {
+                assert!(matches!(result, Ok(None)), "persistent send failure must release local admission: {result:?}");
+            }
+        }
+        let task = crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap();
+        assert!(task.notes.contains("BUILD_ROUTE_EXPIRED:") && task.notes.contains("cause=send_failed"), "{}", task.notes);
+        let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
+        assert!(status.contains("abandoned") && status.contains("attempts: 3"), "{status}");
+        assert!(retry_route(&root, &sender).await.unwrap().is_none(), "expired routes must not replay");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cas_656d_mailbox_cancels_obsolete_routes_before_the_retry_is_due() {
+        let server = MockServer::start().await;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
+        for case in ["disabled", "assigned", "batch"] {
+            server.reset().await;
+            let project = env.home().join(case);
+            std::fs::create_dir_all(&project).unwrap();
+            let (root, sender) = failed_route_fixture(&server, &project).await;
+            assert!(retry_route(&root, &sender).await.is_err());
+            let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+            conn.execute("UPDATE peer_message_outbox SET next_attempt_at=?1", [Utc::now().timestamp() + 3600]).unwrap();
+            match case {
+                "disabled" => {
+                    let mut config = crate::config::Config::load(&root).unwrap();
+                    config.set("factory.auto_route_builds", "false").unwrap();
+                    config.save(&root).unwrap();
+                }
+                "assigned" => {
+                    let tasks = crate::store::open_task_store(&root).unwrap();
+                    let mut task = tasks.get("cas-retry").unwrap();
+                    task.assignee = Some("local-worker".into());
+                    tasks.update(&task).unwrap();
+                }
+                _ => {
+                    crate::store::open_spawn_queue_store(&root).unwrap().enqueue_spawn_with_task_queue(
+                        1, &[], true, None, Some("local"), None, None, None, &["cas-retry".into()],
+                    ).unwrap();
+                }
+            }
+            let runtime = crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "local").unwrap();
+            tokio::task::spawn_blocking(move || runtime.tick_blocking()).await.unwrap();
+            let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
+            assert!(status.contains("abandoned"), "{case}: cancel eagerly without another spawn or due retry: {status}");
+            assert!(crate::store::open_task_store(&root).unwrap().get("cas-retry").unwrap().notes.contains(EXPIRED_MARKER), "{case}");
+            assert_eq!(server.received_requests().await.unwrap().iter().filter(|r| r.method == "POST" && r.url.path() == "/api/peer-messages").count(), 1, "{case}: no obsolete retry may send");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn cas_d1fe_routes_admission_overflow_once_and_preserves_local_fallbacks() {
         let server = MockServer::start().await;

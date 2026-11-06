@@ -459,9 +459,9 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     git(repo, &["checkout", "-q", "-b", "factory/peer"]);
     std::fs::write(repo.join("peer.txt"), "required peer integration\n").unwrap();
     git(repo, &["add", "peer.txt"]);
-    git(repo, &["commit", "-qm", "fix(cas-peer): required sibling work"]);
+    git(repo, &["commit", "-qm", "fix(cas-beef): required sibling work"]);
     git(repo, &["checkout", "-q", "-b", "release/batch", "main"]);
-    git(repo, &["merge", "-q", "--no-ff", "factory/peer", "-m", "release(cas-peer): assemble sibling batch"]);
+    git(repo, &["merge", "-q", "--no-ff", "factory/peer", "-m", "release(cas-beef): assemble sibling batch"]);
     let approved = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["checkout", "-q", "main"]);
     let remote = tempfile::tempdir().unwrap();
@@ -521,7 +521,7 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     git(repo, &["checkout", "-q", "release/batch"]);
     std::fs::write(repo.join("unapproved.txt"), "unrelated later work\n").unwrap();
     git(repo, &["add", "unapproved.txt"]);
-    git(repo, &["commit", "-qm", "fix(cas-other): unapproved later work"]);
+    git(repo, &["commit", "-qm", "fix(cas-dead): unapproved later work"]);
     git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
     let mut continued = parked;
     continued.status = TaskStatus::InProgress;

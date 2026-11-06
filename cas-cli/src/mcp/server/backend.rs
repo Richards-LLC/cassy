@@ -228,7 +228,7 @@ mod tests {
         let arguments = json!({"action":"close", "id":"cas-background"});
         let response = service.call_with_deadline_and_grace("task", arguments.as_object(),
             std::time::Duration::from_secs(60), std::time::Duration::ZERO, async move {
-                crate::mcp::tools::service::mutation_receipt::task_committed("cas-background");
+                crate::mcp::tools::service::mutation_receipt::task_terminal_committed("cas-background");
                 work_finish.notified().await;
                 work_finished.store(true, Ordering::Release);
                 Ok(rmcp::model::CallToolResult::success(Vec::new()))

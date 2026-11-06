@@ -5,6 +5,10 @@
 //! - A ghostty_vt Terminal for state management
 //! - Metadata (agent name, role, etc.)
 
+#[cfg(unix)]
+mod handoff;
+#[cfg(unix)]
+pub use handoff::{PaneHandoff, PtyHandoff};
 mod snapshot;
 mod style;
 mod tests;
@@ -60,7 +64,7 @@ pub enum UserInputKind {
 pub type PaneId = String;
 
 /// The kind of pane
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PaneKind {
     /// Worker agent (Claude/Codex CLI)
     Worker,

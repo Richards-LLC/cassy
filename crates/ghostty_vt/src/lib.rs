@@ -297,6 +297,15 @@ impl Terminal {
     }
 
     /// Dump the viewport content as a UTF-8 string
+    /// Serialize both screens and scrollback to a VT replay for daemon exec.
+    pub fn handoff_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = unsafe { sys::ghostty_vt_terminal_handoff(self.ptr.as_ptr()) };
+        if bytes.is_null() { return Err(Error::DumpFailed); }
+        let data = unsafe { std::slice::from_raw_parts(bytes.ptr, bytes.len) }.to_vec();
+        unsafe { sys::ghostty_vt_bytes_free(bytes); }
+        Ok(data)
+    }
+
     pub fn dump_viewport(&self) -> Result<String> {
         let bytes = unsafe { sys::ghostty_vt_terminal_dump_viewport(self.ptr.as_ptr()) };
 

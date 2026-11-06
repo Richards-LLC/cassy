@@ -2667,7 +2667,10 @@ pub struct Pty {
     /// Channel for receiving raw output
     event_rx: mpsc::Receiver<PtyEvent>,
     /// Handle to the reader task
-    _reader_handle: std::thread::JoinHandle<()>,
+    _reader_handle: Option<std::thread::JoinHandle<()>>,
+    #[cfg(unix)]
+    reader_wake: Option<std::os::unix::net::UnixStream>,
+    process_group: Option<u32>,
     /// Child process handle
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// Master PTY (keep alive)
@@ -2930,7 +2933,7 @@ impl Pty {
         // Drop slave - the child process owns it now
         drop(pair.slave);
 
-        Self::from_handles(id, pair.master, child, is_codex, worker_startup_prompt_file)
+        Self::from_handles(id, pair.master, child, is_codex, worker_startup_prompt_file, true)
     }
 
     /// Adopt a PTY inherited from this process's previous daemon image.
@@ -2938,6 +2941,14 @@ impl Pty {
     /// child because exec preserves the parent PID. Never use a borrowed fd here.
     #[cfg(unix)]
     pub fn adopt(master_fd: std::os::fd::OwnedFd, child_pid: u32, pgid: u32) -> Result<Self> {
+        let mut pty = Self::adopt_paused(master_fd, child_pid, pgid)?;
+        pty.resume()?;
+        Ok(pty)
+    }
+
+    /// Stage inherited handles without reading a byte until all panes validate.
+    #[cfg(unix)]
+    pub fn adopt_paused(master_fd: std::os::fd::OwnedFd, child_pid: u32, pgid: u32) -> Result<Self> {
         if child_pid == 0 || child_pid > i32::MAX as u32 || pgid == 0 || pgid > i32::MAX as u32 {
             return Err(Error::pty("Invalid inherited PTY child or process group"));
         }
@@ -2945,7 +2956,8 @@ impl Pty {
         portable_pty::MasterPty::get_size(&master)
             .map_err(|e| Error::pty(format!("Invalid inherited PTY master: {e}")))?;
         Self::from_handles(format!("adopted-{child_pid}"), Box::new(master),
-            Box::new(crate::adopt::InheritedChild { pid: child_pid, status: None }), false, None)
+            Box::new(crate::adopt::InheritedChild { pid: child_pid, status: None }), false, None, false)
+            .map(|mut pty| { pty.process_group = Some(pgid); pty })
     }
 
     fn from_handles(
@@ -2954,23 +2966,8 @@ impl Pty {
         child: Box<dyn portable_pty::Child + Send + Sync>,
         is_codex: bool,
         worker_startup_prompt_file: Option<tempfile::TempPath>,
+        start_reader: bool,
     ) -> Result<Self> {
-        // Get reader and writer
-        let reader = master
-            .try_clone_reader()
-            .map_err(|e| Error::pty(format!("Failed to clone reader: {e}")))?;
-        #[cfg(unix)]
-        let idle_read_fd = {
-            let fd = master
-                .as_raw_fd()
-                .ok_or_else(|| Error::pty("Native PTY has no pollable output descriptor"))?;
-            // SAFETY: master owns this live descriptor during the clone.
-            // The owned duplicate is CLOEXEC and lives with the reader thread;
-            // borrowing the master's raw number could race drop/FD reuse.
-            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
-                .try_clone_to_owned()
-                .map_err(|e| Error::pty(format!("Failed to clone PTY poll descriptor: {e}")))?
-        };
         let writer = master
             .take_writer()
             .map_err(|e| Error::pty(format!("Failed to get writer: {e}")))?;
@@ -3008,38 +3005,99 @@ impl Pty {
             });
         }
 
-        // Create channel for events - larger buffer for multi-agent scenarios
-        let (event_tx, event_rx) = mpsc::channel::<PtyEvent>(1024);
-
-        // Spawn reader thread - sends raw bytes, no parsing
-        let reader_handle = std::thread::spawn({
-            let input = input.input().clone();
-            move || {
-                Self::reader_loop(
-                    reader,
-                    Box::new(move |reply: &[u8]| {
-                        let _ = input.write_control_then(reply, None);
-                    }),
-                    event_tx,
-                    #[cfg(unix)]
-                    idle_read_fd,
-                );
-            }
-        });
-
-        Ok(Self {
-            id,
-            writer,
-            input,
-            event_rx,
-            _reader_handle: reader_handle,
-            child,
-            master,
-            is_codex,
-            exit_signal: None,
+        let (_, event_rx) = mpsc::channel(1024);
+        let process_group = child.process_id();
+        let mut pty = Self {
+            id, writer, input, event_rx, _reader_handle: None,
+            #[cfg(unix)]
+            reader_wake: None,
+            process_group, child, master, is_codex, exit_signal: None,
             exit_status_pending: false,
             _worker_startup_prompt_file: worker_startup_prompt_file,
-        })
+        };
+        if start_reader { pty.resume()?; } else { pty.input().pause(); }
+        Ok(pty)
+    }
+
+    /// Resume a staged pane, or recover from an exec that returned an error.
+    pub fn resume(&mut self) -> Result<()> {
+        if self._reader_handle.is_some() { return Ok(()); }
+        // Get reader and writer
+        let reader = self.master
+            .try_clone_reader()
+            .map_err(|e| Error::pty(format!("Failed to clone reader: {e}")))?;
+        #[cfg(unix)]
+        let idle_read_fd = {
+            let fd = self.master
+                .as_raw_fd()
+                .ok_or_else(|| Error::pty("Native PTY has no pollable output descriptor"))?;
+            // SAFETY: master owns this live descriptor during the clone.
+            // The owned duplicate is CLOEXEC and lives with the reader thread;
+            // borrowing the master's raw number could race drop/FD reuse.
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }
+                .try_clone_to_owned()
+                .map_err(|e| Error::pty(format!("Failed to clone PTY poll descriptor: {e}")))?
+        };
+        let (event_tx, event_rx) = mpsc::channel(1024);
+        #[cfg(unix)]
+        let (wake_tx, wake_rx) = std::os::unix::net::UnixStream::pair()
+            .map_err(|e| Error::pty(e.to_string()))?;
+        let input = self.input().clone();
+        self.input().resume();
+        self._reader_handle = Some(std::thread::spawn(move || {
+            Self::reader_loop(reader, Box::new(move |reply| {
+                let _ = input.write_control_then(reply, None);
+            }), event_tx,
+                #[cfg(unix)]
+                idle_read_fd,
+                #[cfg(unix)]
+                Some(wake_rx),
+            );
+        }));
+        #[cfg(unix)]
+        { self.reader_wake = Some(wake_tx); }
+        self.event_rx = event_rx;
+        Ok(())
+    }
+
+    /// Stop at a read boundary, return every event already read and flush input.
+    /// The daemon holds exclusive control and accepts no new input during this.
+    #[cfg(unix)]
+    pub async fn quiesce(&mut self) -> Result<Vec<PtyEvent>> {
+        if let Some(wake) = self.reader_wake.as_mut() {
+            wake.write_all(&[1]).map_err(|e| Error::pty(e.to_string()))?;
+        }
+        let mut events = Vec::new();
+        if self._reader_handle.is_some() {
+            while let Some(event) = self.event_rx.recv().await { events.push(event); }
+            if let Some(reader) = self._reader_handle.take() {
+                reader.join().map_err(|_| Error::pty("PTY reader panicked during handoff"))?;
+            }
+        }
+        self.reader_wake = None;
+        self.input().pause();
+        Ok(events)
+    }
+
+    pub async fn flush_input(&self) -> Result<()> {
+        let input = self.input().clone();
+        let drained = tokio::task::spawn_blocking(move ||
+            input.wait_drained(std::time::Duration::from_secs(5)))
+            .await.map_err(|e| Error::pty(e.to_string()))?;
+        if !drained { return Err(Error::pty("PTY input did not drain before handoff")); }
+        Ok(())
+    }
+
+    pub fn set_codex(&mut self, is_codex: bool) { self.is_codex = is_codex; }
+
+    #[cfg(unix)]
+    pub fn master_fd(&self) -> Option<std::os::fd::RawFd> { self.master.as_raw_fd() }
+    pub fn child_pid(&self) -> Option<u32> { self.child.process_id() }
+    pub fn startup_brief_path(&self) -> Option<PathBuf> {
+        self._worker_startup_prompt_file.as_ref().map(|p| p.to_path_buf())
+    }
+    pub fn adopt_startup_brief(&mut self, path: PathBuf) {
+        self._worker_startup_prompt_file = Some(tempfile::TempPath::from_path(path));
     }
 
     /// Reader loop that forwards raw PTY output
@@ -3048,6 +3106,7 @@ impl Pty {
         reply: Box<dyn Fn(&[u8]) + Send>,
         event_tx: mpsc::Sender<PtyEvent>,
         #[cfg(unix)] idle_read_fd: std::os::fd::OwnedFd,
+        #[cfg(unix)] wake: Option<std::os::unix::net::UnixStream>,
     ) {
         // Larger buffer for high-throughput scenarios (6 Claudes generating long responses)
         let mut buf = [0u8; 16384];
@@ -3055,17 +3114,14 @@ impl Pty {
 
         loop {
             #[cfg(unix)]
-            if !carry.is_empty() {
-                match wait_for_pty_read(&idle_read_fd) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        // An ambiguous ESC/CSI suffix gets a short opportunity
-                        // to finish a CPR, then becomes ordinary terminal data.
-                        if !flush_reader_carry(&mut carry, &event_tx) {
-                            break;
-                        }
+            if wake.is_some() || !carry.is_empty() {
+                match wait_for_pty_or_handoff(&idle_read_fd, wake.as_ref(), !carry.is_empty()) {
+                    Ok(ReaderReady::Output) => {},
+                    Ok(ReaderReady::Timeout) => {
+                        if !flush_reader_carry(&mut carry, &event_tx) { break; }
                         continue;
                     }
+                    Ok(ReaderReady::Handoff) => { flush_reader_carry(&mut carry, &event_tx); break; }
                     Err(error) => {
                         flush_reader_carry(&mut carry, &event_tx);
                         let _ = event_tx.blocking_send(PtyEvent::Error(error.to_string()));
@@ -3271,7 +3327,7 @@ impl Pty {
     /// `portable_pty` makes the child a session leader with `setsid()`, so the
     /// direct child's PID is also the PGID inherited by its descendants.
     pub fn process_group_id(&self) -> Option<u32> {
-        self.child.process_id()
+        self.process_group
     }
 
     /// Kill the child and its entire process group (cas-8c5a).
@@ -3359,42 +3415,35 @@ fn flush_reader_carry(carry: &mut Vec<u8>, events: &mpsc::Sender<PtyEvent>) -> b
 #[cfg(unix)]
 const CPR_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Wait only while a possible CPR suffix is held. Normal output retains the
-/// blocking reader path and quiet panes with no carry consume no timer ticks.
 #[cfg(unix)]
-fn wait_for_pty_read(fd: &std::os::fd::OwnedFd) -> std::io::Result<bool> {
-    use std::os::fd::AsRawFd;
+enum ReaderReady { Output, Timeout, Handoff }
 
-    let deadline = std::time::Instant::now() + CPR_IDLE_TIMEOUT;
+#[cfg(unix)]
+fn wait_for_pty_or_handoff(
+    fd: &std::os::fd::OwnedFd,
+    wake: Option<&std::os::unix::net::UnixStream>,
+    has_carry: bool,
+) -> std::io::Result<ReaderReady> {
+    use std::os::fd::AsRawFd;
+    let mut fds = [
+        libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 },
+        libc::pollfd { fd: wake.map_or(-1, AsRawFd::as_raw_fd), events: libc::POLLIN, revents: 0 },
+    ];
     loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Ok(false);
-        }
-        let mut ready = libc::pollfd {
-            fd: fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: fd stays owned by this reader thread, ready is one valid
-        // pollfd, and the timeout is bounded by CPR_IDLE_TIMEOUT (50ms).
-        let result = unsafe { libc::poll(&mut ready, 1, remaining.as_millis().max(1) as i32) };
-        if result < 0 {
+        // Quiet panes have no polling timer. A dedicated wake fd stops the
+        // reader without consuming another output byte or cancelling a read.
+        let timeout = if has_carry { CPR_IDLE_TIMEOUT.as_millis() as i32 } else { -1 };
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+        if ready < 0 {
             let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
-            }
+            if error.kind() == std::io::ErrorKind::Interrupted { continue; }
             return Err(error);
         }
-        if ready.revents & libc::POLLNVAL != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "PTY poll descriptor is invalid",
-            ));
+        if fds[1].revents != 0 { return Ok(ReaderReady::Handoff); }
+        if fds[0].revents & libc::POLLNVAL != 0 {
+            return Err(std::io::Error::other("Invalid PTY poll descriptor"));
         }
-        // HUP/ERR also proceed to the existing portable-pty reader, which
-        // preserves its native EOF/error mapping and any final queued bytes.
-        return Ok(result > 0);
+        return Ok(if ready == 0 { ReaderReady::Timeout } else { ReaderReady::Output });
     }
 }
 
@@ -3555,6 +3604,7 @@ mod cpr_tests {
                     }),
                     tx,
                     idle_fd,
+                    None,
                 );
             });
             Self {

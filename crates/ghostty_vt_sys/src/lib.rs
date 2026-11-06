@@ -83,6 +83,9 @@ pub const GHOSTTY_VT_MOD_ALT: u16 = 0x0004;
 pub const GHOSTTY_VT_MOD_SUPER: u16 = 0x0008;
 
 unsafe extern "C" {
+    /// VT state for both screens and scrollback, suitable for a fresh terminal.
+    pub fn ghostty_vt_terminal_handoff(terminal: *mut GhosttyVtTerminal) -> ghostty_vt_bytes_t;
+
     /// Create a new terminal instance
     ///
     /// # Arguments
@@ -257,4 +260,32 @@ unsafe extern "C" {
         terminal: *mut GhosttyVtTerminal,
         screen_row: u32,
     ) -> ghostty_vt_bytes_t;
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    #[test]
+    fn handoff_preserves_hidden_primary_and_alternate() {
+        unsafe {
+            let old = ghostty_vt_terminal_new(24, 4);
+            let data = b"history-1\r\nhistory-2\r\nhistory-3\r\nhistory-4\r\nhistory-5\x1b[?1049halt-screen";
+            ghostty_vt_terminal_feed(old, data.as_ptr(), data.len());
+            let state = ghostty_vt_terminal_handoff(old);
+            assert!(!state.is_null());
+            let new = ghostty_vt_terminal_new(24, 4);
+            ghostty_vt_terminal_feed(new, state.ptr, state.len);
+            let alt = ghostty_vt_terminal_dump_viewport_row(new, 0);
+            assert!(std::slice::from_raw_parts(alt.ptr, alt.len).windows(10).any(|s| s == b"alt-screen"));
+            ghostty_vt_bytes_free(alt);
+            let exit = b"\x1b[?1049l";
+            ghostty_vt_terminal_feed(new, exit.as_ptr(), exit.len());
+            let primary = ghostty_vt_terminal_dump_screen_row(new, 0);
+            assert!(std::slice::from_raw_parts(primary.ptr, primary.len).windows(9).any(|s| s == b"history-1"));
+            ghostty_vt_bytes_free(primary);
+            ghostty_vt_bytes_free(state);
+            ghostty_vt_terminal_free(old);
+            ghostty_vt_terminal_free(new);
+        }
+    }
 }

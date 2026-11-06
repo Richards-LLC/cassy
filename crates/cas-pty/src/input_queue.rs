@@ -41,6 +41,7 @@ struct State {
     /// Bytes queued or being written.
     buffered: usize,
     closed: bool,
+    paused: bool,
     /// The first write error; the pane takes no more input after it.
     failed: Option<String>,
 }
@@ -129,7 +130,7 @@ impl PtyInput {
         if let Some(error) = &state.failed {
             return Err(Error::pty(format!("Write failed: {error}")));
         }
-        if state.closed {
+        if state.closed || state.paused {
             return Err(Error::pty("PTY input is closed"));
         }
         // An empty buffer takes one chunk of any size (a large paste), so a
@@ -149,6 +150,10 @@ impl PtyInput {
         self.shared.queued.notify_one();
         Ok(())
     }
+
+    /// Freeze producers during daemon handoff; queued writes still drain.
+    pub(crate) fn pause(&self) { self.shared.lock().paused = true; }
+    pub(crate) fn resume(&self) { self.shared.lock().paused = false; }
 
     /// Bytes queued or being written.
     pub fn buffered(&self) -> usize {

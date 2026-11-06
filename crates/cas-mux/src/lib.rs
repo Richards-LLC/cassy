@@ -71,3 +71,6 @@ pub use spec::{Effort, WorkerSpec};
 #[cfg(test)]
 #[path = "../../../cas-cli/src/test_env_guard.rs"]
 mod test_env_guard;
+
+#[cfg(unix)]
+pub use pane::{PaneHandoff, PtyHandoff};

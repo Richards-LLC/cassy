@@ -901,6 +901,7 @@ dependencies = [
  "ghostty_vt",
  "hex",
  "indexmap",
+ "libc",
  "memchr",
  "ratatui",
  "serde",

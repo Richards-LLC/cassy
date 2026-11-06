@@ -30,8 +30,8 @@ pub(crate) fn read(cas_dir: &Path, session: Option<&str>, now: DateTime<Utc>) ->
     let data = cas_factory::DirectorData::load_with_stores_for_project(cas_dir, None, false, None, project.as_deref())?;
     let tasks = crate::store::open_task_store(cas_dir)?;
     let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
-    let focus = crate::ui::factory::app::preferred_epic_focus_from_session_metadata_named(session).epic_id;
-    let held = crate::ui::factory::app::session_progress_named(session).held_workers;
+    let focus = crate::ui::factory::preferred_epic_focus_from_session_metadata_named(session).epic_id;
+    let held = crate::ui::factory::session_progress_named(session).held_workers;
     let scoped = |task: &&cas_factory::TaskSummary| focus.as_deref().is_some_and(|id| task.epic.as_deref() == Some(id));
     let qa_ids: HashSet<_> = data.ready_tasks.iter().chain(&data.in_progress_tasks)
         .filter(|task| task.task_type != TaskType::Epic)

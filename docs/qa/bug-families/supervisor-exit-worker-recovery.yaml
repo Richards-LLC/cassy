@@ -1,0 +1,4 @@
+title: Supervisor exit reports unfinished worker work and releases stopped task bindings
+tasks: [cas-affc]
+invariants: [HUB-J27-EXIT-WORKER-RECOVERY]
+journeys: [HUB-J27]

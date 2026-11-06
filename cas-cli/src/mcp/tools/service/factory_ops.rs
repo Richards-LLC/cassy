@@ -1075,6 +1075,16 @@ fn shutdown_worker_snapshot(
     }
 }
 
+/// The same worktree/task evidence used by explicit shutdown, before daemon teardown.
+pub(crate) fn worker_shutdown_state(cas_root: &std::path::Path, worker: &cas_types::Agent) -> String {
+    let tasks = shutdown_safety_tasks(cas_root);
+    let mut snapshot = shutdown_worker_snapshot(cas_root, worker, tasks.as_deref().unwrap_or_default(), false, None);
+    if let Err(error) = tasks {
+        snapshot.mark_task_state_unknown(&error);
+    }
+    snapshot.render_state()
+}
+
 fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: bool) -> String {
     if !crate::worktree::should_finalize_worker_worktree(false, has_open_tasks) {
         return format!("worktree {} kept (nonterminal tasks)", path.display());

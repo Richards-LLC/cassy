@@ -377,13 +377,9 @@ fn names_ask(body: &str, id: &str) -> bool {
     })
 }
 
-/// Asks (`kind=ask`, or an ask sent with `blocker=true`) from
-/// `sender_agent_id` in the last `window_secs` that no delivered peer reply
-/// answers. Explicit reply IDs remain authoritative across peer succession;
-/// unlinked typed
-/// answers need an ask id in their body or exactly one open ask to that peer.
-/// Replay in arrival order so an ambiguous answer cannot later answer another
-/// question when the first is resolved. Abandoned sends never reached the peer.
+/// Open asks from `sender_agent_id` within `window_secs` (`kind=ask` or `blocker=true`).
+/// Reply IDs survive succession. Unlinked typed answers need an open ask ID or
+/// exactly one open ask per peer. Replay by arrival; exclude abandoned sends.
 pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<OpenPeerAsk> {
     let Ok(conn) = connection(root) else {
         return Vec::new();

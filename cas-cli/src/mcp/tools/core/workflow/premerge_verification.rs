@@ -992,7 +992,7 @@ impl CasCore {
         .map_err(fail)?;
         self.emit_premerge_review_handoff(task, &dispatch)?;
         Err(fail(format!(
-            "task {} requires candidate verdict on dispatch {} before merge. Next: use your Task/Agent tool to spawn subagent_type=\"task-verifier\" with prompt=\"Verify task {}\". Read its verdict with `{}verification action=latest task_id={}`",
+            "task {}: dispatch {} needs approval. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
             task.id, dispatch.id, task.id,
             crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
         )))

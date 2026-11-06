@@ -161,7 +161,7 @@ rejection tests must inspect the returned error rather than discard a `Result`.
 ## Browser tests: behavior versus internal collaborators
 
 Use Vitest against the exported capability. Keep `backoffDelay` real and control only
-its randomness seam. Copy the good example beside `connection-state.ts`:
+its randomness seam. Copy the good example beside the module under test:
 
 ```typescript
 import { expect, it } from "vitest";

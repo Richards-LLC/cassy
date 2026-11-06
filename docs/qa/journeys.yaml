@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  recorded-blocker-dependency-wait:
+    title: A dependency recorded during a blocker hold owns the next supervisor wake until all blockers resolve
+    tasks: [cas-f8c7]
+    invariants: [FACTORY-RECORDED-BLOCKER-WAIT]
+    journeys: [HUB-J5]
   supervisor-clock-drift:
     title: Delayed wakes, reminders, digests and peer messages show the current local clock without inferred turn timing
     tasks: [cas-06eb]
@@ -381,6 +386,10 @@ invariants:
     statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
+  FACTORY-RECORDED-BLOCKER-WAIT:
+    statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
+    check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'
+    bug: {task: cas-f8c7}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
@@ -1089,6 +1098,8 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - cas-cli/src/mcp/tools/core/task/block_hold.rs
+  - cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts
   - hub-web/src/conversation-view.ts
@@ -1139,6 +1150,7 @@ journeys:
   - hub-web/src/viewport.ts
   - hub-web/src/worker-visibility.ts
   invariants:
+  - FACTORY-RECORDED-BLOCKER-WAIT
   - HUB-J5-GOAL
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD

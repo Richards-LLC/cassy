@@ -182,21 +182,21 @@ class QueueRecovery(unittest.TestCase):
         script.write_text("""import os,pathlib,sys
 p=pathlib.Path('step-count'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
 case=os.environ['STEP_CASE']
-if case=='cleanup':
- print('19 passed, 0 failed',flush=True)
+if case in ('cleanup','mixed-summary'):
+ print('19 passed, 0 failed' if case=='cleanup' else 'Tests 1 passed | 1 failed',flush=True)
  print('rm: cannot remove fixture: Directory not empty',file=sys.stderr)
  sys.exit(1)
 failed=n==1 or case=='persistent'
 print('0 passed, 1 failed' if failed else '1 passed, 0 failed',flush=True)
 sys.exit(int(failed))
 """)
-        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS')]:
+        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL')]:
             with self.subTest(case=case):
                 shutil.rmtree(self.repo/'receipts',ignore_errors=True)
                 (self.repo/'step-count').unlink(missing_ok=True)
                 result = subprocess.run([sys.executable,str(SCRIPT),'step','--repo',str(self.repo),
                     '--id','script/test-release-publish','--out',str(self.repo/'receipts'),
-                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case},capture_output=True,text=True)
+                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case},cwd=self.repo,capture_output=True,text=True)
                 self.assertEqual(result.returncode,code,result.stdout+result.stderr)
                 self.assertEqual(int((self.repo/'step-count').read_text()),attempts)
                 receipt=json.loads((self.repo/'receipts/receipt.json').read_text())

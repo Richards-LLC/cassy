@@ -28,7 +28,7 @@ elif args[0]=='api':
  elif '/pulls/' in endpoint: print(json.dumps(data['pr']))
  elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
  elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
- elif endpoint.endswith('/jobs'): print(json.dumps({'jobs':data.get('job_jobs',[{'name':'Shared train and queue graph / Full-set gate','conclusion':data.get('fanin','success')}])}))
+ elif endpoint.split('?')[0].endswith('/jobs'): print(json.dumps({'jobs':data.get('job_jobs',[{'name':'Shared train and queue graph / Full-set gate','conclusion':data.get('fanin','success')}])}))
  else: print(json.dumps({'workflow_runs':data['runs']}))
 else: sys.exit(2)
 '''

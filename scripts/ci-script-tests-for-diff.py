@@ -28,6 +28,7 @@ list or the diff cannot be read.
 from __future__ import annotations
 
 import argparse
+import os
 from fnmatch import fnmatchcase
 from pathlib import Path
 import re
@@ -243,7 +244,15 @@ def main() -> int:
             print(f"ci-script-tests-changed: would run {command}")
             continue
         started = time.monotonic()
-        result = subprocess.run(command, shell=True, cwd=repo)
+        recovering = (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or
+            (os.environ.get('GITHUB_EVENT_NAME') == 'push' and
+             os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-')))
+        if recovering:
+            result = subprocess.run([sys.executable, str(repo/'scripts/ci-queue-flakes.py'),
+                'step', '--repo', str(repo), '--id', test, '--',
+                'bash', '-e', '-o', 'pipefail', '-c', command], cwd=repo)
+        else:
+            result = subprocess.run(command, shell=True, cwd=repo)
         took = time.monotonic() - started
         status = "PASS" if result.returncode == 0 else f"FAIL (exit {result.returncode})"
         print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)

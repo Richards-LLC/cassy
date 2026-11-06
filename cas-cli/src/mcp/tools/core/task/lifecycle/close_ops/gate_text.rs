@@ -305,7 +305,7 @@ pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &
 pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
     format!(
         "Cannot start a task that is awaiting merge. The worker work is \
-         already complete; the supervisor merges the factory branch and \
+         already complete; wait for the supervisor to merge the factory branch; \
          the merge verdict closes the task. If review fails — the supervisor \
          declines the delivery, or requires an amendment after merging — \
          they must first run \

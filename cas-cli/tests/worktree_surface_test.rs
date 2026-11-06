@@ -2833,8 +2833,9 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
 /// cas-cff4 twice, cas-62c3): after approval the target edits a file the
 /// delivery also edits, so the reviewed tree no longer recomputes, yet the
 /// patch the merge adds is unchanged. Far and context-only edits rebind
-/// the one approval with a receipt; a target edit that changes the
-/// delivered patch still dispatches a fresh review.
+/// the one approval with a receipt; a target that lands one of the
+/// delivery's hunks itself changes the delivered patch, so it still
+/// dispatches a fresh review.
 #[tokio::test]
 async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
     let mut env = test_env();
@@ -2847,7 +2848,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
     for (case, line, edit) in [
         ("full-context", 18, "target 18"),
         ("zero-context", 5, "target 5"),
-        ("changed patch", 3, "delivered 3"),
+        ("changed patch", 12, "delivered 12"),
     ] {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
@@ -2861,7 +2862,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["add", "shared.rs"], &fixture.worker);
         run_git(&["commit", "-m", "Shared file on the target"], &fixture.worker);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &fixture.worker);
-        std::fs::write(fixture.worker.join("shared.rs"), shared(&[(3, "delivered 3")])).unwrap();
+        std::fs::write(fixture.worker.join("shared.rs"), shared(&[(3, "delivered 3"), (12, "delivered 12")])).unwrap();
         std::fs::write(fixture.worker.join("delivery.txt"), "approved task delivery\n").unwrap();
         run_git(&["add", "shared.rs", "delivery.txt"], &fixture.worker);
         run_git(&["commit", "-m", "cas-e429: approved delivery"], &fixture.worker);
@@ -2918,7 +2919,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
-            shared(&[(3, "delivered 3"), (line, edit)]).trim_end(), "{case}");
+            shared(&[(3, "delivered 3"), (12, "delivered 12"), (line, edit)]).trim_end(), "{case}");
     }
 }
 

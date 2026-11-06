@@ -175,14 +175,20 @@ fn main() -> ExitCode {
         sentry::add_command_breadcrumb(&args.join(" "));
     }
 
-    // Config and hub refusals are returned through the shared error path. Keep
+    // Config, hub and report refusals use the shared error path. Keep
     // those failures machine-readable on stdout when their caller requested
     // JSON; stderr keeps the human diagnostic either way.
     let json_refusal = cli.json
         && (startup.is_err()
             || matches!(
                 cli.command.as_ref(),
-                Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+                Some(
+                    cas::cli::Commands::Config(_)
+                        | cas::cli::Commands::Hub(_)
+                        | cas::cli::Commands::ReleaseReport(_)
+                        | cas::cli::Commands::Release(cas::cli::ReleaseCommands::Report(_))
+                        | cas::cli::Commands::Deliverable(_)
+                )
             ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = startup.and_then(|()| cli::run(cli));

@@ -107,6 +107,110 @@ fn text(result: CallToolResult) -> String {
 }
 
 #[tokio::test]
+async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
+    use cas_types::{Agent, AgentRole, AgentStatus, Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let (dir, service) = service("codex", AgentRole::Supervisor);
+    let repo = dir.path();
+    let root = repo.join(".cas");
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_FACTORY_SESSION", "new-session");
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git").args(args).current_dir(path)
+            .env("GIT_AUTHOR_NAME", "CAS Test").env("GIT_AUTHOR_EMAIL", "cas@example.test")
+            .env("GIT_COMMITTER_NAME", "CAS Test").env("GIT_COMMITTER_EMAIL", "cas@example.test")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    git(repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    git(repo, &["add", ".gitignore"]);
+    git(repo, &["commit", "-qm", "base"]);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='retained-fixture'\n").unwrap();
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = service.inner.open_agent_store().unwrap();
+    let tasks = service.inner.open_task_store().unwrap();
+    let target = WorkTarget { repo_selector: "project:retained-fixture".into(), target_branch: "main".into() };
+    let mut epic = Task::new("cas-7772d-epic".into(), "Retired work".into());
+    epic.task_type = TaskType::Epic;
+    epic.deliverables.work_target = Some(target.clone());
+    tasks.add(&epic).unwrap();
+    let mut retained = Vec::new();
+    for (worker, id, dirty, live) in [
+        ("warm-retired", "cas-aa11", false, false),
+        ("dirty-retired", "cas-bb22", true, false),
+        ("clean-retired", "cas-cc33", false, false),
+        ("live-worker", "cas-dd44", true, true),
+    ] {
+        let path = root.join("worktrees").join(worker);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let branch = format!("factory/{worker}");
+        git(repo, &["worktree", "add", "-qb", &branch, path.to_str().unwrap(), "main"]);
+        let mut owner = Agent::new_with_role(format!("old-{worker}"), worker.into(), AgentRole::Worker);
+        owner.factory_session = Some("old-session".into());
+        owner.status = if live { AgentStatus::Active } else { AgentStatus::Shutdown };
+        owner.pid = live.then(std::process::id);
+        owner.metadata.insert("clone_path".into(), path.display().to_string());
+        agents.register(&owner).unwrap();
+        if worker == "clean-retired" { continue; }
+        std::fs::write(path.join("delivered.txt"), worker).unwrap();
+        git(&path, &["add", "delivered.txt"]);
+        git(&path, &["commit", "-qm", &format!("fix({id}): delivery")]);
+        let anchor = git(&path, &["rev-parse", "HEAD"]);
+        git(&path, &["push", "-q", "origin", &branch]);
+        if worker == "warm-retired" {
+            git(repo, &["merge", "--squash", &branch]);
+            git(repo, &["commit", "-qm", "squash delivered worker change"]);
+            std::fs::write(path.join("local.txt"), "unpushed follow-up").unwrap();
+            git(&path, &["add", "local.txt"]);
+            git(&path, &["commit", "-qm", &format!("fix({id}): local follow-up")]);
+        } else if !live {
+            std::fs::write(path.join("local.txt"), "unpushed work").unwrap();
+            git(&path, &["add", "local.txt"]);
+            git(&path, &["commit", "-qm", &format!("fix({id}): local follow-up")]);
+        }
+        if dirty { std::fs::write(path.join("dirty.txt"), "uncommitted").unwrap(); }
+        let mut child = Task::new(id.into(), worker.into());
+        child.status = TaskStatus::Closed;
+        child.assignee = Some(worker.into());
+        child.deliverables.work_target = Some(target.clone());
+        child.deliverables.parked_branch = Some(branch);
+        child.deliverables.factory_branch_anchor = Some(anchor);
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&Dependency::new(id.into(), epic.id.clone(), DependencyType::ParentChild)).unwrap();
+        if !live { retained.push((worker, id, path.clone(), git(&path, &["rev-parse", "HEAD"]))); }
+    }
+    let before = git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"]);
+    let banner = crate::hooks::handlers::session_hygiene::build_session_start_orphan_banner(&root)
+        .expect("retained local-only work must surface even with no orphan process");
+    for (worker, id, _, head) in &retained {
+        assert!(banner.contains(worker) && banner.contains(id) && banner.contains(head), "{banner}");
+    }
+    assert!(!banner.contains("clean-retired") && !banner.contains("live-worker"), "{banner}");
+    assert!(banner.contains("unpushed=1") && banner.contains("dirty=1") && banner.contains("push origin"), "{banner}");
+    let gc = text(service.factory(Parameters(serde_json::from_value(
+        serde_json::json!({"action":"gc_report", "full":true})
+    ).unwrap())).await.unwrap());
+    for (worker, id, _, head) in &retained {
+        assert!(gc.contains(worker) && gc.contains(id) && gc.contains(head), "{gc}");
+    }
+    let status = text(service.factory(Parameters(serde_json::from_value(
+        serde_json::json!({"action":"epic_status", "id":epic.id})
+    ).unwrap())).await.unwrap());
+    let row = status.lines().find(|line| line.starts_with("| cas-aa11 |")).unwrap();
+    assert!(!row.contains("merged ("), "retained ahead-of-receipt work must not read clean: {status}");
+    assert!(status.contains("Retained worker") && status.contains("unpushed=1"), "{status}");
+    assert_eq!(git(repo, &["for-each-ref", "--format=%(refname) %(objectname)"]), before, "visibility never changes refs");
+    assert_eq!(git(&retained[1].2, &["status", "--porcelain"]), "?? dirty.txt");
+}
+
+#[tokio::test]
 async fn recovery_guidance_start_success_and_delegation_four_harnesses() {
     let mut env = TestEnvGuard::temp_home();
     for (harness, prefix) in HARNESSES {

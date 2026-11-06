@@ -1165,8 +1165,10 @@ fn enqueue_delivery_pr_merged_wake(
                 "PR #{pr_number} for {task_id} merged at {merge_commit}, but no reusable pre-merge verdict is recorded. Supervisor recovery: {prefix}factory action=worktree_merge id={branch} task_id={task_id} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {prefix}task action=request_changes id={task_id} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Do not ask the worker to repeat close; close cannot create approval."
             );
             let key = format!("delivery-pr-merged:{task_id}:{pr_number}:{merge_commit}");
+            // Use the existing typed delivery-stall lane: an unknown kind
+            // would persist an inbox row without authorizing a supervisor wake.
             return match enqueue_worker_attention_relay_detail_with_key(
-                cas_dir, "delivery_pr_approval_missing", worker, Some(task_id), None,
+                cas_dir, "worker_delivery_stalled", worker, Some(task_id), None,
                 |_| detail.clone(), &key, Some(&key),
             ) {
                 WorkerAttentionRelayOutcome::Persisted { .. } => Ok(()),

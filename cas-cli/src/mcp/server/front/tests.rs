@@ -179,13 +179,26 @@ async fn compatible_candidate_drains_inflight_and_partial_input_without_replay_c
         ("old".into(), json!(3)), ("new".into(), json!(4))]);
 }
 
+#[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn drain_timeout_keeps_old_backend_and_pending_calls_cas_81c4() {
     let mut f = Fixture::new().await;
+    let temp = tempfile::tempdir().unwrap();
+    let program = temp.path().join("cas");
+    std::fs::write(&program, "old").unwrap();
+    let _serving_file = std::fs::File::open(&program).unwrap();
+    let image = Arc::new(std::sync::Mutex::new(Some(
+        crate::mcp::socket::ExeIdentity::from_exe_path(program.clone()))));
+    let replacement = temp.path().join("replacement");
+    std::fs::write(&replacement, "new").unwrap();
+    std::fs::rename(&replacement, &program).unwrap();
     f.call(2).await;
     f.started.notified().await;
     let request = receive(&mut f.input).await;
-    f.update("new", false).await;
+    let (calls, started, finish) = (f.calls.clone(), f.started.clone(), f.finish.clone());
+    let watcher = tokio::spawn(watch_updates(program, image, f.updates.clone(), move |_, _| {
+        Ok(backend("new", false, calls.clone(), started.clone(), finish.clone()))
+    }));
     assert!(matches!(f.event().await, Event::Prepared));
     tokio::time::advance(DRAIN_TIMEOUT + Duration::from_secs(1)).await;
     assert!(matches!(f.event().await, Event::Deferred(reason) if reason.contains("drain timed out")));
@@ -195,7 +208,13 @@ async fn drain_timeout_keeps_old_backend_and_pending_calls_cas_81c4() {
     send(&mut f.output, json!({"jsonrpc":"2.0", "id":request["id"], "result":{"roots":[]}})).await;
     f.call(3).await;
     assert_eq!(receive(&mut f.input).await["result"]["version"], "old");
-    assert_eq!(*f.calls.lock().await, [("old".into(), json!(2)), ("old".into(), json!(3))]);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(matches!(f.event().await, Event::Prepared), "same install must be retried after a drain deferral");
+    assert!(matches!(f.event().await, Event::Serving { version, .. } if version == "new"));
+    f.call(4).await;
+    assert_eq!(receive(&mut f.input).await["result"]["version"], "new");
+    assert_eq!(*f.calls.lock().await, [("old".into(), json!(2)), ("old".into(), json!(3)), ("new".into(), json!(4))]);
+    watcher.abort();
 }
 
 #[cfg(unix)]

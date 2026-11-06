@@ -154,6 +154,10 @@ mod verification_dispatch_tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
         std::fs::create_dir_all(&root).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = Task::new("cas-racing-close".into(), "No delivery".into());
+        task.assignee = Some("worker".into());
+        tasks.add(&task).unwrap();
         let boundary = cas_types::VerificationProofBoundary::task();
         let original = cas_store::create_verification_dispatch_bound(
             &root,
@@ -189,6 +193,9 @@ mod verification_dispatch_tests {
                 ("supervisor", "other-owner", &boundary),
                 ("supervisor", "supervisor", &different_boundary),
             ] {
+                let mut current = tasks.get(&task.id).unwrap();
+                current.deliverables.no_delivery_close_intent = None;
+                tasks.update(&current).unwrap();
                 let outcome = request_close_verification_dispatch(
                     &root,
                     &original.task_id,
@@ -196,7 +203,7 @@ mod verification_dispatch_tests {
                     owner,
                     requested,
                     false,
-                    None,
+                    Some(("Measured no source delivery", Some("worker"))),
                 )
                 .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
                 match outcome {
@@ -204,6 +211,14 @@ mod verification_dispatch_tests {
                     other => panic!(
                         "must return the exact active dispatch without reusing its authority: {other:?}"
                     ),
+                }
+                let intent = tasks.get(&task.id).unwrap().deliverables.no_delivery_close_intent;
+                if requester == "worker" {
+                    let saved = intent.expect("matching active proof must retain the worker's no-delivery declaration");
+                    assert_eq!(saved.dispatch_id, original.id);
+                    assert_eq!(saved.assignee.as_deref(), Some("worker"));
+                } else {
+                    assert!(intent.is_none(), "different owner/proof must not acquire close intent");
                 }
                 assert_eq!(
                     cas_store::get_latest_verification_dispatch(&root, &original.task_id)

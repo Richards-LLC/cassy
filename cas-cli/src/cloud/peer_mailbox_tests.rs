@@ -803,6 +803,54 @@ async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
 }
 
 #[tokio::test]
+async fn worker_directory_is_loaded_only_for_worker_mail_cas_26d0() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    for recipient in [None, Some("recipient"), Some("worker")] {
+        let server = MockServer::start().await;
+        // Sender labels also use /api/agents once for a nonempty batch.
+        let lookups = usize::from(recipient.is_some()) + usize::from(recipient == Some("worker"));
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[{
+                "id":"recipient", "name":"recipient", "agent_type":"primary", "status":"active",
+                "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0, "user_id":"owner"
+            }]}))).expect(lookups as u64).mount(&server).await;
+        Mock::given(method("GET")).and(path("/api/agents/locks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"locks":[]})))
+            .expect(u64::from(recipient == Some("worker"))).mount(&server).await;
+        let messages = recipient.map(|id| serde_json::json!({
+            "id":"mail", "project_id":REPO, "recipient_agent_id":id,
+            "sender_agent_id":"remote-worker", "sender_name":"remote", "body":"collision warning",
+            "created_at":chrono::Utc::now().to_rfc3339()
+        })).into_iter().collect::<Vec<_>>();
+        Mock::given(method("POST")).and(path("/api/peer-messages/claim"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"messages":messages})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("POST")).and(path("/api/peer-messages/ack"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"results":[{"id":"mail","status":200}]})))
+            .mount(&server).await;
+        let machine = Machine::new();
+        machine.register("recipient", "recipient", AgentRole::Supervisor, "factory-a");
+        machine.register("worker", "worker", AgentRole::Worker, "factory-a");
+        crate::cloud::set_canonical_id_in_config_toml(&machine.cas, REPO).unwrap();
+        crate::cloud::CloudConfig { endpoint:server.uri(), token:Some("test-token".into()), ..Default::default() }
+            .save_to_cas_dir(&machine.cas).unwrap();
+        let root = machine.cas.clone();
+        let report = tokio::task::spawn_blocking(move || PeerMailboxRuntime::start(&root, "factory-a").unwrap().tick_blocking())
+            .await.unwrap();
+        assert!(report.errors.is_empty(), "{recipient:?}: {report:?}");
+        if recipient == Some("worker") {
+            assert_eq!(report.rejected, 1, "unauthorized peer must still fail closed: {report:?}");
+            assert!(machine.rows().is_empty());
+        } else {
+            assert_eq!(report.delivered, usize::from(recipient.is_some()));
+        }
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
 async fn cas_4ac8_persistent_ack_rate_limit_is_bounded_and_named_in_mailbox_health() {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};

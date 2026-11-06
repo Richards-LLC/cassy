@@ -3750,8 +3750,8 @@ mod tests {
         );
         commit(p, "foreign.rs", "foreign\n", "cas-a1b2: unrelated task");
         // cas-26d0: squash PR numbers must not hide earlier trailing task tags.
-        commit(p, "squashed.rs", "foreign\n", "fix: unrelated delivery (cas-a1b2) (#123)");
-        commit(p, "bracketed.rs", "foreign\n", "fix: unrelated delivery [cas-a1b2] (#124)");
+        let squashed = commit(p, "squashed.rs", "foreign\n", "fix: unrelated delivery (cas-a1b2) (#123)");
+        let bracketed = commit(p, "bracketed.rs", "foreign\n", "fix: unrelated delivery [cas-a1b2] (#124)");
         commit(
             p,
             "explicit.rs",
@@ -3761,6 +3761,10 @@ mod tests {
         let known = commit(p, "recorded.rs", "known\n", "cas-cafe: recorded delivery");
         let mut scope = window();
         scope.identity.known_commits.push(known);
+        for sha in [squashed, bracketed] {
+            assert!(commit_claims_another_task(p, &sha, &scope.identity),
+                "trailing PR annotation must not hide task ownership: {sha}");
+        }
         let stat = diff_stat(p, "main", &scope, None).unwrap().stat;
         assert!(
             stat.contains("crate_change.rs"),

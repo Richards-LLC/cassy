@@ -756,6 +756,17 @@ pub enum FactoryCommands {
         #[command(subcommand)]
         command: hold::HoldCommand,
     },
+    /// Run the CI watcher's GitHub reads without persisting anything, at the
+    /// daemon's cadence, and print the calls they spent (cas-c24e).
+    #[command(hide = true)]
+    CiWatchDryRun {
+        /// How long to poll
+        #[arg(long, default_value_t = 15)]
+        minutes: u64,
+        /// Factory session whose ci_completed reminders the poll reads
+        #[arg(long, default_value = "")]
+        session: String,
+    },
     /// Release-train guardrails (supervisor)
     Train {
         #[command(subcommand)]
@@ -1292,6 +1303,11 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 Ok(())
             }
             FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
+            FactoryCommands::CiWatchDryRun { minutes, session } => {
+                let root = cas_root.ok_or_else(|| anyhow::anyhow!("ci-watch-dry-run requires a Cassy project"))?;
+                println!("{}", crate::gh_budget::ci_watch_dry_run(root, session, *minutes)?);
+                Ok(())
+            }
             FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train drop requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);

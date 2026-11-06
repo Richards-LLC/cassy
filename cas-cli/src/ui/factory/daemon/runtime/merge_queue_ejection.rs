@@ -5,7 +5,43 @@
 
 use std::path::Path;
 
-use super::ci_watch::{CiTransport, SupervisorPr};
+use super::ci_watch::{AwaitingMergeDelivery, CiTransport, SupervisorPr};
+
+/// Parked deliveries to `main` whose PR GitHub has not yet been seen merging.
+/// cas-c24e: a recorded merge is final, and in batch QA a merged delivery
+/// stays AwaitingMerge until the release verdict; polling its PR every tick
+/// was the factory's largest GitHub GraphQL cost.
+pub(crate) fn awaiting_merge_deliveries(cas_dir: &Path) -> Vec<AwaitingMergeDelivery> {
+    crate::store::open_task_store_cached(cas_dir)
+        .ok()
+        .and_then(|store| store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| {
+            task.deliverables.delivery_pr_merge_commit.is_none()
+                || task.deliverables.delivery_pr_merged_at.is_none()
+        })
+        .filter_map(|task| {
+            let worker = task.assignee?;
+            let work_target = task.deliverables.work_target.as_ref()?;
+            if work_target.target_branch != "main" {
+                return None;
+            }
+            let branch = task
+                .deliverables
+                .parked_branch
+                .or(task.branch)
+                .unwrap_or_else(|| format!("factory/{worker}"));
+            Some(AwaitingMergeDelivery {
+                task_id: task.id,
+                worker,
+                branch,
+                branch_tip: task.deliverables.factory_branch_anchor,
+                pr_number: task.deliverables.delivery_pr_number,
+            })
+        })
+        .collect()
+}
 
 /// Open epics whose `epic/` branch the supervisor queues as a PR.
 pub(crate) fn supervisor_prs(cas_dir: &Path) -> Vec<SupervisorPr> {

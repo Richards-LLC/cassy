@@ -63,9 +63,41 @@ pub(crate) fn origin_slug(cwd: &Path, timeout: Duration) -> Result<Option<String
     )
 }
 
-/// One explicit lookup follows GitHub's rename/transfer redirect. Callers cache
-/// this result for all requests in the operation rather than resolving per SHA.
+/// How long a process trusts a resolved canonical repository. A rename or
+/// transfer is rare and GitHub keeps redirecting the old name meanwhile.
+const CANONICAL_TTL: Duration = Duration::from_secs(3600);
+
+type CanonicalCache = std::sync::Mutex<
+    std::collections::HashMap<(String, PathBuf), (std::time::Instant, ResolvedRepo)>,
+>;
+
+/// One explicit lookup follows GitHub's rename/transfer redirect. cas-c24e:
+/// the answer is cached per process, so a daemon tick, a merge or a close
+/// stops spending a GraphQL request on an identity that never changes.
+#[track_caller]
 pub(crate) fn resolve_slug(
+    origin: &str,
+    cwd: &Path,
+    binary: &Path,
+    timeout: Duration,
+) -> Result<ResolvedRepo, String> {
+    static CACHE: std::sync::OnceLock<CanonicalCache> = std::sync::OnceLock::new();
+    let key = (origin.to_string(), binary.to_path_buf());
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((at, repo)) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned())
+        && at.elapsed() < CANONICAL_TTL
+    {
+        return Ok(repo);
+    }
+    let repo = resolve_slug_uncached(origin, cwd, binary, timeout)?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, (std::time::Instant::now(), repo.clone()));
+    }
+    Ok(repo)
+}
+
+#[track_caller]
+fn resolve_slug_uncached(
     origin: &str,
     cwd: &Path,
     binary: &Path,
@@ -91,6 +123,9 @@ pub(crate) fn resolve_slug(
                 "canonical GitHub repository lookup unavailable for origin {origin} (cannot start or capture gh)"
             ),
         })?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("canonical GitHub repository lookup for origin {origin}: {refusal}"));
+    }
     if !output.status.success() {
         // No stderr here: gh can include credentials in an error. The CI
         // receipt names the failed operation, not arbitrary provider output.
@@ -135,6 +170,7 @@ pub(crate) struct QueueReport {
 }
 
 /// Reuse one response for origin and queue diagnostics, including redirects.
+#[track_caller]
 pub(crate) fn repository_health(
     origin: &str,
     cwd: &Path,
@@ -274,6 +310,7 @@ fn queue_report(repo: &serde_json::Value) -> Result<QueueReport, &'static str> {
 /// branch, including ruleset-backed queues. Do not infer one from workflows,
 /// plan names or branch protection alone. Provider errors are not absence.
 /// Schema: https://docs.github.com/en/graphql/reference/repos#repository
+#[track_caller]
 pub(crate) fn merge_queue_enabled(
     repo: &str,
     branch: &str,
@@ -292,6 +329,9 @@ pub(crate) fn merge_queue_enabled(
     ]);
     let output = run_command(&mut command, Deadline::after(timeout), timeout)
         .map_err(|_| "merge queue lookup unavailable or timed out".to_string())?;
+    if let Some(refusal) = crate::gh_budget::backoff_refusal(&output) {
+        return Err(format!("merge queue lookup: {refusal}"));
+    }
     if !output.status.success() {
         return Err("merge queue lookup failed".into());
     }
@@ -351,6 +391,13 @@ mod tests {
             resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).unwrap();
         assert_eq!(resolved.canonical, "Richards-LLC/cassy");
         assert_eq!(resolved.origin, "pippenz/cas");
+        // cas-c24e: the identity is cached per process; GitHub is not asked again.
+        crate::test_paths::warm_stub(&gh, "#!/bin/sh\nexit 97\n");
+        assert_eq!(
+            resolve_slug("pippenz/cas", temp.path(), &gh, Duration::from_secs(2)).unwrap(),
+            resolved
+        );
+        let resolve_slug = resolve_slug_uncached;
         crate::test_paths::warm_stub(
             &gh,
             "#!/bin/sh\nprintf '%s' '{\"nameWithOwner\":\"bad/repo/extra\"}'\n",

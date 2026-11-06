@@ -25,7 +25,7 @@ struct GhBugFilingTransport;
 
 impl BugFilingTransport for GhBugFilingTransport {
     fn ensure_agent_reported_label(&self, repo: &str) -> Result<(), String> {
-        let output = Command::new("gh")
+        let output = crate::gh_budget::output(Command::new("gh")
             .args([
                 "label",
                 "create",
@@ -37,8 +37,7 @@ impl BugFilingTransport for GhBugFilingTransport {
                 "--description",
                 "Reported by an automated Cassy agent",
                 "--force",
-            ])
-            .output()
+            ]), std::time::Duration::from_secs(30))
             .map_err(|error| format!("Failed to run gh CLI while preparing label: {error}"))?;
 
         if output.status.success() {
@@ -63,7 +62,7 @@ impl BugFilingTransport for GhBugFilingTransport {
             command.args(["--label", label]);
         }
 
-        let output = command.output().map_err(|error| {
+        let output = crate::gh_budget::output(&mut command, std::time::Duration::from_secs(30)).map_err(|error| {
             format!("Failed to run gh CLI: {error}. Is gh installed and authenticated?")
         })?;
 

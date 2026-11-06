@@ -179,3 +179,27 @@ fn ahead_may_be_cause_blames_same_job_running_or_unreadable_entries_ahead() {
     assert!(blamed(None, AheadEntry::Unknown), "entry ahead still running");
     assert!(!blamed(None, AheadEntry::Clear), "no failed entry ahead");
 }
+
+#[test]
+fn deliveries_skip_a_parked_task_whose_pr_merge_is_recorded_cas_c24e() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+    let store = crate::store::open_task_store_cached(&cas_dir).unwrap();
+    for (id, merged) in [("cas-open-pr", false), ("cas-merged-pr", true)] {
+        let mut task = cas_types::Task::new(id.to_string(), id.to_string());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some(format!("worker-{id}"));
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".to_string(),
+            target_branch: "main".to_string(),
+        });
+        task.deliverables.delivery_pr_number = Some(7);
+        if merged {
+            task.deliverables.delivery_pr_merge_commit = Some("merge-tip".to_string());
+            task.deliverables.delivery_pr_merged_at = Some(chrono::Utc::now());
+        }
+        store.add(&task).unwrap();
+    }
+    let polled: Vec<_> = awaiting_merge_deliveries(&cas_dir).into_iter().map(|d| d.task_id).collect();
+    assert_eq!(polled, vec!["cas-open-pr".to_string()], "a landed PR is not polled again");
+}

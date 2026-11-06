@@ -68,6 +68,7 @@
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices.
+- `cas-cli/src/gh_budget.rs`, `cas-cli/src/gh_budget_tests.rs` - GitHub API budget: per-call caller/endpoint log for every `gh` run through `bounded_process`, `cas doctor` top callers, and the machine-wide rate-limit backoff stamp.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.

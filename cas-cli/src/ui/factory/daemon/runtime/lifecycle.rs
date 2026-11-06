@@ -1191,38 +1191,6 @@ fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     }
 }
 
-/// Parked deliveries targeting `main`, for the CI watcher. Runs on the
-/// blocking pool with the GitHub calls (GH #1165).
-fn awaiting_merge_deliveries(
-    cas_dir: &std::path::Path,
-) -> Vec<super::ci_watch::AwaitingMergeDelivery> {
-    crate::store::open_task_store_cached(cas_dir)
-        .ok()
-        .and_then(|store| store.list(Some(cas_types::TaskStatus::AwaitingMerge)).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|task| {
-            let worker = task.assignee?;
-            let work_target = task.deliverables.work_target.as_ref()?;
-            if work_target.target_branch != "main" {
-                return None;
-            }
-            let branch = task
-                .deliverables
-                .parked_branch
-                .or(task.branch)
-                .unwrap_or_else(|| format!("factory/{worker}"));
-            Some(super::ci_watch::AwaitingMergeDelivery {
-                task_id: task.id,
-                worker,
-                branch,
-                branch_tip: task.deliverables.factory_branch_anchor,
-                pr_number: task.deliverables.delivery_pr_number,
-            })
-        })
-        .collect()
-}
-
 /// Persist one completed CI-watch poll: PR observations, merge timeouts,
 /// merge-queue ejections, PR-lane failures and red-run wakes. Runs on the
 /// daemon's store worker, never on the UI loop (GH #1165).
@@ -4344,29 +4312,23 @@ impl FactoryDaemon {
                         ) {
                             tracing::warn!(%error, "CI merge retry scan failed");
                         }
-                        let deliveries = awaiting_merge_deliveries(&watch_cas_dir);
-                        let supervisor_prs =
-                            super::merge_queue_ejection::supervisor_prs(&watch_cas_dir);
-                        let transport = super::ci_watch::GhCiTransport::from_project(&project)?;
-                        let candidates = super::queue_and_events::ci_completed_candidates(
+                        // cas-c24e: the poll's GitHub reads, shared with
+                        // `cas factory ci-watch-dry-run` so their cost is measurable.
+                        let super::ci_watch::GithubPoll {
+                            failures,
+                            mut queue_poll,
+                            ejections,
+                            delivery_pr_observations,
+                            ci_wakes,
+                        } = super::ci_watch::read_github(
                             &watch_cas_dir,
-                            &session_name,
-                        );
-                        let ci_wakes = (
-                            super::ci_watch::collect_ci_wakes(&transport, &candidates),
-                            !candidates.is_empty(),
-                        );
-                        let failures = super::ci_watch::mark_merged_failures(
                             &project,
-                            super::ci_watch::collect_failures(&transport, &watched_branches)?,
-                        );
-                        let mut queue_poll = super::ci_watch::collect_tracked_merge_queue_ejections(
-                            &transport,
-                            &deliveries,
-                            &supervisor_prs,
+                            &session_name,
+                            &watched_branches,
                             &previously_queued,
                             &previously_armed,
                             &previously_held,
+                            &failed_run_lookups,
                         )?;
                         // cas-dcc9: one "train ready to cut" notice per train
                         // state, from this same queue read; never an auto-cut.
@@ -4389,29 +4351,6 @@ impl FactoryDaemon {
                         crate::cloud::peers_detail::save_pr_snapshot(
                             &watch_cas_dir, std::mem::take(&mut queue_poll.observed_prs), chrono::Utc::now(),
                         );
-                        // cas-fd0a: name each ejection's failing job for the
-                        // wake. GitHub calls stay on this blocking task
-                        // (GH #1165).
-                        let ejections = std::mem::take(&mut queue_poll.ejections)
-                            .into_iter()
-                            .map(|ejection| {
-                                let job = failed_run_lookups.failing_job(
-                                    &transport,
-                                    ejection.failed_run_id,
-                                );
-                                let group_mate = failed_run_lookups.ahead_may_be_cause(
-                                    &transport,
-                                    ejection.failed_run_id,
-                                    ejection.ahead,
-                                );
-                                (ejection, job, group_mate)
-                            })
-                            .collect::<Vec<_>>();
-                        let delivery_pr_observations =
-                            super::ci_watch::collect_delivery_pr_observations(
-                                &transport,
-                                &deliveries,
-                            )?;
                         Ok((failures, queue_poll, ejections, delivery_pr_observations, ci_wakes))
                     }));
                     last_ci_watch = std::time::Instant::now();

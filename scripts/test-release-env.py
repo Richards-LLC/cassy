@@ -324,10 +324,15 @@ class QueueHealth(Fixture):
         fixture = json.loads((SCRIPTS.parent / "cas-cli/tests/fixtures/merge-queue-health.json").read_text())
         response, log = self.root / "response.json", self.root / "calls"
         gh = make_exe(self.root / "gh", f"#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> '{log}'\ncat '{response}'\n")
-        for build, merge, grouping, warning in [(1, 1, "ALLGREEN", True), (5, 5, "ALLGREEN", False), (8, 5, "HEADGREEN", True), (5, 1, "ALLGREEN", True)]:
-            fixture["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"].update(
-                maxEntriesToBuild=build, maxEntriesToMerge=merge, groupingStrategy=grouping)
-            response.write_text(json.dumps(fixture))
+        for limits, warning in [((1, 1, "ALLGREEN"), True), ((5, 5, "ALLGREEN"), False), ((8, 5, "HEADGREEN"), True), ((5, 1, "ALLGREEN"), True), (None, False)]:
+            value = json.loads(json.dumps(fixture))
+            if limits:
+                build, merge, grouping = limits
+                value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"][0]["parameters"].update(
+                    maxEntriesToBuild=build, maxEntriesToMerge=merge, groupingStrategy=grouping)
+            else:
+                value["data"]["repository"]["defaultBranchRef"]["rules"]["nodes"] = []
+            response.write_text(json.dumps(value))
             log.write_text("")
             result = subprocess.run([sys.executable, str(SCRIPTS / "github_queue_health.py"), "--worktree", str(repo), "--gh", str(gh)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)

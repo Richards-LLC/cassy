@@ -191,9 +191,9 @@ mod tests {
     }
 
     /// cas-4b22: a parked delivery already on origin/<target> gets one
-    /// supervisor notice per release SHA naming the exact batch_receipt call.
+    /// supervisor notice per uncovered set naming the exact batch_receipt call.
     #[test]
-    fn batch_receipt_offer_names_live_parked_deliveries_once_per_sha() {
+    fn batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let git = |args: &[&str]| {
@@ -229,27 +229,36 @@ mod tests {
             cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
-        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per release SHA");
-        // A delivery parked later at the already-noticed tip still gets its own offer.
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "one notice per uncovered set");
+        // Replay two main advances without accidentally publishing the control delivery.
+        git(&["checkout", "-q", "-b", "main-moves", &live]);
+        let mut newest = live.clone();
+        for name in ["move-one.md", "move-two.md"] {
+            newest = anchor(name);
+            git(&["update-ref", "refs/remotes/origin/main", &newest]);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "unchanged set stays quiet when main moves");
+        }
+        // A newly uncovered delivery changes the set and gets a fresh current-tip offer.
         let mut late = Task::new("cas-late".into(), "late".into());
         late.status = cas_types::TaskStatus::AwaitingMerge;
         late.deliverables.factory_branch_anchor = Some(base.clone());
         tasks.add(&late).unwrap();
         cas_store::defer_qa_batch_evidence(&cas, "cas-late", &base).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "changed set is offered only once");
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
         assert_eq!(rows.len(), 2);
         assert!(
-            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late] staging_sha={live}"))),
+            rows.iter().any(|row| row.payload.contains(&format!("task_ids=[cas-late,cas-live] staging_sha={newest}"))),
             "{:?}",
             rows.iter().map(|row| &row.payload).collect::<Vec<_>>()
         );
-        let payload = &rows.iter().find(|row| row.payload.contains("cas-live")).unwrap().payload;
+        let payload = &rows.iter().find(|row| !row.payload.contains("cas-late")).unwrap().payload;
         assert!(
             payload.contains(&format!("verification action=batch_receipt task_ids=[cas-live] staging_sha={live}")),
             "{payload}"
         );
-        assert!(!payload.contains("cas-unpushed"), "{payload}");
+        assert!(rows.iter().all(|row| !row.payload.contains("cas-unpushed")), "{rows:?}");
     }
 
     #[test]

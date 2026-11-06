@@ -12634,11 +12634,11 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 
 /// cas-7fc3 (GH #1388), real path: a no-code worker closes, receives an exact
 /// supervisor-owned dispatch and waits Blocked on it. The supervisor's
-/// approval through `cas_verification_add` must queue the worker's close
-/// retry (not report "no live assigned worker"), and that unchanged retry
-/// closes the task with no source commit.
+/// approval through `cas_verification_add` must leave close recovery with the
+/// supervisor, without asking the worker to violate never-re-close (cas-abb0).
+/// The supervisor closes through ordinary gates, with no source commit.
 #[tokio::test]
-async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
+async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, _core) = setup_cas(&mut test_env);
     let repo = temp.path();
@@ -12727,18 +12727,18 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
             .await
             .expect("supervisor approves the exact dispatch"),
     );
-    assert!(approved.contains("Close retry queued for the assigned worker"), "{approved}");
-    assert!(!approved.contains("No close retry was queued"), "{approved}");
+    assert!(approved.contains("Supervisor close recovery queued"), "{approved}");
     let rows = cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap();
     let retry = rows
         .iter()
-        .find(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id))
-        .unwrap_or_else(|| panic!("close retry row for the worker: {rows:?}"));
-    // pin: the retry prompt is the instruction the worker acts on.
-    assert!(retry.prompt.contains("Retry task close id=cas-7fc3-wait now"), "{}", retry.prompt);
+        .find(|row| row.target == "sup-7fc3" && row.prompt.contains(&dispatch.id))
+        .unwrap_or_else(|| panic!("close recovery row for the supervisor: {rows:?}"));
+    // pin: recovery must identify the ordinary close command and its permitted owner.
+    assert!(retry.prompt.contains("task action=close id=cas-7fc3-wait"), "{}", retry.prompt);
+    assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains("Retry task close")), "{rows:?}");
 
     let closed = extract_text(
-        worker_core
+        supervisor_core
             .cas_task_close(Parameters(close_request(&task.id, reason)))
             .await
             .unwrap(),

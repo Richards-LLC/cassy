@@ -3615,7 +3615,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .epic-tabs[hidden] { display: none; }
 .epic-tabs-heading { margin: 0 0 var(--space-2); color: var(--ink-mid); font: var(--weight-medium) var(--fs-meta)/var(--line-ui) var(--font-ui); }
 .epic-tab-list { display: flex; flex-direction: column; gap: var(--space-1); }
-.epic-tab { display: grid; gap: var(--space-1); width: 100%; min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); border: 0; border-inline-start: 2px solid var(--color-transparent); border-radius: var(--radius-control); background: var(--color-transparent); color: var(--ink-mid); text-align: left; font: inherit; }
+.epic-tab { display: grid; gap: var(--space-1); width: 100%; min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); border: 0; border-inline-start: 2px solid var(--color-transparent); border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink-mid); text-align: left; font: inherit; }
 .epic-tab:hover { background: var(--bg-hover); color: var(--ink); }
 .epic-tab[aria-selected="true"] { background: var(--bg-active); color: var(--ink); border-inline-start-color: var(--color-action); }
 .epic-tab:focus-visible, .epic-tab-panel:focus-visible, .epic-parked-toggle:focus-visible, .epic-other-projects:focus-visible { outline: 2px solid var(--color-focus); outline-offset: -2px; }

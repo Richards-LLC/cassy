@@ -469,10 +469,15 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
     let agents = crate::store::open_agent_store(&cas).unwrap();
     let mut supervisor = agents.get("single-sup").unwrap();
     supervisor.status = cas_types::AgentStatus::Active;
-    supervisor.metadata.insert("worker_cli".into(), "claude".into());
-    supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
+    // Production supervisor registration carries its own account and native
+    // session id. It has no worker account or worktree metadata.
+    supervisor.cc_session_id = Some("first-boot-native-session".into());
+    supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
     let account = root.path().join("claude-account");
-    supervisor.metadata.insert("worker_account_dir".into(), account.display().to_string());
+    supervisor.metadata.insert("supervisor_account_dir".into(), account.display().to_string());
+    supervisor.metadata.insert("supervisor_account_harness".into(), "claude".into());
+    assert!(!supervisor.metadata.contains_key("worker_account_dir"));
+    assert!(!supervisor.metadata.contains_key("clone_path"));
     agents.register(&supervisor).unwrap();
     daemon.app.refresh_data().unwrap();
     crate::ui::factory::queue_supervisor_intro_prompt(
@@ -524,7 +529,7 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
     // rather than the submitted CR, releases the success receipt.
     let slug: String = root.path().to_str().unwrap().chars()
         .map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
-    let path = account.join("projects").join(slug).join("single-sup.jsonl");
+    let path = account.join("projects").join(slug).join("first-boot-native-session.jsonl");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!("{}\n", serde_json::json!({
         "type":"user", "timestamp":chrono::Utc::now().to_rfc3339(),

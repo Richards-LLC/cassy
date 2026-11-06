@@ -181,7 +181,7 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
     let store = SqliteAgentStore::open(root)?;
     store.init()?;
     let claimed = store.claim_supervisor_handoffs(successor)?;
-    // cas-d85c3: a phone message the predecessor never read belongs to the
+    // Phone and Violet mail the predecessor never read belongs to the
     // claiming successor. Re-check every claimed handoff, not just new ones,
     // so a message left behind before this ran still moves; a moved row no
     // longer matches, so repeats are no-ops.
@@ -265,8 +265,9 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         if let Some(moved) = rerouted.get(&handoff.id).filter(|ids| !ids.is_empty()) {
             let ids: Vec<String> = moved.iter().map(|id| format!("#{id}")).collect();
             detail.push_str(&format!(
-                "Unread operator messages re-routed to you: {}. Answer each once in your final pane reply; \
-                 use explicit routing only for disabled or unmirrored delivery \
+                "Unread operator or Violet messages re-routed to you: {}. Preserve each message's original routing: \
+                 reply to Slack through Violet in its original thread. Answer Commander messages once in your final pane reply; \
+                 use explicit routing only for disabled or unmirrored Commander delivery \
                  (cas-supervisor/references/reference.md#verified-commander-messages).\n",
                 ids.join(", ")
             ));

@@ -210,6 +210,7 @@ async fn retained_worker_work_is_visible_after_session_shutdown_cas_7772d() {
         if worker == "warm-retired" {
             git(repo, &["merge", "--squash", &branch]);
             git(repo, &["commit", "-qm", "squash delivered worker change"]);
+            git(repo, &["push", "-q", "origin", "main"]);
             std::fs::write(path.join("local.txt"), "unpushed follow-up").unwrap();
             git(&path, &["add", "local.txt"]);
             git(

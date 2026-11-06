@@ -22651,47 +22651,50 @@ mod supervisor_notice_wake_tests {
 
     #[test]
     fn owner_notices_wake_only_with_daemon_authority() {
-        let body = "<cas-supervisor-notice kind=\"epic_orphaned\" notification_id=\"42\">\nAdopt cas-epic.\n</cas-supervisor-notice>";
-        assert_eq!(
-            FactoryDaemon::supervisor_wake_class(
-                &WakeSender::Daemon,
-                "owner",
-                "supervisor-notice:42",
-                body
-            ),
-            Some(SupervisorWakeClass::Blocker)
-        );
-        assert_eq!(
-            FactoryDaemon::supervisor_wake_class(
-                &WakeSender::Unattributed,
-                "owner",
-                "supervisor-notice:42",
-                body
-            ),
-            None
-        );
-        assert_eq!(
-            FactoryDaemon::supervisor_wake_class(
-                &WakeSender::Registered {
-                    role: cas_types::AgentRole::Worker,
-                    name: "worker".into()
-                },
-                "owner",
-                "supervisor-notice:42",
-                body
-            ),
-            Some(SupervisorWakeClass::DirectedMessage),
-            "an authenticated worker may wake, but cannot borrow the daemon's Blocker class"
-        );
-        assert_eq!(
-            FactoryDaemon::supervisor_wake_class(
-                &WakeSender::Daemon,
-                "owner",
-                "supervisor-notice:42",
-                "ordinary text"
-            ),
-            None
-        );
+        for kind in ["epic_orphaned", "premerge_verification"] {
+            let body = format!("<cas-supervisor-notice kind=\"{kind}\" notification_id=\"42\">\nOwner action required.\n</cas-supervisor-notice>");
+            let body = body.as_str();
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &WakeSender::Daemon,
+                    "owner",
+                    "supervisor-notice:42",
+                    body
+                ),
+                Some(SupervisorWakeClass::Blocker)
+            );
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &WakeSender::Unattributed,
+                    "owner",
+                    "supervisor-notice:42",
+                    body
+                ),
+                None
+            );
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &WakeSender::Registered {
+                        role: cas_types::AgentRole::Worker,
+                        name: "worker".into()
+                    },
+                    "owner",
+                    "supervisor-notice:42",
+                    body
+                ),
+                Some(SupervisorWakeClass::DirectedMessage),
+                "an authenticated worker may wake, but cannot borrow the daemon's Blocker class"
+            );
+            assert_eq!(
+                FactoryDaemon::supervisor_wake_class(
+                    &WakeSender::Daemon,
+                    "owner",
+                    "supervisor-notice:42",
+                    "ordinary text"
+                ),
+                None
+            );
+        }
         // A release runs one QA round, so a queued hourly overdue row left by an
         // older daemon must not wake a supervisor to start another.
         assert_eq!(

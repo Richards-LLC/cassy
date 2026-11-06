@@ -9376,11 +9376,13 @@ impl CasCore {
                         // an older boundary, but it cannot silently park that
                         // ancestor as this delivery's branch identity.
                         if task.status != TaskStatus::AwaitingMerge
+                            && gate_refusals.is_empty()
+                            && let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref()
+                            && git_commit_is_ancestor(&close_project_root, recorded, tip)
                             && park_anchor.as_deref() != Some(tip)
                         {
                             gate_refusals.push(format!(
-                                "PARK REFUSED: cannot attribute pushed HEAD {tip} on {branch} beyond recorded delivery {:?}. No park or QA round changed. Ask the supervisor to review the continuation before retrying.",
-                                task.deliverables.factory_branch_anchor,
+                                "PARK REFUSED: cannot attribute pushed HEAD {tip} on {branch} beyond recorded delivery {recorded}. No park or QA round changed. Ask the supervisor to review the continuation before retrying.",
                             ));
                             return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                         }

@@ -1501,6 +1501,62 @@ impl GitOperations {
         source_branch: &str,
         no_ff: bool,
     ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            self.merge_branch_in_dir(dir, None, source_branch, no_ff)
+        })
+    }
+
+    /// cas-dcc9: revert merge commits (`-m 1`, their mainline parent) on
+    /// `target_branch`, one new commit each in the given order, with the same
+    /// detached-worktree and compare-and-swap guarantees as a merge. All land
+    /// or none do; history is never rewritten.
+    pub fn revert_merges_via_temp_worktree(
+        &self,
+        target_branch: &str,
+        reverts: &[(String, String)],
+    ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            let git = |args: &[&str]| -> Result<String> {
+                let output = Command::new("git").args(args).current_dir(dir).output()?;
+                if !output.status.success() {
+                    return Err(GitError::CommandFailed(format!(
+                        "git {}: {}",
+                        args.join(" "),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            };
+            for (merge_sha, message) in reverts {
+                if let Err(error) = git(&["revert", "--no-commit", "-m", "1", merge_sha]) {
+                    // cas-d9d3c: the temp worktree is gone after this; name
+                    // what conflicted and what to do, not git's raw hints.
+                    let files = git(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+                    let _ = git(&["revert", "--abort"]);
+                    if files.is_empty() {
+                        return Err(error);
+                    }
+                    return Err(GitError::CommandFailed(format!(
+                        "reverting merge {merge_sha} conflicts in {}: a later commit on {target_branch} \
+                         changed the same lines. Nothing changed on {target_branch}. Next: drop the \
+                         later child that touched them in the same batch, or resolve the revert by \
+                         hand on a checkout of {target_branch}.",
+                        files.lines().collect::<Vec<_>>().join(", ")
+                    )));
+                }
+                git(&["commit", "-q", "-m", message])?;
+            }
+            git(&["rev-parse", "HEAD"]).map(Some)
+        })
+    }
+
+    /// Run `step` in a detached worktree at `target_branch`'s tip, then
+    /// compare-and-swap the branch to the commit it returns.
+    fn advance_via_temp_worktree(
+        &self,
+        target_branch: &str,
+        step: impl FnOnce(&Path) -> Result<Option<String>>,
+    ) -> Result<Option<String>> {
         let old_tip = self
             .resolve_commit(target_branch)
             .ok_or_else(|| GitError::BranchNotFound(target_branch.to_string()))?;
@@ -1523,7 +1579,7 @@ impl GitOperations {
         }
 
         let guard = self.add_temp_worktree(&old_tip)?;
-        let merged = self.merge_branch_in_dir(guard.path(), None, source_branch, no_ff)?;
+        let merged = step(guard.path())?;
 
         let new_tip = match merged {
             Some(ref tip) if *tip != old_tip => tip.clone(),

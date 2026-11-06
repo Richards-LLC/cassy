@@ -1065,6 +1065,8 @@ const SPAWN_ASSIGN_GRACE_SECS: i64 = 10;
 /// Events detected from Cassy state changes
 #[derive(Debug, Clone)]
 pub enum DirectorEvent {
+    /// QA output progress and critical-path advice, independent of native liveness.
+    QaWalkAttention { key: String, text: String },
     /// The focused epic has concrete supervisor-owned work while the
     /// supervisor has made no Cassy MCP call for the configured interval.
     SupervisorStalled {
@@ -1136,6 +1138,7 @@ impl DirectorEvent {
     /// Get the worker/agent this event targets (for prompt injection)
     pub fn target(&self) -> Option<&str> {
         match self {
+            Self::QaWalkAttention { .. } => None,
             Self::SupervisorStalled { .. } => None,
             Self::TaskAssigned { worker, .. } => Some(worker),
             Self::TaskCompleted { worker, .. } => Some(worker),
@@ -1152,6 +1155,7 @@ impl DirectorEvent {
     /// Get a description of the event for logging
     pub fn description(&self) -> String {
         match self {
+            Self::QaWalkAttention { text, .. } => text.clone(),
             Self::SupervisorStalled {
                 next_step,
                 actionable_idle_secs,
@@ -1243,6 +1247,7 @@ impl DirectorEvent {
     /// Events with the same key are considered duplicates within the debounce window.
     pub fn debounce_key(&self) -> String {
         match self {
+            Self::QaWalkAttention { key, .. } => key.clone(),
             Self::SupervisorStalled { occurrence, .. } => {
                 format!("supervisor_stalled:{occurrence}")
             }
@@ -1287,6 +1292,7 @@ impl DirectorEvent {
     /// Get the event type as a string (for recording export)
     pub fn event_type(&self) -> &'static str {
         match self {
+            Self::QaWalkAttention { .. } => "qa_walk_attention",
             Self::SupervisorStalled { .. } => "supervisor_stalled",
             Self::TaskAssigned { .. } => "task_assigned",
             Self::TaskCompleted { .. } => "task_completed",
@@ -1303,6 +1309,7 @@ impl DirectorEvent {
     /// Convert event data to JSON (for recording export)
     pub fn to_json(&self) -> serde_json::Value {
         match self {
+            Self::QaWalkAttention { key, text } => serde_json::json!({"key": key, "text": text}),
             Self::SupervisorStalled {
                 next_step,
                 occurrence,
@@ -3073,7 +3080,7 @@ impl DirectorEventDetector {
     /// WorkerIdle events use a longer rate limit (5 minutes) to prevent flooding
     /// the supervisor when multiple workers idle simultaneously.
     /// Events from removed (shutdown/crashed) workers are suppressed entirely.
-    fn debounce_events(&mut self, events: Vec<DirectorEvent>, now: Instant) -> Vec<DirectorEvent> {
+    pub(crate) fn debounce_events(&mut self, events: Vec<DirectorEvent>, now: Instant) -> Vec<DirectorEvent> {
         // Clean up old entries (use the longer idle rate limit as max TTL)
         self.last_prompt_times
             .retain(|_, time| now.duration_since(*time) < IDLE_RATE_LIMIT);
@@ -3090,7 +3097,7 @@ impl DirectorEventDetector {
                 }
 
                 let key = event.debounce_key();
-                let window = if matches!(event, DirectorEvent::WorkerIdle { .. }) {
+                let window = if matches!(event, DirectorEvent::WorkerIdle { .. } | DirectorEvent::QaWalkAttention { .. }) {
                     IDLE_RATE_LIMIT
                 } else {
                     DEBOUNCE_DURATION

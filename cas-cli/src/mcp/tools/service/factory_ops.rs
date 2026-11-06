@@ -4687,9 +4687,12 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let qa_progress = crate::qa_walk_progress::read(&self.inner.cas_root, factory_session.as_deref(), chrono::Utc::now())
+            .map(|report| report.render()).unwrap_or_else(|error| format!("QA output unavailable: {error}"));
         let mut binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
             .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
+        if !qa_progress.is_empty() { binary_versions.push_str(&format!("\n{qa_progress}")); }
         match cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.inner.cas_root) {
             Ok(queues) => for worker in store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))? {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
@@ -13344,13 +13347,12 @@ fn collect_worker_pr_url(
         return WorkerPrUrl::Unknown("branch not on origin locally");
     }
 
-    let output = match std::process::Command::new(gh_program)
-        .args([
-            "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url",
-        ])
-        .current_dir(worktree_path)
-        .output()
-    {
+    let output = match crate::gh_budget::output(
+        std::process::Command::new(gh_program)
+            .args(["pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url"])
+            .current_dir(worktree_path),
+        std::time::Duration::from_secs(10),
+    ) {
         Ok(output) => output,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return WorkerPrUrl::Unknown("gh unavailable");

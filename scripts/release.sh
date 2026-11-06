@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
-# hotfix branch) once the work is code-done:
+# train branch) once the work is code-done:
 #
 #   scripts/release.sh                 # next minor version
 #   scripts/release.sh --hotfix        # next patch version
@@ -17,12 +17,10 @@
 #      section, and names the release-notes draft
 #      docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
 #      embedded Commander bundle with the new version;
-#   4. commits "release: v<x.y.z>", pushes, opens the PR to the base branch
-#      (or retitles the open one), waits for the PR's one CI run (Scoped
-#      Validation) to go green, and only then enables auto-merge (cas-2aef).
-# Then it watches the PR until it merges. When another release lands on the
-# base first, it re-bumps: merges the base, takes the next version, pushes
-# again and re-enables auto-merge. It never waits for a person on that path.
+#   4. commits "release: v<x.y.z>", pushes, opens/reuses the train PR,
+#      admits it once and verifies admission with one smoke check.
+# Durable cross-session SHA/tag reminders carry landing and publication;
+# this command returns after admission, including with --no-watch.
 #
 # Landing on main is the release: the merge queue's run builds the archives
 # (release-prebuild.yml) and release.yml publishes them. Nothing here tags,
@@ -32,10 +30,8 @@
 # --next-version, or anywhere with --notes <file>; `{{VERSION}}` in it becomes
 # the release version. A re-bump renames it and rewrites its version.
 #
-# Exit codes: 0 merged (or prepared with --no-watch); 1 usage or setup error;
-# 3 the merge queue ejected the PR or auto-merge was turned off (repair, then
-# rerun this command); 4 a merge conflict outside the release files; 5 the
-# PR's CI is red, reported with its failing tests (it never entered the queue).
+# Exit codes: 0 prepared and admitted (or dry run); 1 setup error;
+# 3 no queue admission after the enqueue request; 4 non-release merge conflict.
 
 set -Eeuo pipefail
 # prepare runs in a command substitution; keep errexit there too.
@@ -54,7 +50,7 @@ Options:
   --notes <file>      release-notes draft to commit (default: the draft this
                       branch adds under docs/release-notes/)
   --next-version      print the version and draft path, change nothing
-  --no-watch          stop after enabling auto-merge
+  --no-watch          compatible alias; reminders are armed automatically
   --dry-run           prepare and commit locally; no push, no PR
 EOF
 }
@@ -64,7 +60,6 @@ kind="minor"
 explicit_version=""
 notes_file=""
 print_only=false
-watch=true
 dry_run=false
 while (($#)); do
     case "$1" in
@@ -73,8 +68,8 @@ while (($#)); do
         --base) base="${2:?--base needs a branch}"; shift 2 ;;
         --notes) notes_file="${2:?--notes needs a file}"; shift 2 ;;
         --next-version) print_only=true; shift ;;
-        --no-watch) watch=false; shift ;;
-        --dry-run) dry_run=true; watch=false; shift ;;
+        --no-watch) shift ;;
+        --dry-run) dry_run=true; shift ;;
         -h|--help) usage; exit 0 ;;
         *) printf 'error: unknown argument %s\n' "$1" >&2; usage >&2; exit 1 ;;
     esac
@@ -95,7 +90,7 @@ cd "$repo_root"
 script_dir="$repo_root/scripts"
 remote="${RELEASE_REMOTE:-origin}"
 gh_bin="${GH_BIN:-gh}"
-watch_interval="${RELEASE_WATCH_INTERVAL:-60}"
+cas_bin="${CAS_BIN:-cas}"
 release_date() { printf '%s\n' "${RELEASE_DATE:-$(date -u +%Y-%m-%d)}"; }
 
 release_manifests=(
@@ -378,48 +373,66 @@ open_or_update_pr() {
     fi
     "$gh_bin" pr edit "$pr_number" --add-label release >/dev/null 2>&1 || true
     rm -f "$body"
-    wait_for_pr_ci
-    "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
-    say "auto-merge enabled on PR #$pr_number; the merge queue takes it when admission is green"
-}
-
-# cas-2aef: the queue's 30 s admission check passed a tree whose real CI failed
-# 15 minutes later, wasting the queue cycle. The PR's one CI run (Scoped
-# Validation) must be green before auto-merge; a red run is reported once,
-# with its failing tests, and the PR stays out of the queue.
-wait_for_pr_ci() {
-    local checks failed names tests
-    while :; do
-        checks="$("$gh_bin" pr checks "$pr_number" --json name,bucket,link 2>/dev/null || true)"
-        jq -e '[.[] | select(.name | startswith("Scoped Validation"))] | length > 0 and all(.bucket != "pending")' \
-            <<<"${checks:-[]}" >/dev/null 2>&1 && break
-        sleep "$watch_interval"
-    done
-    failed="$(jq -r '.[] | select((.name | startswith("Scoped Validation")) and (.bucket == "fail" or .bucket == "cancel")) | "\(.name)\t\(.link)"' <<<"$checks")"
-    if [[ -z "$failed" ]]; then
-        say "PR #$pr_number CI is green"
-        return 0
+    local state
+    state="$(pr_state)"
+    # cas-d637: batch landing can add another PR after this entry's prebuild.
+    # Build concurrency stays independent; only landing must be a singleton.
+    singleton_queue <<<"$state"
+    if ! admitted <<<"$state"; then
+        "$gh_bin" pr merge "$pr_number" --auto --merge >/dev/null
+        state="$(pr_state)"
+        singleton_queue <<<"$state"
     fi
-    names="$(cut -f1 <<<"$failed" | paste -sd ',' - | sed 's/,/, /g')"
-    tests="$(cut -f2 <<<"$failed" | while read -r link; do
-        "$gh_bin" run view --job "${link##*/job/}" --log-failed 2>/dev/null || true
-    done | failing_tests)"
-    printf 'error: PR #%s CI is red (%s), so it was not added to the merge queue.\nFailing tests: %s\nFix them, push, then rerun scripts/release.sh.\n' \
-        "$pr_number" "$names" "${tests:-none named in the log; open the run}" >&2
-    exit 5
+    admitted <<<"$state" || {
+        printf 'error: PR #%s has no auto-merge and no merge-queue entry after enqueue; repair admission and rerun.\n' "$pr_number" >&2
+        exit 3
+    }
+    if jq -e '.state == "MERGED" or .mergeQueueEntry != null' <<<"$state" >/dev/null; then
+        say "PR #$pr_number admission verified; the merge queue proves this tree"
+    else
+        # One snapshot of required checks distinguishes an auto-merge request
+        # from actual admission. This never watches or waits for PR CI.
+        local checks
+        checks="$("$gh_bin" pr checks "$pr_number" --required --json name,bucket 2>/dev/null || true)"
+        if jq -e 'any(.[]; .bucket == "fail" or .bucket == "cancel")' <<<"${checks:-[]}" >/dev/null; then
+            say "PR #$pr_number not admitted: required checks failed; repair and rerun"
+            exit 3
+        fi
+        say "PR #$pr_number auto-merge requested; not admitted yet"
+    fi
 }
 
-# Failing test names from CI logs: nextest, cargo test, Python unittest and
-# the scripts' own "FAIL <name>" lines, de-duplicated, at most 20.
-failing_tests() {
-    sed -E $'s/^([^\t]*\t){2}//; s/^[0-9-]+T[0-9:.]+Z //' \
-        | sed -nE 's/^ *FAIL \[ *[0-9.]+s\] +(.*)$/\1/p; s/^test (.+) \.\.\. FAILED$/\1/p; s/^(FAIL|ERROR): (.+)$/\2/p; s/^FAIL (.+)$/\1/p' \
-        | awk '!seen[$0]++' | head -20 | paste -sd ';' - | sed 's/;/; /g'
+singleton_queue() {
+    jq -e '.queueConfiguration.maximumEntriesToMerge == 1 and .queueConfiguration.mergingStrategy == "ALLGREEN"' >/dev/null || {
+        printf 'error: release requires a singleton merge queue (maximumEntriesToMerge=1, ALLGREEN); keep parallel builds enabled, repair the queue configuration and rerun.\n' >&2
+        exit 3
+    }
+}
+
+# One enqueue smoke check, never a watch or CI polling loop.
+admitted() {
+    jq -e '.state == "MERGED" or .autoMergeRequest != null or .mergeQueueEntry != null' >/dev/null
+}
+pr_state() {
+    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f branch="$base" -f query='
+query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
+  repository(owner: $owner, name: $name) {
+    mergeQueue(branch: $branch) { configuration { maximumEntriesToMerge mergingStrategy } }
+    pullRequest(number: $number) {
+      state autoMergeRequest { enabledAt } mergeQueueEntry { state }
+    }
+  }
+}' --jq '.data.repository | .pullRequest + {queueConfiguration: .mergeQueue.configuration}'
 }
 
 publish_branch() {
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
+
+# Advisory once per invocation, including dry-run and version preview. Never
+# include this probe in prepare/rebump loops or fail a release on provider drift.
+python3 "$script_dir/github_queue_health.py" --worktree "$repo_root" --gh "$gh_bin" \
+    || say "warning: merge queue unavailable; report only"
 
 if "$print_only"; then
     fetch_base
@@ -432,70 +445,34 @@ fi
 
 [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "the worktree has uncommitted changes; commit or stash them first"
 
+# Train membership is advisory: explicit hotfix/non-train branches retain the
+# caller's --base (main by default). The canonical CLI owns the branch check.
+train_tracking=false
+if context="$("$cas_bin" release context --branch "$branch" 2>&1)" &&
+   train_integration="$(jq -er .integration <<<"$context" 2>/dev/null)"; then
+    base="$train_integration"
+    train_tracking=true
+else
+    say "train tracking skipped; using --base $base (no matching train context)"
+fi
+# Refresh the canonical integration before timing: a stale origin ref can
+# otherwise make already-landed main work look like the train's first child.
+fetch_base
+train_base="$(git merge-base "$remote/$base" HEAD)"
+first_child="$(git log --format=%H --no-merges "$train_base..HEAD" | tail -1)"
 version="$(prepare)"
 if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"
     exit 0
 fi
+# Persist context and arm reminders before push: publication may follow quickly,
+# and a retry after any later failure must reuse the same reminder occurrence.
+if "$train_tracking"; then
+    if ! "$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" --first-child "$first_child"; then
+        say "release tracking unavailable; continuing the cut without reminders"
+    fi
+fi
 publish_branch
-open_or_update_pr "$version"
-
-"$watch" || exit 0
-
-# Watch until the PR merges. Re-bump when another release takes the version.
-# A queued PR has a merge-queue entry and no auto-merge request; an open PR
-# with neither was ejected (or had auto-merge turned off): that needs repair.
 repo_slug="$("$gh_bin" repo view --json nameWithOwner -q .nameWithOwner)"
-pr_state() {
-    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f query='
-query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      state mergeable
-      autoMergeRequest { enabledAt }
-      mergeQueueEntry { state }
-      mergeCommit { oid }
-    }
-  }
-}' --jq '.data.repository.pullRequest'
-}
-rebump() {
-    explicit_version=""
-    notes_file=""
-    version="$(prepare)"
-    publish_branch
-    open_or_update_pr "$version"
-}
-
-start_base_version="$(version_at "$remote/$base")"
-while :; do
-    sleep "$watch_interval"
-    state_json="$(pr_state 2>/dev/null)" || continue
-    case "$(jq -r '.state' <<<"$state_json")" in
-        MERGED)
-            say "PR #$pr_number merged as $(jq -r '.mergeCommit.oid // "?"' <<<"$state_json"); release.yml publishes v$version"
-            exit 0
-            ;;
-        CLOSED)
-            die "PR #$pr_number was closed without merging"
-            ;;
-    esac
-    fetch_base
-    base_version="$(version_at "$remote/$base")"
-    if [[ "$base_version" != "$start_base_version" ]] || remote_tag_exists "$version"; then
-        say "$base moved to $base_version; re-bumping"
-        rebump
-        start_base_version="$base_version"
-        continue
-    fi
-    if [[ "$(jq -r '.mergeable' <<<"$state_json")" == CONFLICTING ]]; then
-        say "PR #$pr_number conflicts with $base; merging it in"
-        rebump
-        continue
-    fi
-    if [[ "$(jq -r 'if .autoMergeRequest == null and .mergeQueueEntry == null then "stalled" else "moving" end' <<<"$state_json")" == stalled ]]; then
-        printf 'error: PR #%s is open with no auto-merge and no merge-queue entry: the queue ejected it or auto-merge was turned off.\n' "$pr_number" >&2
-        printf 'Repair the failure, push, then rerun scripts/release.sh.\n' >&2
-        exit 3
-    fi
-done
+open_or_update_pr "$version"
+say "v$version is prepared; PR handoff complete"

@@ -173,16 +173,39 @@ update_release() {
     fi
 }
 
+# Publication metadata survives an update that replaces this process's binary.
+# A successful adapter call is stamped; failure retries on an already-current tick.
+notify_installed() {
+    local tag="$1"
+    if [[ -r "$state_dir/install-on-publish.notified" ]] &&
+       [[ "$(cat "$state_dir/install-on-publish.notified")" == "$tag" ]]; then
+        return 0
+    fi
+    if "$cas_bin" release installed --receipt "$state_dir/install-on-publish.pending.json" --repo "$repo"; then
+        printf '%s\n' "$tag" >"$state_dir/install-on-publish.notified.tmp"
+        mv "$state_dir/install-on-publish.notified.tmp" "$state_dir/install-on-publish.notified"
+    else
+        log "post-release notice pending for $tag; retrying on the next tick"
+    fi
+}
+
 run_once() {
-    local tag latest current started last_version last_at
-    tag="$("$gh_bin" api "repos/$repo/releases/latest" --jq .tag_name 2>/dev/null)" || {
+    local tag latest current started last_version last_at publication
+    publication="$("$gh_bin" api "repos/$repo/releases/latest" 2>/dev/null)" || {
         log "latest release lookup failed; retrying on the next tick"
         return 0
     }
+    tag="$(perl -MJSON::PP -0777 -ne '
+        my $v = eval { decode_json($_) };
+        print $v->{tag_name} if $v && !$v->{draft} && $v->{published_at};
+    ' <<<"$publication")"
     latest="${tag#v}"
     [[ "$latest" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { log "latest release tag is not v<x.y.z>: $tag"; return 0; }
     current="$(installed_version || true)"
+    printf '%s\n' "$publication" >"$state_dir/install-on-publish.pending.json.tmp"
+    mv "$state_dir/install-on-publish.pending.json.tmp" "$state_dir/install-on-publish.pending.json"
     if [[ -n "$current" ]] && ! version_greater "$latest" "$current"; then
+        [[ "$current" != "$latest" ]] || notify_installed "$tag"
         return 0
     fi
     if [[ -f "$state_file" ]]; then
@@ -202,6 +225,7 @@ run_once() {
         log "installed $tag in $(( $(now) - started )) s"
         (( status == 0 )) || log "cas update exited $status after installing $tag; its summary names the failed project refresh"
         complete_timer "$tag" "$(now)"
+        notify_installed "$tag"
     else
         mkdir -p "$state_dir"
         printf '%s %s\n' "$latest" "$(now)" >"$state_file"

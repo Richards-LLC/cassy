@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
-export const WALK_KIT_VERSION = '1.0.0';
+export const WALK_KIT_VERSION = '1.2.0';
 const SHA = /^[0-9a-f]{7,40}$/;
 const CITED = /\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b/;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -80,16 +80,18 @@ export function shouldRun(step, open) {
 }
 
 // Expectations precede execution; every record atomically publishes live progress.
-export function createLedger({ file, task, build, scope, surface, label = 'real-build' }) {
+export function createLedger({ file, task, build, scope, surface, label = 'real-build', now = Date.now }) {
   if (!SHA.test(build ?? '')) throw new Error('createLedger: explicit build SHA required');
   if (!['real-build', 'fixture', 'eyewitness'].includes(label)) throw new Error('invalid evidence label');
   const plan = new Map(), rows = new Map(), frames = new Set(), verdicts = new Map();
+  let progressAt = null;
   const write = () => {
     const list = [...rows.values()];
     const count = verdict => list.filter(row => row.verdict.startsWith(verdict)).length;
     const out = [
       `# QA evidence: ${clean(task)}`, '', 'schema: 2', `build: ${build}`,
       `scope: ${clean(scope)}`, `surface: ${clean(surface)}`, 'budget: 30 minutes',
+      `progress_at: ${progressAt ?? 'unknown'}`,
       `cells=${list.length}; PASS=${count('PASS')}; FAIL=${count('FAIL')}; NOT EXERCISED=${count('NOT EXERCISED')}; NOT A ROUTE=${count('NOT A ROUTE')}`,
       `labels: ${label}=${list.length}`, 'sweep: not configured', '',
       '| id | cell | expected | observed | verdict | label | evidence path | defect task |',
@@ -151,8 +153,70 @@ export function createLedger({ file, task, build, scope, surface, label = 'real-
         rows.set(key, { ...expectation, id: step.id, defect: verdict === 'FAIL' ? step.defect : undefined,
           verdict, observed: [line], seen: new Set([where]), evidence, captures: graded ? [evidence] : [] });
       }
+      progressAt = new Date(now()).toISOString();
       write();
       return rows.get(key);
     },
   };
+}
+
+// One job per channel/viewport; each owns its fixture identity and browser state.
+export async function runSurfaceLanes({
+  surfaces, outputDir, profileRoot, createPersona, disposePersona, run, maxParallel = 3,
+}) {
+  if (!Array.isArray(surfaces) || !surfaces.length || !outputDir || !profileRoot
+      || ![createPersona, disposePersona, run].every(fn => typeof fn === 'function')
+      || !Number.isInteger(maxParallel) || maxParallel < 1)
+    throw new Error('surface lanes need surfaces, separate evidence/profile roots and persona/run adapters');
+  const output = path.resolve(outputDir), profiles = path.resolve(profileRoot);
+  const nested = (a, b) => { const rel = path.relative(a, b); return !rel || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
+  if (nested(output, profiles) || nested(profiles, output)) throw new Error('keep browser profiles outside evidence');
+  const ids = new Set();
+  const lanes = surfaces.map(surface => {
+    const channel = String(surface.channel ?? '').toLowerCase();
+    if (!/^[a-z][a-z0-9-]*$/.test(channel)
+        || (surface.width !== undefined && (!Number.isInteger(surface.width) || surface.width <= 0)))
+      throw new Error('surface lane needs a channel and optional positive viewport width');
+    const id = channel + (surface.width === undefined ? '' : `-${surface.width}`);
+    if (ids.has(id)) throw new Error(`duplicate surface lane: ${id}`);
+    ids.add(id);
+    return { ...surface, id, ledgerPath: path.join(output, id, 'LEDGER.md') };
+  });
+  const parallel = async (items, job) => {
+    let cursor = 0;
+    const results = [], errors = [];
+    await Promise.all(Array.from({ length: Math.min(maxParallel, items.length) }, async () => {
+      for (;;) {
+        const index = cursor++;
+        if (index >= items.length) return;
+        try { results[index] = await job(items[index]); } catch (error) { errors.push(error); }
+      }
+    }));
+    if (errors.length) throw new AggregateError(errors, errors.map(error => error.message).join('; '));
+    return results;
+  };
+  const created = new Map(), directories = [];
+  let result, failure;
+  try {
+    fs.mkdirSync(profiles, { recursive: true, mode: 0o700 });
+    for (const lane of lanes) {
+      lane.browserProfileDir = fs.mkdtempSync(path.join(profiles, `${lane.id}-`));
+      directories.push(lane.browserProfileDir);
+    }
+    const seen = new Set();
+    await parallel(lanes, async lane => {
+      lane.persona = await createPersona(lane);
+      if (!lane.persona?.id) throw new Error('each surface needs a distinct persona id');
+      const id = String(lane.persona.id);
+      if (!created.has(id)) created.set(id, lane.persona);
+      if (seen.has(id)) throw new Error('each surface needs a distinct persona; shared login refused');
+      seen.add(id);
+    });
+    result = await parallel(lanes, run);
+  } catch (error) { failure = error; }
+  try { await parallel([...created.values()], disposePersona); }
+  catch (error) { failure ??= error; }
+  finally { for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true }); }
+  if (failure) throw failure;
+  return result;
 }

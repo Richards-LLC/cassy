@@ -141,6 +141,8 @@ for ledger_status in 0 23; do
   success_output="$(FIXTURE="$fixture" GH_BIN="$fake_gh" FIXTURE_LEDGER_STATUS="$ledger_status" \
     "$receipt" v2.69.1 --write-draft "$draft" 2>"$fixture/receipt.err")"
   grep -qFx 'TAG=v2.69.1' <<<"$success_output"
+  grep -qFx 'MAIN_TO_PUBLISHED_SECONDS=540' <<<"$success_output"
+  grep -qFx 'QUEUE_RUNS_USED=unavailable' <<<"$success_output"
   grep -qFx "LINUX_SHA256=$linux_sha" <<<"$success_output"
   grep -qFx "MACOS_SHA256=$macos_sha" <<<"$success_output"
   grep -qF "$linux_sha" "$draft"

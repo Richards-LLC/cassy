@@ -200,12 +200,20 @@ impl Config {
                 factory.worker_local_gate.clone().unwrap_or_default(),
             ),
             (
+                "factory.release_command".to_string(),
+                factory.release_command.clone().unwrap_or_default(),
+            ),
+            (
                 "factory.design_review_bug_threshold".to_string(),
                 factory.design_review_bug_threshold.to_string(),
             ),
             (
                 "factory.design_review_window_hours".to_string(),
                 factory.design_review_window_hours.to_string(),
+            ),
+            (
+                "factory.release_train_max_age_hours".to_string(),
+                factory.release_train_max_age_hours.to_string(),
             ),
             (
                 "factory.supervisor_message_debounce_secs".to_string(),
@@ -290,6 +298,10 @@ impl Config {
             (
                 "factory.strict_cli".to_string(),
                 factory.strict_cli.to_string(),
+            ),
+            (
+                "factory.release_train".to_string(),
+                factory.release_train.to_string(),
             ),
             (
                 "factory.target_cache_high_watermark_percent".to_string(),

@@ -467,7 +467,7 @@ mod tests {
         let server = MockServer::start().await;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_USER_CLOUD_JSON", env.home().join("no-cloud.json"));
-        for case in ["revalidation-error", "disabled", "assigned", "batch", "interrupted-cancel"] {
+        for case in ["revalidation-error", "due-revalidation-error", "disabled", "assigned", "batch", "interrupted-cancel"] {
             server.reset().await;
             let project = env.home().join(case);
             std::fs::create_dir_all(&project).unwrap();
@@ -490,7 +490,7 @@ mod tests {
                         crate::cloud::peer_mailbox::cancel_build_route(&root, &sender.id, &format!("build-route:{REPO}:cas-retry")).unwrap();
                     }
                 }
-                "revalidation-error" => {
+                "revalidation-error" | "due-revalidation-error" => {
                     let send_root = root.clone();
                     assert!(tokio::task::spawn_blocking(move || crate::cloud::peer_mailbox::send_raw(
                         &send_root, "local-sup", "best", "ordinary peer retry", None, None, "best@best",
@@ -499,6 +499,9 @@ mod tests {
                     // Keep the route JSON valid/selectable, but make its typed
                     // payload unreadable; the unrelated send behind it is due.
                     conn.execute("UPDATE peer_message_outbox SET payload=json_remove(payload,'$.project_id') WHERE id=1", []).unwrap();
+                    if case == "due-revalidation-error" {
+                        conn.execute("UPDATE peer_message_outbox SET next_attempt_at=0 WHERE id=1", []).unwrap();
+                    }
                     server.reset().await;
                     Mock::given(method("POST")).and(path("/api/peer-messages"))
                         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"ordinary-sent", "status":"queued"})))
@@ -513,7 +516,7 @@ mod tests {
             let runtime = crate::cloud::peer_mailbox::PeerMailboxRuntime::start(&root, "local").unwrap();
             tokio::task::spawn_blocking(move || runtime.tick_blocking()).await.unwrap();
             let status = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:1").unwrap().unwrap();
-            if case == "revalidation-error" {
+            if case.ends_with("revalidation-error") {
                 let ordinary = crate::cloud::peer_mailbox::outbox_status_text(&root, "peer-outbox:2").unwrap().unwrap();
                 assert!(ordinary.contains(": sent"), "one bad route must not block ordinary peer retries: {ordinary}");
                 assert!(status.contains("retrying") && status.contains("attempts: 1"), "bad route must remain pending: {status}");

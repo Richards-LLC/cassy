@@ -262,14 +262,14 @@ pub struct SystemRequest {
 
     /// Regenerate embeddings (deprecated - semantic search via cloud only)
     #[schemars(
-        description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
+        description = "Deprecated; ignored (cloud-only)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub embeddings: Option<bool>,
 
     /// Only generate for entries missing embeddings (deprecated)
     #[schemars(
-        description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
+        description = "Deprecated; ignored (cloud-only)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub missing_only: Option<bool>,
@@ -287,21 +287,21 @@ pub struct SystemRequest {
     pub query: Option<String>,
 
     /// Audience receiving an estimate.
-    #[schemars(description = "estimate recipient: operator (default) or client")]
+    #[schemars(description = "Estimate recipient: operator (default) or client")]
     #[serde(default)]
     pub recipient: Option<String>,
 
     // ========== Bug Reporting Fields (report_cas_bug) ==========
     /// Bug title (for report_cas_bug)
     #[schemars(
-        description = "Brief title describing the bug (anonymize any project-specific info)"
+        description = "Anonymized bug title"
     )]
     #[serde(default)]
     pub title: Option<String>,
 
     /// Bug description (for report_cas_bug)
     #[schemars(
-        description = "Detailed description including steps to reproduce. Anonymize paths, remove credentials and leave out proprietary code."
+        description = "Reproduction steps. Anonymize paths; omit credentials and proprietary code."
     )]
     #[serde(default)]
     pub description: Option<String>,

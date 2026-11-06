@@ -3563,6 +3563,10 @@ mod worker_attention_tests {
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.assignee = Some("calm-octopus-51".to_string());
         task_store.add(&task).unwrap();
+        let verifications = crate::store::open_verification_store(&cas_dir).unwrap();
+        verifications.add(&cas_types::Verification::approved(
+            "ver-merged".into(), task.id.clone(), "Existing pre-merge approval".into(),
+        )).unwrap();
         let observation = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
             task_id: "cas-7ea6".to_string(),
             worker: "calm-octopus-51".to_string(),
@@ -3602,6 +3606,39 @@ mod worker_attention_tests {
         assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(
             &supervisor_row.prompt
         ));
+
+        // cas-ffd5: an absent verdict, or a new pending cycle after an older
+        // approval, cannot ask the worker for a close that the guard refuses.
+        for (id, old_approval) in [("cas-unreviewed", false), ("cas-new-cycle", true)] {
+            let mut missing = cas_types::Task::new(id.into(), "Merged without reusable approval".into());
+            missing.status = cas_types::TaskStatus::AwaitingMerge;
+            missing.assignee = task.assignee.clone();
+            missing.deliverables.factory_branch_anchor = Some("worker-tip".into());
+            missing.deliverables.parked_branch = Some(observation.branch.clone());
+            task_store.add(&missing).unwrap();
+            if old_approval {
+                verifications.add(&cas_types::Verification::approved(
+                    "ver-old".into(), id.into(), "Older cycle".into(),
+                )).unwrap();
+                cas_store::create_verification_dispatch(
+                    &cas_dir, id, "worker-id", "supervisor-id",
+                    chrono::Utc::now() + chrono::Duration::minutes(10),
+                ).unwrap();
+            }
+            let observed = crate::ui::factory::daemon::runtime::ci_watch::DeliveryPrObservation {
+                task_id: id.into(), pr_number: 933, ..observation.clone()
+            };
+            apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+            apply_delivery_pr_observation(&cas_dir, &observed).unwrap();
+            let rows: Vec<_> = queue.peek_all(20).unwrap().into_iter()
+                .filter(|row| row.prompt.contains(id)).collect();
+            assert_eq!(rows.len(), 1, "one recovery per immutable merge");
+            assert_eq!(rows[0].target, "supervisor", "missing approval belongs to supervisor recovery");
+            assert!(rows[0].prompt.contains(&format!("factory action=worktree_merge id={} task_id={id}", observation.branch)));
+            assert!(!rows[0].prompt.contains(&format!("close {id} with commit_receipt=")));
+            assert!(crate::prompt_revalidation::is_supervisor_wake_envelope(&rows[0].prompt));
+            assert_eq!(task_store.get(id).unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        }
     }
 
     /// cas-d511 (cas-6c03): a merged Tier 1 delivery waiting on the release

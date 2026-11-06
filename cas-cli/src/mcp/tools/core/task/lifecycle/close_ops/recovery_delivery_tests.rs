@@ -446,6 +446,88 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+/// GH #1543/#1548: a supervisor-required release import may itself contain
+/// sibling merges that have not reached this task's target yet.
+#[tokio::test]
+async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+    let base = git(repo, &["merge-base", "main", BRANCH]);
+    git(repo, &["checkout", "-q", "-b", "factory/peer"]);
+    std::fs::write(repo.join("peer.txt"), "required peer integration\n").unwrap();
+    git(repo, &["add", "peer.txt"]);
+    git(repo, &["commit", "-qm", "fix(cas-peer): required sibling work"]);
+    git(repo, &["checkout", "-q", "-b", "release/batch", "main"]);
+    git(repo, &["merge", "-q", "--no-ff", "factory/peer", "-m", "release(cas-peer): assemble sibling batch"]);
+    let approved = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["checkout", "-q", "main"]);
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(&f.worker_path, &["push", "-q", "origin", "main", BRANCH]);
+
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = Some(BRANCH.into());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(),
+        branch: BRANCH.into(),
+        base_sha: base,
+    });
+    // Copying a supervisor-looking token into worker notes grants nothing.
+    task.notes = format!("Decision: merge_source={approved}");
+    tasks.update(&task).unwrap();
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
+    assert!(task_attribution::started_delivery(repo, &task).unwrap_err().contains("foreign commit"));
+    git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+    task.status = TaskStatus::AwaitingMerge;
+    tasks.update(&task).unwrap();
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let decision = text(supervisor.cas_task_request_changes(Parameters(
+        crate::mcp::tools::TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: format!("Merge the required sibling release batch; merge_source={approved}"),
+        }
+    )).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Open, "{decision}");
+    env.set("CAS_AGENT_ROLE", "worker");
+    let started = text(f.core.cas_task_start_with_options(Parameters(
+        crate::mcp::tools::TaskStartRequest { id: TASK.into(), brief: Some(true), force: None }
+    )).await.unwrap());
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{started}");
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
+    git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        id: TASK.into(),
+        reason: Some(format!("PASS {tip}: required release integration")),
+        commit_receipt: Some(tip.clone()),
+        no_delivery: None,
+        supervisor_override: None,
+        stranded_branch_override: None,
+        search_manifest: None,
+    })).await.unwrap());
+    assert!(!output.contains("DELIVERY BRANCH UNRESOLVED"), "{output}");
+    let parked = tasks.get(TASK).unwrap();
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+    // Later changes on the approved branch are not approved by that decision.
+    git(repo, &["checkout", "-q", "release/batch"]);
+    std::fs::write(repo.join("unapproved.txt"), "unrelated later work\n").unwrap();
+    git(repo, &["add", "unapproved.txt"]);
+    git(repo, &["commit", "-qm", "fix(cas-other): unapproved later work"]);
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "release/batch"]);
+    let mut continued = parked;
+    continued.status = TaskStatus::InProgress;
+    assert!(task_attribution::started_delivery(repo, &continued).unwrap_err().contains("foreign commit"));
+}
+
 /// GH #1389: the first final close must use the pushed receipt, even when a
 /// commit hook saved its predecessor before the worker synchronized the target.
 #[tokio::test]

@@ -502,12 +502,15 @@ async fn fresh_close_after_pushed_target_merge_binds_tip_without_receipt_cas_d81
 #[tokio::test]
 async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e3() {
     let mut env = TestEnvGuard::temp_home();
-    for generated_only in [false, true] {
+    for (per_task_branch, generated_only) in [(true, false), (true, true), (false, false), (false, true)] {
         let f = fixture_with_surface(&mut env, "cas-cli/src/lib.rs", false);
         let repo = f.dir.path();
         let cas_dir = repo.join(".cas");
-        let branch = crate::factory_isolation::worker_task_branch(WORKER, TASK);
-        git(&f.worker_path, &["branch", "-m", &branch]);
+        let branch = if per_task_branch {
+            let branch = crate::factory_isolation::worker_task_branch(WORKER, TASK);
+            git(&f.worker_path, &["branch", "-m", &branch]);
+            branch
+        } else { BRANCH.to_string() };
         std::fs::write(f.worker_path.join("Cargo.toml"), "[workspace]\nmembers = [\"cas-cli\"]\n").unwrap();
         std::fs::write(f.worker_path.join("cas-cli/Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
         git(&f.worker_path, &["add", "Cargo.toml", "cas-cli/Cargo.toml"]);
@@ -515,7 +518,9 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
         let merged = git(&f.worker_path, &["rev-parse", "HEAD"]);
         let tasks = open_task_store(&cas_dir).unwrap();
         let mut task = tasks.get(TASK).unwrap();
-        task.deliverables.parked_branch = None;
+        // Resume the same parked lane; the target merge was recorded by its
+        // commit hook before the required generated follow-up was committed.
+        task.deliverables.parked_branch = Some(branch.clone());
         task.deliverables.factory_branch_anchor = Some(merged.clone());
         task.notes = "no changelog: fixture for final-tip proof selection".into();
         tasks.update(&task).unwrap();
@@ -535,6 +540,12 @@ async fn close_after_target_merge_and_generated_history_checks_final_tip_cas_c7e
         git(remote.path(), &["init", "-q", "--bare"]);
         git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         git(&f.worker_path, &["push", "-q", "origin", "main", &branch]);
+        if generated_only {
+            let refused = close_output(&f).await;
+            assert!(refused.contains("FOCUSED PROOF REQUIRED") && refused.contains(&tip[..12]),
+                "a generated follow-up still requires proof at the final tip: {refused}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
+        }
         crate::factory_worker_check::record_passing_test_for_tests(
             &cas_dir, &f.worker_path, &tip, "cas", "test(final_delivery)",
         );

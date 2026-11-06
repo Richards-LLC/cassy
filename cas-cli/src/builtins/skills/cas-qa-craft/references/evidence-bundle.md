@@ -284,14 +284,14 @@ The worked example below is self-contained for other projects. Its chapter
 helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
 styles to the target project's DESIGN.md.
 
-Commander-only, in the Cassy source checkout: replace the inline helper with
-this import (adjust the relative path for the spec). Other projects do not ship
-this repository file:
+<!-- cas-src:begin -->
+Cassy source only: import the helper instead, adjusting the spec's relative path:
 
 ```ts
 // Commander-only; not a dependency of the generic example below.
 import { showRecordingChapter } from '../hub-web/e2e/journeys/receipt-directory.mjs';
 ```
+<!-- cas-src:end -->
 
 ```ts
 // tests/qa-evidence.spec.ts

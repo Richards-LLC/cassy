@@ -6914,7 +6914,7 @@ impl CasCore {
     /// stops apply:
     /// - the measured branch must be this task's per-task branch
     ///   (`factory/<assignee>-<task>`), or its active assignee's plain lane
-    ///   with every continuation commit explicitly claiming this task;
+    ///   with every authored continuation commit explicitly claiming this task;
     /// - no other open task's anchor may sit between the recorded anchor and
     ///   the tip, because that commit is another delivery's boundary.
     pub(crate) fn tip_is_own_task_lineage(
@@ -6979,15 +6979,17 @@ impl CasCore {
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
-                    (explicit_final_tip || !subjects.is_empty())
-                        && subjects.iter().all(|subject| {
+                    // A target-sync merge can leave no authored subjects.
+                    // Anchor advances still check target imports, first-parent
+                    // continuity and the sibling lease boundary separately.
+                    subjects.iter().all(|subject| {
                             // cas-93d7: an exact-tip receipt can identify an
                             // unnamed pre-push correction on the active lane.
                             // A foreign subject still belongs to another task.
                             message_references_task(subject, &task.id)
                                 || (explicit_final_tip
                                     && !message_claims_other_task(subject, Some(&task.id)))
-                        })
+                    })
                 })
         });
         if !own_task_branch && !own_active_lane {
@@ -9695,6 +9697,17 @@ impl CasCore {
                 policy.task_required()
             };
 
+        // Classify before orphan recovery: losing the implementer's session
+        // cannot waive an enforcement delivery's own adversarial review.
+        let delivery_verification_tier = (verification_enabled
+            && !depth_light
+            && close_disposition.requires_delivery_gates())
+        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
+        .flatten();
+        let tier_two = delivery_verification_tier.as_ref().is_some_and(|decision| {
+            decision.tier == super::review_tier::VerificationTier::Adversarial
+        });
+
         // Skip verification for orphaned tasks: if caller is supervisor and the
         // task's assignee is inactive (heartbeat expired or lease gone), allow
         // close without verification. cas-3bd4: compute the reason as a typed
@@ -9709,10 +9722,10 @@ impl CasCore {
         } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
             // cas-eda0: Cassy's own post-merge close never takes the
             // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic {
+            if task.task_type == TaskType::Epic || tier_two {
                 // Ownership admits this caller; the assembled epic still needs
-                // its own dispatch/verdict. Epics normally have no assignee,
-                // which is not orphan recovery and cannot imply verification.
+                // its own dispatch/verdict, as does a Tier 2 delivery whose
+                // assignee has retired. Only an explicit override waives it.
                 if req.supervisor_override.unwrap_or(false) {
                     VerificationSkipReason::SupervisorBypass
                 } else {
@@ -9798,12 +9811,7 @@ impl CasCore {
         // cas-5207: a delivery that changes nothing that runs has no independent
         // verifier. An existing dispatch or verdict keeps its authority, and the
         // delivery, CI and QA gates all sit outside this decision.
-        let verification_tier = (verification_enabled
-            && !skip_verification
-            && !depth_light
-            && close_disposition.requires_delivery_gates())
-        .then(|| super::review_tier::tier_for_delivery(&task, &close_project_root))
-        .flatten();
+        let verification_tier = delivery_verification_tier.filter(|_| !skip_verification);
         let tier_skips_verifier = verification_tier.as_ref().is_some_and(|decision| {
             decision.tier == super::review_tier::VerificationTier::Mechanical
         }) && no_verification_on_record && !fast_lane_receipt_passed;
@@ -10245,8 +10253,21 @@ impl CasCore {
                         // task's local commit — as a delivered anchor, and a
                         // rebase of that next task voided the verdict
                         // (cas-3e66, cas-ba4a).
-                        let merged_receipt = if post_merge_target.is_none() {
-                            req.commit_receipt.as_deref().and_then(|receipt| {
+                        let supervisor_tier_two_recovery = tier_two
+                            && !in_cassy_merge_close()
+                            && self.resolve_live_supervisor_authority().is_ok()
+                            && matches!(self.compute_verification_skip_reason(&task, &req),
+                                VerificationSkipReason::NoAssignee
+                                    | VerificationSkipReason::AssigneeInactive { .. }
+                                    | VerificationSkipReason::AssigneeUnknown);
+                        // A retired worker's recorded delivery is the recovery
+                        // boundary even when close supplies no new receipt.
+                        // It must still be proven on the declared target below.
+                        let recovery_anchor = verification_tier.as_ref()
+                            .filter(|_| supervisor_tier_two_recovery)
+                            .map(|decision| decision.tip.as_str());
+                        let merged_receipt = if post_merge_target.is_none() || supervisor_tier_two_recovery {
+                            req.commit_receipt.as_deref().or(recovery_anchor).and_then(|receipt| {
                                 let resolved =
                                     resolve_task_commit_receipt_sha(&close_project_root, receipt)
                                         .ok()?;
@@ -10313,6 +10334,7 @@ impl CasCore {
                         }
 
                         if !is_epic && !empty_delivery
+                            && !(supervisor_tier_two_recovery && merged_receipt.is_some())
                             && task.deliverables.factory_branch_anchor.is_some()
                             && (task.deliverables.factory_branch_start.is_some()
                                 || task.deliverables.parked_branch.as_deref().is_some_and(|branch| branch.starts_with("factory/")))

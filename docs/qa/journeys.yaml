@@ -11,6 +11,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-ask-merge-scope:
+    title: Only explicit asks hold related merges and later messages from that peer clear them
+    tasks: [cas-5ec1]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
   sandboxed-harness-stall-detection:
     title: A sandboxed worker harness does not hide stalls and real jobs with the same agent name still count
     tasks: [cas-cff4]
@@ -364,6 +369,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-SECRET-SHAPES:
+    statement: Mirrored replies preserve disk-limit, risk-label, ask-me and task-id verbatim while long key-shaped SK credentials remain redacted.
+    check: Run message_display::inner_tests::sk_token_redacted_without_mangling_words_cas_c1ff and the MessageDisplay hook tests; on the batch candidate compare those ordinary words and a synthetic key in the native reply with Commander history.
+    bug: {task: cas-c1ff}
   FACTORY-DELIVERY-CI-RANGE:
     statement: A docs-only followup push retains Rust, Commander and bridge validation for earlier code in the same delivery.
     check: 'Run scripts/test-resolve-ci-base.py through the actual classifier action; compare each factory delivery fork with a direct branch event delta and retain unknown-base and ambiguous-epic fail-closed controls.'
@@ -373,8 +382,8 @@ invariants:
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes as an ask (cas-7dd1d) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
-    check: 'Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail wakes without creating a merge hold (cas-5ec1) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    check: 'Run peer_ask_gate::tests for explicit asks, later same-peer messages and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
     statement: Automatic about-to-merge notices stay in the peer inbox as receipts without waking the idle supervisor.
@@ -633,6 +642,9 @@ invariants:
     statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
     check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
     bug: {task: cas-a147}
+  HUB-J26-EPIC-TABS:
+    statement: Every running session's live epics are visible above the conversation across paired machines, with authoritative merged/total and live worker dots; the busiest opens by default and an explicit selection survives updates until epic closure. Phone tabs scroll and open a task sheet with focus return.
+    check: Run the HUB-J26 epic tabs across machines cases in team.journey.ts at desktop and phone; compare both machines' status snapshots, switch to the peer epic, observe a merge event and inspect keyboard, forced colors and overflow.
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -1080,6 +1092,7 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - cas-cli/src/hooks/handlers/handlers_events/message_display.rs
   - hub-web/src/composer-markup.ts
   - hub-web/src/supervisor-message.ts
   - hub-web/src/conversation-view.ts
@@ -1131,6 +1144,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE
@@ -2555,6 +2569,7 @@ journeys:
   - Read Team with forced colors and reduced motion
   owner_groups: [commander_runtime]
   owners:
+  - hub-web/src/epic-tabs.ts
   - hub-web/src/team-view.ts
   - hub-web/src/provider-mark.ts
   - hub-web/src/progress-model.ts
@@ -2570,7 +2585,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-EPIC-TABS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-WORKER-BRIEF-PRIVATE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

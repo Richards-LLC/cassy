@@ -12640,121 +12640,121 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
 #[tokio::test]
 async fn approved_no_code_wait_queues_supervisor_recovery_cas_abb0() {
     for wait_status in [TaskStatus::InProgress, TaskStatus::Blocked] {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, _core) = setup_cas(&mut test_env);
-    let repo = temp.path();
-    let cas_dir = repo.join(".cas");
-    std::fs::write(
-        cas_dir.join("config.toml"),
-        "[project]\ncanonical_id = 'cas-7fc3-fixture'\n[verification]\nenabled = true\n[worktrees]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n",
-    )
-    .unwrap();
-    proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
-    std::fs::write(repo.join("README.md"), "seed\n").unwrap();
-    proof_boundary_git(repo, &["add", ".gitignore", "README.md"]);
-    proof_boundary_git(repo, &["commit", "-q", "-m", "seed main"]);
-    let head = || {
-        let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap();
-        String::from_utf8(out.stdout).unwrap()
-    };
-    let starting_head = head();
+        let mut test_env = TestEnvGuard::temp_home();
+        let (temp, _core) = setup_cas(&mut test_env);
+        let repo = temp.path();
+        let cas_dir = repo.join(".cas");
+        std::fs::write(
+            cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = 'cas-7fc3-fixture'\n[verification]\nenabled = true\n[worktrees]\nenabled = false\n[qa]\nevidence_gate = false\nindependent_pass = false\n",
+        )
+        .unwrap();
+        proof_boundary_git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        std::fs::write(repo.join("README.md"), "seed\n").unwrap();
+        proof_boundary_git(repo, &["add", ".gitignore", "README.md"]);
+        proof_boundary_git(repo, &["commit", "-q", "-m", "seed main"]);
+        let head = || {
+            let out = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(repo).output().unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let starting_head = head();
 
-    let agents = open_agent_store(&cas_dir).unwrap();
-    let mut supervisor = cas::types::Agent::new("sup-7fc3".into(), "sup-7fc3".into());
-    supervisor.role = AgentRole::Supervisor;
-    supervisor.factory_session = Some("sess-7fc3".into());
-    agents.register(&supervisor).unwrap();
-    let mut worker = cas::types::Agent::new("worker-7fc3".into(), "worker-7fc3".into());
-    worker.role = AgentRole::Worker;
-    worker.factory_session = Some("sess-7fc3".into());
-    agents.register(&worker).unwrap();
-    let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
-    worker_core.set_agent_id_for_testing("worker-7fc3".to_string());
-    let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
-    supervisor_core.set_agent_id_for_testing("sup-7fc3".to_string());
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let mut supervisor = cas::types::Agent::new("sup-7fc3".into(), "sup-7fc3".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("sess-7fc3".into());
+        agents.register(&supervisor).unwrap();
+        let mut worker = cas::types::Agent::new("worker-7fc3".into(), "worker-7fc3".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("sess-7fc3".into());
+        agents.register(&worker).unwrap();
+        let worker_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        worker_core.set_agent_id_for_testing("worker-7fc3".to_string());
+        let supervisor_core = cas::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor_core.set_agent_id_for_testing("sup-7fc3".to_string());
 
-    let tasks = open_task_store(&cas_dir).unwrap();
-    let mut task = cas::types::Task::new("cas-7fc3-wait".into(), "Publish the artifact".into());
-    task.status = TaskStatus::InProgress;
-    task.task_type = TaskType::Chore;
-    task.assignee = Some("worker-7fc3".into());
-    task.execution_note = Some("no-code".into());
-    task.external_ref = Some("artifact:cas-7fc3/report".into());
-    task.risk = vec![cas::types::TaskRisk::None];
-    task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:cas-7fc3-fixture".into(),
-        target_branch: "main".into(),
-    });
-    tasks.add(&task).unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = cas::types::Task::new("cas-7fc3-wait".into(), "Publish the artifact".into());
+        task.status = TaskStatus::InProgress;
+        task.task_type = TaskType::Chore;
+        task.assignee = Some("worker-7fc3".into());
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("artifact:cas-7fc3/report".into());
+        task.risk = vec![cas::types::TaskRisk::None];
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-7fc3-fixture".into(),
+            target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
 
-    let reason = "Published the artifact; no source change";
-    let first = extract_text(
-        worker_core
-            .cas_task_close(Parameters(close_request(&task.id, reason)))
-            .await
-            .unwrap(),
-    );
-    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
-    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
-        .unwrap()
-        .expect("exact dispatch");
-    assert_eq!(dispatch.owner_agent_id, "sup-7fc3");
+        let reason = "Published the artifact; no source change";
+        let first = extract_text(
+            worker_core
+                .cas_task_close(Parameters(close_request(&task.id, reason)))
+                .await
+                .unwrap(),
+        );
+        assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+            .unwrap()
+            .expect("exact dispatch");
+        assert_eq!(dispatch.owner_agent_id, "sup-7fc3");
 
-    // The worker records the documented verification wait.
-    let mut waiting = tasks.get(&task.id).unwrap();
-    waiting.status = wait_status;
-    waiting.notes.push_str(&format!(
-        "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
-        dispatch.requested_at.format("%Y-%m-%d %H:%M"),
-        dispatch.id
-    ));
-    tasks.update(&waiting).unwrap();
+        // The worker records the documented verification wait.
+        let mut waiting = tasks.get(&task.id).unwrap();
+        waiting.status = wait_status;
+        waiting.notes.push_str(&format!(
+            "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+            dispatch.requested_at.format("%Y-%m-%d %H:%M"),
+            dispatch.id
+        ));
+        tasks.update(&waiting).unwrap();
 
-    let approval = || VerificationAddRequest {
-        task_id: task.id.clone(),
-        status: "approved".into(),
-        summary: "Artifact reviewed; no-code delivery approved".into(),
-        confidence: Some(0.9),
-        issues: None,
-        files_reviewed: None,
-        duration_ms: None,
-        verification_type: None,
-        verifier_capability: None,
-        dispatch_id: Some(dispatch.id.clone()),
-    };
-    let approved = extract_text(
-        supervisor_core.cas_verification_add(Parameters(approval())).await
-            .expect("supervisor approves the exact dispatch"),
-    );
-    assert!(approved.contains("Supervisor close recovery queued"), "{approved}");
-    let rows = cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap();
-    let retry = rows
-        .iter()
-        .find(|row| row.target == "sup-7fc3" && row.prompt.contains(&dispatch.id))
-        .unwrap_or_else(|| panic!("close recovery row for the supervisor: {rows:?}"));
-    // pin: recovery must identify the ordinary close command and its permitted owner.
-    assert!(retry.prompt.contains("task action=close id=cas-7fc3-wait"), "{}", retry.prompt);
-    assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id)), "{rows:?}");
+        let approval = || VerificationAddRequest {
+            task_id: task.id.clone(),
+            status: "approved".into(),
+            summary: "Artifact reviewed; no-code delivery approved".into(),
+            confidence: Some(0.9),
+            issues: None,
+            files_reviewed: None,
+            duration_ms: None,
+            verification_type: None,
+            verifier_capability: None,
+            dispatch_id: Some(dispatch.id.clone()),
+        };
+        let approved = extract_text(
+            supervisor_core.cas_verification_add(Parameters(approval())).await
+                .expect("supervisor approves the exact dispatch"),
+        );
+        assert!(approved.contains("Supervisor close recovery queued"), "{approved}");
+        let rows = cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap();
+        let retry = rows
+            .iter()
+            .find(|row| row.target == "sup-7fc3" && row.prompt.contains(&dispatch.id))
+            .unwrap_or_else(|| panic!("close recovery row for the supervisor: {rows:?}"));
+        // pin: recovery must identify the ordinary close command and its permitted owner.
+        assert!(retry.prompt.contains("task action=close id=cas-7fc3-wait"), "{}", retry.prompt);
+        assert!(!rows.iter().any(|row| row.target == "worker-7fc3" && row.prompt.contains(&dispatch.id)), "{rows:?}");
 
-    let repeated = extract_text(
-        supervisor_core.cas_verification_add(Parameters(approval())).await
-            .expect("replaying the exact verdict repairs recovery"),
-    );
-    assert!(repeated.contains("idempotent"), "{repeated}");
-    assert_eq!(cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap().len(), rows.len());
-    assert_eq!(tasks.get(&task.id).unwrap().status, wait_status,
-        "approval must not bypass ordinary close");
+        let repeated = extract_text(
+            supervisor_core.cas_verification_add(Parameters(approval())).await
+                .expect("replaying the exact verdict repairs recovery"),
+        );
+        assert!(repeated.contains("idempotent"), "{repeated}");
+        assert_eq!(cas::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(50).unwrap().len(), rows.len());
+        assert_eq!(tasks.get(&task.id).unwrap().status, wait_status,
+            "approval must not bypass ordinary close");
 
-    let closed = extract_text(
-        supervisor_core
-            .cas_task_close(Parameters(close_request(&task.id, reason)))
-            .await
-            .unwrap(),
-    );
-    assert!(closed.contains("Closed task:"), "{closed}");
-    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
-    assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
+        let closed = extract_text(
+            supervisor_core
+                .cas_task_close(Parameters(close_request(&task.id, reason)))
+                .await
+                .unwrap(),
+        );
+        assert!(closed.contains("Closed task:"), "{closed}");
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(head(), starting_head, "the no-code delivery authored no commit");
     }
 }
 

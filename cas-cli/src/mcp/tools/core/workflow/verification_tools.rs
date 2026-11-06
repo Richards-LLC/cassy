@@ -675,7 +675,7 @@ impl CasCore {
                     }
                     cas_store::invalidate_verification_dispatch_for_repository_drift(
                         &self.cas_root,
-                        &proof_dispatch,
+                        &requested_dispatch_id,
                     )
                     .map_err(|store_error| McpError {
                         code: ErrorCode::INTERNAL_ERROR,

@@ -1648,7 +1648,17 @@ fn recommend_spawn_accounts(
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
-        if let Some(recommended) = selection.recommended {
+        let recommended = selection.recommended.or_else(|| {
+            if provider != crate::accounts::Provider::Codex { return None }
+            // Missing usage is not a failed login. Only use this fallback after
+            // the shared policy has excluded disabled, stale and duplicate homes,
+            // and no account with known capacity was recommended (cas-2ece).
+            selection.excluded.iter().find(|(_, reason)| reason == "usage unknown")
+                .map(|(account, reason)| crate::account_selection::Recommendation {
+                    account, reason: reason.clone(),
+                })
+        });
+        if let Some(recommended) = recommended {
             for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
@@ -13490,7 +13500,7 @@ mod spawn_lifecycle_tests {
         let mut unresolved = vec![spec.clone()];
         let selection_notice = recommend_spawn_accounts(
             &mut unresolved,
-            false, // The explicit cli=codex request below carries no lane.
+            false, // Direct Codex spawn without a lane or explicit account.
             &Default::default(),
             chrono::Utc::now(),
             |provider| crate::account_registry::collect_for(provider, env.home(), false),

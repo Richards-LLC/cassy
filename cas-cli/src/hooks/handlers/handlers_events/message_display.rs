@@ -305,12 +305,24 @@ mod inner_tests {
     // --- redact_secrets ---
 
     #[test]
-    fn sk_token_redacted() {
-        let (out, changed) =
-            redact_secrets("key: sk-abcdef1234567890abcdef1234567890".to_string());
-        assert!(changed);
-        assert!(!out.contains("sk-"), "sk- must be gone: {out}");
-        assert!(out.contains(REDACTION_PLACEHOLDER));
+    fn sk_token_redacted_without_mangling_words_cas_c1ff() {
+        for ordinary in [
+            "The disk-limit fix landed on main",
+            "risk-label ask-me task-id disk-space ask-me-raw getpulsecard.com/ask-pulse",
+            "sk-short sk-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+            &format!("disk-{} risk-{} ask-{}", "a".repeat(32), "a".repeat(32), "a".repeat(32)),
+        ] {
+            assert_eq!(redact_secrets(ordinary.to_string()), (ordinary.to_string(), false));
+        }
+        for fake in [
+            "sk-abcdef1234567890abcdef1234567890".to_string(),
+            format!("sk-proj-{}", "aB_9-".repeat(12)),
+            format!("sk-ant-api03-{}", "aB_9-".repeat(12)),
+        ] {
+            let text = format!("disk-limit\tkey: \"{fake}\"\nask-me risk-label");
+            assert_eq!(redact_secrets(text),
+                ("disk-limit\tkey: [REDACTED]\nask-me risk-label".to_string(), true));
+        }
     }
 
     #[test]

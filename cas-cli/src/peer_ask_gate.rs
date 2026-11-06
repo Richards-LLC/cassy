@@ -345,6 +345,7 @@ mod tests {
                 _ => {}
             }
             let insert = |reply: &PeerEnvelope, body: &str| {
+                // pin: The peer queue source is a protocol identity; a conflicting source cannot authorize an answer.
                 let source = if case == "wrong-source" { "peer:someone-else@prowl".into() }
                     else { format!("peer:{}@{}", reply.sender_name, reply.machine) };
                 let target = if case == "wrong-target" { "another-supervisor" } else { "cosmic-shark-29" };

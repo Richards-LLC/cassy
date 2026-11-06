@@ -2844,7 +2844,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    for (case, line, text) in [
+    for (case, line, edit) in [
         ("full-context", 18, "target 18"),
         ("zero-context", 5, "target 5"),
         ("changed patch", 3, "delivered 3"),
@@ -2891,7 +2891,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let writer = fixture.cas_root.join("target-writer");
         run_git(&["worktree", "add", "--detach", writer.to_str().unwrap(), "refs/remotes/origin/epic/rebound"],
             &fixture.repo.root);
-        std::fs::write(writer.join("shared.rs"), shared(&[(line, text)])).unwrap();
+        std::fs::write(writer.join("shared.rs"), shared(&[(line, edit)])).unwrap();
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
@@ -2918,7 +2918,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
-            shared(&[(3, "delivered 3"), (line, text)]).trim_end(), "{case}");
+            shared(&[(3, "delivered 3"), (line, edit)]).trim_end(), "{case}");
     }
 }
 

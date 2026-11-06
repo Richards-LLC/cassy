@@ -13,7 +13,7 @@ Produce a read-only ledger of which tests protect nothing, which cost too much, 
 
 ## What the measurements say
 
-Read this before promising speed. In cas-src (the reference audit, 10 green merge-queue runs):
+Read this before promising speed. In cas-src (the reference audit, 10 green integration runs):
 
 - Every approved delete and merge removed about 13 test-seconds from a run of 2,906. Deleting tests is about correctness, not speed.
 - The slowest 5% of Rust tests held 68% of test time, and runner config was the biggest win in a second project (Jest 2 workers: 7.4 to 3.6 min). Fixing a few slow tests and runner levers beats deleting many.

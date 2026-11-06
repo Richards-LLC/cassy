@@ -296,6 +296,10 @@ impl Config {
                 factory.strict_cli.to_string(),
             ),
             (
+                "factory.release_train".to_string(),
+                factory.release_train.to_string(),
+            ),
+            (
                 "factory.target_cache_high_watermark_percent".to_string(),
                 factory.target_cache_high_watermark_percent.to_string(),
             ),

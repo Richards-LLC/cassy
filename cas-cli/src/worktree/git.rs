@@ -1506,20 +1506,19 @@ impl GitOperations {
         })
     }
 
-    /// cas-dcc9: revert one merge commit (`-m 1`, its mainline parent) on
-    /// `target_branch` as a new commit, with the same detached-worktree and
-    /// compare-and-swap guarantees as a merge. History is never rewritten.
-    pub fn revert_merge_via_temp_worktree(
+    /// cas-dcc9: revert merge commits (`-m 1`, their mainline parent) on
+    /// `target_branch`, one new commit each in the given order, with the same
+    /// detached-worktree and compare-and-swap guarantees as a merge. All land
+    /// or none do; history is never rewritten.
+    pub fn revert_merges_via_temp_worktree(
         &self,
         target_branch: &str,
-        merge_sha: &str,
-        message: &str,
+        reverts: &[(String, String)],
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
             let git = |args: &[&str]| -> Result<String> {
                 let output = Command::new("git").args(args).current_dir(dir).output()?;
                 if !output.status.success() {
-                    let _ = Command::new("git").args(["revert", "--abort"]).current_dir(dir).output();
                     return Err(GitError::CommandFailed(format!(
                         "git {}: {}",
                         args.join(" "),
@@ -1528,8 +1527,25 @@ impl GitOperations {
                 }
                 Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
             };
-            git(&["revert", "--no-commit", "-m", "1", merge_sha])?;
-            git(&["commit", "-q", "-m", message])?;
+            for (merge_sha, message) in reverts {
+                if let Err(error) = git(&["revert", "--no-commit", "-m", "1", merge_sha]) {
+                    // cas-d9d3c: the temp worktree is gone after this; name
+                    // what conflicted and what to do, not git's raw hints.
+                    let files = git(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+                    let _ = git(&["revert", "--abort"]);
+                    if files.is_empty() {
+                        return Err(error);
+                    }
+                    return Err(GitError::CommandFailed(format!(
+                        "reverting merge {merge_sha} conflicts in {}: a later commit on {target_branch} \
+                         changed the same lines. Nothing changed on {target_branch}. Next: drop the \
+                         later child that touched them in the same batch, or resolve the revert by \
+                         hand on a checkout of {target_branch}.",
+                        files.lines().collect::<Vec<_>>().join(", ")
+                    )));
+                }
+                git(&["commit", "-q", "-m", message])?;
+            }
             git(&["rev-parse", "HEAD"]).map(Some)
         })
     }

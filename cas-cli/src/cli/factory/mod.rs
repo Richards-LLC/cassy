@@ -729,10 +729,12 @@ pub struct KillAllArgs {
 /// `cas factory train` actions (cas-dcc9).
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum TrainCommand {
-    /// Revert one child's merge off its release train, return the task to its
-    /// worker and re-enqueue the train PR. One repair cycle per train.
+    /// Revert children's merges off their release train in one batch, return
+    /// each task to its worker and re-enqueue the train PR once. One repair
+    /// cycle per train.
     Drop {
-        task: String,
+        #[arg(required = true)]
+        tasks: Vec<String>,
         /// The failure: the failing job or the review finding.
         #[arg(long)]
         reason: String,
@@ -1290,7 +1292,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 Ok(())
             }
             FactoryCommands::Hold { command } => hold::execute(command, cli, cas_root),
-            FactoryCommands::Train { command: TrainCommand::Drop { task, reason } } => {
+            FactoryCommands::Train { command: TrainCommand::Drop { tasks, reason } } => {
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train drop requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
                 let queue = crate::train_guardrails::GhTrainQueue(
@@ -1299,7 +1301,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 let receipt = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
                     .build()?
-                    .block_on(crate::train_guardrails::drop_child(&core, task, reason, &queue))?;
+                    .block_on(crate::train_guardrails::drop_children(&core, tasks, reason, &queue))?;
                 println!("{}", receipt.render());
                 Ok(())
             }

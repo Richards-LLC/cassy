@@ -6636,8 +6636,11 @@ async fn test_gc_reclaims_recorded_closed_candidate_binaries_cas_82f8() {
     assert!(!root.join("cas-c001/candidate/cas").exists(),
         "cas-82f8: recorded candidate of a task closed over 48h must be reclaimed: {text}");
     assert!(text.contains(&format!("Candidate binaries: removed_files=1 reclaimed_bytes={}", binary.len())), "{text}");
+    // pin: binary reclamation must preserve the original ledger bytes.
     assert_eq!(std::fs::read_to_string(root.join("cas-c001/LEDGER.md")).unwrap(), ledger);
+    // pin: build logs remain durable evidence after binary reclamation.
     assert_eq!(std::fs::read_to_string(root.join("cas-c001/build.log")).unwrap(), "build completed");
+    // pin: the original binary checksum record must survive reclamation.
     assert_eq!(std::fs::read_to_string(root.join("cas-c001/candidate/SHA256SUMS")).unwrap(), format!("{hash}  cas\n"));
     for id in ["cas-c002", "cas-c003", "cas-c004", "cas-c005"] {
         assert_eq!(std::fs::read(root.join(id).join("candidate/cas")).unwrap(), binary,

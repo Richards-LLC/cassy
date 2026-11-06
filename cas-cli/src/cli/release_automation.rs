@@ -370,8 +370,7 @@ mod tests {
     use super::*;
     use cas_types::{Agent, AgentRole, Task, TaskType, WorkTarget};
 
-    #[test]
-    fn release_tracking_and_installed_notice_are_restart_safe() {
+    fn fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();
@@ -445,6 +444,14 @@ mod tests {
             first_child: sha.clone(),
             version: "9.99.2".into(),
         };
+        (temp, root, train, owner, args)
+    }
+
+    #[test]
+    fn release_tracking_and_installed_notice_are_restart_safe() {
+        let (temp, root, mut train, owner, args) = fixture();
+        let repo = temp.path();
+        let sha = args.commit.clone();
         track_on_train(&args, &root, repo, &train).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
         let reminders = open_reminder_store(&root).unwrap();
@@ -488,5 +495,45 @@ mod tests {
         assert!(crate::supervisor_notices::is_action_envelope(
             &rows[0].prompt
         ));
+    }
+    #[test]
+    fn release_tracking_owner_fallback_never_blocks() {
+        for peer_available in [true, false] {
+            let (temp, root, mut train, owner, args) = fixture();
+            train.epic_verification_owner = None;
+            if !peer_available {
+                open_agent_store(&root)
+                    .unwrap()
+                    .unregister(&owner.id)
+                    .unwrap();
+            }
+            track_on_train(&args, &root, temp.path(), &train).unwrap();
+            let pending = open_reminder_store(&root)
+                .unwrap()
+                .list_all_pending()
+                .unwrap();
+            assert_eq!(pending.len(), if peer_available { 2 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn release_version_rebump_cancels_both_old_watches() {
+        let (temp, root, train, owner, mut args) = fixture();
+        track_on_train(&args, &root, temp.path(), &train).unwrap();
+        let reminders = open_reminder_store(&root).unwrap();
+        let old = reminders.list_all_pending().unwrap();
+        args.version = "9.99.3".into();
+        track_on_train(&args, &root, temp.path(), &train).unwrap();
+        let pending = reminders.list_all_pending().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(
+            pending
+                .iter()
+                .all(|r| !old.iter().any(|old| old.id == r.id))
+        );
+        assert_eq!(
+            reminders.list_recently_ended(&owner.id, 60).unwrap().len(),
+            2
+        );
     }
 }

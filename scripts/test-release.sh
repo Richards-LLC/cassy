@@ -54,6 +54,10 @@ cat >"$tmp/bin/cas" <<'EOF'
 printf '%s\n' "$*" >>"${FAKE_CAS_LOG:?}"
 case "$1 $2" in
   "release context")
+    case "${FAKE_CONTEXT_MODE:-}" in
+      no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
+      different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
+    esac
     printf '{"branch":"%s","integration":"main","base_commit":"%s"}\n' "$(git branch --show-current)" "$(git merge-base origin/main HEAD)" ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
@@ -484,6 +488,27 @@ echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":null}' >"$tmp/no
 status=0
 (cd "$epic" && FAKE_PR_STATE_JSON="$tmp/not-enqueued.json" ./scripts/release.sh --no-watch) >"$tmp/not-enqueued.err" 2>&1 || status=$?
 check '[[ "$status" == 3 ]] && grep -q "no auto-merge and no merge-queue entry" "$tmp/not-enqueued.err"' 'cas-61e0: a missing enqueue is reported immediately after admission'
+
+# A hotfix remains an explicit exception, including actual CLI refusal shapes.
+hotfix_fallback() {
+    local mode="$1" fixture="$tmp/hotfix-$1" status=0
+    clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
+    mkdir -p "$tmp/state-$mode"
+    write_valid_draft "$tmp/hotfix-$mode.md"
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
+        run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
+    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log"
+}
+check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
+check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
+check 'hotfix_fallback tracking_unavailable 1' 'cas-61e0: a tracking failure cannot prevent a hotfix push and enqueue'
+
+echo '{"state":"OPEN","autoMergeRequest":{"enabledAt":"2026-11-05T23:00:00Z"},"mergeQueueEntry":null}' >"$tmp/pending-auto.json"
+echo '[{"name":"required CI","bucket":"fail"}]' >"$tmp/checks-red.json"
+status=0
+(cd "$epic" && FAKE_PR_STATE_JSON="$tmp/pending-auto.json" FAKE_PR_CHECKS_JSON="$tmp/checks-red.json" ./scripts/release.sh --no-watch) >"$tmp/pending-red.err" 2>&1 || status=$?
+check '[[ "$status" != 0 ]] && grep -qi "not admitted" "$tmp/pending-red.err" && ! grep -q "admission verified" "$tmp/pending-red.err"' 'cas-61e0: pending auto-merge with failed required checks is not admission'
 
 # 8. cas-ea62: git exports GIT_DIR to hooks. A fixture
 # test that creates bare repositories must leave the repository those name

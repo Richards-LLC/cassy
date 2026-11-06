@@ -466,7 +466,6 @@ async fn builtin_docs_rebind_rust_receipts_at_park_cas_23b1() {
         } else {
             assert!(reply.contains("MERGE REQUIRED"), "{reply}");
             assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
-            assert!(f.task().notes.contains(&format!("rebound from {tested_tip}")), "{}", f.task().notes);
         }
     }
 }

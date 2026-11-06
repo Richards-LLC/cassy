@@ -2259,7 +2259,7 @@ impl CasCore {
             crate::mcp::tools::core::task::lifecycle::close_ops::freshest_target_ref(repo, parent_branch)
         };
         let unchanged = if git.is_ancestor(anchor, &tip) {
-            crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(repo, anchor, &tip, &target)
+            crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(repo, task, &tip, &target)
         } else {
             crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(
                 repo, anchor, &tip, &target, &task.id,
@@ -4097,7 +4097,7 @@ impl CasCore {
             );
             let unchanged = if git.is_ancestor(recorded_anchor, &pushed_tip) {
                 crate::mcp::tools::core::task::lifecycle::close_ops::target_sync_only_advance(
-                    manager.repo_root(), recorded_anchor, &pushed_tip, &target,
+                    manager.repo_root(), task, &pushed_tip, &target,
                 )
             } else {
                 crate::mcp::tools::core::task::lifecycle::close_ops::rebased_delivery_has_same_patches(

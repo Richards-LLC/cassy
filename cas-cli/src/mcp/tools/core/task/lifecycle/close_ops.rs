@@ -6641,11 +6641,7 @@ impl CasCore {
             );
         // Target-only merge containers remain this delivery even after its
         // worker starts a successor. A new authored commit still needs a park.
-        let target_sync = target_sync_only_advance(repo_path, recorded, &candidate, &rebase_target)
-            && (task.delivery_mode == cas_types::DeliveryMode::LocalMerge
-                || lane.as_deref().and_then(|branch| {
-                    resolve_branch_sha(repo_path, &format!("refs/remotes/origin/{branch}"))
-                }).as_deref() == Some(candidate.as_str()));
+        let target_sync = target_sync_only_advance(repo_path, task, &candidate, &rebase_target);
         // Prediction and persistence share the same ownership fences. A
         // proven identical rebase preserves a handed-off delivery; changed
         // continuations still require exclusive ownership.
@@ -25107,10 +25103,13 @@ fn no_other_open_anchor_between(
 /// a merge whose other parents are already reachable on the declared target.
 pub(crate) fn target_sync_only_advance(
     repo: &std::path::Path,
-    anchor: &str,
+    task: &Task,
     tip: &str,
     target: &str,
 ) -> bool {
+    let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+        return false;
+    };
     if [anchor, tip, target].iter().any(|reference| !is_safe_git_refname(reference)) {
         return false;
     }
@@ -25119,6 +25118,16 @@ pub(crate) fn target_sync_only_advance(
     ) else {
         return false;
     };
+    let lane = task.deliverables.parked_branch.clone().or_else(|| {
+        task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+    });
+    if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+        && lane.as_deref().and_then(|branch| {
+            resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}"))
+        }).as_deref() != Some(tip.as_str())
+    {
+        return false;
+    }
     let Ok(history) = git_stdout_lines(repo, &[
         "rev-list", "--first-parent", "--parents", &format!("{anchor}..{tip}"), "--",
     ]) else {

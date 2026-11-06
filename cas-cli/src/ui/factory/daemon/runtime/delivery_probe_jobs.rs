@@ -86,7 +86,7 @@ pub(crate) fn read_normal_probe(
     let mut evidence = NormalDeliveryTurnEvidence::Unavailable {
         pane_output_grew: false,
     };
-    if activity == RecipientActivity::Absent {
+    if activity == RecipientActivity::Absent || probe.startup_pane.is_some() {
         evidence = normal_delivery_turn_evidence_io(
             cas_dir,
             &probe.pane,
@@ -94,7 +94,8 @@ pub(crate) fn read_normal_probe(
             &probe.prompt,
             false,
         );
-        if evidence != NormalDeliveryTurnEvidence::TurnStarted
+        if probe.startup_pane.is_none()
+            && evidence != NormalDeliveryTurnEvidence::TurnStarted
             && crate::ui::factory::director::idle_worker_liveness(cas_dir, &probe.pane).is_some_and(
                 |o| o.state == crate::mcp::tools::service::worker_liveness::Liveness::Executing,
             )

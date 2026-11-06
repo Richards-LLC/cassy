@@ -468,6 +468,7 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
     let name = daemon.app.supervisor_name().to_string();
     let agents = crate::store::open_agent_store(&cas).unwrap();
     let mut supervisor = agents.get("single-sup").unwrap();
+    supervisor.status = cas_types::AgentStatus::Active;
     supervisor.metadata.insert("worker_cli".into(), "claude".into());
     supervisor.metadata.insert("clone_path".into(), root.path().display().to_string());
     let account = root.path().join("claude-account");
@@ -500,7 +501,7 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
     // Replay the incident's native composer, with the startup frame still at
     // the input marker. No transcript exists, so echo cannot count as a turn.
     daemon.app.mux.get_mut(&name).unwrap().feed(
-        format!("\x1b[2J\x1b[H❯ [cas #{} agent-authored 5s first] startup draft", row.id).as_bytes(),
+        format!("\x1b[2J\x1b[H────────────────────\r\n❯ [cas #{} agent-authored 5s first] startup draft\r\n────────────────────", row.id).as_bytes(),
     ).unwrap();
     daemon.normal_delivery_probes.get_mut(&row.id).expect("startup observation remains owned")
         .next_check_at = Some(Instant::now());
@@ -521,7 +522,9 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
     assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes());
     // The authoritative native user record is the turn start. Its appearance,
     // rather than the submitted CR, releases the success receipt.
-    let path = account.join("projects/first-boot/single-sup.jsonl");
+    let slug: String = root.path().to_str().unwrap().chars()
+        .map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
+    let path = account.join("projects").join(slug).join("single-sup.jsonl");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!("{}\n", serde_json::json!({
         "type":"user", "timestamp":chrono::Utc::now().to_rfc3339(),

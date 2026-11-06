@@ -74,7 +74,7 @@ In qa.mode=batch (the default) the release's batch QA round at the frozen tip is
 `per_task` is the explicit opt-in. A batch park opens no per-task round. Capture
 visual before/after evidence while building. The supervisor owns the release's one
 epic-tip candidate, shared PASS ledger and `verification action=batch_receipt`.
-In qa.mode=batch, Cassy closes merged deliveries when the release batch_receipt lands; the worker does nothing.
+In qa.mode=batch, Cassy closes merged deliveries covered by the release verdict through ordinary gates; a batch QA receipt alone does not replace that verdict, and the worker does nothing.
 Explicit `qa_request` reviews remain available.
 
 ## Worker peer lane

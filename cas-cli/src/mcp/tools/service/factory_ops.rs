@@ -2041,10 +2041,10 @@ fn format_assigned_task_info(
                     || status == cas_types::TaskStatus::Blocked) =>
         {
             // A merged delivery is closed or returned by its verdict. A worker
-            // in the Blocked wait is not: a PASS queues its close retry, and
+            // in the Blocked wait needs supervisor close recovery after PASS, and
             // nothing is promised for a FAIL.
             let outcome = if status == cas_types::TaskStatus::Blocked {
-                "a PASS queues the assigned worker's close retry"
+                "a PASS leaves remaining ordinary close recovery with the supervisor"
             } else {
                 "a PASS closes it and a FAIL returns it to the worker"
             };
@@ -18396,8 +18396,8 @@ effort = "high"
         for (status, merged, outcome) in [
             (cas_types::TaskStatus::AwaitingMerge, true, "a PASS closes it and a FAIL returns it to the worker"),
             // A Blocked no-code wait is not returned by a FAIL; only the
-            // queued close retry is promised.
-            (cas_types::TaskStatus::Blocked, false, "a PASS queues the assigned worker's close retry"),
+            // supervisor close recovery is promised.
+            (cas_types::TaskStatus::Blocked, false, "a PASS leaves remaining ordinary close recovery with the supervisor"),
         ] {
             let out = format_assigned_task_info(
                 None,

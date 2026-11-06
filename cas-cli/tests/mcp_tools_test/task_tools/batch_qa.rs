@@ -37,7 +37,15 @@ async fn squash_deferred_delivery_cas_5129a(receipt: bool) {
             &fx.repo,
             &["update-ref", "refs/remotes/origin/main", &fx.staging],
         );
+        // Pause automatic completion while this fixture studies the later
+        // squash receipt's binding to the original QA delivery anchor.
+        let mut paused = tasks.get("cas-bq01").unwrap();
+        paused.status = TaskStatus::Blocked;
+        tasks.update(&paused).unwrap();
         fx.record().await;
+        let mut resumed = tasks.get("cas-bq01").unwrap();
+        resumed.status = TaskStatus::AwaitingMerge;
+        tasks.update(&resumed).unwrap();
     } else {
         let request = serde_json::from_value(serde_json::json!({
             "action":"qa_request", "task_id":"cas-bq01", "summary":"Review before squash"

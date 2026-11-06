@@ -20,7 +20,7 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
-async fn r1_approved_verdict_leaves_close_retry_with_worker() {
+async fn r1_approved_verdict_leaves_close_recovery_with_supervisor() {
     r1_verification_wait_wakes("verdict").await;
 }
 
@@ -230,7 +230,7 @@ async fn r1_verification_wait_wakes(release: &str) {
                     "task_id": task.id,
                     "dispatch_id": dispatch.id,
                     "status": "approved",
-                    "summary": "Review passed; worker can retry close."
+                    "summary": "Review passed; supervisor owns close recovery."
                 }))
                 .unwrap(),
             ))
@@ -240,8 +240,8 @@ async fn r1_verification_wait_wakes(release: &str) {
         let rows = queue.peek_all(20).unwrap();
         assert_eq!(
             rows.iter().filter(|row| row.target == "merge-w").count(),
-            1,
-            "the real verdict path must queue the worker's close retry: {rows:?}"
+            0,
+            "an approved verdict cannot ask the worker to re-close: {rows:?}"
         );
     }
     let released_at = if release != "verdict" {
@@ -273,8 +273,8 @@ async fn r1_verification_wait_wakes(release: &str) {
             .filter(|row| row.target != "merge-w"
                 && !crate::supervisor_message_wakes::quiet(&row.prompt))
             .count(),
-        if release != "verdict" { 2 } else { 1 },
-        "after the dispatch handoff, expiry needs one wake and approval needs zero: {rows:?}"
+        2,
+        "after the dispatch handoff, expiry or supervisor close recovery needs one wake: {rows:?}"
     );
     if release == "verdict" {
         let resolved_at = cas_store::get_latest_verification_dispatch(&root, &task.id)
@@ -282,7 +282,7 @@ async fn r1_verification_wait_wakes(release: &str) {
         let close_deadline = resolved_at + chrono::Duration::minutes(5);
         reconcile_blocked_task_alert(&root, &task.id, close_deadline - chrono::Duration::seconds(1)).unwrap();
         assert_eq!(queue.peek_all(20).unwrap().len(), rows.len(),
-            "approval gives the worker a bounded chance to retry close");
+            "approval gives the supervisor a bounded chance to complete recovery");
         for _ in 0..3 {
             reconcile_blocked_task_alert(&root, &task.id, close_deadline).unwrap();
             crate::ui::factory::daemon::runtime::lifecycle::escalate_expired_verification_dispatches(
@@ -291,8 +291,8 @@ async fn r1_verification_wait_wakes(release: &str) {
         }
         let rows = queue.peek_all(20).unwrap();
         assert_eq!(rows.iter().filter(|row| row.target != "merge-w"
-            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 2,
-            "an unretried approval must escalate exactly once after its grace period: {rows:?}");
+            && !crate::supervisor_message_wakes::quiet(&row.prompt)).count(), 3,
+            "an unfinished supervisor recovery must escalate exactly once after its grace period: {rows:?}");
     }
 }
 

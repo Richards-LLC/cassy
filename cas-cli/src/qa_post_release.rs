@@ -192,8 +192,9 @@ mod tests {
 
     /// cas-4b22: a parked delivery already on origin/<target> gets one
     /// supervisor notice per uncovered set naming the exact batch_receipt call.
-    #[test]
-    fn batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25() {
+    #[tokio::test]
+    async fn batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let git = |args: &[&str]| {
@@ -204,7 +205,7 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "qa@example.test"]);
         git(&["config", "user.name", "QA"]);
-        fs::write(project.join(".gitignore"), ".cas/\n").unwrap();
+        fs::write(project.join(".gitignore"), ".cas/\nartifacts/\nLEDGER.md\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-qm", "base"]);
         let base = git(&["rev-parse", "HEAD"]);
@@ -214,17 +215,29 @@ mod tests {
             git(&["commit", "-qm", name]);
             git(&["rev-parse", "HEAD"])
         };
-        let live = anchor("live.md");
+        let live = anchor("live.css");
         git(&["update-ref", "refs/remotes/origin/main", &live]);
         let unpushed = anchor("unpushed.md");
         let cas = crate::store::init_cas_dir(project).unwrap();
+        env.set("CAS_ROOT", cas.to_str().unwrap());
+        env.set("CAS_CLONE_PATH", project.to_str().unwrap());
+        fs::write(cas.join("config.toml"), "[project]\ncanonical_id='batch-offer-fixture'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
         let supervisor = cas_types::Agent::new_with_role("sup-4b22".into(), "release-sup".into(), cas_types::AgentRole::Supervisor);
         crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+        let worker = cas_types::Agent::new_with_role("delivery-worker".into(), "delivery-worker".into(), cas_types::AgentRole::Worker);
+        crate::store::open_agent_store(&cas).unwrap().register(&worker).unwrap();
+        git(&["branch", "factory/delivery-worker", &live]);
         let tasks = crate::store::open_task_store(&cas).unwrap();
         for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed)] {
             let mut task = Task::new(id.into(), id.into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.assignee = Some(worker.id.clone());
+            task.risk = vec![cas_types::TaskRisk::None];
             task.deliverables.factory_branch_anchor = Some(head.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: cas_types::WorkTarget { repo_selector: "project:batch-offer-fixture".into(), target_branch: "main".into() },
+                assignee: worker.id.clone(), branch: "factory/delivery-worker".into(), base_sha: base.clone(),
+            });
             tasks.add(&task).unwrap();
             cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
         }
@@ -262,6 +275,41 @@ mod tests {
             "{payload}"
         );
         assert!(rows.iter().all(|row| !row.payload.contains("cas-unpushed")), "{rows:?}");
+
+        let ledger = project.join("LEDGER.md");
+        fs::write(&ledger, "# Batch walk\ncas-live PASS\n").unwrap();
+        let store = cas_store::SqliteArtifactStore::open(&cas).unwrap();
+        let context = crate::artifacts::PublishContext {
+            store: &store,
+            roots: crate::artifacts::paths::PublishRoots::new(&cas, &project.join("artifacts"), "cas-live"),
+            task_id: "cas-live".into(), cloud: None,
+        };
+        let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact.id;
+        let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id.clone());
+        let service = crate::mcp::CasService::new(core, None);
+        let request = |kind: &str| serde_json::from_value(serde_json::json!({
+            "action": "batch_receipt", "verification_type": kind,
+            "task_ids": ["cas-live"], "staging_sha": target_tip,
+            "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
+        })).unwrap();
+        let text = |response: rmcp::model::CallToolResult| response.content.iter()
+            .filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None })
+            .collect::<Vec<_>>().join("\n");
+        let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
+        // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
+        assert!(qa.contains("WAITING FOR RELEASE VERDICT"), "{qa}");
+        assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        fs::remove_dir_all(cas.join("post-release/batch-offers")).unwrap();
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");
+        let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
+        let latest = rows.iter().filter(|row| row.payload.contains("batch_receipt_offer"))
+            .max_by_key(|row| row.id).unwrap();
+        assert!(!latest.payload.contains("cas-live"), "covered anchor cannot be re-offered: {latest:?}");
+        let reviewed = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap());
+        assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
+        assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "closed delivery has no further QA offer");
+
     }
 
     #[test]
@@ -905,6 +953,11 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         let (Some(anchor), Some(tip)) = (delivery_anchor(&repo, &task), commit(&repo, &format!("origin/{target}"))) else {
             continue;
         };
+        if crate::qa_batch::satisfying_receipt(cas_root, &task, &repo, &target, &anchor)
+            .map_err(anyhow::Error::msg)?.is_some()
+        {
+            continue;
+        }
         if ancestor(&repo, &anchor, &tip) == Some(true) {
             live.entry((target, tip)).or_default().push(id);
         }
@@ -921,13 +974,14 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
             continue;
         }
         let detail = format!(
-            "{} parked deliver{} already live on origin/{target} at {tip}: {}. They stay AwaitingMerge until their batch QA receipt is recorded. \
+            "{} parked deliver{} already live on origin/{target} at {tip}: {}. {batch_close} \
              Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
              Cassy did not record it: a receipt needs a supervisor recorder and an independent ledger author.",
             ids.len(),
             if ids.len() == 1 { "y is" } else { "ies are" },
             ids.join(", "),
             ids.join(","),
+            batch_close = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::BATCH_CLOSE_RULE,
         );
         let agents = crate::store::open_agent_store(cas_root)?.list(None)?;
         let recipient = crate::supervisor_notices::resolve(&agents, None, None);

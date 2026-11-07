@@ -150,11 +150,17 @@ class TrainReceipts(unittest.TestCase):
         self.assertEqual((restored['run_id'],restored['observation_run_id']),('102','101'))
         self.assertEqual(json.loads((reports/'shard.json').read_text())['head'],self.env['GITHUB_SHA'])
         self.assertEqual((reports/'native.log').read_bytes(),original_log)
-        self.run_cli('job-save','--repo',self.repo,'--job','scripts','--job-name','scripts',
-            '--inputs',inputs,'--status','success','--out',self.repo/'target/full-gate-job-scripts')
-        exported=self.run_cli('job-export','--repo',self.repo,'--evidence',self.repo/'target/full-gate-job-scripts',
+        # Two jobs of one run record the same script step; publication keeps both.
+        for job in ('scripts','ci-tiers'):
+            self.run_cli('job-save','--repo',self.repo,'--job',job,'--job-name',job,
+                '--inputs',inputs,'--status','success','--out',self.repo/f'target/full-gate-job-{job}')
+        exported=self.run_cli('job-export','--repo',self.repo,'--evidence',self.repo/'target',
             '--out',self.root/'exported')
-        self.assertEqual(exported['observations'],1)
+        self.assertEqual(exported['observations'],2)
+        published=subprocess.run([sys.executable,str(SCRIPT.parent/'ci-queue-flakes.py'),'reconcile',
+            '--issues-repo','fixture/repo','--receipts',str(self.root/'exported')],
+            env={**self.env,'GITHUB_EVENT_NAME':'merge_group'},capture_output=True,text=True)
+        self.assertEqual(published.returncode,0,published.stdout+published.stderr)
         self.assertFalse(check('scripts','{"selection":"changed"}'))
         self.assertFalse(check('scripts',requires='expired-suite-archive'))
         forge=self.root/'forge.json'

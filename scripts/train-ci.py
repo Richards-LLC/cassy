@@ -270,6 +270,10 @@ def job_export(args):
         for recovery in record.get('recovery',[]):
             if recovery.get('tree')!=tree or recovery.get('run_id')!=os.environ['GITHUB_RUN_ID'] or recovery.get('head')!=os.environ['GITHUB_SHA']:
                 raise ValueError('recovery observation does not belong to the evaluated run/tree')
+            # Two jobs may run the same script step (preflight's source-built
+            # terminal test and the CI tiers); each is its own reconcile slot.
+            if recovery.get('runner')=='step':
+                recovery={**recovery,'shard':record['job']+'/'+recovery['shard']}
             write(args.out/str(count)/'receipt.json',recovery)
             count+=1
     return {'observations':count}

@@ -277,7 +277,8 @@ def step(args):
         attempt=out/('initial' if index==0 else 'rerun')
         attempt.mkdir(parents=True,exist_ok=True)
         log=attempt/'console.log'
-        status,seconds=execute(command,Path.cwd(),os.environ.copy(),log,300 if index else None)
+        # CAS_QUEUE_STEP tells a nested selector that this step owns recovery.
+        status,seconds=execute(command,Path.cwd(),{**os.environ,'CAS_QUEUE_STEP':args.id},log,300 if index else None)
         raw=status
         warning=status>0 and cleanup_after_pass(log)
         if warning:

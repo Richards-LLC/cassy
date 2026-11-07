@@ -28,7 +28,12 @@ uploads = [step for step in workflow["jobs"]["fast-validation-journeys"]["steps"
            if step.get("uses", "").startswith("actions/upload-artifact@")]
 assert len(uploads) == 1, f"journey evidence must upload once per shard, found {len(uploads)} uploads"
 step = uploads[0]
-assert step.get("if") == "always()", "preserve evidence even when startup fails before a recovery receipt"
+# always() lifts the implicit success(); the only other gate skips a job whose
+# exact-tree receipt was reused, which runs no journeys and has nothing to keep.
+assert step.get("if") == "${{ steps.job-receipt.outputs.reused != 'true' && (always()) }}", \
+    "preserve evidence even when startup fails before a recovery receipt"
+assert any(s.get("id") == "job-receipt" for s in workflow["jobs"]["fast-validation-journeys"]["steps"]), \
+    "the reuse gate must name this job's receipt step"
 inputs = step["with"]
 assert inputs["name"] == "queue-flakes-playwright-${{ matrix.shard }}", "retain the queue fan-in artifact contract"
 print(json.dumps({"path": str(inputs["path"]).replace("${{ matrix.shard }}", "3").strip(),

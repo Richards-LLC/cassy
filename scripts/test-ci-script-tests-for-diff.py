@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Selection of script-tier tests, including real git diffs and selector calls."""
 import importlib.util
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -164,6 +165,25 @@ class Selection(unittest.TestCase):
         self.assertIn("AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
                       selected[0][1])
         self.assertEqual(SELECTOR.select(TIER, ["hub-web/src/app.ts"]), [])
+
+    def test_suites_inside_a_train_step_ignore_the_outer_job_cas_f235(self):
+        # Train run 42351777395: suites inherited FULL_SET and the train event,
+        # so fixture repositories classified as the outer full set or re-wrapped
+        # their selector in a queue step that the fixture does not contain.
+        with tempfile.TemporaryDirectory(prefix='script-suite-env-') as directory:
+            repo = Path(directory)
+            (repo / 'cas-cli').mkdir()
+            (repo / 'scripts').mkdir()
+            (repo / 'cas-cli/Makefile').write_text('test-ci-tiers:\n\tcd .. && python3 scripts/test-probe.py\n')
+            (repo / 'scripts/test-probe.py').write_text(
+                "import os\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n")
+            env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
+                       CAS_QUEUE_STEP='scripts/test-fast-release-rows.py', FULL_SET='true', BASE_SHA='abc')
+            result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
+                                     '--only', 'scripts/test-probe.py'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn('PASS python3 scripts/test-probe.py', result.stdout)
 
 
 if __name__ == "__main__":

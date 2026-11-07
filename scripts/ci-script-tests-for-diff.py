@@ -68,6 +68,8 @@ VISUAL_INPUTS = (
 )
 COHORT_INPUTS = ("scripts/ci-script-tests-for-diff.py", "cas-cli/Makefile",
                  ".github/actions/run-script-suite-tests/*")
+# Workflow step inputs for this selector (ci.yml, run-script-suite-tests).
+JOB_INPUTS = ('BASE_SHA', 'FULL_SET')
 PROVISIONED_INPUTS = {
     "scripts/test-cas-image-generate.sh": (
         "cas-cli/src/builtins/skills/cas-image-generate/scripts/generate-image.sh",),
@@ -232,6 +234,9 @@ def main() -> int:
         print("ci-script-tests-changed: no script test covers this lane's changes")
         return 0
     failed = []
+    # The calling job's selection inputs are not test inputs: a suite that
+    # inherits FULL_SET or BASE_SHA classifies its fixtures as the outer run.
+    env = {key: value for key, value in os.environ.items() if key not in JOB_INPUTS}
     for test, command in selected:
         if test in PROVISIONED_INPUTS and not (args.provisioned or args.all or args.only):
             print(f"ci-script-tests-changed: DEFERRED {test} to the path-scoped CI validation step")
@@ -244,15 +249,16 @@ def main() -> int:
             print(f"ci-script-tests-changed: would run {command}")
             continue
         started = time.monotonic()
-        recovering = (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or
+        recovering = not os.environ.get('CAS_QUEUE_STEP') and (
+            os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or
             (os.environ.get('GITHUB_EVENT_NAME') == 'push' and
              os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-')))
         if recovering:
             result = subprocess.run([sys.executable, str(repo/'scripts/ci-queue-flakes.py'),
                 'step', '--repo', str(repo), '--id', test, '--',
-                'bash', '-e', '-o', 'pipefail', '-c', command], cwd=repo)
+                'bash', '-e', '-o', 'pipefail', '-c', command], cwd=repo, env=env)
         else:
-            result = subprocess.run(command, shell=True, cwd=repo)
+            result = subprocess.run(command, shell=True, cwd=repo, env=env)
         took = time.monotonic() - started
         status = "PASS" if result.returncode == 0 else f"FAIL (exit {result.returncode})"
         print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)

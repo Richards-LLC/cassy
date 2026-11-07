@@ -1160,7 +1160,9 @@ jobs:
         env:
           CHECK_COMMITTED_DIST: ${{ needs.ci-diff.outputs.web-dist-check-needed }}
         run: |
-          python3 ../scripts/ci-queue-flakes.py step --id web-build -- npm run build
+          # A build, not a test: it writes tracked dist, so the queue step's
+          # clean-tree receipt cannot wrap it. The equality check below is the test.
+          npm run build
           # Only source-only lanes defer committed output to release.sh prepare.
           # Missing policy retains equality, including unknown comparison bases.
           if [[ "$CHECK_COMMITTED_DIST" != false ]]; then
@@ -2121,7 +2123,8 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/checkout@v4
-        if: inputs.full-set
+        # A red lane still records its FAIL full-set receipt below.
+        if: inputs.full-set && !cancelled()
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}

@@ -329,7 +329,12 @@ mod tests {
         let store = core.open_task_store().unwrap();
         let frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
         let lane = frozen.effective_epic_branch().unwrap().to_string();
-        let _ = Command::new("git").args(["branch", &lane]).current_dir(&root).output();
+        // The train carries work main lacks; a tip already on main is landed.
+        git(&root, &["checkout", "-qB", &lane]);
+        std::fs::write(root.join("work.txt"), "work\n").unwrap();
+        git(&root, &["add", "work.txt"]);
+        git(&root, &["commit", "-qm", "work"]);
+        git(&root, &["checkout", "-q", "main"]);
         crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
         let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
             "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",

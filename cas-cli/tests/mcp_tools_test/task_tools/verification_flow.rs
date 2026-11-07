@@ -1357,7 +1357,10 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     assert!(recorded.contains("Release verdict"), "{recorded}");
     assert!(recorded.contains("Closed 3: "), "{recorded}");
     assert!(recorded.contains(&format!("- {}: Tier 2:", named[5])), "{recorded}");
-    assert!(recorded.contains("Still held (2):"), "{recorded}");
+    // cas-e06c: a rejected dedicated review is held like any other gate.
+    assert!(recorded.contains("Still held (3):"), "{recorded}");
+    assert!(recorded.contains(&format!("- {}: ⚠️ VERIFICATION REQUIRED", named[2])), "{recorded}");
+    assert!(recorded.contains(&format!("- {}: ⚠️ VERIFICATION TIMED OUT", named[3])), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
         if path.starts_with("src/") {

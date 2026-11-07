@@ -379,7 +379,15 @@ fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> St
                 })
                 .unwrap_or_default();
             if result.is_error == Some(true) {
-                format!("refused: {text}")
+                // The refusal body (offending claim and remedy) is what the
+                // caller needs; the first line is only its heading.
+                let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut cap = 600.min(body.len());
+                while !body.is_char_boundary(cap) {
+                    cap -= 1;
+                }
+                let ellipsis = if cap < body.len() { "…" } else { "" };
+                return format!("refused: {}{ellipsis}", &body[..cap]);
             } else {
                 text
             }
@@ -1780,6 +1788,7 @@ mod tests {
         };
         assert!(notes.contains("task status now `open`"), "{notes}");
         assert!(notes.contains("refused: ⚠️ MERGE REQUIRED"), "{notes}");
+        assert!(notes.contains("not on staging"), "{notes}");
         assert_eq!(notes.matches("CLOSE_OUTCOME").count(), 1, "{notes}");
     }
 

@@ -243,7 +243,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
         sibling.last_activity_at = new Date(minute + 10_000 + frame * 400).toISOString();
         sibling.last_activity = `supervisor → frame-${width}-${frame}`;
         await hub.announceCatalog("atlas");
-        await expect(row(sibling.supervisor!)).toContainText(`Messaged frame-${width}-${frame}`);
+        await expect(row(sibling.supervisor!)).toHaveAccessibleName(new RegExp(`Messaged frame-${width}-${frame}`));
       }
       const changes = await page.evaluate(() => {
         const probe = (window as unknown as { recencyProbe: { changes: unknown[]; observer: MutationObserver } }).recencyProbe;
@@ -716,9 +716,10 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const dialog = page.locator("#paired-machines-dialog");
     await dialog.getByRole("group", { name: "Filter conversations" }).getByRole("button", { name: "Borealis", exact: true }).click();
     await expect(dialog).toBeHidden();
-    await expect(filters.getByRole("button", { name: "Borealis", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(filters.locator(".machine-filter")).toHaveAttribute("aria-pressed", "true");
+    await expect(filters.locator(".machine-filter")).toContainText("Borealis");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
+    await expect(list.locator(".conversation-row")).toHaveAccessibleName(/wild-shark-68/);
     await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
     await filters.getByRole("button", { name: /Show every machine/ }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(3);

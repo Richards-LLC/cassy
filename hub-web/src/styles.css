@@ -3434,6 +3434,13 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 /* cas-da546: one compact card per project. Head: the name (the collapse
    toggle) and its machines as dots; then the train bar and one status line;
    then one line per session. A quiet project steps back. */
+.conversation-avatar { position: relative; }
+.conversation-avatar.harness-mark { background: var(--bg-panel); color: var(--ink); font-family: var(--font-mono); }
+.supervisor-state { position: absolute; right: 0; bottom: 0; width: var(--space-3); height: var(--space-3); border: var(--state-rule-width) solid var(--bg-raised); border-radius: var(--radius-pill); background: var(--state-idle); }
+.supervisor-state.working { background: var(--state-ok); }
+.supervisor-state.idle { background: var(--state-idle); }
+.supervisor-state.needs-you { background: var(--state-warn); }
+.supervisor-state.offline { background: var(--state-off); }
 .project-card-head { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
 .project-card-toggle { display: flex; flex: 1 1 auto; align-items: center; gap: var(--space-1); min-width: 0; min-height: 32px; padding: var(--space-1) var(--space-2); border: 0; border-radius: var(--radius-card); background: var(--color-transparent); color: var(--ink); text-align: left; }
 .project-card-toggle:hover { background: var(--bg-hover); color: var(--ink); }

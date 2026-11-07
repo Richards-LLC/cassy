@@ -288,7 +288,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // The machine and the supervisor codename find it too.
     await search.fill("atlas");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("cas-src");
+    await expect(list.locator(".project-card-name")).toHaveText(["cas-src"]);
     // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
     // and its unread count side by side, never one drawn over the other. Every
     // point of the count is the count's own, not the hint painted on top.

@@ -22,7 +22,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Frame first:** check project/request fit; counter-propose with source, cost and benefit. Written standards (DESIGN.md, voice guide, spec, plan, rule) settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request.
-- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
+- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding. Tests assert behaviour or stable IDs, never wording.
 - **Worker liveness:** on lifecycle notices, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Recovery: [worker-recovery.md](references/worker-recovery.md).
 - **Trust refusals.** Follow the named gate/next command. Never force (`force=true`, `supervisor_override`, merge overrides) over unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
@@ -57,7 +57,7 @@ Read once per phase.
 | --- | --- |
 | Create or assign a task | [Brief fields](references/workflow.md#brief-fields-no-spawn-without-them) and [risk declarations](references/reference.md#task-risk-declarations) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
-| Report deliverable (brief or relay) | Load `cas-html-reports` and `cas-ui-craft`; brief from [supervisor-brief.md](../cas-html-reports/references/supervisor-brief.md), never from memory. Before relaying, open the 1280 and 390 px screenshots and score distinctiveness, fit and hierarchy yourself (each at least 4). Visual QA PASS is not enough. |
+| Report deliverable (brief or relay) | Load `cas-html-reports` and `cas-ui-craft`; brief and relay from [supervisor-brief.md](../cas-html-reports/references/supervisor-brief.md), never from memory. |
 | Plan or coordinate | [workflow](references/workflow.md) |
 | Merge, QA or assemble | [merge review](references/workflow.md#required-merge-review-discipline), [Batch QA](references/workflow.md#batch-qa) and [epic driving](references/epic-driving.md) |
 | Peer child, grant or shared epic | [peers](references/reference.md#peer-supervisors-on-the-same-repo) |

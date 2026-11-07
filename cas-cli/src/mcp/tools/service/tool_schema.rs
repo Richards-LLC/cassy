@@ -74,6 +74,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "cross_session",
     // cas-2a5a: `peers scope=all` lists the account's supervisors.
     "scope",
+    "peer",
 ];
 
 /// Descriptions `coordination` publishes in place of the shared
@@ -81,37 +82,38 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("action", "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true."),
-    ("id", "Agent id (default self); message_status: message id."),
-    ("target", "Recipient: agent, supervisor, all_workers, operator, commander:<label>; remind: self."),
-    ("message", "Body chars (configurable): 1200; blocker/merge 2500; notes 1500. Over-cap operator/Commander refused; supervisor-to-agent spills to artifact."),
-    ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
-    ("blocker", "Blocker escalation; wakes idle supervisor."),
-    ("merge_request", "Parked task_id merge request."),
+    ("action", "`inbox` is an alias of `inbox_poll`."),
+    ("id", "Agent id (self); message_status: id."),
+    ("target", "To: agent|supervisor|all_workers|operator|commander:<label>; remind=self."),
+    ("message", "Caps: message 1200, blocker/merge 2500, notes 1500 (configurable). Over-cap operator/Commander refused; supervisor spills to artifact."),
+    ("urgent", "Discard in-flight work; inject next."),
+    ("blocker", "Escalate blocker; wake idle supervisor."),
+    ("merge_request", "Parked task merge request."),
     ("in_reply_to", "notification_id of direct message answered."),
     ("kind", "answer|status|receipt|ask|blocker|secret (summary=NAME); untyped wakes; receipt is quiet."),
-    ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
-    ("options", "Operator ask choices; tap returns the label with in_reply_to."),
-    ("attachment", "Published artifact id for Commander."),
+    ("wake", "message: false=inbox only; broadcasts never wake."),
+    ("options", "Operator choices; selection returns label with in_reply_to."),
+    ("attachment", "Commander artifact id."),
     // Keep explicit caller contracts within the 3,600 B coordination budget.
     ("supersede_key", "Broadcast: newest per key wins."),
     ("sticky", "Broadcast: late joiners get it."),
-    ("task_id", "Parked task for merge_request; remind: bind to task."),
+    ("task_id", "merge_request's parked task; remind: bind task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked unnamed batch reads reappear once."),
-    ("limit", "inbox_poll: max rows."),
-    ("name", "register/session_start: agent name."),
+    ("notification_id", "message_ack/message_status: id; inbox_poll: row. Unacked unnamed rows repeat once."),
+    ("limit", "inbox_poll: rows; peer_transcript: context 0..10 (default 2)."),
+    ("name", "register/session_start: name."),
     ("agent_type", "register/session_start: primary|sub_agent|worker|ci."),
-    ("parent_id", "register/session_start: parent id."),
-    ("session_id", "register/session_start/session_end: harness id."),
-    ("remind_message", "Reminder text; ask: default at deadline."),
-    ("remind_delay_secs", "Seconds: time reminder. ask: deadline."),
+    ("parent_id", "register/session_start: parent."),
+    ("session_id", "Harness id; peer_transcript: current or known session."),
+    ("peer", "peer_transcript: own-account name@machine; message=regex <=512 B."),
+    ("remind_message", "Text; ask: deadline default."),
+    ("remind_delay_secs", "Reminder/ask deadline in seconds."),
     ("remind_event", "task_*|worker_idle|epic_completed|epic_split_decided|ci_completed|branch_contained_in|tag_exists; external: cross_session=true."),
     ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); task {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
     ("remind_ttl_secs", "TTL default 3600 (task-bound 0); external default 604800; 0=never."),
-    ("cross_session", "remind: survive session end and task close."),
-    ("scope", "peers: all=account-wide."),
+    ("cross_session", "remind: survive session/task end."),
+    ("scope", "peers: all=own account."),
 ];
 
 /// Messaging and reminder parameters the supervisor `factory` tool does not

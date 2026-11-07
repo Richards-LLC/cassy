@@ -69,20 +69,26 @@ describe("project-first navigation", () => {
   });
   it("contains supervisors across machines in one project and renders only supplied identity", () => {
     const nav = setup();
-    new ProjectNavigation().render(nav, [row("nimble-fox-66", { project: "cassy", harness: "codex", account_email: "operator@example.test", supervisorState: "working", machine_online: true, workerCount: 2, activityAt: 2 }), row("mighty-eagle-86", { machineId: "prowl", host: "prowl · macOS", projectDir: "/other/cassy", machine_online: false, activityAt: 1 }), row("solo", { projectDir: "/projects/pulse-card", machine_online: true, workerCount: 0 }), row("ended", { projectDir: "/projects/pulse-card", machine_online: false, workerCount: 0, ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } })], vi.fn(), undefined, { machines: [{ id: "soundwave", label: "soundwave · Linux", online: true }, { id: "prowl", label: "prowl · macOS", online: false }] });
+    new ProjectNavigation().render(nav, [row("nimble-fox-66", { project: "cassy", harness: "codex", account_email: "operator@example.test", supervisorState: "working", machine_online: true, workerCount: 2, activityAt: 2, statusLine: { train: { open: 3, in_progress: 1, merged: 1, total: 5 }, blocked: 1 } }), row("mighty-eagle-86", { machineId: "prowl", host: "prowl · macOS", projectDir: "/other/cassy", machine_online: false, activityAt: 1 }), row("solo", { projectDir: "/projects/pulse-card", machine_online: true, workerCount: 0 }), row("ended", { projectDir: "/projects/pulse-card", machine_online: false, workerCount: 0, ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } })], vi.fn(), undefined, { machines: [{ id: "soundwave", label: "soundwave · Linux", online: true, runtime: "4.3.0", installed: "4.3.0" }, { id: "prowl", label: "prowl · macOS", online: false, runtime: "4.2.0", installed: "4.3.0" }] });
     const cards = nav.querySelectorAll(".project-card");
     expect(cards).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".conversation-row")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")[1]!.getAttribute("aria-label")).toBe("Filter conversations on prowl, offline");
-    expect(cards[0]!.textContent).toContain("2 live workers");
+    // cas-da546: one status line — the train, workers and blocked — and a version only on skew.
+    expect(cards[0]!.querySelector(".project-card-summary")?.textContent).toBe("train 1/5 · 2 workers · 1 blocked");
+    expect(cards[0]!.querySelector(".project-card-summary .split-bar")).not.toBeNull();
+    expect(cards[0]!.querySelector(".project-card-blocked")?.textContent).toBe("1 blocked");
+    expect([...cards[0]!.querySelectorAll(".project-machine-chip")].map(chip => chip.querySelector(".machine-version") !== null)).toEqual([false, true]);
+    expect(cards[0]!.classList.contains("is-quiet")).toBe(false);
     // DESIGN.md Avatars: the provider's drawn mark, never a tiny glyph.
     expect(cards[0]!.querySelector('[data-harness="codex"]')?.getAttribute("title")).toBe("OpenAI");
     expect(cards[0]!.querySelector('[data-harness="codex"] svg.provider-mark')).not.toBeNull();
-    expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");
-    expect(cards[1]!.querySelector(".conversation-account")).toBeNull();
+    expect(cards[0]!.querySelector('[data-thread-key="nimble-fox-66"]')?.getAttribute("aria-label")).toContain("operator@example.test");
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
-    expect(cards[1]!.querySelector<HTMLElement>(".project-card-summary")?.hidden).toBe(true);
+    // A quiet project without a reported train says idle, and steps back.
+    expect(cards[1]!.querySelector(".project-card-summary")?.textContent).toBe("idle · no workers");
+    expect(cards[1]!.classList.contains("is-quiet")).toBe(true);
     expect(cards[1]!.querySelector(".project-machine-chip")?.getAttribute("aria-label")).toBe("Filter conversations on soundwave, online");
     // Both provider marks and machine-monogram fallbacks expose the same state contract.
     for (const [key, state] of [["nimble-fox-66", "Working"], ["solo", "Idle"], ["mighty-eagle-86", "Offline"]]) {
@@ -173,22 +179,29 @@ describe("project-first navigation", () => {
     expect(nav.querySelectorAll(".project-card")).toHaveLength(1);
   });
 
-  it("pins operator decisions and intersects the Needs you and machine filters with the supplied search results", () => {
+  it("pins operator decisions with their question and intersects the Needs you and machine filters with the supplied search results", () => {
     const nav = setup(); const list = new ProjectNavigation(); const open = vi.fn();
-    const rows = [row("answer-me", { attention: 1 }), row("merge-me", { machineId: "prowl", host: "prowl", needsYou: true }), row("only-unread", { unread: 2 })];
+    const rows = [row("answer-me", { attention: 1, operatorQuestion: "**Ship now**, or hold?" }), row("merge-me", { machineId: "prowl", host: "prowl", needsYou: true, operatorReason: "Ready for your merge" }), row("only-unread", { unread: 2 })];
     list.render(nav, rows, open);
-    expect(nav.querySelectorAll(".needs-you-shortcut")).toHaveLength(2);
-    nav.querySelector<HTMLButtonElement>(".needs-you-shortcut")!.click();
+    const shortcuts = [...nav.querySelectorAll(".needs-you-shortcut")];
+    expect(shortcuts.map(node => node.querySelector("q, small")?.textContent)).toEqual(["Ship now, or hold?", "Ready for your merge"]);
+    (shortcuts[0] as HTMLButtonElement).click();
     expect(open.mock.calls[0]![0].session).toBe("answer-me");
-    document.querySelector<HTMLButtonElement>('[data-nav-filter="needs-you"]')!.click();
+    const needs = () => document.querySelector<HTMLButtonElement>(".needs-you-filter")!;
+    expect(needs().textContent).toBe("Needs you 2");
+    needs().click();
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(2);
-    document.querySelector<HTMLButtonElement>('[data-nav-filter="machine:prowl"]')!.click();
+    expect(needs().getAttribute("aria-pressed")).toBe("true");
+    needs().click();
+    expect(nav.querySelectorAll(".conversation-row")).toHaveLength(3);
+    nav.querySelector<HTMLButtonElement>('.project-machine-chip[data-project-machine="prowl"]')!.click();
     expect(nav.querySelectorAll(".conversation-row")).toHaveLength(1);
-    expect(nav.querySelector(".conversation-row")?.textContent).toContain("merge-me");
+    expect((nav.querySelector(".conversation-row") as HTMLElement).dataset.threadKey).toBe("merge-me");
     list.render(nav, [rows[0]!], open);
     expect(nav.querySelector(".project-nav-empty")?.textContent).toContain("All");
-    document.querySelector<HTMLButtonElement>('[data-nav-filter="all"]')!.click();
+    document.querySelector<HTMLButtonElement>(".machine-filter")!.click();
     list.render(nav, [row("only-unread", { unread: 2 })], open);
     expect(nav.querySelector(".needs-you-section")).toBeNull();
+    expect(document.querySelector<HTMLElement>("#conversation-filters")!.hidden).toBe(true);
   });
 });

@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { displayCounts, projectEpics, type EpicSessionProgress } from "./progress-model";
+import { displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -73,7 +73,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
 import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
 import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
@@ -1075,6 +1075,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       retireEndedSessionNotices(machine.id, items);
       settleSendsForStoppedSessions(machine, items);
       sessions.set(machine.id, items);
+      refreshCardStatuses(machine.id, items);
       // A peer's retained events refresh the catalog too (cas-c4b7). Only a
       // new or revived destination needs status here; existing sessions keep
       // their own event invalidations and the independent health heartbeat.
@@ -2301,6 +2302,27 @@ function refreshEpicSessions(machineId: string, peersOnly = false): void {
     if (peersOnly && machineId === selectedMachineId && session.name === selectedSession) continue;
     if (!session.unreachable) void loadStatus(machineId, session.name);
   }
+}
+
+/** cas-da546: every project card's status line (train, blocked) reads its
+ * running sessions' status. Catalog ticks refresh it at most once a minute a
+ * session; the selected project keeps its own event-driven reads. */
+const CARD_STATUS_MS = 60_000;
+const cardStatusAt = new Map<string, number>();
+function refreshCardStatuses(machineId: string, items: readonly HubSession[]): void {
+  const now = Date.now();
+  for (const item of items) {
+    if (!sessionRunning(item) || item.dormant || !sessionReachable(item)) continue;
+    const key = sessionKey(machineId, item.name);
+    if (now - (cardStatusAt.get(key) ?? -Infinity) < CARD_STATUS_MS) continue;
+    cardStatusAt.set(key, now);
+    void loadStatus(machineId, item.name);
+  }
+}
+/** The question a waiting conversation asks, as its ask summarises it. */
+function waitingQuestion(history: ConversationHistory | undefined): string | undefined {
+  const ask = history?.waiting()[0];
+  return ask ? (ask.summary?.trim() || ask.message?.trim() || undefined) : undefined;
 }
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
@@ -4963,7 +4985,7 @@ function renderConversationList(): void {
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5760,6 +5782,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   const trainCounts = release ? displayCounts(release, tasks.filter(task => task.epic_id === release.id)) : undefined;
   const lead: HTMLElement[] = [releaseHeader(document, release && trainCounts ? { ...release, counts: trainCounts } : release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
     workers: workers.filter(worker => trainTasks.some(task => task.id === worker.currentTask)).length } : undefined)];
+  const ops = fleetOpsContext(status);
+  if (ops && release) lead[0]!.append(trainControls(document, ops, release));
   const epicSection = liveEpicsSection(document, { ...liveEpics, explorerHref: explorerBase ? explorerUrl(explorerBase, session?.cloud_project_id) : null,
     retry: () => { for (const id of machines.keys()) refreshEpicSessions(id, true); } });
   if (epicSection) lead.push(epicSection);
@@ -5786,7 +5810,6 @@ function renderStatus(status?: Record<string, unknown>): void {
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
   let revealPhoneNotice = false;
-  const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();

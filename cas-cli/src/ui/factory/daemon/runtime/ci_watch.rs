@@ -291,6 +291,8 @@ impl CiWake {
 pub(crate) struct CiRun {
     pub id: u64,
     #[serde(default)]
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     pub name: String,
     pub head_branch: String,
     pub head_sha: String,
@@ -1312,6 +1314,32 @@ pub(crate) fn read_github(
         })
         .collect();
     let delivery_pr_observations = collect_delivery_pr_observations(&transport, &deliveries)?;
+    // Settle outstanding promises from the poll's existing completed-run read.
+    // Job timestamps are fetched only for a matching unsettled promise.
+    let mut pending=crate::quality_ledger::estimates::pending_pipeline_subjects(cas_dir);
+    let mut remaining=3;
+    if !pending.is_empty() && let Some(runs)=transport.completed.get() {
+        for run in runs.iter().filter(|run|run.conclusion.as_deref()==Some("success")) {
+            let stage=match (run.name.as_str(),run.event.as_str()) {
+                ("CI","push") if run.head_branch.starts_with("epic/release-train-")=>"train_tip_suite",
+                ("CI","merge_group")=>"merge_queue", ("Release","push")=>"release_publish", _=>continue,
+            };
+            if !pending.contains(&format!("{stage}:{}",run.head_sha)) { continue; }
+            let Some(start)=run.created_at else { continue; };
+            if remaining==0 { break; }
+            remaining-=1;
+            let jobs:Result<serde_json::Value,_>=transport.gh_json(&["api".into(),format!("repos/{}/actions/runs/{}/jobs?per_page=100",transport.repo,run.id)]);
+            if let Ok(jobs)=jobs {
+                if stage=="train_tip_suite" && !jobs["jobs"].as_array().into_iter().flatten()
+                    .any(|j|j["name"].as_str().is_some_and(crate::quality_ledger::estimates::is_suite_job)) { continue; }
+                if let Some(end)=jobs["jobs"].as_array().into_iter().flatten()
+                .filter_map(|j|j["completed_at"].as_str().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok()).map(|t|t.with_timezone(&chrono::Utc))).max() {
+                crate::quality_ledger::estimates::record_pipeline_completion(cas_dir,stage,run.id,Some(&run.head_sha),start,end,Some(&run.html_url));
+                pending.remove(&format!("{stage}:{}",run.head_sha));
+                }
+            }
+        }
+    }
     Ok(GithubPoll { failures, queue_poll, ejections, delivery_pr_observations, ci_wakes })
 }
 
@@ -1909,6 +1937,7 @@ mod tests {
     fn run_with(branch: &str, head_sha: &str, id: u64, conclusion: Option<&str>) -> CiRun {
         CiRun {
             id,
+            created_at: None,
             name: "CI".to_string(),
             head_branch: branch.to_string(),
             head_sha: head_sha.to_string(),

@@ -164,7 +164,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   await journey.stage("Go back to the list", async () => {
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
     await expect(list).toBeVisible();
-    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Cutting now.");
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toHaveAccessibleName(/Cutting now\./);
   });
 
   await journey.stage("Jump from the palette with a tap", async () => {

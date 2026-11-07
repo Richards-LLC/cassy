@@ -497,7 +497,11 @@ impl CasCore {
             reason: Some(reason),
             supervisor_override: None,
             search_manifest: None,
-            commit_receipt: task.deliverables.factory_branch_anchor.clone(),
+            commit_receipt: task.deliverables.factory_branch_anchor.clone().or_else(|| {
+                // GH #1641: a PR merge recorded no anchor; close on the resolved delivery.
+                let (repo, target) = crate::qa_batch::task_context(&self.cas_root, &task).ok()?;
+                crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target)
+            }),
         };
         let close = crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)));
         let result = match as_cassy_merge_close(close).await {
@@ -631,7 +635,7 @@ impl CasCore {
             };
             let own_review = super::review_tier::own_review(&self.cas_root, &task, &repo);
             // cas-bc15: after request_changes the retired anchor is the delivery.
-            let anchor = crate::qa_batch::delivery_anchor(&repo, &task).unwrap_or_default();
+            let anchor = crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target).unwrap_or_default();
             let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {
                 Ok(Some(verdict)) => Some(verdict),
                 Ok(None) if recording_verdict => {

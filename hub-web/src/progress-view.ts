@@ -37,6 +37,10 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined,
   const title = document.createElement("h3"); title.textContent = epic ? epicTitle(epic) || "Untitled release" : "No release reported";
   if (epic?.title) title.title = epic.title;
   header.append(eyebrow, title);
+  if (epic?.freeze?.summary) {
+    const freeze = document.createElement("p"); freeze.className = "release-freeze"; freeze.textContent = epic.freeze.summary;
+    header.append(freeze);
+  }
   const counts = epicCounts(epic);
   const progress = epic?.progress;
   const valid = progress && Number.isSafeInteger(progress.total) && Number.isSafeInteger(progress.merged) && progress.total >= progress.merged && progress.merged >= 0;

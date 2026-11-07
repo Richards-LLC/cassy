@@ -6837,6 +6837,21 @@ impl CasService {
         Ok(Self::success(output))
     }
 
+    pub(super) async fn coordination_peer_transcript(&self, req: CoordinationRequest) -> Result<CallToolResult, McpError> {
+        let root = self.inner.cas_root.clone();
+        let sender = self.inner.get_registered_agent_id_read_only()?;
+        let output = tokio::task::spawn_blocking(move || {
+            crate::cloud::peer_mailbox::transcript::request(
+                &root, &sender, req.peer.as_deref().ok_or("peer is required")?,
+                req.session_id.as_deref().unwrap_or("current"),
+                req.message.as_deref().ok_or("message is the required transcript regex")?,
+                req.limit.unwrap_or(2),
+            )
+        }).await.map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+        Ok(Self::success(output))
+    }
+
     /// `coordination action=peers` (cas-e477): the live supervisors of this
     /// repo on any machine, from the Cassy Cloud agent registry. Read-only;
     /// peers are never spawned, messaged or claimed for (cas-604d).

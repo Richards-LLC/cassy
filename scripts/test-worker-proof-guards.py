@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -40,7 +41,7 @@ class ChangedStrings(unittest.TestCase):
         base = self.commit()
         product.write_text('fn receipt() -> &\'static str { "new receipt" }\n')
         hits = GUARDS.changed_string_matches(self.repo, base)
-        self.assertEqual({(path, name) for path, _, name in hits},
+        self.assertEqual({(path, name) for path, _, name, _ in hits},
                          {('inline.rs', 'alias_receipt'), ('tests/receipt.rs', 'codex_receipt')})
 
     def test_deleted_escaped_literal_finds_raw_test_reference(self):
@@ -50,7 +51,7 @@ class ChangedStrings(unittest.TestCase):
         base = self.commit()
         product.unlink()
         hits = GUARDS.changed_string_matches(self.repo, base)
-        self.assertEqual([name for _, _, name in hits], ['multiline_receipt'])
+        self.assertEqual([name for _, _, name, _ in hits], ['multiline_receipt'])
 
     def test_first_token_docstring_uses_test_file_label(self):
         product = self.repo / 'product.rs'
@@ -59,7 +60,7 @@ class ChangedStrings(unittest.TestCase):
         base = self.commit()
         product.write_text('fn receipt() { "new receipt"; }\n')
         self.assertEqual(GUARDS.changed_string_matches(self.repo, base),
-                         [('test_receipt.py', 1, '<test file>')])
+                         [('test_receipt.py', 1, '<test file>', 'old receipt')])
 
     def test_unchanged_literals_comments_and_production_functions_do_not_warn(self):
         product = self.repo / 'product.rs'
@@ -75,8 +76,36 @@ class ChangedStrings(unittest.TestCase):
         (self.repo / 'inline.rs').write_text('#[test] fn supervisor_alias() { assert!(reply.contains("To: cosmic-bear")); }\n')
         base = self.commit()
         product.write_text('fn receipt() { format!("queued -> {target}"); }\n')
-        self.assertEqual([name for _, _, name in GUARDS.changed_string_matches(self.repo, base)],
+        self.assertEqual([name for _, _, name, _ in GUARDS.changed_string_matches(self.repo, base)],
                          ['supervisor_alias'])
+
+    def test_changed_schema_stays_whole_and_ignores_fixture_setup(self):
+        old = 'CREATE TABLE quality_events (\n    id INTEGER PRIMARY KEY,\n    payload TEXT\n);'
+        cloud = old.replace('quality_events', 'cloud_fixture')
+        product = self.repo / 'ledger.rs'
+        product.write_text('fn schema() { execute_batch(r#"' + old + '"#); }\n')
+        (self.repo / 'fixtures.rs').write_text('\n'.join([
+            '#[test] fn cloud_setup() { execute_batch(r#"' + cloud + '"#); }',
+            '#[test] fn doctor_setup() { execute_batch(r#"' + old + '"#); }',
+            '#[test] fn schema_contract() { assert_eq!(schema(), r#"' + old + '"#); }',
+        ]))
+        base = self.commit()
+        # Only the column line changes; the complete literal begins outside
+        # the zero-context hunk. Both fixture SQL sections stay untouched.
+        product.write_text(product.read_text().replace('payload TEXT', 'payload BLOB'))
+        self.assertEqual(self.git('diff', '--name-only', base), 'ledger.rs')
+        # Exercise the actual diagnostic entry point; only Cargo is replaced.
+        result = subprocess.run([
+            sys.executable, str(SCRIPTS / 'worker-proof-guards.py'), '--base', base,
+            '--verified-script', 'printf 1 > "$VERIFIED_TEST_COUNT_FILE"',
+            '--cargo', 'unused', '--count-file', str(self.repo / 'count'), '--', 'fixture',
+        ], cwd=self.repo, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        warnings = [line for line in result.stdout.splitlines()
+                    if line.startswith('Worker changed-string warning:')]
+        self.assertEqual(len(warnings), 1, result.stdout)
+        self.assertIn('test schema_contract;', warnings[0])
+        self.assertIn(repr(old), warnings[0])
 
 
 if __name__ == '__main__':

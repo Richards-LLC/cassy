@@ -276,12 +276,24 @@ fn finish_turn_handled(rows: &[serde_json::Value], cli: cas_mux::SupervisorCli, 
     false
 }
 
-fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
+pub(super) fn supervisor_transcript(cas_dir: &std::path::Path, session: &str, supervisor: &str, cli: cas_mux::SupervisorCli) -> Option<std::path::PathBuf> {
     let store = crate::store::open_agent_store(cas_dir).ok()?;
     let agent = store.list(None).ok()?.into_iter().find(|agent|
         (agent.name == supervisor || agent.id == supervisor)
             && agent.role == cas_types::AgentRole::Supervisor
             && agent.factory_session.as_deref() == Some(session))?;
+    if cli == cas_mux::SupervisorCli::Claude
+        && let Some(account) = agent.metadata.get("supervisor_account_dir")
+    {
+        // Claude's generic worker resolver searches the daemon's ambient
+        // roots. The supervisor's registered account is the launch authority.
+        return crate::mcp::tools::service::factory_ops::transcript_path_from_resolution(
+            crate::mcp::tools::service::factory_ops::resolve_transcript_in_roots(
+                &[std::path::Path::new(account).join("projects")],
+                cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
+            ),
+        );
+    }
     crate::mcp::tools::service::factory_ops::resolve_worker_transcript_path_for_account(
         cas_dir.parent()?.to_str(), agent.cc_session_id.as_deref()?, cli,
         agent.metadata.get("supervisor_account_dir").map(String::as_str))

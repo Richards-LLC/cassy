@@ -174,6 +174,25 @@ that succeeded before a concurrent task edit can be retried with the same exact
 source SHA after reviewing its intent. Dirty/uncommitted worker files still
 require an explicit separate recovery; this operation only copies commits.
 
+## Peer transcript queries
+
+A registered supervisor can queue `coordination action=peer_transcript
+peer=<name@machine> session_id=current message="<regex>" limit=2`, or
+`cas peers --peer <name@machine> --transcript '<regex>' --context 2`.
+`session_id` / `--session-id` also accepts a known local supervisor session
+ID on that peer. The response returns through `coordination action=inbox_poll`
+with the Cloud request ID; queued does not mean the transcript was read yet.
+The receiving daemon must support this query; its request is quiet even on
+older daemons.
+
+Only supervisors of the caller's own Cloud account are addressable. The peer
+factory daemon handles the query without waking its supervisor or invoking a
+shell. It reads at most the last 1 MiB of that session's JSONL transcript,
+skips partial/invalid records, applies the existing secret redactors, then
+matches the regex with zero to ten context lines. Regex length is capped at
+512 bytes and the reply text at 8 KiB; scan/output truncation is explicit.
+Paths, shell commands and arbitrary filesystem reads are not accepted.
+
 ## Coordination messages and reminders
 
 Agent-facing message provenance and pointer wakes stamp the current render time
@@ -2647,10 +2666,13 @@ guard count and elapsed seconds; the `test: PASS` count remains the requested
 selection's count. Both invocations share the builder slot, private target and
 memory scope. Other repositories retain their existing named-test behavior.
 
-The same preflight compares removed/changed string literals against tracked
-test references and prints `Worker changed-string warning: <file>:<line> test
-<name>` for surviving assertions. Run or update the named assertions before
-push. This is a warning heuristic, not a complete dependency analysis. The diff
+The same preflight compares removed string literals overlapping changed hunks
+against tracked test references and prints `Worker changed-string warning:
+<file>:<line> test <name>` with the matched literal or fragment. Multiline SQL
+schemas stay whole; Rust SQL fixture setup is excluded while actual assertion
+macros remain eligible. Unchanged tests can still assert a changed contract.
+Run or update the named assertions before push. This is a warning heuristic,
+not a complete dependency analysis. The diff
 uses the active task's integration target, with configured epic/default-branch
 fallbacks for standalone runs; pushing the worker branch never clears it.
 Failed retries invalidate that scope's receipt; close imports all matching
@@ -4376,6 +4398,23 @@ pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
+## Release freeze
+
+`factory action=train_freeze id=<train> [reason=...]` needs a live registered
+supervisor. Commander's `freeze_train` operation (factory:operate) does the
+same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
+label on the train epic, which syncs to peer machines with the task row. One
+gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
+lane (through `check_cut_merge`, before and under the target lock), CI retry
+arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
+covering spawn, assignment and start of tasks that are still open). A
+`release-repair` task is admitted only while the train is red, and each
+admission is noted on the train. Task create retargets new work aimed at a
+frozen train to the next train. The freeze ends when a published release covers its tip (the
+`Release` ledger event that `release-published-receipt.sh` records, whose version tag
+contains the frozen tip), or through the operator-only Commander
+`lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
 ## Ordered train merge queue
 
 A registered supervisor can submit `factory action=train_merge id=<epic>` to
@@ -4422,3 +4461,7 @@ The hold filters parked rows at MCP list and startup presentation boundaries;
 internal task lists retain them for ownership fences, re-close exemptions and
 recovery checks. READY TO MERGE generation stops before caching or queueing an
 alert during the hold; lifting it alone generates no stale READY backlog.
+
+### Measured ledger estimates
+
+`cas ledger estimate pipeline <stage> --instance <sha>` and MCP `system action=estimate query=pipeline:<stage>:<sha>` record promises from successful measured runs; task/epic lookup uses closed project tasks. `--preview` is read-only. `cas ledger backfill --sync` derives historical facts and synchronizes the ledger without inventing promises. Estimate/outcome kinds use migration m297 and store-open reconciliation, preserving append-only sequence and history. See [ESTIMATES](../../docs/ESTIMATES.md) for endpoints, calibration, outcome semantics and supervisor-owned two-machine backfill proof.

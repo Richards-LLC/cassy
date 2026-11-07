@@ -377,6 +377,13 @@ fn names_ask(body: &str, id: &str) -> bool {
     })
 }
 
+/// Cassy task ids (`cas-<hex>`) named in `body`.
+fn task_ids(body: &str) -> impl Iterator<Item = &str> {
+    static TASK_ID: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\bcas-[0-9a-f]{4,16}\b").expect("task id pattern"));
+    TASK_ID.find_iter(body).map(|found| found.as_str())
+}
+
 /// Open asks from `sender_agent_id` within `window_secs` (explicit `kind=ask`).
 /// Reply IDs survive succession. Unlinked typed answers need an open ask ID or
 /// exactly one open ask per peer. Replay by arrival; exclude abandoned sends.
@@ -436,9 +443,28 @@ pub fn open_asks(root: &Path, sender_agent_id: &str, window_secs: i64) -> Vec<Op
         // Preserve the existing Cloud reply-link contract, including a live
         // successor answering mail routed from its retired predecessor.
         if let Some(id) = reply.in_reply_to.as_deref()
-            && let Some(ask) = asks.iter_mut().find(|ask| ask.ask.cloud_id.as_deref() == Some(id))
+            && let Some(linked) = asks.iter().position(|ask| ask.ask.cloud_id.as_deref() == Some(id))
         {
-            ask.answered = true;
+            asks[linked].answered = true;
+            // cas-6b42: one answer often covers several asks. It also clears
+            // earlier open asks to the same peer whose tasks it or its linked
+            // ask names.
+            if reply.kind == Some(PeerMessageKind::Answer) {
+                let body = prompt.split_once('\n').map(|(_, body)| body).unwrap_or("");
+                let covered: std::collections::HashSet<String> = task_ids(&asks[linked].ask.body)
+                    .chain(task_ids(body)).map(str::to_owned).collect();
+                for ask in &mut asks {
+                    let mut tasks = task_ids(&ask.ask.body).peekable();
+                    if !ask.answered && ask.ask.cloud_id.is_some() && ask.created_at <= arrived_at
+                        && ask.from_peer(&reply)
+                        && (target == ask.sender_name || target == sender_agent_id)
+                        && tasks.peek().is_some()
+                        && tasks.all(|task| covered.contains(task))
+                    {
+                        ask.answered = true;
+                    }
+                }
+            }
             continue;
         }
         let candidates: Vec<_> = asks.iter().enumerate().filter_map(|(i, ask)| {

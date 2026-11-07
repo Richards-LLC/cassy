@@ -476,6 +476,30 @@ mod tests {
         }
     }
 
+    /// cas-6b42 (GH #1634): prowl answered several asks about cas-aa10 in one
+    /// reply linked to a sibling ask. That answer clears every earlier open
+    /// ask to the same peer about the same tasks; an ask about another task
+    /// stays open.
+    #[test]
+    fn a_linked_answer_clears_sibling_asks_about_the_same_tasks_cas_6b42() {
+        let (_env, _temp, root, conn) = fixture();
+        sent_ask(&conn, "ask-handover", "Is cas-aa10 yours to merge as train owner?");
+        sent_ask(&conn, "ask-other", "Status of cas-bb20?");
+        sent_ask(&conn, "ask-queues", "Which worker re-parks cas-aa10?");
+        conn.execute(
+            "INSERT INTO prompt_queue (source, target, prompt) VALUES ('peer:lively-cheetah-57@prowl', 'cosmic-shark-29',
+             '<cas-peer-message v=\"1\" id=\"r1\" from=\"lively-cheetah-57\" from_agent=\"p\" machine=\"prowl\" repo=\"cassy\" in_reply_to=\"ask-queues\" kind=\"answer\"/>
+lively-eagle-82 re-parked cas-aa10; yours to merge.')",
+            [],
+        )
+        .unwrap();
+        let merge = |task: &str| merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", None,
+            &MergeSubject { task_id: Some(task.into()), ..Default::default() });
+        assert!(merge("cas-aa10").is_none(), "{:?}", merge("cas-aa10"));
+        let refused = merge("cas-bb20").expect("an ask about another task still holds its merge");
+        assert!(refused.contains("ask-other"), "{refused}");
+    }
+
     /// Verifier ver-37f17bf1f171 (2): `gh pr merge` with a branch or with no
     /// argument resolves its PR like the QA merge guard and is held too.
     #[test]

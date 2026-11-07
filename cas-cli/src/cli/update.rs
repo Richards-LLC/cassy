@@ -1776,6 +1776,10 @@ fn refresh_all_projects_with_user_refresh(
     // including every project and every channel. Dry-run never reaps records.
     let runtime_inventory = crate::coordination::binding_repair::RuntimeSnapshot::capture(!args.dry_run);
     let names = findings::display_names(discovery.projects.iter().map(PathBuf::as_path));
+    // cas-e1e9: each running session re-execs right after its own project
+    // refreshes; the rest (failed or unmatched projects) re-exec at the end.
+    let mut live_daemons = (hub_restart.is_some() && !args.dry_run && args.render_fixture.is_none())
+        .then(super::factory::reexec::LiveDaemonUpdate::new);
     for (index, project) in discovery.projects.iter().enumerate() {
         live::set_activity(format!(
             "{} of {} · {}",
@@ -1910,7 +1914,7 @@ fn refresh_all_projects_with_user_refresh(
             }
         }
 
-        receipts.push(ProjectRefreshReceipt {
+        let receipt = ProjectRefreshReceipt {
             project,
             unregistered,
             retired_toml: Some(retired_toml),
@@ -1922,7 +1926,13 @@ fn refresh_all_projects_with_user_refresh(
             details,
             phase_details,
             documents,
-        });
+        };
+        if let Some(live) = &mut live_daemons
+            && !receipt.failed()
+        {
+            live.after_project(&cas_root);
+        }
+        receipts.push(receipt);
     }
 
     finish_project_refresh(
@@ -1935,6 +1945,7 @@ fn refresh_all_projects_with_user_refresh(
             user_documents,
             user_retired_toml,
             skipped_unregistered: discovery.skipped_unregistered,
+            daemon_outcomes: live_daemons.map(|live| live.finish()).unwrap_or_default(),
         },
         hub_transport_error,
         hub_restart,
@@ -2006,6 +2017,8 @@ struct RefreshResults {
     user_documents: Vec<serde_json::Value>,
     user_retired_toml: Vec<crate::config::ConfigRetirement>,
     skipped_unregistered: Vec<SkippedProject>,
+    /// Factory session re-execs, one per running session (cas-e1e9).
+    daemon_outcomes: Vec<super::factory::reexec::UpdateOutcome>,
 }
 
 /// Report a finished sweep: the summary (or the JSON receipt), the receipt
@@ -2026,11 +2039,9 @@ fn finish_project_refresh(
         user_documents,
         user_retired_toml,
         skipped_unregistered,
+        daemon_outcomes,
     } = results;
 
-    let daemon_outcomes = if hub_restart.is_some() && !args.dry_run && args.render_fixture.is_none() {
-        super::factory::reexec::update_live_daemons()
-    } else { Vec::new() };
     if !cli.json {
         for outcome in &daemon_outcomes {
             println!("Factory {}: {}{}", outcome.session, outcome.status,

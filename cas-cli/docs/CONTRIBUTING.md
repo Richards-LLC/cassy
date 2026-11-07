@@ -174,6 +174,25 @@ that succeeded before a concurrent task edit can be retried with the same exact
 source SHA after reviewing its intent. Dirty/uncommitted worker files still
 require an explicit separate recovery; this operation only copies commits.
 
+## Peer transcript queries
+
+A registered supervisor can queue `coordination action=peer_transcript
+peer=<name@machine> session_id=current message="<regex>" limit=2`, or
+`cas peers --peer <name@machine> --transcript '<regex>' --context 2`.
+`session_id` / `--session-id` also accepts a known local supervisor session
+ID on that peer. The response returns through `coordination action=inbox_poll`
+with the Cloud request ID; queued does not mean the transcript was read yet.
+The receiving daemon must support this query; its request is quiet even on
+older daemons.
+
+Only supervisors of the caller's own Cloud account are addressable. The peer
+factory daemon handles the query without waking its supervisor or invoking a
+shell. It reads at most the last 1 MiB of that session's JSONL transcript,
+skips partial/invalid records, applies the existing secret redactors, then
+matches the regex with zero to ten context lines. Regex length is capped at
+512 bytes and the reply text at 8 KiB; scan/output truncation is explicit.
+Paths, shell commands and arbitrary filesystem reads are not accepted.
+
 ## Coordination messages and reminders
 
 Agent-facing message provenance and pointer wakes stamp the current render time

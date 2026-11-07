@@ -107,6 +107,7 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "my_context",
     // cas-e477: live supervisors of this repo on any machine.
     "peers",
+    "peer_transcript",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,

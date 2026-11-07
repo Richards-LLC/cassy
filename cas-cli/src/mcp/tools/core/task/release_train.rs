@@ -130,22 +130,29 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// Trains are opt-in (`factory.release_train`, default off).
-fn enabled(repo: &Path) -> bool {
-    crate::config::Config::load(&repo.join(".cas"))
-        .is_ok_and(|config| config.factory().release_train)
+/// Trains are opt-in (`factory.release_train`, default off). `None` when the
+/// project config cannot be read.
+fn enabled(repo: &Path) -> Option<bool> {
+    crate::config::Config::load(&repo.join(".cas")).ok().map(|config| config.factory().release_train)
 }
 
 /// GH #1613: with trains off, retire the trains the old default opened. Each
 /// unfinished task under or targeting an uncut train leaves it for the
 /// integration branch once, with a decision note, and a train left with no
-/// unfinished work is cancelled as superseded. Idempotent; a no-op while
-/// trains are on. Returns how many tasks were retargeted.
+/// unfinished work is cancelled as superseded. Idempotent; acts only on a
+/// readable config with trains off, so a broken config never cancels a live
+/// train. Returns how many tasks were retargeted.
 pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::TaskStore) -> usize {
     let Some((repo, integration)) = super::repo_context::integration_branch(cas_root) else {
         return 0;
     };
-    if enabled(&repo) {
+    if enabled(&repo) != Some(false) {
+        return 0;
+    }
+    let open_train = [TaskStatus::Open, TaskStatus::InProgress, TaskStatus::Blocked].into_iter().any(|status| {
+        store.list(Some(status)).is_ok_and(|tasks| tasks.iter().any(|t| is_release_train(t) && !is_cut_train(t)))
+    });
+    if !open_train {
         return 0;
     }
     let Ok(tasks) = store.list(None) else { return 0 };
@@ -166,22 +173,29 @@ pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::Tas
                 .find(|train| train.effective_epic_branch() == Some(target.target_branch.as_str()))
         });
         let Some(train) = parent.or(lane) else { continue };
-        if let Some(parent) = parent {
-            let _ = store.remove_dependency_of_type(
+        if let Some(parent) = parent
+            && let Err(error) = store.remove_dependency_of_type(
                 &task.id, &parent.id, cas_types::DependencyType::ParentChild,
-            );
+            )
+        {
+            tracing::warn!(task = %task.id, train = %parent.id, %error, "release train detach deferred");
+            continue;
         }
         let Ok(mut row) = store.get(&task.id) else { continue };
         if let Some(target) = row.deliverables.work_target.as_mut().filter(|_| lane.is_some()) {
             target.target_branch = integration.clone();
         }
         row.updated_at = now;
-        if store.update(&row).is_ok() {
-            retargeted += 1;
-            let _ = store.append_note(&task.id, &format!(
-                "[{}] ✅ DECISION Release trains are off in this project: left {} for `{integration}`, which is now this task's target.",
-                now.format("%Y-%m-%d %H:%M"), train.id,
-            ));
+        if let Err(error) = store.update(&row) {
+            tracing::warn!(task = %task.id, train = %train.id, %error, "release train retarget deferred");
+            continue;
+        }
+        retargeted += 1;
+        if let Err(error) = store.append_note(&task.id, &format!(
+            "[{}] ✅ DECISION Release trains are off in this project: left {} for `{integration}`, which is now this task's target.",
+            now.format("%Y-%m-%d %H:%M"), train.id,
+        )) {
+            tracing::warn!(task = %task.id, %error, "release train retarget note deferred");
         }
     }
     for (train, _) in trains.into_iter().filter(|(train, _)| !train.is_terminal()) {
@@ -197,7 +211,9 @@ pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::Tas
         cancelled.close_reason = Some(format!(
             "Superseded: release trains are off in this project; its work targets `{integration}`."
         ));
-        let _ = store.update(&cancelled);
+        if let Err(error) = store.update(&cancelled) {
+            tracing::warn!(train = %train.id, %error, "release train cancel deferred");
+        }
     }
     retargeted
 }
@@ -233,7 +249,7 @@ impl CasCore {
         else {
             return (None, String::new());
         };
-        if !enabled(&repo) {
+        if enabled(&repo) != Some(true) {
             return (None, String::new());
         }
         // Find-or-open is one critical section across MCP requests and
@@ -379,6 +395,33 @@ mod tests {
         let trains: Vec<_> = store.list(None).unwrap().into_iter().filter(is_release_train).collect();
         assert_eq!(trains.len(), 1, "{trains:?}");
         assert_eq!(store.get_subtasks(&trains[0].id).unwrap().len(), 2);
+    }
+
+    /// GH #1613: retirement acts only on a readable config with trains off.
+    /// With trains on, or a config that cannot be read, the train and its
+    /// child stay exactly as they were.
+    #[tokio::test]
+    async fn retire_leaves_trains_alone_unless_config_reads_off() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let temp = repo();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".cas")).unwrap();
+        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
+        let store = core.open_task_store().unwrap();
+        let snapshot = || {
+            let train = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+            let child = store.get_subtasks(&train.id).unwrap().pop().unwrap();
+            (train.status, child.deliverables.work_target, child.notes)
+        };
+        let before = snapshot();
+        for config in ["[factory]\nrelease_train = true\n", "[factory\nrelease_train = false\n"] {
+            std::fs::write(root.join(".cas/config.toml"), config).unwrap();
+            assert_eq!(retire_disabled_trains(&root, store.as_ref()), 0, "{config}");
+            assert_eq!(snapshot(), before, "{config}");
+        }
     }
 
     /// A train is not landed while a child is in flight, before any child

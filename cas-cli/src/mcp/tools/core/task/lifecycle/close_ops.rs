@@ -29695,8 +29695,9 @@ mod merge_state_gate_tests {
         sibling.deliverables.factory_branch_anchor = Some(b.clone());
         tasks.add(&sibling).unwrap();
         let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let handoff = held.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let held = format!("{held:?}");
-        assert!(held.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && held.contains(&b), "{held}");
+        assert!(handoff && held.contains(&b), "{held}");
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
         sibling.status = TaskStatus::Closed;
         tasks.update(&sibling).unwrap();

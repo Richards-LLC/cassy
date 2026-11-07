@@ -1090,7 +1090,7 @@ mod tests {
         .unwrap();
 
         let rendered = failure.to_string();
-        assert!(failure.is_boundary());
+        assert!(matches!(failure, UploadFailure::Failed { step: UploadStep::Begin, .. }), "{failure:?}");
         assert!(
             !rendered.contains("evil.example") && !rendered.contains("Signature"),
             "a rejected URL is still a credential: {rendered}"

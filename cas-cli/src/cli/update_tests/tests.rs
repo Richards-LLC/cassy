@@ -2358,11 +2358,13 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
         crate::cli::update::fixture::render(&path, &args, &update_test_cli(false))
     });
 
-    let error = result.expect_err("a partial refresh must still exit nonzero");
-
-    let failure = Err(error);
-    let report = refresh_report(&failure).unwrap();
-    assert!(report.failed_projects > 0);
+    result.expect_err("a partial refresh must still exit nonzero");
+    // The binary phase's verdict leads, then the refresh phase's.
+    let verdicts = output
+        .lines()
+        .filter_map(|line| line.strip_prefix('[')?.split(']').next())
+        .collect::<Vec<_>>();
+    assert_eq!(verdicts.get(..2), Some(&["OK", "ERROR"][..]), "{output}");
     assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
 }
 

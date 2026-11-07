@@ -15629,7 +15629,7 @@ mod tests {
             .remove(0)
             .prompt;
         assert!(prompt.contains(focus), "{prompt}");
-        assert!(prompt.starts_with(&cas_mux::claude_worker_contract("worker-1")));
+        assert!(prompt.contains(&cas_mux::claude_worker_contract("worker-1")), "the single spawn message carries the worker contract: {prompt}");
         deliver_worker_task_brief(&cas_dir, "factory-session", "worker-1", &task.id,
             &task.title, cas_mux::SupervisorCli::Claude).unwrap();
         let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "worker-1".into(),

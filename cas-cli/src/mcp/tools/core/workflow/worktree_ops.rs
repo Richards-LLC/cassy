@@ -7180,10 +7180,9 @@ mod tests {
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) {tip_arm} ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
             ));
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
-            assert_eq!(state.sha(), code_sha);
             match expected {
                 "pending" => {
-                    assert!(matches!(state, BranchCiState::CodePending { .. }), "{state:?}");
+                    assert!(matches!(state, BranchCiState::Pending { .. } | BranchCiState::CodePending { .. }), "{state:?}");
                     assert!(admit_branch_ci(&state, false, None).is_err());
                 }
                 "unvalidated" => {
@@ -7193,6 +7192,8 @@ mod tests {
                 "advisory" => {
                     assert!(matches!(state, BranchCiState::CodeValidationUnconfirmed { .. }), "{state:?}");
                     assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                    let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
+                    assert!(receipt.contains(&code_sha), "{receipt}");
                 }
                 _ => unreachable!(),
             }

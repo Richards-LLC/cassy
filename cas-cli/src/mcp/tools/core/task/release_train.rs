@@ -130,6 +130,78 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// Trains are opt-in (`factory.release_train`, default off).
+fn enabled(repo: &Path) -> bool {
+    crate::config::Config::load(&repo.join(".cas"))
+        .is_ok_and(|config| config.factory().release_train)
+}
+
+/// GH #1613: with trains off, retire the trains the old default opened. Each
+/// unfinished task under or targeting an uncut train leaves it for the
+/// integration branch once, with a decision note, and a train left with no
+/// unfinished work is cancelled as superseded. Idempotent; a no-op while
+/// trains are on. Returns how many tasks were retargeted.
+pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::TaskStore) -> usize {
+    let Some((repo, integration)) = super::repo_context::integration_branch(cas_root) else {
+        return 0;
+    };
+    if enabled(&repo) {
+        return 0;
+    }
+    let Ok(tasks) = store.list(None) else { return 0 };
+    let trains: Vec<(&Task, Vec<String>)> = tasks
+        .iter()
+        .filter(|task| is_release_train(task) && !is_cut_train(task))
+        .map(|train| {
+            let children = store.get_subtasks(&train.id).unwrap_or_default();
+            (train, children.into_iter().map(|child| child.id).collect())
+        })
+        .collect();
+    let now = chrono::Utc::now();
+    let mut retargeted = 0;
+    for task in tasks.iter().filter(|task| !task.is_terminal() && !is_release_train(task)) {
+        let parent = trains.iter().find(|(_, children)| children.contains(&task.id)).map(|(t, _)| *t);
+        let lane = task.deliverables.work_target.as_ref().and_then(|target| {
+            trains.iter().map(|(t, _)| *t)
+                .find(|train| train.effective_epic_branch() == Some(target.target_branch.as_str()))
+        });
+        let Some(train) = parent.or(lane) else { continue };
+        if let Some(parent) = parent {
+            let _ = store.remove_dependency_of_type(
+                &task.id, &parent.id, cas_types::DependencyType::ParentChild,
+            );
+        }
+        let Ok(mut row) = store.get(&task.id) else { continue };
+        if let Some(target) = row.deliverables.work_target.as_mut().filter(|_| lane.is_some()) {
+            target.target_branch = integration.clone();
+        }
+        row.updated_at = now;
+        if store.update(&row).is_ok() {
+            retargeted += 1;
+            let _ = store.append_note(&task.id, &format!(
+                "[{}] ✅ DECISION Release trains are off in this project: left {} for `{integration}`, which is now this task's target.",
+                now.format("%Y-%m-%d %H:%M"), train.id,
+            ));
+        }
+    }
+    for (train, _) in trains.into_iter().filter(|(train, _)| !train.is_terminal()) {
+        if store.get_subtasks(&train.id).is_ok_and(|children| children.iter().any(|c| !c.is_terminal())) {
+            continue;
+        }
+        let mut cancelled = train.clone();
+        cancelled.status = TaskStatus::Cancelled;
+        cancelled.terminal_outcome =
+            Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by: None });
+        cancelled.closed_at = Some(now);
+        cancelled.updated_at = now;
+        cancelled.close_reason = Some(format!(
+            "Superseded: release trains are off in this project; its work targets `{integration}`."
+        ));
+        let _ = store.update(&cancelled);
+    }
+    retargeted
+}
+
 /// Exclusive lock over train lookup, landing and opening (the
 /// `worker_task_queue` pattern): blocks off the runtime until the holder,
 /// in this or another process, releases it by dropping the file.
@@ -161,10 +233,7 @@ impl CasCore {
         else {
             return (None, String::new());
         };
-        if !crate::config::Config::load(&repo.join(".cas"))
-            .map(|config| config.factory().release_train)
-            .unwrap_or(true)
-        {
+        if !enabled(&repo) {
             return (None, String::new());
         }
         // Find-or-open is one critical section across MCP requests and
@@ -295,6 +364,8 @@ mod tests {
         crate::store::known_repos::ensure_host_schema().unwrap();
         let temp = repo();
         let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".cas")).unwrap();
+        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let spawn = |title: &'static str| {
             let core = CasCore::with_daemon(root.clone(), None, None);
             tokio::spawn(async move {

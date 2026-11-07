@@ -7803,6 +7803,10 @@ impl CasCore {
             return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
         }
         let task_store = self.open_task_store()?;
+        // GH #1613: a train the old default opened must not hold this close.
+        crate::mcp::tools::core::task::release_train::retire_disabled_trains(
+            &self.cas_root, task_store.as_ref(),
+        );
 
         let mut task = task_store.get(&req.id).map_err(|e| McpError {
             code: ErrorCode::INVALID_PARAMS,

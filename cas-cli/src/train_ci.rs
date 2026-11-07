@@ -120,6 +120,8 @@ pub(crate) fn notify(root: &Path, epic: &cas_types::Task, state: &Value) -> Resu
 
 pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
     let tasks = crate::store::open_task_store(root)?;
+    // GH #1613: heal trains the old default opened, with no operator step.
+    crate::mcp::tools::core::task::release_train::retire_disabled_trains(root, tasks.as_ref());
     let agents = crate::store::open_agent_store(root)?.list(None)?;
     for epic in tasks
         .list(None)?

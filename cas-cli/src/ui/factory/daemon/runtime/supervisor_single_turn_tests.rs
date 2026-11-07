@@ -454,6 +454,121 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     assert!(teams_messages(&daemon).is_empty(), "retry must not append another Teams body after ingestion");
 }
 
+/// cas-aa10: replay first boot with a swallowed submit. The real queue and
+/// PTY capture run normally; native transcript records are supplied only after
+/// the fixture observes the recovery CR, never from PTY echo or dispatch.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10() {
+    if !fixture_child("claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10") {
+        return;
+    }
+    for native_after_retry in [true, false] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        let agents = crate::store::open_agent_store(&cas).unwrap();
+        let mut supervisor = agents.get("single-sup").unwrap();
+        supervisor.status = cas_types::AgentStatus::Active;
+        // Production supervisor registration carries its own account and native
+        // session id. It has no worker account or worktree metadata.
+        supervisor.cc_session_id = Some("first-boot-native-session".into());
+        supervisor.metadata.insert("supervisor_cli".into(), "claude".into());
+        let account = root.path().join("claude-account");
+        supervisor.metadata.insert("supervisor_account_dir".into(), account.display().to_string());
+        supervisor.metadata.insert("supervisor_account_harness".into(), "claude".into());
+        assert!(!supervisor.metadata.contains_key("worker_account_dir"));
+        assert!(!supervisor.metadata.contains_key("clone_path"));
+        agents.register(&supervisor).unwrap();
+        daemon.app.refresh_data().unwrap();
+        crate::ui::factory::queue_supervisor_intro_prompt(
+            &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
+        let statuses = || crate::store::open_event_store(&cas).unwrap()
+            .list_by_type(cas_types::EventType::SupervisorInjected, 100).unwrap()
+            .into_iter().filter_map(|event| event.metadata)
+            .filter(|meta| meta["prompt_id"] == row.id)
+            .map(|meta| meta["status"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                daemon.app.mux.flush_deferred_injections().await;
+                daemon.process_prompt_queue().await.unwrap();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r")
+                    && !statuses().is_empty() { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("first-boot prompt must reach the real PTY");
+        assert!(!statuses().iter().any(|s| s == "ok"),
+            "a physical submit and echo are not an observed Claude turn: {:?}", statuses());
+        let original = std::fs::read_to_string(root.path().join("input")).unwrap();
+        assert_eq!(original.matches('\r').count(), 1);
+        // Replay the incident's native composer, with the startup frame still at
+        // the input marker. No transcript exists, so echo cannot count as a turn.
+        daemon.app.mux.get_mut(&name).unwrap().feed(
+            format!("\x1b[2J\x1b[H────────────────────\r\n❯ [cas #{} agent-authored 5s first] startup draft\r\n────────────────────", row.id).as_bytes(),
+        ).unwrap();
+        daemon.normal_delivery_probes.get_mut(&row.id).expect("startup observation remains owned")
+            .next_check_at = Some(Instant::now());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r\r") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the unsent first-boot draft receives one bare submit retry");
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes(),
+            "retry never repeats the startup body or appends a nudge");
+        // No native evidence even after recovery: remain unconfirmed, never keep
+        // typing CRs. Advance the evidence clock explicitly.
+        daemon.normal_delivery_probes.get_mut(&row.id).unwrap().next_check_at = Some(Instant::now());
+        for _ in 0..20 { daemon.process_prompt_queue().await.unwrap(); tokio::task::yield_now().await; }
+        assert!(!statuses().iter().any(|s| s == "ok"));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes());
+        if !native_after_retry {
+            let probe = daemon.normal_delivery_probes.get_mut(&row.id).unwrap();
+            probe.delivered_at = Instant::now() - super::queue_and_events::CLAUDE_STARTUP_TURN_TIMEOUT - Duration::from_secs(1);
+            probe.next_check_at = Some(Instant::now());
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    if !daemon.normal_delivery_probes.contains_key(&row.id)
+                        && statuses().iter().any(|s| s == "unconfirmed") { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("final unconfirmed startup releases observation ownership");
+            for _ in 0..20 { daemon.process_prompt_queue().await.unwrap(); tokio::task::yield_now().await; }
+            assert!(!daemon.normal_delivery_probes.contains_key(&row.id), "final results never restart the probe");
+            assert!(!statuses().iter().any(|s| s == "ok"));
+            assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes());
+            continue;
+        }
+        // The authoritative native user record is the turn start. Its appearance,
+        // rather than the submitted CR, releases the success receipt.
+        let slug: String = root.path().to_str().unwrap().chars()
+            .map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
+        let path = account.join("projects").join(slug).join("first-boot-native-session.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{}\n", serde_json::json!({
+            "type":"user", "timestamp":chrono::Utc::now().to_rfc3339(),
+            "message":{"role":"user", "content":row.prompt}
+        }))).unwrap();
+        assert_eq!(super::supervisor_commands::supervisor_transcript(
+            &cas, &daemon.session_name, &name, cas_mux::SupervisorCli::Claude,
+        ), Some(path), "registered supervisor account and native session select the transcript");
+        daemon.normal_delivery_probes.get_mut(&row.id).unwrap().next_check_at = Some(Instant::now());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if statuses().iter().any(|s| s == "ok") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("only the native turn start confirms startup");
+        assert!(!daemon.normal_delivery_probes.contains_key(&row.id));
+    }
+}
+
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
 /// physical submit is not evidence that the real Codex harness accepted a turn.
 #[tokio::test(flavor = "current_thread")]

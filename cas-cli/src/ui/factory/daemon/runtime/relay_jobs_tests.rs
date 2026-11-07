@@ -1217,6 +1217,7 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
         nudge_sent_at: None,
         nudges: 0,
         next_check_at: None,
+        startup_pane: None,
     };
     let live = daemon.queue_jobs.normal_probe_jobs.track(42, &probe);
     daemon.normal_delivery_probes.insert(42, probe);

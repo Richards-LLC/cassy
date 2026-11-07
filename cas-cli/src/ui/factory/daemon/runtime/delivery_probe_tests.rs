@@ -69,6 +69,7 @@ fn fixture(
             nudge_sent_at: None,
             nudges: 0,
             next_check_at: None,
+            startup_pane: None,
         },
     );
     (temp, daemon, queue, row)

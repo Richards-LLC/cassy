@@ -545,7 +545,13 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            assert!(settled(), "{status}: verifier never finished");
+            assert!(
+                settled(),
+                "{status}: verifier never finished; child_done={} dispatch={:?} prompts={:?}",
+                child_done(),
+                cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state,
+                crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+            );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();

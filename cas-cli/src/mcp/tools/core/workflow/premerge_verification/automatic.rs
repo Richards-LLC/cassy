@@ -501,7 +501,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             // cas-f2dc: drive the real merge refusal with automatic review on.
             // It must name the running verifier, never tell the supervisor to
             // spawn a second one.
-            let refusal = match core.prepare_premerge_verification(&task, repo, &source, "epic/train") {
+            let refusal = match core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train") {
                 Err(error) => error.message.to_string(),
                 Ok(_) => panic!("{status}: an unreviewed delivery cannot merge"),
             };

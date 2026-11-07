@@ -592,5 +592,22 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 dispatch.id, candidate.proof.head_commit
             );
         }
+        // With no eligible home left, the refusal names each home's state
+        // instead of blaming only the logged-out default home.
+        std::fs::write(
+            account.join("sessions/usage.jsonl"),
+            serde_json::json!({
+                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
+                    "primary": {"used_percent": 100.0, "window_minutes": 10080,
+                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let refused = command(env.home(), &env.home().join("verdict.json")).unwrap_err();
+        for needle in [".codex-review", "100%", " ET", "not logged in", "launch the task-verifier yourself"] {
+            assert!(refused.contains(needle), "{needle}: {refused}");
+        }
     }
 }

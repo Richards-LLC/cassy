@@ -19742,7 +19742,8 @@ mod tests {
         assert_eq!(prompts.len(), harnesses.len());
         for prompt in prompts {
             let index = prompt.target.strip_prefix("worker-").unwrap();
-            assert!(prompt.prompt.contains(&format!("cas-test-{index}")));
+            let assigned_task = format!("cas-test-{index}");
+            assert!(prompt.prompt.contains(&assigned_task));
         }
     }
 

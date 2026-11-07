@@ -2520,9 +2520,9 @@ mod tests {
         .expect("idle prompt is generated");
 
 
+        let observed_at = snapshot_at.format("%Y-%m-%d %H:%M:%SZ").to_string();
         assert!(
-
-            prompt.text.contains("2026-08-05 22:41:07Z"),
+            prompt.text.contains(&observed_at),
             "the absence claim must be attributable to a known read: {}",
             prompt.text
         );
@@ -2555,9 +2555,9 @@ mod tests {
         )
         .expect("registration prompt is generated");
 
+        let observed_at = snapshot_at.format("%Y-%m-%d %H:%M:%SZ").to_string();
         assert!(
-
-            prompt.text.contains("2026-08-05 22:41:07Z"),
+            prompt.text.contains(&observed_at),
             "{}",
             prompt.text
         );

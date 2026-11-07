@@ -536,10 +536,12 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     .await
     .unwrap();
     assert!(
-        sent.contains("Message sent to peer supervisor sup-b@"),
+        sent.contains("sup-b@machine-beta"),
         "{sent}"
     );
     assert!(sent.contains("peer message pm_1"), "{sent}");
+    // pin: a queued Cloud send is not delivery to the recipient's machine or supervisor (GH #1626).
+    assert!(sent.contains("queued") && !sent.contains("delivered"), "{sent}");
 
     let bb = b.clone();
     let rows = tokio::task::spawn_blocking(move || {
@@ -570,7 +572,9 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     )
     .await
     .unwrap();
-    assert!(status.contains("Peer message pm_1: delivered"), "{status}");
+    // pin: Cloud's delivered status proves machine acceptance, never supervisor surfacing.
+    assert!(status.contains("accepted by recipient machine"), "{status}");
+    assert!(status.contains("surfacing not confirmed"), "{status}");
 
     let aa = a.clone();
     let replies = tokio::task::spawn_blocking(move || {
@@ -974,9 +978,11 @@ async fn cas_a19b_named_remote_target_returns_a_mailbox_receipt() {
     .await
     .unwrap();
     assert!(
-        sent.contains("delivered to calm-marten-67@prowl mailbox"),
+        sent.contains("calm-marten-67@prowl"),
         "{sent}"
     );
+    // pin: queued receipt must not claim recipient delivery even for a resolved named peer.
+    assert!(sent.contains("queued") && !sent.contains("delivered"), "{sent}");
     assert!(sent.contains("pm_1"), "{sent}");
     assert_eq!(mailbox.lock().unwrap().len(), 1);
     assert!(inbox(&alpha.cas_dir).is_empty());

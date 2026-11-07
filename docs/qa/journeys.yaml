@@ -28,8 +28,8 @@ bug_families:
     invariants: [HUB-J27-CARD-RELOAD]
     journeys: [HUB-J27]
   approved-dispatch-close-owner:
-    title: Approved dispatch and batch receipt recovery use ordinary close gates without worker retries or repeated covered QA offers
-    tasks: [cas-abb0]
+    title: Approved dispatch and batch receipt recovery accept the first landed reviewed tree while retaining exact delivery and dedicated review gates
+    tasks: [cas-abb0, cas-e06c]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
   unread-supervisor-mail-succession:

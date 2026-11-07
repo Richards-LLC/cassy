@@ -106,7 +106,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// zero-context id would hide a target edit beside a delivered hunk (`if ok`
 /// to `if !ok` two lines away); only full-context identity may rebind. An
 /// empty or unreadable patch is an error, never a match.
-fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {
@@ -562,13 +562,8 @@ impl Approval {
             return Err("candidate promotion does not match the approved proof".into());
         }
         candidate.verify_landing(&record.landed_sha)?;
-        let mut published = repository_proof::capture_repository_proof_at_target(
-            &candidate.repository,
-            &record.landed_sha,
-            vec![candidate.source_sha.clone()],
-        )?;
-        published.target_branch = Some(candidate.target_branch.clone());
-        repository_proof::verify_repository_proof(&published).map_err(|error| error.to_string())?;
+        // The immutable landing was just checked against the approved tree.
+        // Later edits on the same target do not undo that published review.
         let reachable = [
             &candidate.target_branch,
             &format!("origin/{}", candidate.target_branch),

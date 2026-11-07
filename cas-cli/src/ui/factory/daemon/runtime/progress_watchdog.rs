@@ -63,6 +63,11 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         if task.status != TaskStatus::AwaitingMerge {
             return true;
         }
+        // cas-e239: a delivery the supervisor deliberately holds for a later
+        // train waits on that decision, not on anyone here.
+        if is_held(&task.notes) {
+            return false;
+        }
         if peer_tasks.contains(&task.id) {
             return false;
         }
@@ -87,16 +92,30 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let latest = crate::store::open_prompt_queue_store(cas_dir).ok()?.latest_agent_message_id(&names, session).ok()?;
     fingerprint.push(format!("message {}", latest.unwrap_or(0)));
     // Worker lane tips; a repo git cannot read contributes nothing.
-    let lanes: Vec<String> = agents.iter().filter(|agent| agent.role == AgentRole::Worker)
+    // cas-e239: a release commit pushed to a train is progress too.
+    let mut lanes: Vec<String> = agents.iter().filter(|agent| agent.role == AgentRole::Worker)
         .flat_map(|agent| [format!("refs/heads/factory/{}", agent.name), format!("refs/heads/factory/{}-*", agent.name)])
         .collect();
-    if let Some(repo) = cas_dir.parent().filter(|repo| !lanes.is_empty() && repo.join(".git").exists())
+    lanes.extend(["refs/heads/epic/release-train-*", "refs/remotes/origin/epic/release-train-*"].map(String::from));
+    if let Some(repo) = cas_dir.parent().filter(|repo| repo.join(".git").exists())
         && let Ok(output) = std::process::Command::new("git").arg("-C").arg(repo)
             .args(["for-each-ref", "--format=%(refname) %(objectname)"]).args(&lanes).output()
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
     Some((fingerprint.join("\n"), waiting, supervisor))
+}
+
+/// Whether the newest decision in `notes` is a `DECISION HOLD`; any later
+/// decision lifts it. Entries start at a `[YYYY-MM-DD HH:MM] ` line.
+fn is_held(notes: &str) -> bool {
+    let mut held = false;
+    for entry in notes.split("\n[") {
+        if let Some((_, rest)) = entry.split_once("DECISION") {
+            held = rest.trim_start().starts_with("HOLD");
+        }
+    }
+    held
 }
 
 /// A parked delivery already on its recorded target waits for a receipt,
@@ -196,6 +215,50 @@ mod tests {
             "a genuine local stall must wake the supervisor once: {rows:?}");
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1,
             "a genuine local stall must still page once: {rows:?}");
+    }
+
+    #[test]
+    fn held_deliveries_and_release_commits_are_not_stalls_cas_e239() {
+        const SESSION: &str = "held-release-e239";
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", SESSION)]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(temp.path())
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).output().unwrap().status.success());
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        git(&["branch", "epic/release-train-cas-e239"]);
+        let mut supervisor = Agent::new("supervisor-e239b".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut held = Task::new("cas-2f4d".into(), "Held for the next train".into());
+        held.status = TaskStatus::AwaitingMerge;
+        held.assignee = Some(supervisor.name.clone());
+        held.notes = "[2026-11-07 12:00] ✅ DECISION HOLD: merge on the next train after the operator scope freeze.".into();
+        tasks.add(&held).unwrap();
+        let mut waiting = Task::new("cas-78d2".into(), "Waiting on the supervisor".into());
+        waiting.assignee = Some(supervisor.name.clone());
+        tasks.add(&waiting).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        // The release commit lands on the train mid-episode: progress, so no wake.
+        super::sweep(&cas_dir, SESSION, now);
+        super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(30));
+        git(&["checkout", "-q", "epic/release-train-cas-e239"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "release: v4.4.0"]);
+        super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(50));
+        super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(80));
+        assert!(queue.peek_all(50).unwrap().is_empty(), "a release commit is progress: {:?}", queue.peek_all(50).unwrap());
+        // Only the held delivery left open: nothing is locally actionable.
+        let mut done = tasks.get("cas-78d2").unwrap();
+        done.status = TaskStatus::Closed;
+        tasks.update(&done).unwrap();
+        for minutes in [81, 130, 180, 230, 280] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert!(queue.peek_all(50).unwrap().is_empty(), "a held delivery is not a stall");
     }
 
     #[test]

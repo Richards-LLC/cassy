@@ -43,6 +43,22 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .filter(|task| task.task_type == cas_types::TaskType::Epic)
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
     tasks.retain(|task| {
+        // cas-e239: a blocked operator check is not locally actionable.
+        // Inspect only the current blocker, never historical operator waits.
+        if task.status == TaskStatus::Blocked {
+            use crate::mcp::tools::core::task::block_hold;
+            let reason = block_hold::latest_blocker_reason(&task.notes)
+                .or_else(|| block_hold::read(store.as_ref(), &task.id).ok().flatten().map(|hold| hold.reason));
+            if reason.is_some_and(|reason| {
+                let words: Vec<_> = reason.split(|c: char| !c.is_alphanumeric())
+                    .filter(|word| !word.is_empty()).map(str::to_ascii_lowercase).collect();
+                // An explicit owner wins over incidental mentions elsewhere.
+                words.windows(2).find(|pair| pair[0] == "owner")
+                    .map_or_else(|| words.iter().any(|word| word == "operator"), |pair| pair[1] == "operator")
+            }) {
+                return false;
+            }
+        }
         // An old delivery anchor cannot hide a worker's new local work.
         if task.status != TaskStatus::AwaitingMerge {
             return true;
@@ -136,6 +152,51 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
 #[cfg(test)]
 mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+
+    #[test]
+    fn operator_blocked_epic_does_not_stall_cas_e239() {
+        const SESSION: &str = "operator-blocked-epic-e239";
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", SESSION)]);
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut supervisor = Agent::new("supervisor-e239".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut epic = Task::new("cas-9be9".into(), "Release verification".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.status = TaskStatus::Blocked;
+        epic.assignee = Some(supervisor.name.clone());
+        epic.notes = "[2026-11-06 18:00] 🚫 BLOCKER owner: operator; operator-only desktop verification remains.".into();
+        tasks.add(&epic).unwrap();
+        let mut child = Task::new("cas-e239-merged".into(), "All release work merged".into());
+        child.status = TaskStatus::Closed;
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(
+            child.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild,
+        )).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135, 180] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert!(queue.peek_all(50).unwrap().is_empty(),
+            "GH #1625: an operator-owned blocked epic must never nag the supervisor or page the operator");
+
+        // A newer blocker returns responsibility to the factory. Historical
+        // operator ownership must not hide this genuine stall.
+        epic.notes.push_str("\n\n[2026-11-06 18:01] 🚫 BLOCKER owner: worker; release repair has not started; operator check is complete.");
+        tasks.update(&epic).unwrap();
+        for minutes in [181, 226, 271, 316] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1,
+            "a genuine local stall must wake the supervisor once: {rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1,
+            "a genuine local stall must still page once: {rows:?}");
+    }
 
     #[test]
     fn only_locally_actionable_work_pages_cas_c1fb() {

@@ -7,6 +7,7 @@ import { plainTextMarkdown } from "./markdown-renderer";
 import { providerAvatarMarkup } from "./provider-mark";
 import { supervisorVersion } from "./machine-version";
 import type { CommandReceipt } from "./supervisor-commands";
+import type { ProjectStatusLine } from "./progress-model";
 
 export interface ConversationRow {
   ended?: SessionEndOutcome;
@@ -64,7 +65,6 @@ export interface ConversationRow {
   reloadPending?: boolean;
   reloadUnavailable?: string;
   workerCount?: number;
-  mergesPerHour?: number;
   needsYou?: boolean;
   operatorReason?: string;
   supervisorState?: "working" | "idle" | "needs-you" | "offline";
@@ -76,6 +76,12 @@ export interface ConversationRow {
   group?: { key: string; label: string; size: number; first: boolean; active: boolean };
   /** This device may end the session (factory-manage), offered on grouped and dormant rows. */
   canEnd?: boolean;
+  /** The question a waiting ask puts to the operator (cas-da546). */
+  operatorQuestion?: string;
+  /** Train split and blocked count from this session's status, when read (cas-da546). */
+  statusLine?: ProjectStatusLine;
+  /** Another session of this project runs on the same machine: the row names its codename. */
+  showCodename?: boolean;
 }
 
 /** The badge follows whole-minute activity, tied by stable identity (cas-6faf).
@@ -242,10 +248,6 @@ function rowVersion(row: ConversationRow) {
   return supervisorVersion(row.mcp_version, row.installed_version);
 }
 
-/** One Pebble row: `avatar · project machine · codename · preview · time`, with
- * two distinct affordances — waiting (ochre dot, hot time) and unread (accent
- * count pill). Users think in projects (journey F7): the project is the title,
- * the machine follows it, and the generated codename is tertiary text. */
 /**
  * What the row's second line says. A connection problem leads, so the row
  * agrees with the header (cas-a447); then a parked draft in another
@@ -265,15 +267,18 @@ function rowPreviewText(row: ConversationRow, fallback: string): string {
   return row.preview || fallback;
 }
 
+/**
+ * One line per session (cas-da546): `avatar · Supervisor · machine · time ·
+ * marks`. The project card names the project, so the row names the role and
+ * where it runs. A second line appears only for a state the operator must
+ * see: ended, unreachable, interrupted, or a reply parked here as a draft.
+ * The last turn is spoken, not shown. The version shows only on skew.
+ */
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = !row.ended && row.attention > 0;
   const unread = row.unread ?? 0;
-  // cas-5d2c: a grouped row with no turn of its own yet shows what its
-  // session last did, so siblings differ before any of them is opened.
-  const fallback = row.group ? row.activityLine || row.connection : row.connection;
-  const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
-  // The time always holds the headline end; an unread count sits beneath it
-  // with the waiting dot, so the most active row never loses its time (P13).
+  const draft = row.draft?.trim() && !row.selected;
+  const note = row.ended || row.unreachable || row.interrupted || draft ? truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, row.connection))) : "";
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
   const time = row.when
     ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`
@@ -282,27 +287,15 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const count = unread > 0 ? `<span class="conversation-unread" aria-label="${unread} unread">${unread}</span>` : "";
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
-  // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
-  const project = rowProjectName(row);
-  // The title is "project · machine": the project leads, never a dot (P13);
-  // the one separator rides with the machine, so a dot never dangles at a
-  // line end when a long project pushes the machine to the next line. The
-  // machine is legible as text on every row (operator direction): the
-  // monogram and accent alone do not name it. A long machine name ellipsises
-  // inside the title column (its title attribute carries it whole) instead of
-  // running under the time stamp (cas-1ca1). The codename sits beneath.
-  // cas-6faf: every sibling reserves the same badge slot, including its wrap
-  // onto another line. Inactive slots occupy space but have no spoken name.
-  const mark = row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
-  const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
   const version = rowVersion(row);
-  const badge = version ? `<span class="supervisor-version${version.update ? " update-available" : ""}" title="${escapeHtml(version.description)}">${escapeHtml(version.version)}${version.update ? ' <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span>' : ""}</span>` : "";
-  // DESIGN.md Avatars: the model's provider mark, or the machine monogram.
+  const badge = version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "";
+  // Two sessions of one project on one machine read apart by their codename.
+  const codename = row.showCodename ? `<span class="conversation-supervisor-name codename">${escapeHtml(row.supervisor)}</span>` : "";
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename"><span class="conversation-supervisor-name">${escapeHtml(row.supervisor)}</span>${badge}${mark}</span>` : `${mark}${badge}`}${account}</span>`
+    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">Supervisor</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
     + time
-    + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${emojiMarkup(preview)}</span>`
     + marks
+    + (note ? `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : draft ? " draft" : ""}">${emojiMarkup(note)}</span>` : "")
     + spoken;
 }
 

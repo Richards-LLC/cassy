@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -116,14 +117,35 @@ def write_json(path, data):
 
 def quarantine(api):
     tests = []
-    seen = set()
-    for issue in api.issues('flaky-quarantine'):
-        data = issue_state(issue)
-        entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
-        key = identity(entry)
-        if key in seen or not entry['issue'].startswith(f'https://github.com/{api.repo}/issues/'):
-            raise ValueError('quarantine entries need unique test identities and linked fix issues')
-        seen.add(key)
+    seen = {}
+    try:
+        issues = list(api.issues('flaky-quarantine'))
+    except Exception as error:
+        print(f'WARNING: quarantine read failed for {api.repo}: {error}; running without exclusions',file=sys.stderr)
+        return tests
+    for issue in issues:
+        number = issue.get('number','unknown') if isinstance(issue,dict) else 'unknown'
+        try:
+            data = issue_state(issue)
+            entry = {**data['test'],'issue':issue['html_url'],'runs':data['runs']}
+            key = identity(entry)
+            expected = f'https://github.com/{api.repo}/issues/{number}'
+            if not isinstance(entry['issue'],str) or entry['issue'].casefold() != expected.casefold():
+                raise ValueError('invalid linked fix issue URL')
+            fields = {'rust':('binary','name'),'playwright':('project','file'),'step':('name',)}[entry['runner']]
+            if any(not isinstance(entry.get(field),str) or not entry[field] for field in fields):
+                raise ValueError('test identity fields must be nonempty strings')
+            if entry['runner']=='playwright':
+                titles = entry.get('titles')
+                if not isinstance(titles,list) or not titles or not all(isinstance(t,str) and t for t in titles):
+                    raise ValueError('test titles must be nonempty strings')
+                playwright_list([entry])
+            if key in seen:
+                raise ValueError(f'duplicate test identity already linked to issue #{seen[key]}: {key}')
+        except Exception as error:
+            print(f'WARNING: quarantine issue #{number} skipped: {error}',file=sys.stderr)
+            continue
+        seen[key] = number
         tests.append(entry)
     return tests
 
@@ -133,6 +155,8 @@ def identity(test):
         return json.dumps(['rust', test['binary'], test['name']], ensure_ascii=False)
     if test['runner'] == 'playwright':
         return json.dumps(['playwright', test['project'], test['file'], test['titles']], ensure_ascii=False)
+    if test['runner'] == 'step':
+        return json.dumps(['step', test['name']], ensure_ascii=False)
     raise ValueError('unknown quarantine runner')
 
 
@@ -208,6 +232,75 @@ def execute(command, cwd, env, log, timeout=None):
     return status,time.monotonic()-started
 
 
+def cleanup_after_pass(log):
+    """Only a harness success summary followed by known cleanup diagnostics.
+
+    A nested child summary or an assertion after a summary cannot forgive the
+    parent failure. Unknown infrastructure errors retain their failure status.
+    """
+    lines = re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace')).splitlines()
+    failed = re.compile(r'\bFAIL(?:ED)?\b|\b[1-9]\d*\s+failed\b|\bAssertionError\b|'
+        r'(?i:\bassertion\b|^\s*assert\s)')
+    if any(failed.search(line) for line in lines):
+        return False
+    summary = re.compile(r'^(?:\s*[1-9]\d* passed,\s*0 failed|\s*Tests\s+[1-9]\d* passed(?:\s+\(\d+\))?|'
+        r'\s*Summary\s+\[[^\]]+\]\s+[1-9]\d* tests? run:\s+[1-9]\d* passed(?:, 0 failed)?(?:, \d+ skipped)?|'
+        r'test result: ok\. [1-9]\d* passed; 0 failed;[^\n]*|OK)\s*$')
+    cleanup = re.compile(r'^(?:rm:|rmdir:|cleanup(?: error| warning| failed)?:)', re.I)
+    vitest_footer = re.compile(r'(?:Start at\s+\d{2}:\d{2}:\d{2}|Duration\s+[\d.]+(?:ms|s)(?:\s+\([^\n]*\))?)')
+    for index in range(len(lines)-1, -1, -1):
+        if summary.fullmatch(lines[index]):
+            if lines[index]=='OK' and not any(re.fullmatch(r'Ran [1-9]\d* tests? in .+', row) for row in lines[:index]):
+                return False
+            tail = [row.strip() for row in lines[index+1:] if row.strip()]
+            vitest = lines[index].lstrip().startswith('Tests ')
+            return any(cleanup.match(row) for row in tail) and all(
+                cleanup.match(row) or (vitest and vitest_footer.fullmatch(row)) for row in tail)
+    return False
+
+
+def step(args):
+    repo = args.repo.resolve()
+    command = args.exec_args[1:] if args.exec_args[:1]==['--'] else args.exec_args
+    if not command:
+        raise ValueError('step requires a test command after --')
+    recovering = (os.environ.get('GITHUB_EVENT_NAME')=='merge_group' or
+        (os.environ.get('GITHUB_EVENT_NAME')=='push' and os.environ.get('GITHUB_REF','').startswith('refs/heads/epic/release-train-')))
+    if not recovering:
+        return subprocess.run(command, cwd=Path.cwd()).returncode
+    head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
+    out = args.out or repo/'target/queue-flakes/steps'/hashlib.sha256(args.id.encode()).hexdigest()[:20]
+    if (out/'receipt.json').exists():
+        raise ValueError('refusing to overwrite earlier step evidence')
+    attempts=[]
+    for index in range(2):
+        attempt=out/('initial' if index==0 else 'rerun')
+        attempt.mkdir(parents=True,exist_ok=True)
+        log=attempt/'console.log'
+        status,seconds=execute(command,Path.cwd(),os.environ.copy(),log,300 if index else None)
+        raw=status
+        warning=status>0 and cleanup_after_pass(log)
+        if warning:
+            print('::warning::Harness passed; post-result cleanup failed. Full diagnostic: '+str(log),flush=True)
+            status=0
+        sys.stdout.write(log.read_text(errors='replace'))
+        attempts.append({'status':status,'raw_status':raw,'seconds':seconds,
+            'tests':[{'runner':'step','name':args.id,'passed':status==0,
+                      'output':log.read_text(errors='replace')[-16000:]}]})
+        if status==0:
+            break
+    if git(repo,'rev-parse','HEAD')!=head or git(repo,'rev-parse','HEAD^{tree}')!=tree or subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
+        raise ValueError('the tested tree changed during execution')
+    success=attempts[-1]['status']==0
+    flakes=attempts[0]['tests'] if success and len(attempts)>1 else []
+    receipt={'schema':1,'head':head,'tree':tree,'runner':'step','shard':args.id,
+        'run_id':os.environ['GITHUB_RUN_ID'],'outcome':('FLAKY' if flakes else 'PASS') if success else 'FAIL',
+        'initial_status':attempts[0]['raw_status'],'flaky':flakes,'quarantine':[], 'attempts':attempts}
+    write_json(out/'receipt.json',receipt)
+    print(f'{receipt["outcome"]}: step {args.id}; receipt {out/"receipt.json"}')
+    return 0 if success else 1
+
+
 def run(args):
     repo = args.repo.resolve()
     out = args.out.resolve()
@@ -217,7 +310,13 @@ def run(args):
     head,tree = git(repo,'rev-parse','HEAD'),git(repo,'rev-parse','HEAD^{tree}')
     if subprocess.run(['git','-C',str(repo),'diff','--quiet','HEAD']).returncode:
         raise ValueError('queue tests require a clean tracked tree')
-    active = quarantine(GitHub(args.issues_repo)) if queued else []
+    recovering = queued or train
+    active = []
+    if recovering:
+        try:
+            active = quarantine(GitHub(args.issues_repo))
+        except (OSError,ValueError) as error:
+            print(f'WARNING: quarantine read unavailable for {args.issues_repo}: {error}; running without exclusions',file=sys.stderr)
     excluded = [t for t in active if t['runner']==args.runner]
     summary = f'Queue quarantine: {len(excluded)} {args.runner} test(s)\n'+''.join(f'- {identity(t)} — {t["issue"]}\n' for t in excluded)
     print(summary,flush=True)
@@ -229,15 +328,15 @@ def run(args):
         cwd = repo
         command = [str(HERE/'run-verified-tests.sh'),'nextest','run','--archive-file',str(repo/'fast-validation-suite.tar.zst'),
                    '--workspace-remap',str(repo),'--no-fail-fast']
-        if queued or train:command += ['--profile','queue','--retries','0']
+        if recovering:command += ['--profile','queue','--retries','0']
     else:
         cwd = repo/'hub-web'
         command = ['npm','run','journeys','--','--workers=2']
-        if queued:command += ['--retries=0']
+        if recovering:command += ['--retries=0']
     # Strict non-queue callers retain the original command, including their
     # native zero-test guard. No quarantine or additional attempt applies.
     partition = ['--partition',f'count:{args.shard}'] if args.runner=='rust' else [f'--shard={args.shard}']
-    if not queued:
+    if not recovering:
         return subprocess.run(command+partition,cwd=cwd,env=base_env).returncode
     if (out/'receipt.json').exists():
         raise ValueError('refusing to overwrite earlier queue evidence')
@@ -277,7 +376,13 @@ def run(args):
             if status==0:
                 if failed:raise ValueError('successful runner reported failed tests')
                 break
-            if not failed:raise ValueError('runner failed without an executed failed test')
+            if not failed:
+                if cleanup_after_pass(attempt/'console.log'):
+                    print('::warning::Native harness passed; post-result cleanup failed')
+                    attempts[-1]['raw_status']=status
+                    attempts[-1]['status']=0
+                    break
+                raise ValueError('runner failed without an executed failed test')
     final_tests = {identity(t):t for t in attempts[-1]['tests']}
     flakes = [t for t in failed if final_tests.get(identity(t),{}).get('passed')] if len(attempts)>1 else []
     complete = all(identity(t) in final_tests for t in failed) if len(attempts)>1 else True
@@ -295,8 +400,8 @@ def run(args):
 
 
 def reconcile(args):
-    if os.environ.get('GITHUB_EVENT_NAME') != 'merge_group':
-        raise ValueError('flake publication is merge-queue-only')
+    if not (os.environ.get('GITHUB_EVENT_NAME') == 'merge_group' or (os.environ.get('GITHUB_EVENT_NAME') == 'push' and os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-'))):
+        raise ValueError('flake publication requires a train or merge-queue run')
     receipts = sorted(args.receipts.rglob('receipt.json'))
     if not receipts:
         raise ValueError('no queue receipts found; publication cannot silently pass')
@@ -313,7 +418,7 @@ def reconcile(args):
         slots.add(slot)
         for test in receipt['flaky']:
             observations[identity(test)] = (test,receipt)
-    if args.expect and slots != set(args.expect):
+    if args.expect and (not set(args.expect).issubset(slots) or any(not slot.startswith('step:') for slot in slots-set(args.expect))):
         raise ValueError(f'incomplete queue evidence: expected {args.expect}; found {sorted(slots)}')
     if not observations:
         print('Queue flake publication: no recovered failures')
@@ -329,21 +434,22 @@ def reconcile(args):
                 raise ValueError('duplicate open flake issues need reconciliation: '+key)
             issue,state = matches[0] if matches else (None,{'schema':1,'runs':[]})
             # Store the actual identity fields, not the presentation JSON list.
-            state['test'] = {k:test[k] for k in (('runner','binary','name') if test['runner']=='rust' else ('runner','project','file','titles'))}
-            run_id = receipt['run_id']
+            state['test'] = {k:test[k] for k in ({'rust':('runner','binary','name'),'playwright':('runner','project','file','titles'),'step':('runner','name')}[test['runner']])}
+            run_id = receipt.get('observation_run_id',receipt['run_id'])
             if not re.fullmatch(r'[1-9]\d*',run_id): raise ValueError('invalid GitHub run id')
             if run_id not in state['runs']: state['runs'].append(run_id)
             labels = set(l['name'] for l in issue['labels']) if issue else set()
             labels.update(['flaky','priority:p1'])
-            if len(set(state['runs']))>=2: labels.add('flaky-quarantine')
+            if test['runner']=='step' or len(set(state['runs']))>=2: labels.add('flaky-quarantine')
             runs = '\n'.join(f'- https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{r}' for r in state['runs'])
-            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'
-                    'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n'
+            body = ('Merge-queue fail-then-pass: **FLAKY**. Fix this test; close this issue with the fix PR.\n\n'+
+                    ('The step remains covered on later trees; its quarantine issue tracks the recovered failure.\n\n' if test['runner']=='step' else
+                     'An open `flaky-quarantine` issue excludes this identity from subsequent queue trees.\n\n')+
                     f'Test id: `{key}`\n\nIndependent runs:\n{runs}\n\n'
                     f'Evaluated commit: {receipt["head"]}\n\nLatest initial failure:\n'
                     '```text\n'+test['output'][:16000].replace('```','` ` `').replace('<!--','&lt;!--')+'\n```\n\n'
                     '<!-- cas-queue-flake: '+json.dumps(state,ensure_ascii=True)+' -->\n')
-            payload = {'title':('Flaky queue test: '+(test['name'] if test['runner']=='rust' else ' › '.join(test['titles'])))[:240],
+            payload = {'title':('Flaky queue test: '+(test['name'] if test['runner'] in ('rust','step') else ' › '.join(test['titles'])))[:240],
                        'body':body,'labels':sorted(labels)}
             if issue:
                 issue = api.api(f'/issues/{issue["number"]}','PATCH',payload)
@@ -356,7 +462,7 @@ def reconcile(args):
                     issue = found[0]
                 issues.append(issue)
             saved = issue_state(issue)
-            if run_id not in saved['runs'] or (len(set(state['runs']))>=2 and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
+            if run_id not in saved['runs'] or ((test['runner']=='step' or len(set(state['runs']))>=2) and 'flaky-quarantine' not in [l['name'] for l in issue['labels']]):
                 raise ValueError('GitHub did not persist the flake observation/quarantine')
             published.append({'test':key,'issue':issue['html_url'],'runs':saved['runs'],
                               'quarantined':'flaky-quarantine' in [l['name'] for l in issue['labels']]})
@@ -377,13 +483,18 @@ def main():
     command.add_argument('--shard',required=True)
     command.add_argument('--out',type=Path,required=True)
     command.add_argument('--issues-repo',default=os.environ.get('CASSY_ISSUES_REPO',os.environ.get('GITHUB_REPOSITORY','')))
+    command = commands.add_parser('step')
+    command.add_argument('--repo',type=Path,default=HERE.parent)
+    command.add_argument('--id',required=True)
+    command.add_argument('--out',type=Path)
+    command.add_argument('exec_args',nargs=argparse.REMAINDER)
     command = commands.add_parser('reconcile')
     command.add_argument('--issues-repo',required=True)
     command.add_argument('--receipts',type=Path,required=True)
     command.add_argument('--expect',action='append',default=[],help='required runner:shard receipt (repeatable)')
     args = parser.parse_args()
     try:
-        return run(args) if args.command=='run' else reconcile(args)
+        return {'run':run,'step':step,'reconcile':reconcile}[args.command](args)
     except (OSError,ValueError,KeyError,ET.ParseError,subprocess.SubprocessError) as error:
         print(f'ERROR: {error}',file=sys.stderr)
         return 1

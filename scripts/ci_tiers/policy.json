@@ -1,5 +1,5 @@
 [
-  {"legacy_line": 124, "consumer": "ruleset-required context is a CI job: Fast Validation", "source": {"file": ".github/workflows/ci.yml"}, "kind": "text", "needle": "name: Fast Validation"},
+  {"legacy_line": 124, "consumer": "ruleset-required context is a CI job: Fast Validation", "source": {"file": ".github/workflows/full-validation.yml"}, "kind": "text", "needle": "name: Fast Validation"},
   {"legacy_line": 132, "consumer": "ruleset requires the complete Fast Validation rollup once", "source": {"file": "docs/branch-protection/main-ruleset.json"}, "kind": "count", "needle": "\"context\": \"Fast Validation\"", "expected": 1},
   {"legacy_line": 133, "consumer": "macOS advisory validation must not become a queue requirement", "source": {"file": "docs/branch-protection/main-ruleset.json"}, "kind": "count", "needle": "\"context\": \"macOS Check\"", "expected": 0}
 ]

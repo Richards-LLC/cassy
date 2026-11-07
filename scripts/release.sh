@@ -477,7 +477,9 @@ if [[ "$branch" == epic/release-train-* ]]; then
         train_ci_start="$prior_ci_start"
     fi
     python3 "$script_dir/train-ci.py" check --repo "$repo_root" --branch "$branch" --head "$train_ci_start" --gh "$gh_bin" \
-        || die "train full-suite receipt is not green; no release commit was prepared"
+        || die "train full-set receipt is not green; no release commit was prepared"
+else
+    say "no train receipt: the merge queue will run the full check set"
 fi
 version="$(prepare)"
 if "$dry_run"; then

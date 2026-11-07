@@ -47,7 +47,7 @@ case "$1 $2" in
   "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
   "api -X")
     case "$4" in
-      */jobs) echo '{"jobs":[{"name":"Fast Validation — full suite","conclusion":"success"}]}' ;;
+      */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
       *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
     esac ;;
   "api graphql")
@@ -518,7 +518,8 @@ hotfix_fallback() {
     FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
     [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
-    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log"
+    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log" &&
+        grep -qF 'no train receipt: the merge queue will run the full check set' "$tmp/hotfix-$mode.log"
 }
 train_receipt_cut() {
     local fixture="$tmp/train-ci-cut" status=0 before after
@@ -530,13 +531,29 @@ train_receipt_cut() {
     echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
     [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
-    python3 - "$before" <<'PY'
-import json, os, pathlib, sys, zipfile
+    python3 - "$before" "$fixture" <<'PY'
+import json, os, pathlib, subprocess, sys, zipfile
 head=sys.argv[1]
+repo=sys.argv[2]
 json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'push','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
-json.dump({'schema':1,'head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','tests':1,'failures':[]},open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
+jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-ci-tiers','fast-validation-web','fast-validation-suite','fast-validation-docs','queue-flake-publication')}
+receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
+         'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
+         'main_baseline':subprocess.check_output(['git','-C',repo,'rev-parse','origin/main'],text=True).strip(),
+         'required_jobs':list(jobs),'jobs':jobs,'elapsed_seconds':12,'journeys_required':False,'bridge_required':False}
+json.dump(receipt,open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
 with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
 PY
+    cp "$FAKE_TRAIN_ARTIFACT/receipt.json" "$tmp/train-ci-green.json"
+    python3 - "$FAKE_TRAIN_ARTIFACT/receipt.json" <<'PY'
+import json,sys
+p=sys.argv[1]; row=json.load(open(p)); row['jobs']['fast-validation-ci-tiers']='skipped'; json.dump(row,open(p,'w'))
+PY
+    status=0
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
+    cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
+    rm -rf "$fixture/.git/cas/train-ci"
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
     [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1

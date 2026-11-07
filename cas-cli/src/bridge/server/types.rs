@@ -226,6 +226,10 @@ pub(crate) struct TaskSummaryJson {
     /// "ask the supervisor to merge" states it saw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tip: Option<String>,
+    /// A release train's freeze (cas-2f4d): frozen_at, tip, measured eta
+    /// (null when a stage is unmeasured) and the card's summary line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) freeze: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]

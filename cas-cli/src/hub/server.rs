@@ -1260,6 +1260,10 @@ enum FleetOperation {
         #[serde(default)]
         assignee: Option<String>,
     },
+    /// Freeze a release train for its release (cas-2f4d).
+    FreezeTrain { epic_id: String },
+    /// The operator's lift of a train freeze; no supervisor action lifts it.
+    LiftTrainFreeze { epic_id: String },
 }
 
 impl FleetOperation {
@@ -1272,6 +1276,8 @@ impl FleetOperation {
             Self::RecycleWorker { .. } => "operation:recycle_worker",
             Self::ShutdownWorkers { .. } => "operation:shutdown_workers",
             Self::AssignTask { .. } => "operation:assign_task",
+            Self::FreezeTrain { .. } => "operation:freeze_train",
+            Self::LiftTrainFreeze { .. } => "operation:lift_train_freeze",
         }
     }
 
@@ -1284,8 +1290,11 @@ impl FleetOperation {
             Self::FocusEpic { .. }
             | Self::SpawnWorkers { .. }
             | Self::SetWorkerHold { .. }
-            | Self::AssignTask { .. } => Scope::FactoryOperate,
-            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
+            | Self::AssignTask { .. }
+            | Self::FreezeTrain { .. } => Scope::FactoryOperate,
+            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } | Self::LiftTrainFreeze { .. } => {
+                Scope::FactoryManage
+            }
         }
     }
 
@@ -1310,6 +1319,7 @@ impl FleetOperation {
                 "task={task_id} assignee={}",
                 assignee.as_deref().unwrap_or("<none>")
             ),
+            Self::FreezeTrain { epic_id } | Self::LiftTrainFreeze { epic_id } => format!("epic={epic_id}"),
         }
     }
 }
@@ -1814,6 +1824,18 @@ fn run_store_operation(
                 // S3 (cas-31f0): Undo sends this as a new operation.
                 "inverse": fleet::focus_epic_inverse(current.as_deref(), now.as_deref()),
             }))
+        }
+        FleetOperation::FreezeTrain { epic_id } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_freeze::freeze(cas_dir, &epic_id, &actor, None)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "freeze_train", "epic_id": epic_id, "detail": detail}))
+        }
+        FleetOperation::LiftTrainFreeze { epic_id } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_freeze::lift(cas_dir, &epic_id, &actor)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "lift_train_freeze", "epic_id": epic_id, "detail": detail}))
         }
         worker => Err(OperationError::Failed(format!(
             "{} is a worker operation, not a store operation",

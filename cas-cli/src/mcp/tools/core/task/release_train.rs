@@ -112,7 +112,8 @@ fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
 
 /// Checked at target resolution and again under the delivery-target lock.
 /// Release tracking takes that same lock before persisting the cut marker.
-pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), String> {
+/// A frozen train (cas-2f4d) admits only repairs of its red.
+pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {
         if !is_cut_train(&train) {
@@ -127,7 +128,12 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), Strin
             train.id
         ));
     }
-    Ok(())
+    crate::mcp::tools::core::workflow::release_freeze::check_merge(cas_root, target, task_id)
+}
+
+/// A frozen train keeps its own work but takes no new tasks (cas-2f4d).
+fn accepts_no_work(train: &Task) -> bool {
+    crate::mcp::tools::core::workflow::release_freeze::freeze_of(train).is_some()
 }
 
 /// Trains are opt-in (`factory.release_train`, default off). `None` when the
@@ -268,7 +274,7 @@ impl CasCore {
         let mut receipt = String::new();
         for train in active_trains(store, &integration) {
             if !landed(store, &repo, &train, &integration) {
-                if is_cut_train(&train) {
+                if is_cut_train(&train) || accepts_no_work(&train) {
                     continue;
                 }
                 return (
@@ -324,7 +330,7 @@ impl CasCore {
                 ),
             );
         }
-        match open_trains(store, &integration).into_iter().next() {
+        match open_trains(store, &integration).into_iter().find(|train| !accepts_no_work(train)) {
             Some(train) => (
                 Some(train.id.clone()),
                 format!(
@@ -422,6 +428,41 @@ mod tests {
             assert_eq!(retire_disabled_trains(&root, store.as_ref()), 0, "{config}");
             assert_eq!(snapshot(), before, "{config}");
         }
+    }
+
+    /// cas-2f4d: a frozen train keeps its own work, but a new task, even one
+    /// aimed at the frozen train, joins the next train.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_work_joins_the_next_train_while_one_is_frozen() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let temp = repo();
+        let root = temp.path().to_path_buf();
+        std::fs::create_dir_all(root.join(".cas")).unwrap();
+        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
+        let store = core.open_task_store().unwrap();
+        let frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+        let lane = frozen.effective_epic_branch().unwrap().to_string();
+        // The train carries work main lacks; a tip already on main is landed.
+        git(&root, &["checkout", "-qB", &lane]);
+        std::fs::write(root.join("work.txt"), "work\n").unwrap();
+        git(&root, &["add", "work.txt"]);
+        git(&root, &["commit", "-qm", "work"]);
+        git(&root, &["checkout", "-q", "main"]);
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
+        let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
+            "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",
+            "epic": frozen.id,
+        }))
+        .unwrap();
+        core.cas_task_create(Parameters(aimed)).await.map_err(|error| error.message).unwrap();
+        let next: Vec<_> = store.list(None).unwrap().into_iter()
+            .filter(|train| is_release_train(train) && train.id != frozen.id).collect();
+        assert_eq!(next.len(), 1, "{next:?}");
+        assert_eq!(store.get_subtasks(&frozen.id).unwrap().len(), 1);
+        assert_eq!(store.get_subtasks(&next[0].id).unwrap().len(), 1);
     }
 
     /// A train is not landed while a child is in flight, before any child

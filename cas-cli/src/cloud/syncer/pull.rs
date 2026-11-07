@@ -1525,6 +1525,14 @@ pub(crate) fn merge_task_notes(local: &str, remote: &str) -> String {
     // server-attested sections, which no reader can trust.
     let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
+    // cas-3588: a timestamped note can be read with a different untimestamped
+    // tail on each machine (note_blocks glues a following orphan paragraph to
+    // it). One note entry is its timestamp, type and body, so a copy whose
+    // paragraphs are a prefix of another copy's is the same entry; the longer
+    // copy, which holds everything, is kept.
+    fn paragraphs(block: &str) -> Vec<&str> {
+        block.split("\n\n").map(str::trim).filter(|p| !p.is_empty()).collect()
+    }
     for (is_local, notes) in [(true, local), (false, remote)] {
         for block in cas_store::task_note_markers::note_blocks(notes) {
             let block = block.trim();
@@ -1540,6 +1548,19 @@ pub(crate) fn merge_task_notes(local: &str, remote: &str) -> String {
                 .and_then(|(value, _)| {
                     chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M").ok()
                 });
+            if timestamp.is_some() {
+                let new = paragraphs(block);
+                if blocks.iter().any(|(at, _, existing)| *at == timestamp && paragraphs(existing).starts_with(&new)) {
+                    continue;
+                }
+                if let Some((_, _, existing)) = blocks
+                    .iter_mut()
+                    .find(|(at, _, existing)| *at == timestamp && new.starts_with(&paragraphs(existing)))
+                {
+                    *existing = block.to_string();
+                    continue;
+                }
+            }
             let order = blocks.len();
             blocks.push((timestamp, order, block.to_string()));
         }
@@ -4581,6 +4602,19 @@ mod web_close_tests {
         let receipt = "[2026-08-09 11:30] 📝 PROGRESS shared";
         let pointer = format!("{receipt}\n\nARTIFACT_PROOF: standalone metadata");
         assert_eq!(merge_task_notes(&pointer, receipt), pointer);
+
+        // cas-3588 (cas-1214 incident): the same note arrives with an orphan
+        // untimestamped tail on one machine and bare on the other. A pull of
+        // notes the store already holds stores each note once, and repeats
+        // change nothing.
+        let note = "[2026-11-07 18:06] 📝 PROGRESS POST_COMMIT_OUTCOME: `close` answered COMMITTED";
+        let local = format!("{note}\n\nRecord one ledger row per live journey.\n\n[2026-11-07 18:14] 📝 PROGRESS later");
+        let remote = format!("[2026-11-07 18:05] START CONTEXT\n\n{note}\n\n[2026-11-07 18:14] 📝 PROGRESS later");
+        let merged = merge_task_notes(&local, &remote);
+        assert_eq!(merged.matches("POST_COMMIT_OUTCOME").count(), 1, "{merged}");
+        assert!(merged.contains("Record one ledger row per live journey."), "{merged}");
+        assert_eq!(merge_task_notes(&merged, &remote), merged);
+        assert_eq!(merge_task_notes(&remote, &merged), merged);
     }
 
     #[test]

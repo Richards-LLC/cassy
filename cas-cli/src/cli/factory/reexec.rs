@@ -32,7 +32,13 @@ fn read_exact_before(
     deadline: Instant,
 ) -> Result<()> {
     while !data.is_empty() {
-        stream.set_read_timeout(Some(time_left(deadline)?))?;
+        // After the swap the new image writes the receipt and closes. macOS
+        // then refuses socket options with EINVAL while the receipt is still
+        // buffered; a read of a closed socket cannot block, so read it anyway.
+        match stream.set_read_timeout(Some(time_left(deadline)?)) {
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
+            result => result?,
+        }
         match stream.read(data) {
             Ok(0) => bail!("Daemon disconnected before completing its response"),
             Ok(n) => data = &mut data[n..],

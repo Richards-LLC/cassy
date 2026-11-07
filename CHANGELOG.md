@@ -7,6 +7,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.6.0] - 2026-11-07
+
+### Fixed — Worker test runner
+
+- **Auto-discovered test targets accepted** — Was: the capped runner refused `--test` for Cargo auto-discovered integration tests such as cas-factory spec_resolver, so workers could not get a receipt. Now: tests/<name>.rs and tests/<name>/main.rs are accepted unless the package sets autotests = false.
+
+### Fixed — Factory
+
+- **Publish new release trains at once** — A release train opened on task create now has its branch on origin immediately, so workers retargeted there can fetch it without a hand push. A failed push is reported on the create receipt.
+- **Releasing a queued task lets the queue move on** — Was: `task release` on a worker's current queue task reset it to Open, but the daemon's queue repair restarted it at once, so the next task's start refused with "has active work". Now: release drops the task from its worker's queue and starts the next pending task; the released task stays Open and unassigned.
+- **Reports reach the operator branded, clear and short** — A report under `docs/` (an HTML page beside its markdown) now parks only when it has its concept brief with an audience and a critique that meets the floor, declares the project's DESIGN.md brand tokens, loads nothing from the network, states one verdict first and fits its height budget (4,000 px for executive and external readers, 8,000 px for practitioners). Executive and external reports also carry no task ids and no internal jargon. A refusal lists exactly what is missing. Supervisors brief report tasks from a template in `cas-html-reports`, and the skill states that a visual-QA pass is necessary but not sufficient.
+- **Supervisor guidance fits its session-start budget again** — The report-deliverable and UI-delivery pointers now link into their references instead of inlining detail, so the rest of the SessionStart payload (context header, issue titles, ready tasks) is no longer squeezed out. The read-only Commander preview steps install only in the Cassy source checkout.
+- **The first merge into a train from another machine passes premerge verification** — Was: when the train existed only on origin, premerge verification compared it against a local branch that did not exist yet and failed with `unknown revision`, so the first merge needed a retry. Now: with no local branch, origin's copy is the only authority and the candidate builds on the first call; a diverged local branch is still refused.
+- **The automatic premerge verifier starts on an eligible account, or says why not** — Was: on a host whose default `~/.codex` is logged out, the daemon-launched verifier used that home and stopped with "codex is not logged in", so the merge waited for a hand launch. Now: it chooses the account `spawn_workers` would (the recommended account, else a logged-in Codex home whose usage is not known yet). When no Codex home is eligible, the notice names each home and why (logged out, or usage at the threshold with its reset time in ET) and says to launch the task-verifier yourself.
+- **Keep operator waits out of stall alerts** — A blocked epic waiting on the operator no longer triggers supervisor stall nags or operator pages. A newer factory-owned blocker restores normal stall escalation.
+
+### Fixed — Sync
+
+- **Cross-machine sync stores each task note once** — Was: when task notes synced between machines, a note that one machine read with an untimestamped paragraph attached and the other read without it counted as two different notes, so it was stored twice. Each later sync could add another copy (one task held 4 copies of the same progress note on one machine and 2 on the other). Now: a note entry is matched on its timestamp, type and body, the fuller copy is kept, and pulling notes a machine already holds changes nothing. Existing duplicates collapse the next time that task's notes sync.
+
+### Fixed — Tests
+
+- **Batch receipt early-answer test no longer flakes under load** — Was: it bounded the answer at 5 seconds of wall time, which parallel runs exceeded. Now: it asserts the short batch grace answered instead of the caller grace, independent of host speed.
+
+### Fixed — CI
+
+- **A failing script test's output now shows next to the failure** — Was: when `scripts/ci-script-tests-for-diff.py` ran several script tests and one failed, the tests after it pushed its output out of the release gate's 20-line row excerpt, so CI showed only `failed: <script>` and an exit status. Now: after the `failed:` summary, the row repeats the last 60 lines of each failing script test's output, so the gate's excerpt ends with that test's own last lines.
+- **A failing queue shard names its failing tests** — Was: `scripts/ci-queue-flakes.py` ended a real failure with `FAIL: 0 flaky test(s)`, which hid the failing tests and read as a gate fault. Now: it prints `FAIL: N failing test(s): <names, first 10> (+M more); receipt <path>`. FLAKY and PASS lines are unchanged.
+
+### Added — Factory
+
+- **A supervisor whose wakes grow too expensive hands off and clears its own context at a quiet moment** — Was: a long supervisor session re-read its whole conversation on every wake, so per-wake input kept climbing (one v4.4.0 session spent about 1.3M input tokens per wake) until someone cleared it by hand. Now: when one supervisor wake reads more than `factory.supervisor_wake_input_budget` input tokens (default 1,000,000; 0 turns it off), Cassy waits for an idle boundary, meaning no merge, release freeze, release repair or unanswered operator question is in flight and no newer turn is running. It then saves a handoff from the facts (owned epics and tasks, operator approvals from decision notes, pending asks, and workers) and gives the supervisor one turn to add its own judgement. After that turn it clears the supervisor's context with the existing reset. Workers keep running, and the new session starts with the handoff.
+
+### Added — Commander
+
+- **Preview a Commander delivery against live data** — `cas hub preview --dist <build> --task <id>` serves a candidate Commander build on its own loopback origin. The operator pairs it once; it reads live sessions, the hub refuses every send, launch, stop and setting change from it, and its pairing ends with the preview window (default 120 minutes). While it runs, the task's awaiting-merge row in Commander links to it as Preview this delivery.
+
+### Fixed — Supervisor wakes
+
+- **No second wake for a message already read** — Was: a pointer wake still opened a supervisor turn after a hook or inbox_poll had shown the message, so the turn only said "[already shown]". Now: the wake is skipped when that row was already shown; unread rows still wake.
+
+### Fixed — QA
+
+- **A QA ledger scaffold is valid even when the task title quotes a verdict line** — Was: `cas qa ledger init` copied a title such as "CI flake gate prints 'FAIL: 0 flaky test(s)'" into the `scope:` line, and `cas qa ledger check` then read that text as a second FAIL count and refused the ledger with "duplicate headline count". Now: the check reads headline counts only outside the free-text title, `scope:` and `surface:` lines, so the generated scaffold validates without hand edits.
+
 ## [4.5.0] - 2026-11-07
 
 ### Added — Supervisor tooling

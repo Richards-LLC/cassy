@@ -320,7 +320,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // tech as the field's active descendant.
     const target = list.locator('.conversation-row[data-enter-target="true"]');
     await expect(target).toHaveCount(1);
-    await expect(target).toContainText("gabber-studio");
+    await expect(target).toHaveAccessibleName(/gabber-studio/);
     await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
     await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();

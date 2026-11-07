@@ -1177,7 +1177,7 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
     assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
     // A reused lane's tip equal to its start commit is another task's merge, not this one's.
     git(&fx.repo, &["branch", "pr/cas-start", &fx.staging]);
-    let target = cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() };
+    let target = cas::types::WorkTarget { repo_selector: "project:batch-project".into(), target_branch: "main".into() };
     let mut reused = Task::new("cas-start".into(), "Reused lane".into());
     reused.assignee = Some("test-agent".into());
     reused.status = TaskStatus::AwaitingMerge;

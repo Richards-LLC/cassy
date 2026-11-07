@@ -242,6 +242,33 @@ mod tests {
     use std::time::Instant;
 
     #[test]
+    fn swapped_daemon_receipt_is_read_after_the_new_image_closes_cas_60a0() {
+        let (mut client, mut daemon) = UnixStream::pair().unwrap();
+        let receipt = ReexecReceipt {
+            session: "s".into(),
+            nonce: "n".into(),
+            pid: 7,
+            old_version: "4.3.0".into(),
+            version: "4.4.0".into(),
+            build: "b".into(),
+            panes_adopted: 2,
+            fallback: false,
+            error: None,
+            at: chrono::Utc::now(),
+        };
+        let frame = encode_message(&DaemonMessage::ReexecResult { receipt }).unwrap();
+        daemon.write_all(&frame).unwrap();
+        drop(daemon);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        match read_frame(&mut client, deadline).unwrap() {
+            DaemonMessage::ReexecResult { receipt } => {
+                assert_eq!((receipt.pid, receipt.panes_adopted), (7, 2))
+            }
+            other => panic!("expected the receipt, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn update_returns_relaunch_required_for_a_chatty_old_daemon() {
         let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
         let short = tempfile::tempdir_in("/tmp").unwrap();

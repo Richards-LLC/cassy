@@ -232,9 +232,6 @@ mod tests {
                 "mcp__cs__",
             )
             .unwrap();
-
-
-
         }
         let notes = "[time] decision snapshot-approved: view.snap — +after — display now includes the new field";
         assert!(

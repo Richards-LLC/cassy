@@ -88,7 +88,6 @@ fn supervisor_agent_worktree_is_denied() {
         reason.contains("spawn_workers"),
         "deny message should name spawn_workers action: {reason}"
     );
-
 }
 
 /// EPIC cas-8888 (cas-fd9f): the load-bearing regression test — before the
@@ -103,8 +102,6 @@ fn grok_supervisor_agent_worktree_is_denied_with_cas_prefix() {
     let input = agent_input_with_role(Some("supervisor"), Some("worktree"));
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = deny_reason(&out).expect("expected deny");
-
-
 }
 
 // ============================================================================

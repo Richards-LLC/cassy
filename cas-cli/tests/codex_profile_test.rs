@@ -99,9 +99,7 @@ fn list_profiles_shows_detected_accounts_login_state_and_excludes_lock_dirs() {
         .stdout(predicate::str::contains("main"))
         .stdout(predicate::str::contains("alt"))
 
-
         .stdout(predicate::str::contains("work"))
-
 
         // a `.lock` directory is not an account and must not be selectable
         .stdout(predicate::str::contains("support@example.com").not());
@@ -274,7 +272,6 @@ fn bare_interactive_single_profile_shows_picker_and_keeps_main_default() {
         "interactive launch failed: {rendered}"
     );
 
-
     assert!(
         rendered.contains("BARE_CODEX_HOME=<main>"),
         "default selection did not launch the sole main profile: {rendered}"
@@ -321,8 +318,6 @@ fn login_creates_seeds_and_scopes_the_profile() {
         stdout.contains("LOGIN_OPENAI_API_KEY=<scrubbed>"),
         "an inherited OPENAI_API_KEY leaked into the login: {stdout}"
     );
-
-
 
     // config.toml arrived as a symlink to the main home; auth.json did not arrive at all.
     let seeded = profile.join("config.toml");

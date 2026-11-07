@@ -797,7 +797,6 @@ release_train_announce_posted_block
     let report_path = project.path().join("docs/release-reports/v3.19.0.md");
     let report = fs::read_to_string(&report_path).unwrap();
 
-
     assert!(!report.contains("### Only reply:"));
     assert!(
         report

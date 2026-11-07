@@ -173,8 +173,6 @@ mod tests {
         )
         .expect_err("an unsupported CI claim still requires a receipt");
 
-
-
         validate_claims(
             "CI tests passed ./receipt.log",
             cas_root.path(),

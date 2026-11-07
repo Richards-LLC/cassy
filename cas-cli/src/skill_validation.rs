@@ -289,7 +289,6 @@ mod tests {
         );
         let error = select_validation_mode(true, None).expect_err("required sandbox must fail");
         assert!(error.contains("require_sandbox"));
-
     }
 
     #[cfg(target_os = "linux")]

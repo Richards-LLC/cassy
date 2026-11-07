@@ -263,14 +263,11 @@ mod tests {
         assert_eq!(rows[0].name, "vercel integration");
         assert_eq!(rows[0].severity, DoctorSeverity::Ok);
 
-
         assert_eq!(rows[1].severity, DoctorSeverity::Warning);
 
         assert!(rows[1].message.contains("br-dev"));
 
-
         assert_eq!(rows[2].severity, DoctorSeverity::Warning);
-
     }
 
     #[test]
@@ -283,7 +280,6 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "integrations");
         assert_eq!(rows[0].severity, DoctorSeverity::Ok);
-
     }
 
     #[test]

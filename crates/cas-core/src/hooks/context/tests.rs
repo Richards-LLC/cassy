@@ -13,7 +13,6 @@ fn test_estimate_tokens() {
 }
 
 
-
 #[test]
 fn test_truncate() {
     assert_eq!(truncate("short", 10), "short");
@@ -540,7 +539,6 @@ fn session_start_injects_the_knowledge_index_and_a_pull_instruction() {
 
     let context = build_with_knowledge(&ks, None);
 
-
     assert!(
         context.contains("Task Verifier") && context.contains("Gates task close on evidence."),
         "expected title + snippet in the index, got:\n{context}"
@@ -554,7 +552,6 @@ fn session_start_injects_the_knowledge_index_and_a_pull_instruction() {
         !context.contains("THE VERIFIER BODY PROSE"),
         "page body leaked into the injected block:\n{context}"
     );
-
 }
 
 #[test]

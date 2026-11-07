@@ -11,7 +11,6 @@ afterEach(() => { document.body.innerHTML = ""; vi.restoreAllMocks(); });
 const settle = async () => {
   await vi.waitFor(() => {
     expect(document.querySelector('.accounts-machine-body > [role="status"]')).toBeNull();
-
   });
 };
 function setup(manage = true, account = row, list: AccountsHost["list"] = async () => ({ accounts: [account] })) {
@@ -32,7 +31,6 @@ it("shows read-only pairings their disabled actions and the exact manage-access 
   const loaded = settle();
   completeListing({ accounts: [row] });
   await loaded;
-
 
   expect(document.body.textContent).toBeTruthy();
   const operations = [...document.querySelectorAll<HTMLButtonElement>("[data-operation]")];

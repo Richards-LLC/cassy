@@ -106,7 +106,6 @@ async fn recovery_guidance_missing_parameters_four_harnesses() {
                 .unwrap_err();
             assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
             assert!(error.data.is_none());
-
         }
         let error = service
             .memory(Parameters(
@@ -115,14 +114,12 @@ async fn recovery_guidance_missing_parameters_four_harnesses() {
             .await
             .unwrap_err();
 
-
         let error = service
             .factory(Parameters(
                 serde_json::from_value(serde_json::json!({"action": "epic_status"})).unwrap(),
             ))
             .await
             .unwrap_err();
-
     }
 }
 
@@ -431,10 +428,6 @@ async fn recovery_guidance_start_success_and_delegation_four_harnesses() {
             ))
             .await
             .unwrap_err();
-
-
-
-
     }
 }
 
@@ -505,7 +498,6 @@ async fn recovery_guidance_unknown_caller_uses_own_role_fallback() {
             ))
             .await
             .unwrap_err();
-
     }
 }
 
@@ -548,7 +540,6 @@ async fn recovery_guidance_named_recipient_is_not_the_callers_harness() {
         ))
         .await
         .unwrap_err();
-
 }
 
 #[tokio::test]
@@ -586,8 +577,6 @@ async fn recovery_guidance_claim_and_message_errors_four_harnesses() {
             .await
             .unwrap_err();
 
-
-
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_FACTORY_SUPERVISOR_CLI", harness);
         let (_dir, supervisor) = service("claude", crate::types::AgentRole::Supervisor);
@@ -605,9 +594,6 @@ async fn recovery_guidance_claim_and_message_errors_four_harnesses() {
             ))
             .await
             .unwrap_err();
-
-
-
     }
 }
 
@@ -656,7 +642,6 @@ async fn recovery_guidance_parked_start_names_the_registered_supervisor_harness(
             ))
             .await
             .unwrap_err();
-
     }
 }
 

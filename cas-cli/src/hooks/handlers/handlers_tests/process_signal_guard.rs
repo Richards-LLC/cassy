@@ -21,9 +21,6 @@ fn decision(command: &str, role: &str) -> Option<String> {
 
 fn assert_refused(command: &str) {
     let reason = decision(command, "worker").unwrap_or_else(|| panic!("expected refusal: {command}"));
-
-
-
 }
 
 #[test]
@@ -111,7 +108,6 @@ fn cas_a290_every_factory_role_refuses_pattern_signals() {
         ] {
             let reason = decision(command, role)
                 .unwrap_or_else(|| panic!("{role} must refuse {command}"));
-
         }
         for command in [
             "kill 12345", "kill -0 12345", "kill \"$(cat .pid)\"", "kill $!",

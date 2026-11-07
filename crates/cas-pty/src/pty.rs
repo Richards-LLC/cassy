@@ -5013,9 +5013,7 @@ echo SMOKE_DONE
         );
         let all_args = config.args.join(" ");
 
-
         // The developer_instructions must carry the same discipline.
-
 
         assert!(
             config
@@ -5207,7 +5205,6 @@ echo SMOKE_DONE
     }
 
 
-
     #[test]
     fn test_worker_build_cache_env_decision_table() {
         let none = Vec::<(String, String)>::new();
@@ -5366,11 +5363,9 @@ echo SMOKE_DONE
     /// worker updates wake an idle supervisor. Triage and reply through the
     /// receiving harness's own coordination tool.
 
-
     /// cas-83c8: the Codex worker prompt must instruct continued availability
     /// after a task closes (you are not permanently done) and acting on injected
     /// supervisor messages, without breaking the one-task-at-a-time rule.
-
 
     #[tokio::test]
     async fn test_pty_config_claude_with_teams() {
@@ -7292,8 +7287,6 @@ echo SMOKE_DONE
         assert_eq!(rules, &grok_supervisor_instructions());
         // cas-c145: Grok supervisors must get merge-queue-first lifecycle
         // guidance equivalent to other harnesses (no SessionStart bundle).
-
-
     }
 
     /// EPIC cas-8888 (cas-9a31, Phase 1 wiring): CAS_FACTORY_WORKER_CLI must
@@ -7421,12 +7414,10 @@ echo SMOKE_DONE
 
 
 
-
     /// AC-1/AC-2: every one of the six launch shapes (Claude/Codex/Grok ×
     /// supervisor/worker) carries the full canonical role contract — coordinate-
     /// only / one-task, async message handling, task lifecycle, merge completion,
     /// and safe urgent-stop recovery — on the surface each runtime consumes.
-
 
     /// AC-5: normalized parity allows only the intentional tool-prefix
     /// difference — each harness's surface issues tool CALLS with ITS prefix and
@@ -7438,7 +7429,6 @@ echo SMOKE_DONE
     /// one renderer. After normalizing the tool prefix, the bodies differ only
     /// by the identity line, Grok's namespace note and Codex's Plan-mode
     /// hazard.
-
 
     #[test]
     fn test_launch_shapes_use_harness_correct_tool_prefix() {
@@ -7472,7 +7462,6 @@ echo SMOKE_DONE
             }
         }
     }
-
 
 
     #[test]

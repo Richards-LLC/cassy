@@ -279,7 +279,6 @@ mod tests {
         assert!(rendered.contains(&outcome.artifact.id), "{rendered}");
 
         assert!(rendered.contains(&outcome.artifact.sha256), "{rendered}");
-
     }
 
     #[test]
@@ -306,7 +305,6 @@ mod tests {
         let detail = render_detail(&committed);
         assert!(detail.contains("cloud-42"), "{detail}");
         assert!(detail.contains("https://cloud.example/a/cloud-42"), "{detail}");
-
     }
 
     #[test]

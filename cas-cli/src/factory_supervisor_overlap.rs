@@ -369,11 +369,9 @@ mod tests {
         )
         .expect("two live supervisor sessions must warn");
 
-
         assert!(warning.contains("/home/pippenz/Petrastella/gabber-studio"));
         assert!(warning.contains("gabber-witty-panda-98/gentle-falcon-66"));
         assert!(warning.contains("gabber-gentle-hawk-71/noble-koala-5"));
-
 
         // Oldest first: the incumbent is named before the newcomer.
         let incumbent = warning.find("gentle-falcon-66").expect("incumbent listed");
@@ -419,8 +417,6 @@ mod tests {
             .expect("two sessionless supervisors still share the clone");
         assert!(warning.contains("solo-one"));
         assert!(warning.contains("solo-two"));
-
-
     }
 
     fn epic(id: &str, title: &str, owner: Option<&str>) -> Task {
@@ -516,7 +512,6 @@ mod tests {
             SupervisorEpic::Unavailable.render(),
             SupervisorEpic::NoEpic.render()
         );
-
     }
 
     /// A five-supervisor clone must stay one line per supervisor.

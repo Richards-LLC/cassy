@@ -994,7 +994,6 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(matches!(error, TaskProposalError::Contract(_)), "{error}");
-
     }
 
     #[tokio::test]
@@ -1095,7 +1094,6 @@ mod tests {
         .await
         .unwrap()
         .expect_err("a triage response for another proposal must be rejected");
-
     }
 
     #[tokio::test]
@@ -1349,7 +1347,6 @@ mod tests {
         .await
         .unwrap()
         .expect_err("a proposed dependency cannot claim a resolved target");
-
     }
 
     #[test]

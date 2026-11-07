@@ -2200,7 +2200,6 @@ mod tests {
         let error = wait_for_manager_unload(crate::bounded_process::Deadline::after(Duration::from_secs(1)), |_| {
             ManagerProbe::TimedOut
         }).unwrap_err();
-
     }
 
     #[cfg(target_os = "linux")]
@@ -2231,7 +2230,6 @@ exit 0
         let started = Instant::now();
         let error = restart_supervised(&cli, true, 443).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(2));
-
 
         assert_eq!(fs::read_to_string(&unit).unwrap(), LEGACY_SYSTEMD_UNIT);
         let calls = fs::read_to_string(&log).unwrap();
@@ -3032,7 +3030,6 @@ exit 0
             .count();
         assert_eq!(reloads, 1);
     }
-
 
 
     #[test]

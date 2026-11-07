@@ -707,6 +707,5 @@ mod tests {
         assert!(detail.contains("zen-eagle-20"), "{detail}");
         assert!(detail.contains("refresh token was revoked"), "{detail}");
         assert!(detail.contains("codex login"), "{detail}");
-
     }
 }

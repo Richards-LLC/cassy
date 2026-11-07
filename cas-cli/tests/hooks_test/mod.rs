@@ -590,7 +590,6 @@ fn notification_hook_finishes_webhook_before_cli_exits() {
     assert!(output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-
     let (path, body) = received.expect("curl reached the loopback webhook before CLI exit");
     assert_eq!(path, "/webhook");
     let payload: serde_json::Value = serde_json::from_str(&body).unwrap();

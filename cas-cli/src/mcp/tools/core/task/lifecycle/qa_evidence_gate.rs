@@ -1111,7 +1111,6 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the live tip carries a web surface");
 
-
         // A deleted lane must not replace its durable delivery with the
         // closing checkout's unrelated HEAD (cas-420af).
         task.deliverables.factory_branch_anchor = Some(rust_only.clone());

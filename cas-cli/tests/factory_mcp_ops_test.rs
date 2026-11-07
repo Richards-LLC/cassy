@@ -1575,7 +1575,6 @@ async fn spawn_workers_refuses_diverged_base_before_enqueue_cas_52b7() {
     let result = env.service.factory_request(Parameters(request())).await;
     let error = result.expect_err("a diverged base must fail before enqueue").to_string();
 
-
     assert!(error.contains("origin/main"), "{error}");
     assert!(env.spawn_queue().peek(10).unwrap().is_empty(), "no second request queued");
 }
@@ -2012,7 +2011,6 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
         .await
         .expect_err("a closed task must not authorize a spawn");
 
-
     // Unknown task id.
     let mut req = factory_req("spawn_workers");
     req.count = Some(1);
@@ -2022,7 +2020,6 @@ async fn test_spawn_workers_task_id_bypass_requires_a_valid_open_task() {
         .factory_request(Parameters(req))
         .await
         .expect_err("an unknown task must not authorize a spawn");
-
 
     // Ambiguous multi-worker request keeps its own error even with no epic.
     let mut req = factory_req("spawn_workers");
@@ -2233,7 +2230,6 @@ async fn test_spawn_workers_task_id_rejects_unknown_task() {
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "unknown task_id must be rejected");
     let err = result.unwrap_err();
-
 }
 
 /// cas-6913: task_id referencing an already-closed task must be rejected —
@@ -2255,7 +2251,6 @@ async fn test_spawn_workers_task_id_rejects_closed_task() {
     let result = env.service.factory_request(Parameters(req)).await;
     assert!(result.is_err(), "closed task_id must be rejected");
     let err = result.unwrap_err();
-
 }
 
 #[tokio::test]
@@ -2820,7 +2815,6 @@ async fn test_shutdown_workers_validates_existence() {
     assert!(result.is_err(), "Should fail for nonexistent worker");
 
     let err = result.unwrap_err();
-
 }
 
 #[tokio::test]
@@ -3039,7 +3033,6 @@ async fn test_recycle_worker_refuses_an_unlaunchable_recipe_before_stopping_cas_
         .factory_request(Parameters(req))
         .await
         .expect_err("an unlaunchable recipe is refused");
-
 
     assert!(
         env.spawn_queue().peek(10).expect("peek").is_empty(),
@@ -3277,7 +3270,6 @@ async fn test_recycle_worker_refuses_unpushed_commits_without_suggesting_force_c
             !error.message.contains("force=true"),
             "the refusal must not suggest a flag that cannot work: {error:?}"
         );
-
     }
     assert!(
         env.spawn_queue().peek(10).expect("peek queue").is_empty(),
@@ -6050,7 +6042,6 @@ async fn coordination_rejects_retired_factory_actions() {
         .await
         .expect_err("retired alias must not run the action");
 
-
     let direct = env
         .service
         .factory(Parameters(gc_report))
@@ -6072,7 +6063,6 @@ async fn coordination_rejects_retired_factory_actions() {
         .factory(Parameters(message))
         .await
         .expect_err("messaging stays on coordination");
-
 }
 
 #[tokio::test]
@@ -6413,9 +6403,7 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         "report must not prune"
     );
 
-
     // The bounded preview preserves terminal width; full detail retains the path.
-
 
     assert!(
         report_text.is_ascii() && report_text.lines().all(|line| line.len() <= 79),
@@ -6430,7 +6418,6 @@ async fn test_gc_process_cleanup_preserves_task_artifacts_without_opt_in_gh_1248
         get_text(&full)
     );
     assert!(get_text(&full).contains(&root.display().to_string()));
-
 
     // Named cache consent must never enter ordinary GC's evidence-retention
     // or process-reaping paths, even when the named path is refused.
@@ -7829,7 +7816,6 @@ async fn test_c384_gc_cleanup_aggregates_notices_per_sender() {
         let notice = pending.iter().find(|row| row.target == sender).unwrap();
         assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
         assert!(notice.prompt.starts_with(&format!("{count} messages to dead-worker were abandoned (")), "{}", notice.prompt);
-
     }
     for id in originals {
         assert_eq!(pq.message_delivery_report(id).unwrap().unwrap().stage, cas_store::DeliveryStage::Abandoned);
@@ -7929,7 +7915,6 @@ async fn test_unknown_action() {
     assert!(result.is_err());
 
     let err = result.unwrap_err();
-
 }
 
 // =============================================================================
@@ -8580,9 +8565,6 @@ async fn test_coordination_message_urgent_flag_enqueues_urgent() {
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude interrupt must fail explicitly");
 
-
-
-
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
     assert!(
@@ -8790,7 +8772,6 @@ async fn test_126b_target_awaiting_merge_reclose_urgent_does_not_halt() {
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude urgent must fail explicitly");
 
-
     // Still enqueued as an urgent so the worker wakes.
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
@@ -8826,7 +8807,6 @@ async fn test_126b_other_workers_task_does_not_exempt_target() {
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude urgent must fail explicitly");
 
-
     assert!(
         env.worker_halted("swift-fox"),
         "close guidance naming another worker's parked task must NOT exempt the \
@@ -8855,7 +8835,6 @@ async fn test_126b_ordinary_urgent_still_halts_even_with_parked_task() {
     );
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude urgent must fail explicitly");
-
 
     assert!(
         env.worker_halted("swift-fox"),
@@ -8887,7 +8866,6 @@ async fn test_126b_close_guidance_without_target_awaiting_task_fails_closed_to_h
     );
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude urgent must fail explicitly");
-
 
     assert!(
         env.worker_halted("swift-fox"),
@@ -9683,8 +9661,6 @@ async fn test_coordination_message_returned_notification_id_drives_status_query(
         let error = env.service.coordination(Parameters(request)).await
             .expect_err("corrupt local row must report a read error");
         assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
-
-
     }
 }
 
@@ -9903,7 +9879,6 @@ async fn test_coordination_message_to_reserved_source_target_is_refused() {
         .await
         .expect_err("reserved source target must be rejected");
 
-
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert!(
         prompts.is_empty(),
@@ -10073,7 +10048,6 @@ async fn test_coordination_interrupt_action_is_urgent() {
     );
     let result = env.service.coordination(Parameters(req)).await;
     let error = result.expect_err("unobserved Claude interrupt action must fail explicitly");
-
 
     let prompts = env.prompt_queue().peek_all(10).expect("peek");
     assert_eq!(prompts.len(), 1);
@@ -12254,7 +12228,6 @@ async fn test_supervisor_override_audits_a_stale_worker_assignment_cas_0a69() {
         .await
         .expect_err("an override needs an audit reason");
 
-
     let request: TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "update",
         "id": task_id,
@@ -12741,7 +12714,6 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
             let error = result
                 .expect_err("unsafe start must refuse without losing committed or dirty work");
             if after == "behind-dirty" {
-
             } else {
                 let commit =
                     unattributed.expect("refusal identifies the first unattributed commit");
@@ -14480,7 +14452,6 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
     );
 
 
-
     // The same authenticated worker without the flag can send a directed
     // message. Shouting BLOCKER cannot turn it into the typed blocker class;
     // ordinary directed traffic still uses the scheduler and pane safety gates.
@@ -14518,7 +14489,6 @@ async fn cas_8725_a_registered_workers_blocker_wakes_the_supervisor_pane() {
     );
     assert!(ordinary.allowed, "{}", ordinary.reason);
     assert_eq!(ordinary.kind, cas::ui::factory::WakeOutcome::Allowed);
-
 
     // And the envelope alone buys nothing on a row nobody stamped — the shape
     // `cas factory message --from …` and bridge POST /message still produce.
@@ -14982,7 +14952,6 @@ async fn shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc() {
             .await
             .expect_err("another session's worker must not be shut down");
 
-
         // task reset: refused even with force, naming session and supervisor.
         let reset = core
             .cas_task_reset(Parameters(cas::mcp::tools::TaskReleaseRequest {
@@ -15225,7 +15194,6 @@ async fn cas_3e3a_public_refusals_offer_a_supported_remedy_and_preserve_work() {
     request.target = Some("unsafe-worker".into());
     request.force = Some(true);
     let error = env.service.factory(Parameters(request)).await.unwrap_err();
-
 
     assert!(env.spawn_queue().peek(10).unwrap().is_empty());
     assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());

@@ -15872,7 +15872,6 @@ mod tests {
         let error = store
             .peek_for_targets(&[], Some("session-a"), 10)
             .expect_err("session-only peeks must fail loudly");
-
     }
 
     /// Regression test for cas-7210 ("active workers stop receiving ALL
@@ -17038,7 +17037,6 @@ mod tests {
         assert!(rows[2].1.contains(&merge.to_string()) && rows[2].1.contains("worker-3"), "{}", rows[2].1);
         assert!(!rows[2].1.contains(operator_target));
 
-
         store.mark_transport_delivered(rows[2].0).unwrap();
         let next = gh_1196_abandon_one(&store, "worker-4");
         let rows = gh_1196_notices(&store);
@@ -17241,8 +17239,6 @@ mod tests {
         // pin: GH #1196 contract: the operator-facing cause is "no Commander device", not session membership.
         let cause = "no Commander device received it before it expired";
         assert!(prompts[0].contains(cause), "{prompts:?}");
-
-
     }
 
     /// cas-5871: worker_status listed nine undelivered relays from September
@@ -18306,7 +18302,6 @@ mod tests {
         let error = store
             .delivery_stalled_candidates("session", i64::MAX, 30 * 60, 10)
             .expect_err("an unrepresentable threshold must be rejected without a panic");
-
 
         store
             .enqueue("supervisor", "worker", "queue remains usable")
@@ -19470,7 +19465,6 @@ mod tests {
         }
         let err = store.message_delivery_report(id).unwrap_err();
         let msg = err.to_string();
-
     }
 
     #[test]
@@ -19578,7 +19572,6 @@ mod tests {
             .unwrap();
         }
         let err = store.message_delivery_report(id).unwrap_err().to_string();
-
     }
 
     #[test]
@@ -19594,7 +19587,6 @@ mod tests {
             .unwrap();
         }
         let err = store.message_delivery_report(id).unwrap_err().to_string();
-
     }
 
     #[test]
@@ -19702,7 +19694,6 @@ mod tests {
             "stale Dropped after Delivered must fail; got {b_result:?}"
         );
         let err = b_result.unwrap_err().to_string();
-
 
         let store = SqlitePromptQueueStore::open(&path).unwrap();
         let r = store.message_delivery_report(id).unwrap().unwrap();
@@ -20982,8 +20973,6 @@ mod cas_aac2_hook_surfaced_stamp_tests {
             "a confirmed row is not pending on anything; awaiting_ack was the misleading state"
         );
         let detail = raw.pending_detail.unwrap_or_default();
-
-
     }
 
     /// The Confirmed stamp rides ON TOP of the cas-d047 Delivered stamp, so the
@@ -22363,7 +22352,6 @@ mod cas_f17b_tests {
         assert_eq!(notice.origin, Some(QueueOrigin::Daemon));
         assert!(notice.prompt.contains(&id.to_string()));
         assert!(notice.prompt.contains("swift-heron"));
-
 
         assert_eq!(
             queue

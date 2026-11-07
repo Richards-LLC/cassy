@@ -1090,7 +1090,6 @@ async fn cas_a19b_status_404_names_visibility_without_claiming_delivery() {
     )
     .await
     .unwrap_err();
-
 }
 
 #[tokio::test]
@@ -1946,7 +1945,6 @@ async fn cas_56c4_cross_project_without_successor_names_ended_session_and_projec
     for target in ["sup-old@soundwave", "supervisor:widgets"] {
         let error = coordinate(&service, json!({"action":"message", "target":target,
             "summary":"cross-project ask", "message":"hold staging"})).await.unwrap_err();
-
     }
     assert!(mailbox.lock().unwrap().is_empty());
     assert!(inbox(&sender.cas_dir).is_empty());

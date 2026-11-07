@@ -109,7 +109,6 @@ fn token_login_outside_a_project_succeeds_and_serves_every_project() {
         "`cas login --token` outside a project must succeed; stderr: {stderr}"
     );
 
-
     let user_config: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap(),
     )

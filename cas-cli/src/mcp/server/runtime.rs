@@ -1867,8 +1867,6 @@ url = "https://context7.invalid/mcp"
                 .await
                 .unwrap_err()
                 .to_string();
-
-
         }
         let forbidden = engine
             .call_tool(&caller, VIKTOR_SERVER, "get_file_download_url", None)
@@ -1987,9 +1985,6 @@ url = "https://context7.invalid/mcp"
             .last()
             .map(|migration| migration.id)
             .expect("at least one migration");
-
-
-
     }
 
     #[test]
@@ -2378,7 +2373,6 @@ url = "https://context7.invalid/mcp"
             ("CAS_ROOT", None),
         ]);
         let error = resolve_mcp_serve_root().unwrap_err();
-
     }
 
     /// When CLAUDE_PROJECT_DIR is not set, the function must still work via the

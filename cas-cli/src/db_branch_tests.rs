@@ -160,7 +160,6 @@ fn a_production_parent_is_refused() {
     let branches = neon().branches.into_inner().unwrap();
     for requested in ["production", "br-prod", "main"] {
         let error = resolve_parent(&binding(), Some(requested), &branches).unwrap_err();
-
     }
     // Neon's default branch is production even when nothing labels it.
     let unlabelled = NeonProjectBinding {

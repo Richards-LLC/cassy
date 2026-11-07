@@ -1521,7 +1521,6 @@ mod tests {
         let row = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(row.state, SpawnLifecycleState::Failed);
         assert_eq!(row.worker_name.as_deref(), Some("boot-failed-worker"));
-
     }
 
     /// A spawn that launches but never registers is FAILED with a reason —

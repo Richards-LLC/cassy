@@ -24,13 +24,6 @@ describe("hub-web fixture visual QA", () => {
 
 
 
-
-
-
-
-
-
-
   it("picks the highest stable cached Playwright by version, never by directory order", async () => {
     const npxRoot = await mkdtemp(join(tmpdir(), "visual-qa-npx-"));
     try {
@@ -59,6 +52,5 @@ describe("hub-web fixture visual QA", () => {
       await rm(npxRoot, { recursive: true, force: true });
     }
   });
-
 
 });

@@ -299,7 +299,6 @@ mod tests {
             return;
         }
         let err = read_capped(&link).unwrap_err().to_string();
-
     }
 
     #[test]
@@ -315,7 +314,6 @@ mod tests {
         f.write_all(&[0u8]).unwrap();
         drop(f);
         let err = read_capped(&p).unwrap_err().to_string();
-
     }
 
     #[test]
@@ -323,14 +321,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let p = tmp.path().join("missing.txt");
         let err = read_capped(&p).unwrap_err().to_string();
-
     }
 
     #[test]
     fn read_capped_rejects_directory() {
         let tmp = TempDir::new().unwrap();
         let err = read_capped(tmp.path()).unwrap_err().to_string();
-
     }
 
     // --- atomic_write --------------------------------------------------------

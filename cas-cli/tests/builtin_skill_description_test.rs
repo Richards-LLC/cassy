@@ -238,15 +238,12 @@ fn codex_opt_out_skills_ship_agents_openai_yaml() {
 /// The routing convention: the description opens with the trigger, not with an
 /// identity sentence, a provider name, or a shouted opt-in.
 
-
 /// cas-dataviz previously carried the bundled `dataviz` skill's trigger list
 /// word for word, so both skills matched the same prompts.
-
 
 /// cas-150b: a plain-words "feature report" request has one owner. Its
 /// description claims the phrase, and cas-html-reports hands it over instead
 /// of turning it away.
-
 
 // ---------------------------------------------------------------------------
 // Portability of shipped text
@@ -326,7 +323,6 @@ fn cas_nuxt_playwright_opts_out_through_frontmatter() {
             "{label} cas-nuxt-playwright: user-invocable is the default and is redundant here"
         );
         let description = field(&content, "description").expect("description");
-
     }
 }
 
@@ -337,10 +333,8 @@ fn cas_nuxt_playwright_opts_out_through_frontmatter() {
 /// `/plan` is not a skill or a command in any tree; the real handoff for
 /// planning is cas-supervisor epic creation.
 
-
 /// The PreToolUse guard already denies AskUserQuestion in factory mode and
 /// returns that guidance; repeating it in prose costs context on every load.
-
 
 // ---------------------------------------------------------------------------
 // The config key the skill now points at

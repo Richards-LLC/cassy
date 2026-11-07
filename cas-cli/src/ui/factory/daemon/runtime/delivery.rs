@@ -2100,8 +2100,6 @@ mod tests {
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&rows[0].prompt).unwrap();
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
-
-
     }
 
     fn commander_attribution() -> crate::ui::factory::protocol::MessageAttribution {

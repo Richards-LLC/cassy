@@ -1674,8 +1674,6 @@ mod tests {
             "a few empty pulls are the normal steady state and must stay quiet — got {early:?}"
         );
         let warning = at_threshold.expect("the streak must eventually be reported");
-
-
     }
 
     #[tokio::test]

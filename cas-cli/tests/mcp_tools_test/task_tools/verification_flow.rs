@@ -1538,7 +1538,6 @@ async fn test_unmerged_receipt_keeps_worktree_binding_cas_5200() {
         .cas_verification_add(Parameters(approve(&task_id, dispatch.id)))
         .await
         .expect_err("an unmerged delivery's bound worktree head moving still voids the verdict");
-
 }
 
 #[tokio::test]
@@ -3284,7 +3283,6 @@ async fn test_update_to_closed_is_exact_task_gated_but_other_task_update_remains
         .await
         .expect_err("A update-to-closed must require legitimate verification");
 
-
     let unrelated = service
         .cas_task_update(Parameters(task_status_update(
             &id_b,
@@ -3497,7 +3495,6 @@ async fn test_task_close_blocked_without_verification() {
         "pending",
         "Dispatch markers are pending work, not failed checks"
     );
-
 }
 
 #[tokio::test]
@@ -3779,8 +3776,6 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
             .await
             .expect("render lease history"),
     );
-
-
 }
 
 /// cas-8d5b: the close-time MERGE REQUIRED data-state guard must park the task
@@ -8413,7 +8408,6 @@ async fn test_close_supervisor_bypass_orphaned_task() {
         "bypass row must be Skipped, got {:?}",
         verification_row.status
     );
-
 }
 
 /// Positive: supervisor closes a task whose assignee points at an agent that
@@ -8503,7 +8497,6 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
         .expect("verification lookup should not error")
         .expect("ghost-assignee bypass must write a Skipped verification row");
     assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
-
 }
 
 /// cas-3bd4 regression: a factory worker's `task.assignee` stores the agent's
@@ -10246,7 +10239,6 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
         legacy_dispatch.status,
         cas::types::VerificationStatus::Pending
     );
-
 
     let mut other = cas::types::Task::new(
         "cas-timeout-isolation-b".to_string(),

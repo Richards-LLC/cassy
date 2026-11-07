@@ -409,7 +409,6 @@ mod tests {
         assert!(rendered.contains("┌"));
         assert!(rendered.contains("Hello"));
         assert!(rendered.contains("World"));
-
     }
 
     #[test]

@@ -204,8 +204,6 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             );
             assert!(!text.contains('\u{1b}'));
             assert!(!ascii || text.is_ascii());
-
-
         }
     }
     let encoded = serde_json::to_value(&report).unwrap();
@@ -243,7 +241,6 @@ async fn cas_559c_list_locks_sends_project_and_surfaces_failure() {
     })
     .await
     .unwrap();
-
 }
 
 #[test]
@@ -276,8 +273,6 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     };
     assert_eq!(report.peers[0].claims_visibility, ClaimsVisibility::Unknown);
     let text = render_peer_report(&report, 80, true);
-
-
 }
 
 #[tokio::test]
@@ -745,9 +740,6 @@ async fn cas_cd42_unavailable_cloud_sections_keep_observation_time_and_no_regist
 
     assert_eq!(report["peers"][0]["claims_status"]["state"], "unavailable");
     assert!(report["peers"][0]["claims_status"]["observed_at"].is_string());
-
-
-
 
     assert!(
         server

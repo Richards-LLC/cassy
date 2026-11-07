@@ -45,7 +45,6 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
       const view = new ConversationView(document, history, { supervisor: "sup", retryMessage: vi.fn() });
       view.update();
       expect(view.element.querySelectorAll(".conversation-retry")).toHaveLength(0);
-
     }
   });
 

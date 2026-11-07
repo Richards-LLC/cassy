@@ -6866,7 +6866,6 @@ mod tests {
                 }
                 _ => {
                     let refusal = admit_branch_ci(&state, true, Some("ship it")).unwrap_err();
-
                 }
             }
         }
@@ -7047,7 +7046,6 @@ mod tests {
                 }
                 "pending" => {
                     let refusal = admit_branch_ci(&state, true, Some("ship it")).unwrap_err();
-
                 }
                 _ => assert!(matches!(state, BranchCiState::Red { .. }), "{state:?}"),
             }
@@ -7071,8 +7069,6 @@ mod tests {
                 // cas-6c13: pending code CI is refused, even with an override.
                 for (override_requested, reason) in [(false, None), (true, Some("ship it"))] {
                     let refusal = admit_branch_ci(&state, override_requested, reason).unwrap_err();
-
-
                 }
                 assert!(
                     describe_branch_ci_state("factory/ci-fixture", &state)
@@ -7771,8 +7767,6 @@ mod tests {
             refusal.contains("https://github.com/acme/cas/actions/runs/42"),
             "{refusal}"
         );
-
-
     }
 
     #[test]
@@ -7816,7 +7810,6 @@ mod tests {
         assert!(note.ends_with("incident reviewed"), "{note}");
         for reason in [None, Some(" ")] {
             let refusal = admit_branch_ci(&red, true, reason).unwrap_err();
-
         }
     }
 
@@ -7979,12 +7972,7 @@ mod tests {
 
         assert!(error.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{error}");
 
-
-
         // Here the fetch/merge/retry recipe is the recovery that works.
-
-
-
 
         // A refused divergence never reaches a merge receipt.
         assert!(
@@ -8043,10 +8031,6 @@ mod tests {
             error.starts_with("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR"),
             "{error}"
         );
-
-
-
-
 
         assert!(!error.contains("--auto"), "{error}");
 
@@ -8467,7 +8451,6 @@ mod tests {
             store.as_ref(),
         )
         .expect_err("the conservative rule must survive: this is what asks for the assignment");
-
     }
 
     #[test]
@@ -8481,7 +8464,6 @@ mod tests {
             store.as_ref(),
         )
         .expect_err("cas-bd5f must keep refusing a foreign task's epic");
-
     }
 
     /// GH #421: the MCP task surface writes WorkTarget, not the old
@@ -8521,7 +8503,6 @@ mod tests {
         let resolved = declared_system_b_merge_target(&task, Some(&epic), "cas-child")
             .expect("branchless epic WorkTarget must replace the legacy field");
         assert_eq!(resolved.branch, "epic/declared-lane");
-
     }
 
     /// GH #1216 (cas-cf8e0): an epic created with target_branch=epic/x
@@ -8819,7 +8800,6 @@ mod cas_7ce6_parked_merge_source_tests {
         let refusal = parked_merge_source(&git_ops, branch, &task.id, old_anchor)
             .expect_err("a stale anchor must not authorize a direct merge");
 
-
         assert_eq!(git(repo.path(), &["rev-parse", branch]), tip);
 
         let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
@@ -8973,7 +8953,6 @@ mod cas_7ce6_parked_merge_source_tests {
         let refusal = parked_merge_source(&ops, "factory/w", "cas-park", &anchor)
             .expect_err("source lacks the anchor");
         assert!(refusal.contains(&anchor), "{refusal}");
-
 
         // An origin-only task branch is still an existing recovery branch.
         git(path, &["branch", "-D", "factory/w-cas-park"]);

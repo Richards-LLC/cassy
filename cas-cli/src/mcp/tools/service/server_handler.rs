@@ -1371,8 +1371,6 @@ mod tests {
             "COMMITTED"
         );
         assert_eq!(error.data.as_ref().unwrap()["notification_id"], row.id);
-
-
     }
 
     #[tokio::test]
@@ -1483,8 +1481,6 @@ mod tests {
         let text = format!("{answered:?}");
         assert_eq!(answered.is_error, Some(false));
         assert!(text.contains("4dd898a71"), "{text}");
-
-
     }
 
     /// The real receipt handler must release its response budget once its
@@ -1619,7 +1615,6 @@ mod tests {
             )
             .await
             .unwrap_err();
-
 
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
 
@@ -1760,8 +1755,6 @@ mod tests {
             .await
             .unwrap_err();
 
-
-
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1829,7 +1822,6 @@ mod tests {
         assert!(data["notification_id"].is_null());
         assert_eq!(data["budget_ms"], 10);
         assert!(data["elapsed_ms"].as_u64().unwrap() >= 10);
-
     }
 
     #[tokio::test]

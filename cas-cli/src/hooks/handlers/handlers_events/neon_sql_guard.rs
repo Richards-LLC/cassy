@@ -327,7 +327,6 @@ mod tests {
         let reason = neon_production_write_denial(tool, Some(&no_branch), &roots)
             .expect("no branchId writes are denied");
 
-
         // cas-90e8: the remedy is one a worker can take — a blocker message
         // to the supervisor, who owns db_branch_create — never a branch create.
 

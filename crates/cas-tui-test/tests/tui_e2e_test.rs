@@ -83,8 +83,6 @@ fn test_tui_startup() {
     // Verify menu content
     let output = runner.get_output();
 
-
-
     // Clean exit
     runner.send_input("q").unwrap();
 }
@@ -139,7 +137,6 @@ fn test_counter_screen() {
 
     // Verify counter content
     let output = runner.get_output();
-
 
     // Increment counter multiple times
     for _ in 0..3 {

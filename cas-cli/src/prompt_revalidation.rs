@@ -1982,8 +1982,6 @@ mod cas_7787_relay_honesty_tests {
         let notice =
             undelivered_relay_notice("cas-edee", Some("task_awaiting_merge: cas-edee (19:26)"));
         assert!(notice.contains("cas-edee"), "must name the task");
-
-
     }
 }
 
@@ -2426,8 +2424,6 @@ mod tests {
         );
 
         // pin: a suppressed landed request needs no worker close action.
-
-
     }
 
     /// GH #1022: a merge request for a branch whose parked anchor landed but
@@ -2440,7 +2436,6 @@ mod tests {
 
         assert!(guidance.contains("aaa111") && guidance.contains("bbb222"));
         assert!(guidance.contains("task action=request_changes id=cas-test"));
-
     }
 
     #[test]
@@ -2717,7 +2712,6 @@ mod tests {
         }
         let guidance = merge_request_moot_guidance("cas-test", TaskStatus::Closed);
         assert!(guidance.contains("cas-test"));
-
     }
 
     /// GH #887: request_changes reopens the task and moves its reviewed tip
@@ -2819,7 +2813,6 @@ mod tests {
             MergeRequestDelivery::Deliver,
             "a request composed for the current anchor's live successor is actionable"
         );
-
     }
 
     /// GH #340: request_changes clears the anchor before a queued worker
@@ -2842,7 +2835,6 @@ mod tests {
         );
         let guidance = merge_request_anchor_invalidated_guidance("cas-test", "worker-tip", None);
         assert!(guidance.contains("worker-tip"));
-
     }
 
     #[test]
@@ -3078,7 +3070,6 @@ mod cas_3dcb_worker_died_relay_tests {
         );
         assert!(body.contains("exit_signal=\"Terminated\""), "{body}");
 
-
         assert_eq!(
             parse_worker_died_envelope(&body).and_then(|envelope| envelope.exit_signal),
             Some("Terminated".to_string())
@@ -3096,7 +3087,6 @@ mod cas_3dcb_worker_died_relay_tests {
         let body =
             format_worker_died_relay("id", "idle-worker", "incident", "shutdown", &[], &[], 1);
         assert!(parse_worker_died_envelope(&body).is_some());
-
     }
 
     /// Wake eligibility is corroborated by the payload, so both producers must
@@ -3315,7 +3305,6 @@ mod cas_3dcb_worker_died_relay_tests {
             None,
         );
 
-
         // The close backstop reports only the target ancestry it measured;
         // it cannot infer whether the delivery ever parked or when QA began.
         let merged = qa_dispatch_envelope(
@@ -3331,9 +3320,6 @@ mod cas_3dcb_worker_died_relay_tests {
             None,
         );
 
-
-
-
         let unmerged = qa_dispatch_envelope(
             "qapass-3",
             "cas-0019",
@@ -3346,8 +3332,6 @@ mod cas_3dcb_worker_died_relay_tests {
             QaDeliveryLocation::UnmergedFrom("epic/burn-down"),
             None,
         );
-
-
 
         assert_eq!(
             parse_qa_dispatch_envelope(&merged).map(|parsed| parsed.bound_head),
@@ -3371,8 +3355,6 @@ mod cas_3dcb_worker_died_relay_tests {
     fn undelivered_notice_names_the_worker_not_a_task() {
         let notice = undelivered_worker_died_notice("mighty-kestrel-57");
         assert!(notice.contains("mighty-kestrel-57"));
-
-
     }
 }
 

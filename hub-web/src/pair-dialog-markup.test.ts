@@ -136,7 +136,6 @@ describe("pairing dialog in plain words (F3)", () => {
     const share = code.querySelector(".pair-share")!;
     expect(share.textContent).toBeTruthy();
 
-
     const button = share.querySelector<HTMLButtonElement>("button#pair-share")!;
     expect(button.textContent).toBeTruthy();
     // What is sent names the code and the command that approves it, never a scope.
@@ -146,7 +145,6 @@ describe("pairing dialog in plain words (F3)", () => {
     const create = new DOMParser().parseFromString(steps.create, "text/html");
     expect(create.querySelector(".pair-flow")?.textContent).toBeTruthy();
   });
-
 
 });
 
@@ -215,6 +213,5 @@ describe("the pairing dialog's name and admin consent (cas-d043 G08, G11)", () =
     // The lead names the power in a part CSS shows only while the box is ticked.
     const admin = doc.querySelector(".pair-summary .pair-summary-admin");
     expect(admin?.textContent).toBeTruthy();
-
   });
 });

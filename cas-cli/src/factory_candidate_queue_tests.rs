@@ -345,7 +345,6 @@ async fn refused_requests_name_why_and_queue_nothing() {
     std::fs::remove_file(queue_dir(&fixture.cas_root).join(RUNNER_HEARTBEAT)).unwrap();
     let reply = fixture.request(OWN_TASK, &fixture.head).await;
 
-
     // The daemon's own context decides: a worker's `cas serve` is confined
     // differently from the process that builds.
     mark_runner_live(&fixture.cas_root).unwrap();
@@ -377,7 +376,6 @@ fn sandbox_probe_runs_the_real_sandbox_from_this_process() {
         namespaces_available()
     );
     let missing = sandbox_problem("linux", "cas-test-no-such-bwrap", Path::new("true")).unwrap();
-
 }
 
 #[test]
@@ -462,7 +460,6 @@ async fn failed_build_tells_the_worker_the_exact_error() {
         "{}",
         messages[0].1
     );
-
 }
 
 #[tokio::test]
@@ -621,7 +618,6 @@ PY"#.replace("__SOCKET__", socket.to_str().unwrap()).replace("__DETACHED__", if 
         let messages = fixture.messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].0, WORKER);
-
     }
 }
 

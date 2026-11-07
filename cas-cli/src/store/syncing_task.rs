@@ -1288,7 +1288,6 @@ mod tests {
             .add_with_mutation_receipt(&task, "receipt-id")
             .unwrap_err();
 
-
         assert!(inner.is_empty());
     }
 

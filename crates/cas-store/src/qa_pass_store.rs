@@ -1122,8 +1122,6 @@ mod tests {
 
         let second = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now).unwrap_err();
 
-
-
         let released = release_qa_claim_for_task(dir.path(), "cas-qa1").unwrap();
         assert!(released, "reset releases the QA work item's active claim");
         let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
@@ -1288,7 +1286,6 @@ mod tests {
 
         let claim = claim_qa_pass(dir.path(), "cas-ui1", "impl-worker", now).unwrap_err();
 
-
         let resolve = resolve_qa_pass(
             dir.path(),
             "cas-ui1",
@@ -1300,7 +1297,6 @@ mod tests {
             now,
         )
         .unwrap_err();
-
 
         let claimed = claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
         assert_eq!(claimed.state, QaPassState::Claimed);
@@ -1317,7 +1313,6 @@ mod tests {
             now,
         )
         .unwrap_err();
-
     }
 
     #[test]

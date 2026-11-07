@@ -1421,7 +1421,6 @@ journeys:
                 ("manual_unclassified", "manual_checks.MANUAL-OLD"),
             ]
         );
-
     }
 
     #[test]

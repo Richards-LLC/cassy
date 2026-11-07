@@ -486,11 +486,8 @@ mod tests {
     /// Every suggested `task`/`verification`/`coordination` call in close-gate
     /// runtime text carries a harness prefix (literal or `{…}` placeholder).
 
-
     /// A string literal line ending in `\\` renders a literal backslash plus
     /// the next line's indentation instead of joining the lines.
-
-
 
 
     #[test]
@@ -503,8 +500,6 @@ mod tests {
             && !unsafe_ref.contains("mcp__cs__task"), "{unsafe_ref:?}");
 
     }
-
-
 
 
 
@@ -525,6 +520,4 @@ mod tests {
         assert!(line.contains("remaining items"), "{line}");
 
     }
-
-
 }

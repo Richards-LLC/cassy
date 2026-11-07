@@ -938,14 +938,11 @@ mod tests {
         std::fs::write(&malformed, "[[not valid").unwrap();
         let error = Config::load_merged_with_sources_from(None, Some(&malformed)).unwrap_err();
 
-
         let unreadable = dir.path().join("directory-not-file");
         std::fs::create_dir(&unreadable).unwrap();
         let error = Config::load_merged_with_sources_from(None, Some(&unreadable)).unwrap_err();
 
-
         let error = Config::load_merged_with_sources_from(Some(&malformed), None).unwrap_err();
-
     }
 
     #[test]
@@ -1237,7 +1234,6 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
             "allowlist = [\"*\"]",
         ] {
             let error = toml::from_str::<Config>(source).unwrap_err();
-
         }
     }
 

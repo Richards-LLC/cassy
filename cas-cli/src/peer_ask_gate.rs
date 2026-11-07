@@ -309,7 +309,6 @@ mod tests {
         ).unwrap();
         let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
             .await.expect_err("the missing source remains subject to normal merge guards");
-
     }
 
     #[test]

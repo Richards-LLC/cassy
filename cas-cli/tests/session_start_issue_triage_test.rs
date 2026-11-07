@@ -115,7 +115,6 @@ fn configured_supervisor_sees_issue_count_recent_titles_and_reuses_fresh_cache()
         assert!(first.contains(repo), "missing {repo}: {first}");
     }
 
-
     let (second, _) = session_start(&project, "supervisor", &fake_bin, &call_log);
     assert!(second.contains("7 open"), "{second}");
     assert_eq!(fs::read_to_string(call_log).unwrap().lines().count(), 1);

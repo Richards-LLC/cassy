@@ -297,13 +297,10 @@ describe("a conversation opens behind one quiet line (cas-813a)", () => {
 });
 
 describe("one outage, one vocabulary (journey F9)", () => {
-
   it("folds a fatal session failure into the machine outage (cas-99d7)", () => {
     const fatal = snapshot({ phase: "failed", fatal: true });
     expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "failed", fatal: true }))).toBe(false);
     expect(transportFailureNeedsAttention(fatal, snapshot({ phase: "live" }))).toBe(true);
   });
-
-
 
 });

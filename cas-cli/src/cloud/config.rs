@@ -2088,7 +2088,6 @@ mod tests {
 
         let error = config.save_to(&cloud_path).unwrap_err();
 
-
         assert!(!cloud_path.exists());
     }
 
@@ -2104,7 +2103,6 @@ mod tests {
         };
 
         let error = config.save_to(&cloud_path).unwrap_err();
-
 
         assert!(!cloud_path.exists());
     }
@@ -2128,7 +2126,6 @@ mod tests {
         };
 
         let error = config.save_to(&link).unwrap_err();
-
 
         assert!(
             !external_cloud.exists(),
@@ -3662,7 +3659,6 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-
 
         assert_eq!(std::fs::read_to_string(&config_path).unwrap(), original);
         assert!(!temp_path.exists(), "owned temp file must be cleaned up");

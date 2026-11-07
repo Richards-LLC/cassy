@@ -2741,7 +2741,6 @@ mod tests {
             .unwrap();
         let err = deliver_lifecycle_outbox_row(&sq, &pq, &row).unwrap_err();
 
-
         assert!(
             sq.get_by_transition_key("key-corrupt")
                 .unwrap()
@@ -2805,7 +2804,6 @@ mod tests {
             .find(|n| n.id == id_unk)
             .unwrap();
         let err = deliver_lifecycle_outbox_row(&sq, &pq, &row).unwrap_err();
-
 
         assert!(
             sq.get_by_transition_key("key-unk")

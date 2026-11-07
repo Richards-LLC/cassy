@@ -826,7 +826,6 @@ origin\thttps://github.com/me/foo.git (push)
     fn init_rejects_malformed_flag() {
         let tmp = TempDir::new().unwrap();
         let err = init_at(tmp.path(), Some("not-a-slash-pair")).unwrap_err();
-
     }
 
     #[test]
@@ -875,7 +874,6 @@ origin\thttps://github.com/me/foo.git (push)
         let tmp = TempDir::new().unwrap();
         let outcome = verify_at(tmp.path()).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Skipped);
-
     }
 
     #[test]
@@ -958,7 +956,6 @@ name: github-repo
         // Open marker with no matching close.
         fs::write(&claude_path, "<!-- keep github-repo -->\nstray content\n").unwrap();
         let err = refresh_at(tmp.path(), Some("acme/widget")).unwrap_err();
-
     }
 
     #[test]

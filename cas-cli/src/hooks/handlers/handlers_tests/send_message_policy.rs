@@ -56,8 +56,6 @@ fn factory_worker_send_message_is_denied_with_coordination_guidance() {
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     let reason = deny_reason(&out).expect("factory worker SendMessage must be denied");
 
-
-
     let queue = crate::store::open_prompt_queue_store(tmp.path()).expect("queue opens");
     assert!(
         queue
@@ -90,9 +88,6 @@ fn factory_supervisor_send_message_to_worker_is_denied_with_cas_guidance() {
 
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = deny_reason(&out).expect("factory supervisor SendMessage must be denied");
-
-
-
 
     let queue = crate::store::open_prompt_queue_store(tmp.path()).expect("queue opens");
     assert!(

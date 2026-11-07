@@ -820,7 +820,6 @@ fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
     let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
     result.unwrap();
 
-
     crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
     for builtin in &copies {
         assert_eq!([&personal, builtin].iter().filter(|path| path.is_file()).count(), 1,
@@ -2583,7 +2582,6 @@ fn update_names_what_happens_to_running_factories_cas_cef2() {
     assert!(notice.contains("pinned-session"), "{notice}");
     assert!(notice.contains("older-session"), "{notice}");
     assert!(notice.contains("9.99.1") && notice.contains("cas factory reexec --session <session>"), "{notice}");
-
 }
 
 // One real Git repo carries the seven downstream drift shapes from cas-6718.
@@ -3146,7 +3144,6 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
                 execute(&args, &update_test_cli(false), Some(&root))
             });
             result.unwrap();
-
         }
         assert_eq!(std::fs::read_to_string(&file).unwrap(), conflicted);
         assert_eq!(cas_6718_git(&project, &["ls-files", "--stage"]), index);

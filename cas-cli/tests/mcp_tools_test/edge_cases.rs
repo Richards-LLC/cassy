@@ -124,7 +124,6 @@ async fn test_invalid_entry_type() {
         .cas_remember(Parameters(req))
         .await
         .expect_err("remember must reject an unknown entry_type");
-
 }
 
 #[tokio::test]

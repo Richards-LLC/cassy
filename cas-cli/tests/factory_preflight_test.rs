@@ -378,9 +378,6 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
         .clone();
     let human = String::from_utf8(output).unwrap();
 
-
-
-
     // cas-43b3 shares one typed, credential-free Claude auth throttle record
     // across doctor and preflight processes. Nothing else may change.
     let mut after = file_snapshot(home.path());

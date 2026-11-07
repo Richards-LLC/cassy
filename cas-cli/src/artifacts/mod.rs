@@ -664,7 +664,6 @@ mod tests {
         let file = f.task_dir.join("empty.pdf");
         fs::write(&file, b"").unwrap();
         let error = publish(&f.context(), &file).unwrap_err();
-
     }
 
     #[tokio::test]
@@ -745,7 +744,6 @@ mod tests {
                     );
 
                     if path == "oversized.zip" {
-
                     }
                 }
             }

@@ -1996,8 +1996,6 @@ exec "$CAS_TEST_REAL_GIT" "$@"
                 target_branch: "main".to_string(),
             };
             let error = resolve_repo_context(dir.path(), &target).unwrap_err();
-
-
         });
     }
 
@@ -2519,7 +2517,6 @@ exec "$CAS_TEST_REAL_GIT" "$@"
         )
         .unwrap_err();
 
-
         let wrong_clone = RepoContext {
             repo_selector: expected.repo_selector.clone(),
             repo_root: PathBuf::from("/runtime/work-clone"),
@@ -2697,16 +2694,12 @@ mod task_anchor_tests {
             warning.contains("gabber-studio"),
             "must name the cloud project: {warning}"
         );
-
-
-
     }
 
     #[test]
     fn warning_without_canonical_id_still_names_the_root_cas_156b() {
         let warning = unanchored_task_start_warning("cas-9999", Path::new("/tmp/proj"), None);
         assert!(warning.contains("/tmp/proj"), "{warning}");
-
     }
 
     #[test]

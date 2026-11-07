@@ -712,7 +712,6 @@ mod tests {
     /// FAIL — never UNKNOWN-as-PASS. Drive the real detector with a stripped
     /// surface to prove the gate actually fails closed.
 
-
     /// AC-2 faithfulness: the Claude launch surface the runner captures matches
     /// what the REAL app enqueue path queues at launch — i.e. the intro prompt is
     /// actually wired, not just derivable. Drives the production

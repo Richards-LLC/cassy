@@ -499,9 +499,6 @@ mod tests {
         assert!(!agent_mcp_older_than(&root, "9.99.1", "old-worker"));
         let status = render(&snapshot, Some("factory-release"));
 
-
-
-
         // Eager MCP registration records the server PID itself. Both roster
         // shapes must identify this same live daemon epoch.
         let mut direct = Agent::new_with_role(
@@ -585,7 +582,6 @@ mod tests {
         let payload = &rows[0].payload;
         assert!(payload.contains("old-worker"), "{payload}");
         assert!(payload.contains("factory-release"), "{payload}");
-
     }
 
     #[test]
@@ -626,7 +622,5 @@ mod tests {
 
         // pin: the supported daemon re-exec remedy survives automatic update requests.
         assert!(notice.contains("cas factory reexec --session <session>"), "{notice}");
-
-
     }
 }

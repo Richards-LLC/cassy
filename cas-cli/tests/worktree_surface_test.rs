@@ -1532,7 +1532,6 @@ async fn task_bound_system_a_merge_rejects_same_selector_worktree_from_wrong_clo
         .expect_err("same-selector wrong-clone worktree must fail closed")
         .to_string();
 
-
     assert_eq!(repo_snapshot(&repo_a.root), a_before, "repo A changed");
     assert_eq!(repo_snapshot(&repo_b.root), b_before, "repo B changed");
     assert_eq!(
@@ -2235,9 +2234,7 @@ async fn test_worktree_merge_keeps_cut_trains_frozen_after_landing_cas_2b8d() {
         tasks.update(&epic).unwrap();
         let held = svc.factory(Parameters(request())).await.unwrap_err();
         if status == TaskStatus::Closed {
-
         } else {
-
         }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/cut"]), before, "a landed cut lane stays frozen even after closure");
         assert!(worker.join("late.txt").is_file(), "late work remains available for retargeting");
@@ -5046,11 +5043,8 @@ async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge(
         req.cleanup = Some(case == "cleanup");
         let error = svc.factory(Parameters(req)).await.expect_err(case);
         if case == "conflict" {
-
         } else if case == "anchor_mismatch" {
-
         } else {
-
         }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "epic/parked"]), target_before, "{case}");
         assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), head_before, "{case}");
@@ -5204,7 +5198,6 @@ async fn missing_work_target_refusal_names_resolved_trunk_cas_84df() {
         .factory(Parameters(req))
         .await
         .expect_err("missing WorkTarget must require explicit trunk authorization");
-
 }
 
 #[tokio::test]
@@ -7880,7 +7873,6 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
         .await
         .expect_err("resolved close-authoritative scope must reject semantic mutation");
 
-
     assert_eq!(
         durable_close_snapshot(&cas_root),
         before_rejected_update,
@@ -7935,7 +7927,6 @@ async fn resolved_task_proof_freezes_scope_until_supervisor_starts_a_fresh_cycle
         }))))
         .await
         .expect_err("approved scope needs explicit recovery before mutation");
-
 
     let worker_reopen = {
         let _role = VarGuard::set(&mut env, "CAS_AGENT_ROLE", "worker");
@@ -8919,7 +8910,6 @@ async fn epic_child_resolving_to_trunk_requires_allow_trunk_cas_c85e() {
             .factory(Parameters(req))
             .await
             .expect_err("trunk must not replace the epic lane silently");
-
     }
     assert_eq!(
         git_stdout(&repo.root, &["rev-parse", "main"]),

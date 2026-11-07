@@ -65,7 +65,6 @@ describe("operator inbox view (cas-9b7d QA round 1)", () => {
 
     snapshot.replay = { kind: "ready" };
     inbox.render();
-
   });
 
   it("names an unavailable observer and separate component status without claiming power state", () => {
@@ -161,7 +160,6 @@ describe("operator inbox view (cas-9b7d QA round 1)", () => {
 });
 
 describe("operator inbox copy (cas-97d58 F21)", () => {
-
 
   it("says who can read the messages and keeps the command line behind a disclosure", () => {
     const { inbox } = view({ kind: "signed_out" });

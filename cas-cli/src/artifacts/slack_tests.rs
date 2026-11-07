@@ -292,7 +292,6 @@ async fn missing_cloud_auth_is_named() {
         .await
         .unwrap_err();
     assert_eq!(error.code, "cloud_auth_missing", "{error}");
-
 }
 
 #[tokio::test]
@@ -349,7 +348,6 @@ async fn violets_refusal_keeps_its_code_and_the_allocated_upload() {
     assert_eq!(error.code, "contact_too_recent");
     assert!(error.message.contains("16:23:00") && error.message.contains("peer-on-prowl") && error.message.contains("https://example.slack.com/root") && error.message.contains("17:23:00"));
     assert_eq!(error.file_id.as_deref(), Some("F1148"));
-
 }
 
 #[tokio::test]

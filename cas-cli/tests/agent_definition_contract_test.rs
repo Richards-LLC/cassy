@@ -50,7 +50,6 @@ fn job(name: &str) -> &'static str {
 /// hard-code a calendar year — now sweeps the whole catalog instead, so it
 /// still catches the next agent that tries.
 
-
 const EVIDENCE_GATE: &str = "skills/cas-qa-craft/references/verifier-evidence-gate.md";
 
 #[test]
@@ -105,8 +104,6 @@ fn verifier_mirrors_document_the_current_close_contract() {
 /// (cas-228e); the verifier routes to it before it reads the close reason.
 
 
-
-
 /// Audit D12 / L2 P1-58 (cas-228e): each Stop job has one body, built into
 /// the prompt with the light lane's own tool prefix. No harness installs the
 /// jobs as subagents, and stop_flow never embeds a per-harness copy.
@@ -158,7 +155,6 @@ fn maintenance_jobs_call_tools_the_way_the_tools_accept() {
         "learning-reviewer lists skills once, not once per learning"
     );
 }
-
 
 
 /// Audit M09 (cas-228e): the Stop-hook classifier is a single-turn,

@@ -1448,7 +1448,6 @@ mod tests {
     fn cas_3147_config_set_refuses_write_roots() {
         let mut config = crate::config::Config::default();
         let error = config.set("factory.write_roots", "/tmp").unwrap_err().to_string();
-
     }
 
     /// GH #1182: setting project roots refuses only a factory worker or

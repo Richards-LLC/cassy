@@ -501,7 +501,6 @@ async fn epic_split_assignment_and_start_require_reasoned_supervisor_override_ca
         .await
         .unwrap_err();
 
-
     let id = propose_and_accept(&cloud, &soundwave, &prowl).await;
     assert_split_decision(&soundwave, &id, "accept");
 

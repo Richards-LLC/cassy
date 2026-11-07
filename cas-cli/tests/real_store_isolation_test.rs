@@ -45,7 +45,6 @@ fn spawned_cas_aborts_when_it_opens_a_protected_database() {
         !output.status.success(),
         "cas opened a protected database and exited successfully; stderr: {stderr}"
     );
-
 }
 
 #[test]
@@ -73,7 +72,6 @@ fn an_unrelated_protected_database_does_not_break_a_sandboxed_run() {
         &elsewhere.cas_root().join("cas.db").display().to_string(),
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-
 
     assert!(
         output.status.success(),

@@ -4517,7 +4517,6 @@ mod tests {
             result.status.code()
         );
         let stderr = String::from_utf8_lossy(&result.stderr);
-
     }
 
     /// Running `git commit` on a factory branch must succeed (hook allows it).
@@ -4593,7 +4592,6 @@ mod tests {
             result.status.code()
         );
         let stderr = String::from_utf8_lossy(&result.stderr);
-
     }
 
     /// Installing the hook twice must be idempotent (second install is a no-op).
@@ -4782,7 +4780,6 @@ mod tests {
             "commit off factory/<name> inside the worker worktree must still be blocked"
         );
         let stderr = String::from_utf8_lossy(&wt_commit.stderr);
-
 
         // Best-effort cleanup so temp dirs don't linger as registered worktrees.
         let _ = std::process::Command::new("git")
@@ -5038,7 +5035,6 @@ mod tests {
         assert!(!foreign_source.status.success());
         let stderr = String::from_utf8_lossy(&foreign_source.stderr);
 
-
         // Finally, switch HEAD away from the worker's own branch and ensure
         // even an otherwise valid destination is refused.
         std::process::Command::new("git")
@@ -5057,7 +5053,6 @@ mod tests {
             .unwrap();
         assert!(!wrong_head.status.success());
         let stderr = String::from_utf8_lossy(&wrong_head.stderr);
-
 
         std::fs::write(wt_path.join("foreign.txt"), "foreign worker commit\n").unwrap();
         std::process::Command::new("git")
@@ -5148,8 +5143,6 @@ mod tests {
             .unwrap();
         let stderr = String::from_utf8_lossy(&push.stderr);
         assert!(!push.status.success(), "a rewritten delivery must be refused: {stderr}");
-
-
 
         assert_eq!(
             String::from_utf8_lossy(&git(&remote, &["rev-parse", "refs/heads/factory/w"]).stdout).trim(),
@@ -5286,7 +5279,6 @@ mod tests {
         assert!(!onto_frozen.status.success(), "the frozen branch must not move");
         let stderr = String::from_utf8_lossy(&onto_frozen.stderr);
 
-
         // Another worker's task branch, and a suffix that is not a task id,
         // stay refused at commit time.
         for foreign in ["factory/support-triage-cas-1185", "factory/credit-repairs-scratch"] {
@@ -5296,7 +5288,6 @@ mod tests {
             let refused = git(&["commit", "-m", "foreign"]);
             assert!(!refused.status.success(), "{foreign} must be refused");
             let stderr = String::from_utf8_lossy(&refused.stderr);
-
         }
 
         let _ = std::process::Command::new("git")

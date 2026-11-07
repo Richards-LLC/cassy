@@ -555,7 +555,6 @@ mod tests {
         let error = store
             .reserve_or_resume(&request("digest-b", 4), &budget())
             .unwrap_err();
-
     }
     #[test]
     fn terminal_receipt_persists_verdict_and_non_secret_evidence_reference() {

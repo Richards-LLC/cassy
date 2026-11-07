@@ -917,5 +917,4 @@ fn a_baseline_from_a_future_format_is_refused() {
 
     let err = retrieval_parity::replay(&h.ctx, &h.set, &baseline, 3)
         .expect_err("a version mismatch must not be silently compared");
-
 }

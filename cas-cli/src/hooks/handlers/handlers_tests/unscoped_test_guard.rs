@@ -58,7 +58,6 @@ fn cas_c0ec_rewritten_worker_logs_require_ignored_or_external_paths() {
         let mut request = input("cargo check -p cas --lib > target/source.log 2>&1 &", "worker");
         request.cwd = worktree.into();
         let reason = deny_reason(&handle_pre_tool_use(&request, Some(&root)).unwrap()).unwrap();
-
     }
     let artifacts = tempfile::tempdir().unwrap();
     let mut config = crate::config::Config::default();
@@ -154,7 +153,6 @@ fn worker_rust_builds_are_denied_naming_the_assembly_rule() {
         let reason = deny_reason(&out).unwrap_or_else(|| panic!("expected deny for {command:?}"));
 
         assert!(reason.contains("cas-4cbb"), "{reason}");
-
     }
     // The complete provider profile does not admit identity/build overrides.
     for extra in ["-u CAS_SESSION_ID", "CAS_AGENT_ROLE=supervisor", "CARGO_BUILD_JOBS=64"] {
@@ -374,7 +372,6 @@ fn worker_suites_run_unwrapped_without_memory_admission_cas_38e7() {
         request.cwd = cwd.into();
         let out = handle_pre_tool_use(&request, Some(&root)).unwrap();
         let reason = deny_reason(&out).expect("credential write remains denied");
-
     }
 }
 
@@ -465,7 +462,6 @@ fn rust_or_unprovable_make_targets_stay_refused_cas_cf70() {
         request.cwd = dir.path().to_str().unwrap().into();
         let out = handle_pre_tool_use(&request, None).expect("handler ok");
         let reason = deny_reason(&out).unwrap_or_else(|| panic!("expected deny for {command:?}"));
-
     }
 }
 

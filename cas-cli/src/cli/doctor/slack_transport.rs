@@ -137,7 +137,6 @@ mod tests {
         let check = check_for_homes(&[home.path().into()]);
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("violet.violet_post"));
-
     }
 
     #[test]

@@ -63,7 +63,6 @@ fn cas_ef94_running_consumer_comes_from_the_live_daemon_receipt() {
     let old = observe(root, &live_session("old"), true).unwrap();
     assert_eq!(old.state, ConsumerState::Unknown);
 
-
     assert!(observe(root, &live_session("old"), false).is_none());
 
     // Clean shutdown retires only this process's receipt.
@@ -88,14 +87,12 @@ fn cas_ef94_push_wake_off_at_start_reports_config_drift() {
     assert_eq!(off.state, ConsumerState::PushWakeOff, "{off:?}");
     assert_eq!(off.consumer_id, None);
 
-
     set_wake_enabled(root, true);
     let drift = observe(root, &live_session("off"), true).unwrap();
     assert_eq!(
         (drift.wake_enabled_at_start, drift.wake_enabled_now),
         (Some(false), true)
     );
-
 }
 
 /// A successor publishing in the read/unlink window must retain its receipt.

@@ -420,7 +420,6 @@ fn after_cells_must_preserve_before_carousels_cas_51f1() {
             assert!(result.is_ok(), "AFTER supersets must pass: {result:?}");
         } else {
             let refusal = result.expect_err("dropped carousel cells must refuse close");
-
         }
     }
 }
@@ -529,7 +528,6 @@ fn citation_migration_preserves_validation_boundaries_gh_1061() {
     std::fs::copy(&bundle, &unrelated).unwrap();
     for citation in [unrelated.clone(), legacy.join("../other-project/qa/bundle.json")] {
         let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", citation.display())).unwrap_err();
-
     }
     // Remapping still enforces the delivered commit, rather than trusting the
     // presence of a scoped manifest alone.
@@ -547,7 +545,6 @@ fn citation_migration_preserves_validation_boundaries_gh_1061() {
         // never permission to switch to a different bundle.
         std::os::unix::fs::symlink(legacy.join("absent.json"), &historical).unwrap();
         let error = scoped_close(&fx, &cas_root, &format!("qa-bundle: {}", historical.display())).unwrap_err();
-
     }
 }
 
@@ -568,7 +565,6 @@ fn missing_citation_names_the_note_command() {
 fn missing_bundle_json_is_rejected() {
     let fx = Fixture::new();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -581,7 +577,6 @@ fn each_missing_or_empty_required_file_is_named_with_its_command() {
         refusal.problem.contains("files.trace_actions"),
         "{refusal:?}"
     );
-
 
     let fx = Fixture::new();
     fx.write_bundle(|_| {});
@@ -600,7 +595,6 @@ fn each_missing_or_empty_required_file_is_named_with_its_command() {
             .remove("critique");
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -612,7 +606,6 @@ fn polish_renders_must_cover_light_dark_desktop_phone() {
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
     assert!(refusal.problem.contains("-light-phone.png"), "{refusal:?}");
-
 }
 
 #[test]
@@ -634,7 +627,6 @@ fn stale_file_mtime_is_rejected() {
     fx.write_bundle(|_| {});
     set_mtime_secs_ago(&fx.bundle_dir().join("M01.png"), 3600);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -666,14 +658,11 @@ fn failing_or_assertion_free_trace_is_rejected() {
     trace_zip(&fx.bundle_dir().join("trace.zip"), &events);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     trace_zip(&fx.bundle_dir().join("trace.zip"), &PASSING[2..]);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     std::fs::write(fx.bundle_dir().join("trace.zip"), "not a zip").unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 /// cas-b10d: a trace zip with these entries, stored uncompressed.
@@ -733,8 +722,6 @@ fn a_library_context_trace_is_refused_with_the_runner_recipe_cas_b10d() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
-
     assert!(refusal.command.contains("--scrub-trace"), "{}", refusal.command);
 }
 
@@ -784,7 +771,6 @@ fn passing_poll_and_to_pass_ignore_caught_inner_expect_retries_gh1013() {
     terminal_failure[5] = r#"{"type":"after","callId":"poll@1","error":{"message":"poll timed out"}}"#;
     trace_zip(&fx.bundle_dir().join("trace.zip"), &terminal_failure);
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -792,7 +778,6 @@ fn polish_proof_and_critique_floor_are_enforced() {
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["visual_qa_status"] = serde_json::json!("unavailable"));
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 
     let fx = Fixture::new();
     fx.write_bundle(|_| {});
@@ -803,7 +788,6 @@ fn polish_proof_and_critique_floor_are_enforced() {
         "http://127.0.0.1:4173/",
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["critique_score"]["fit"] = serde_json::json!(3));
@@ -849,7 +833,6 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
         .validate(&format!("qa-bundle: {}/bundle.json", outside.display()))
         .unwrap_err();
 
-
     #[cfg(unix)]
     {
         let link = fx.task_dir.join("escape");
@@ -857,7 +840,6 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
         let refusal = fx
             .validate(&format!("qa-bundle: {}/bundle.json", link.display()))
             .unwrap_err();
-
     }
 
     let round = fx.task_dir.join("independent-qa/round-1");
@@ -870,7 +852,6 @@ fn citations_outside_the_task_or_from_an_independent_round_are_rejected() {
     let refusal = fx
         .validate(&format!("qa-bundle: {}/bundle.json", round.display()))
         .unwrap_err();
-
 }
 
 #[test]
@@ -880,7 +861,6 @@ fn listed_files_may_not_escape_the_bundle() {
         manifest["files"]["receipt"] = serde_json::json!("../../../repo/app.ts")
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -1120,8 +1100,6 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
 
-
-
     assert!(
         !error.contains("webkit.spec.ts:2"),
         "allowed skip must not be listed: {error}"
@@ -1139,8 +1117,6 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
         &allowed_only,
     )
     .unwrap();
-
-
 }
 
 #[test]
@@ -1161,7 +1137,6 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         &[],
     )
     .unwrap_err();
-
 
     assert!(error.contains(CONTRACT_REFERENCE), "{error}");
     // cas-f426: with no local build that can sign in, the refusal names the
@@ -1328,7 +1303,6 @@ fn journey_polish_exception_does_not_reach_the_delivery_close() {
     });
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     let fx = Fixture::new();
     fx.write_bundle(|manifest| manifest["producer"] = serde_json::json!("journey"));
     fx.validate(&fx.notes())
@@ -1355,7 +1329,6 @@ fn ledger_pass_row_must_be_real_build() {
     )
     .unwrap();
     let refusal = validate_ledger(&ctx).unwrap_err();
-
 }
 
 #[test]
@@ -1424,7 +1397,6 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
         &[],
     )
     .unwrap();
-
 }
 
 // cas-a6a3 (GH #1007): a claimed visual-QA pass needs the strict run's own
@@ -1437,9 +1409,6 @@ fn visual_qa_pass_claim_without_the_run_report_is_refused() {
     // The claim and the PASS lines are there, but the run never wrote its report.
     std::fs::write(fx.bundle_dir().join("visual-qa/visual-qa.json"), "{}").unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
-
-
 }
 
 #[test]
@@ -1471,7 +1440,6 @@ fn visual_qa_run_older_than_the_delivered_commit_is_refused() {
         "http://127.0.0.1:4173/",
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -1486,14 +1454,12 @@ fn visual_qa_run_that_failed_or_was_not_strict_is_refused() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     std::fs::write(
         fx.bundle_dir().join("visual-qa/visual-qa.json"),
         serde_json::json!({"status": "PASS", "strict": false, "generatedAt": chrono::Utc::now().to_rfc3339(), "urls": ["http://127.0.0.1:4173/"]}).to_string(),
     )
     .unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -1683,7 +1649,6 @@ fn scoped_visual_qa_refuses_a_finding_the_delivery_introduced() {
         ]),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 /// GH #1166: a project visual-qa.mjs (the gabber-studio shape) writes one
@@ -1769,7 +1734,6 @@ fn scoped_visual_qa_compares_per_render_issue_reports_gh_1166() {
         render_issue("#send")
     ]));
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -1786,7 +1750,6 @@ fn scoped_visual_qa_names_both_accepted_shapes_when_neither_is_present_gh_1166()
     )
     .unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 #[test]
@@ -1808,7 +1771,6 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     // A base run against a deployed site.
     let fx = scoped_fixture();
     scoped_report(
@@ -1820,7 +1782,6 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
 
-
     // A delivered-build run from before the delivered commit.
     let fx = scoped_fixture();
     scoped_report(
@@ -1831,7 +1792,6 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
         serde_json::json!([backlog_finding(TIP, "footer a")]),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 
     // Reports without a findings list cannot be compared.
     let fx = scoped_fixture();
@@ -1847,7 +1807,6 @@ fn scoped_visual_qa_needs_a_comparable_local_base_run() {
     )
     .unwrap();
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 // ---------------------------------------------------------------------------
@@ -1917,7 +1876,6 @@ fn deployed_staging_bundle_with_reason_and_proof_satisfies_the_gate() {
     assert_eq!(receipt.head_sha, fx.head);
     // The same run is not local, so without the declaration it is refused.
     let local_only = fx.validate_with_origins(&[]).unwrap_err();
-
 }
 
 /// cas-f426: Vercel serves each deployment on its own host, so a project
@@ -1948,7 +1906,6 @@ fn deployed_bundle_without_a_reason_is_refused() {
     let fx = Fixture::new();
     fx.write_deployed_bundle(|manifest| manifest["deployed"]["reason"] = serde_json::json!(" "));
     let refusal = fx.validate_with_origins(&staging()).unwrap_err();
-
 }
 
 #[test]
@@ -1966,7 +1923,6 @@ fn deployed_bundle_from_an_unconfigured_or_local_origin_is_refused() {
         manifest["deployed"]["origin"] = serde_json::json!("http://localhost:3000")
     });
     let local = fx.validate_with_origins(&staging()).unwrap_err();
-
 
     // The visual-QA run itself must be on the declared origin.
     let fx = Fixture::new();
@@ -1992,7 +1948,6 @@ fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
     });
     let stale = fx.validate_with_origins(&staging()).unwrap_err();
 
-
     let fx = Fixture::new();
     fx.write_deployed_bundle(|_| {});
     std::fs::write(
@@ -2001,7 +1956,6 @@ fn deployed_bundle_for_another_commit_or_without_proof_is_refused() {
     )
     .unwrap();
     let unproven = fx.validate_with_origins(&staging()).unwrap_err();
-
 
     let fx = Fixture::new();
     fx.write_deployed_bundle(|_| {});
@@ -2166,7 +2120,6 @@ fn deployed_bundle_carrying_credentials_is_refused_without_echoing_them() {
     fx.write_deployed_bundle(|_| {});
     std::fs::write(fx.bundle_dir().join("staging-storage-state.json"), "{}").unwrap();
     let state = fx.validate_with_origins(&staging()).unwrap_err();
-
 }
 
 #[test]
@@ -2301,7 +2254,6 @@ fn scoped_visual_qa_ignores_per_render_random_ids_but_still_reports_new_findings
         ]),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
 }
 
 // cas-f290: captured cas-a286 Atlas findings, including the ancestor class
@@ -2389,7 +2341,6 @@ fn scoped_visual_qa_keeps_new_renamed_findings_added_cas_f290() {
             serde_json::json!([cas_f290_atlas_finding(BASE, "light", true)]),
         );
         let refusal = fx.validate(&fx.notes()).unwrap_err();
-
     }
 }
 
@@ -2508,7 +2459,6 @@ fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
         *changed.pointer_mut(pointer).unwrap() = value;
         cas_f290_reports(&fx, serde_json::json!([changed]), serde_json::json!([base.clone()]));
         let refusal = fx.validate(&fx.notes()).unwrap_err();
-
     }
     cas_f290_reports(&fx, serde_json::json!([tip.clone(), tip]), serde_json::json!([base]));
     let _ = fx.validate(&fx.notes()).unwrap_err().problem;
@@ -2563,8 +2513,6 @@ fn scoped_visual_qa_reports_a_finding_inside_an_inserted_section_gh_1321() {
         Some(gh_1321_finding(TIP, "observations", 1, "Total 12", 120.0)),
     );
     let refusal = fx.validate(&fx.notes()).unwrap_err();
-
-
 }
 
 fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
@@ -2721,7 +2669,6 @@ fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
         &["journeys:HUB-J7".into()], &[],
     ).unwrap_err();
 
-
     git_ok(&fx.repo, &["checkout", "-q", "delivery"]);
     fx.head = merged;
 
@@ -2733,7 +2680,6 @@ fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
         &journey_context(&fx, &notes), EvidenceTier::Bundle,
         &["journeys:HUB-J7".into()], &[],
     ).unwrap_err();
-
 }
 
 #[test]
@@ -2759,7 +2705,6 @@ fn visual_bundle_requires_screencast_cas_7e91() {
     let refusal = fx.validate(&fx.notes()).expect_err("a visual bundle needs its screencast");
 
     assert!(refusal.command.contains("receipt"), "{refusal:?}");
-
 }
 
 #[test]

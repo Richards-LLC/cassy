@@ -413,7 +413,6 @@ mod tests {
         assert!(!failed.contains("fixture-secret"), "{failed}");
         let timed_out = resolve_slug("pippenz/cas", temp.path(), &gh, Duration::ZERO).unwrap_err();
 
-
         let unavailable = resolve_slug(
             "pippenz/cas",
             temp.path(),
@@ -421,8 +420,6 @@ mod tests {
             Duration::from_secs(2),
         )
         .unwrap_err();
-
-
     }
 
     #[test]
@@ -446,6 +443,5 @@ mod tests {
 
         assert!(failed.contains("128"), "{failed}");
         let timed_out = origin_slug(temp.path(), Duration::ZERO).unwrap_err();
-
     }
 }

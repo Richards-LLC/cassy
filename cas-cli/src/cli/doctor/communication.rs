@@ -66,7 +66,6 @@ mod tests {
         let row = check(&root);
         assert!(matches!(row.status, CheckStatus::Warning), "{}", row.message);
 
-
         assert!(!row.message.contains("cas-447d") && !row.message.contains("SELECT"), "{}", row.message);
         assert!(row.message.lines().all(|line| line.is_ascii()), "{}", row.message);
     }

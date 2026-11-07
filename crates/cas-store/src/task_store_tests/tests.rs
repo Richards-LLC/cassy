@@ -307,7 +307,6 @@ fn task_note_append_reports_bounded_contention_exhaustion() {
 
     let message = error.to_string();
 
-
     assert_eq!(store.get(&task.id).unwrap().notes, "");
 }
 

@@ -3509,7 +3509,6 @@ mod tests {
             Some(&review),
         )
         .unwrap_err();
-
     }
 
     #[test]

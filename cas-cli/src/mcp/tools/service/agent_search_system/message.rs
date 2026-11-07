@@ -6649,7 +6649,6 @@ mod cas_89e1_post_merge_message_type_tests {
         let error = crate::prompt_revalidation::refresh_merge_request_source(
             repo.path(), "-unsafe", cas_types::DeliveryMode::LocalMerge,
         ).expect_err("unsafe source names must refuse before any Git probe");
-
     }
 
     /// GH #734: a worker in one factory session must not inherit the newest
@@ -6834,7 +6833,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(cross_session)
             .await
             .expect_err("typed status cannot target a sibling session");
-
     }
 
     /// cas-6920: classify each acknowledgement before its labels and other
@@ -7191,7 +7189,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(request)
             .await
             .expect_err("blank summary must be rejected");
-
     }
 
     fn assignment_message_fixture() -> (tempfile::TempDir, CasService) {
@@ -7496,8 +7493,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("over-cap message must be rejected");
 
-
-
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)
@@ -7716,9 +7711,7 @@ mod cas_89e1_post_merge_message_type_tests {
             let error = error_service.message_send(request).await.expect_err("invalid alias reply must be refused");
             assert!(error.message.contains(cause), "{selector}: {error:?}");
 
-
             assert!(error.message.contains(COMMANDER_REPLY_CONTRACT_POINTER), "{selector}: {error:?}");
-
         }
         assert_eq!(queue.peek_operator_replies("factory-commander-alias", 10).unwrap().len(), 1,
             "error guidance must not queue another answer");
@@ -7757,8 +7750,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(request)
             .await
             .expect_err("unknown target must be rejected");
-
-
 
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
@@ -8467,7 +8458,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .message_send(request)
             .await
             .expect_err("worker operator turn must be rejected");
-
     }
 }
 
@@ -8479,7 +8469,6 @@ mod cas_89e1_post_merge_message_type_tests {
 mod cas_d5ab_send_outcome_tests {
     use super::*;
     use cas_store::PromptQueueStore as _;
-
 
 
 

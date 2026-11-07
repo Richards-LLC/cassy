@@ -630,7 +630,6 @@ mod reused_factory_branch_tests {
         let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
             .expect_err("tracked changes must block reset");
 
-
     }
 
     /// GH #1006 item 3: a branch parked for merge on another target is kept
@@ -3960,7 +3959,6 @@ mod factory_epic_owner_tests {
         // Empty strings must not count as identity either.
         let err_empty =
             resolve_factory_epic_owner(Some("  ".into()), Some("".into()), None).unwrap_err();
-
     }
 
     /// cas-cc74: create write boundary trims owner identity before store.
@@ -3993,8 +3991,6 @@ mod demo_statement_gate_tests {
             &labels(&["ui", "frontend"]),
         )
         .unwrap_err();
-
-
     }
 
     #[test]
@@ -4052,7 +4048,6 @@ mod demo_statement_gate_tests {
             &labels(&["commander"]),
         )
         .unwrap_err();
-
     }
 
     #[test]
@@ -4196,7 +4191,6 @@ mod related_recall_response_tests {
             )))
             .await
             .expect_err("a matching task outside the epic still needs confirmation");
-
     }
 
     #[tokio::test]
@@ -4282,7 +4276,6 @@ mod related_recall_response_tests {
             .await.expect("generic-only title overlap needs a higher threshold");
         let warning = core.cas_task_create(Parameters(plain_task_request("Publish release notes report")))
             .await.expect_err("an exact duplicate title still warns");
-
     }
 
     #[tokio::test]
@@ -4565,7 +4558,6 @@ mod related_recall_response_tests {
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
         std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let first = create("Fix one").await;
-
 
         let train = trains("main").pop().expect("train opened from main");
         let lane = train.branch.clone().expect("train lane");
@@ -6107,7 +6099,6 @@ mod related_recall_response_tests {
             .cas_task_create(Parameters(duplicate_request))
             .await
             .expect_err("identical open title must require confirmation");
-
 
         second
             .cas_task_create_with_target(

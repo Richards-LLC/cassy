@@ -3175,8 +3175,6 @@ mod risk_proof_tests {
     fn no_code_delivery_rejection_names_methodology_repair_cas_1b74() {
         let error = no_code_close_proof("cas-delivered", Some("no-code"), Some("artifact:report"), true)
             .expect_err("code must never close using a no-code declaration");
-
-
     }
 
     fn failed_run_log(head: &str, base: &str, command: &str, failed: &[&str]) -> String {
@@ -3597,10 +3595,6 @@ mod risk_proof_tests {
             std::path::Path::new("."),
         )
         .expect_err("a missing blast-radius module must refuse close");
-
-
-
-
     }
 
     #[test]
@@ -3636,7 +3630,6 @@ mod risk_proof_tests {
             .expect_err("platform proof is still owed until a supervisor corrects the risk");
 
         assert!(error.contains("web/src/composer.css"), "{error}");
-
 
         assert_eq!(task.risk, vec![TaskRisk::Platform], "the declared risk is never downgraded");
 
@@ -3730,13 +3723,11 @@ mod risk_proof_tests {
         let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect_err("a platform receipt without a command must remain rejected");
 
-
         task.id = "cas-incomplete-loaded-proof".into();
         task.risk = vec![TaskRisk::Concurrency];
         task.notes = "[2026-09-14] 🧪 LOADED_PROOF non-Rust target: pnpm test -j16; 2 runs; PASS".into();
         let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect_err("a loaded receipt with fewer than three runs must remain rejected");
-
     }
 
     #[test]
@@ -4053,7 +4044,6 @@ mod risk_proof_tests {
             "surface checker rejected the gate command: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-
     }
 
     /// cas-0db7: the gate resolves the task's attributed paths, but `--proof`
@@ -4167,7 +4157,6 @@ mod risk_proof_tests {
             !gate_only.status.success(),
             "the gate-only command was the defect"
         );
-
     }
 
     #[test]
@@ -4284,7 +4273,6 @@ mod risk_proof_tests {
             .expect_err("missing integration proof must refuse close");
         assert!(error.contains("factory_mcp_ops_test"), "{error}");
 
-
         task.notes = "[2026-09-10] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS"
             .into();
         validate_risk_close_proofs(&task, &changed, dir.path())
@@ -4389,8 +4377,6 @@ mod risk_proof_tests {
             validate_risk_close_proofs_with_base(&task, &changed, dir.path(), Some(&expected_base))
                 .expect_err("a receipt from another base must not satisfy this delivery");
         assert!(error.contains(&expected_base), "{error}");
-
-
 
         task.notes = format!(
             "[2026-09-18] 📝 PROGRESS SCOPED_PROOF: targets=lib:factory_ops,test:factory_mcp_ops_test result=PASS base={expected_base}"
@@ -5310,14 +5296,12 @@ mod supervisor_override_tests {
     fn supervisor_override_requires_a_non_empty_reason() {
         let error = validate_supervisor_override(true, Some("   "), true)
             .expect_err("supervisor override without a reason must be rejected");
-
     }
 
     #[test]
     fn supervisor_override_is_supervisor_only() {
         let error = validate_supervisor_override(true, Some("reviewed"), false)
             .expect_err("workers must not issue supervisor overrides");
-
     }
 }
 
@@ -18920,8 +18904,6 @@ mod parent_branch_resolver_tests {
 
         let error = resolve_close_gate_default_branch(dir.path())
             .expect_err("ambiguous detached HEAD must reject");
-
-
     }
 
     // ── cas-e093: success message ordering ──────────────────────────────────
@@ -29351,7 +29333,6 @@ mod merge_state_gate_tests {
         .unwrap_err()
         .to_string();
 
-
         let merged = observed_merged_delivery_tip(repo, &anchor, "main").unwrap();
         cas_store::record_observed_delivery_merge(
             root.path(),
@@ -32675,7 +32656,6 @@ esac
         git(dir.path(), &["branch", "-f", "factory/original", "factory/receiver"]);
         let error = resolve_close_delivery_branch(dir.path(), &task, "receiver")
             .expect_err("a handoff branch recycled for another task is not this delivery");
-
     }
 
     #[test]
@@ -32812,7 +32792,6 @@ esac
         let branch = resolve_close_delivery_branch(p, &task, "worker").unwrap();
         assert_eq!(branch, "factory/worker-cas-test1");
         let refusal = unpushed_delivery_tip_refusal(&branch, &tip, &base);
-
 
         assert_eq!(head_sha(p), tip);
         assert_eq!(rev_parse_local(p, "factory/worker"), parked);
@@ -33622,7 +33601,6 @@ esac
     /// cas-08f9: the QA backstop's "cannot tell which commit" refusal never
     /// claims a merge when the branch tip is not on the target.
 
-
     /// GH #849: `request_changes` deliberately clears the active parked
     /// anchor before the worker starts a fresh lease.  The declined delivery
     /// is still this task's work, however; it must not become anonymous lane
@@ -34017,7 +33995,6 @@ esac
             refusal.contains("target_repo"),
             "refusal must point cross-repo work at the declared target repo: {refusal}"
         );
-
 
         // A receipt that does resolve locally is not refused by this check —
         // ancestry/window semantics stay with the existing gates.
@@ -34908,7 +34885,6 @@ esac
         task.deliverables.factory_branch_anchor = Some("d".repeat(40));
         let refusal = parked_delivery_head(p, &task).unwrap_err();
 
-
         assert!(refusal.contains(&"d".repeat(40)), "{refusal}");
     }
 
@@ -35630,7 +35606,6 @@ esac
         git(p, &["commit", "-qm", "unreviewed later change"]);
         let error =
             validated_delivery_drop_review(p, &anchor, "main", &paths, Some(&review)).unwrap_err();
-
     }
 
     #[test]
@@ -43151,7 +43126,6 @@ mod zero_change_close_tests {
         let error = run_declared_pre_close_hook(&task, &declared_main_context(repo),
             with_worktree.then_some(repo), Some(&integrated), false)
             .expect_err("origin-only receipt must not authorize local_merge");
-
     }
 
     #[test]
@@ -43368,7 +43342,6 @@ mod zero_change_close_tests {
         let error =
             run_declared_pre_close_hook(&task, &declared_main_context(p), None, None, true)
                 .expect_err("an anchor no delivery ref carries stays refused");
-
     }
 
     /// cas-49c0: the close receipt flags main-checkout edits that match the
@@ -43673,7 +43646,6 @@ mod zero_change_close_tests {
             false,
         )
         .expect_err("an epic without an anchor needs an explicit receipt");
-
     }
 
     #[test]
@@ -43909,7 +43881,6 @@ mod zero_change_close_tests {
         let (dir, _origin, task, receipt) = pushed_receipt_fixture_cas_9ffa();
         let error = run_declared_pre_close_hook(&task, &declared_main_context(dir.path()),
             None, Some(&receipt), false).expect_err("ordinary receipt must still be integrated");
-
     }
 
     #[test]
@@ -43972,9 +43943,6 @@ mod zero_change_close_tests {
         )
         .expect_err("a receipt on neither the worker nor target branch must remain rejected");
         assert!(error.contains(&receipt), "rejection must name the commit: {error}");
-
-
-
     }
 
     /// cas-06ff: a supervisor-directed rebase rewrites the parked anchor out
@@ -44075,8 +44043,6 @@ mod zero_change_close_tests {
             error.contains(&rebased_tip),
             "current tip must be named: {error}"
         );
-
-
     }
 
     // ── has_worker_committed_reviewable_changes ──────────────────────────────
@@ -44139,7 +44105,6 @@ mod zero_change_close_tests {
                     "the non-ancestor branch tip must be rejected with a squash suggestion",
                 );
         assert!(error.contains(&squash_sha), "{error}");
-
     }
 
     #[test]
@@ -44974,8 +44939,6 @@ mod zero_change_close_tests {
             validate_task_commit_receipt(dir.path(), short_receipt, "main", &test_receipt_window())
                 .expect_err("a real but unmerged commit must remain invalid close evidence");
 
-
-
         let message = commit_receipt_rejection(dir.path(), "cas-receipt", short_receipt, "main", &reason);
         assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
         assert!(!message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
@@ -45042,8 +45005,6 @@ mod zero_change_close_tests {
             validate_task_commit_receipt(dir.path(), &tree, "main", &test_receipt_window())
                 .expect_err("a tree object is not immutable commit evidence");
 
-
-
         git(
             dir.path(),
             &["tag", "-a", "receipt-tag", "-m", "receipt tag"],
@@ -45062,8 +45023,6 @@ mod zero_change_close_tests {
         let tag_error =
             validate_task_commit_receipt(dir.path(), &tag, "main", &test_receipt_window())
                 .expect_err("an annotated tag object is not immutable commit evidence");
-
-
     }
 
     /// cas-7308a: conflict resume clears the parked anchor, then the
@@ -45447,7 +45406,6 @@ mod zero_change_close_tests {
 
         let reason = validate_task_commit_receipt(repo, &unrelated, "main", &window)
             .expect_err("an unrelated historical commit must not survive the re-claim");
-
     }
 
     /// The relaxation is bounded by attribution: a merged commit that neither
@@ -45484,7 +45442,6 @@ mod zero_change_close_tests {
         };
         let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
             .expect_err("an unattributable pre-cycle commit must stay rejected");
-
     }
 
     /// A commit that predates the task itself is never this task's work, even
@@ -45518,7 +45475,6 @@ mod zero_change_close_tests {
         };
         let reason = validate_task_commit_receipt(dir.path(), &receipt, "main", &window)
             .expect_err("a commit older than the task cannot be its delivery");
-
     }
 
     #[test]
@@ -46194,7 +46150,6 @@ mod epic_close_owner_gate_tests {
             None,
         )
         .unwrap_err();
-
     }
 
     /// Review P1: unknown caller must fail closed — never fall through when
@@ -46202,7 +46157,6 @@ mod epic_close_owner_gate_tests {
     #[test]
     fn test_9fff_unknown_caller_identity_fail_closed() {
         let err = epic_close_owner_gate("cas-epic", "owner-id", None, None, None).unwrap_err();
-
     }
 
     /// cas-cc74: close compare trims owner + identity facets.

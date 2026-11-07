@@ -20,7 +20,6 @@ test("HUB-J1 approved pairing health check has a deadline and keeps its invitati
     await page.clock.runFor(3_001);
     await expect(dialog).toBeVisible();
 
-
     await expect(dialog.getByRole("button", { name: "Pair", exact: true })).toBeEnabled();
     expect(hub.exchanges).toHaveLength(0);
   });
@@ -52,8 +51,6 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
     // Advance the entire deadline: protocol-idle cannot drain a held fetch
     // before its abort, so this test deliberately drives the browser clock.
     await page.clock.runFor(10_001);
-
-
 
     await expect(dialog.getByRole("button", { name: "Pair", exact: true })).toBeEnabled();
     expect(hub.exchanges).toHaveLength(0);

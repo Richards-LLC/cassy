@@ -2182,7 +2182,6 @@ pub(crate) mod tests {
         let repo = make_repo();
         let client = FakeNeonClient::empty();
         let err = verify(repo.path(), &client).unwrap_err().to_string();
-
     }
 
     // --- Keep-payload parser ----------------------------------------------
@@ -2285,7 +2284,6 @@ pub(crate) mod tests {
         let err = init(repo.path(), &client, InitChoices::default())
             .unwrap_err()
             .to_string();
-
     }
 
     #[test]
@@ -2301,7 +2299,6 @@ pub(crate) mod tests {
         let err = init(repo.path(), &client, InitChoices::default())
             .unwrap_err()
             .to_string();
-
     }
 
     #[test]

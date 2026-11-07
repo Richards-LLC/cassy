@@ -395,7 +395,6 @@ mod tests {
 
         let error = store.mark_uploaded("art-1", "cloud-99").unwrap_err();
 
-
         store.mark_committed("art-1", None).unwrap();
         assert!(
             store.mark_committed("art-1", None).is_err(),
@@ -419,7 +418,6 @@ mod tests {
                 "must classify as signed: {signed}"
             );
             let error = store.mark_committed("art-1", Some(signed)).unwrap_err();
-
         }
 
         assert!(

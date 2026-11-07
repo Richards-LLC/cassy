@@ -602,7 +602,6 @@ mod tests {
         };
         let projects = KnownProjects::from_specs_with(&this.path().join(".cas"), vec![repo_spec(root)], &restart);
         let error = projects.holders("cas-bbbb").unwrap_err();
-
     }
 
     /// cas-2191: a checkpoint during the read that leaves the database

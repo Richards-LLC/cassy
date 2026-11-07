@@ -111,7 +111,6 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
         }))
         .await
         .expect_err("cancelled work must not be startable");
-
 }
 
 #[tokio::test]

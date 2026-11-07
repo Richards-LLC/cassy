@@ -15,5 +15,4 @@ fn epic_close_owner_gate_exposes_owner_mismatch_as_a_typed_error() {
         &error,
         TaskLifecycleGateError::OwnerMismatch { .. }
     ));
-
 }

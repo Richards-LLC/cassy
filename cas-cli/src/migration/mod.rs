@@ -1591,7 +1591,6 @@ mod tests {
             .expect_err("destructive replay must be refused");
         conn.execute("ROLLBACK", []).unwrap();
 
-
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master

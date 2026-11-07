@@ -288,8 +288,6 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     let human = String::from_utf8(human).unwrap();
     assert!(human.contains("operator@example.com"));
 
-
-
     assert!(human.lines().all(|line| line.len() <= 80));
 }
 

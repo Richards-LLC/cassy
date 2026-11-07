@@ -524,7 +524,6 @@ Oldest section.
         let error = collect(dir.path(), "/repo")
             .expect_err("an undecodable changelog must be reported, not silently empty")
             .to_string();
-
     }
 
     /// The real file on this repository, parsed end to end.

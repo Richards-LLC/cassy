@@ -524,7 +524,6 @@ mod tests {
             panic!("a small tmpfs root must warn, got {verdict:?}");
         };
         assert!(message.contains("/tmp"), "must name the mount: {message}");
-
     }
 
     #[test]
@@ -603,8 +602,6 @@ mod tests {
         let rendered = inventory.render();
 
         assert!(rendered.contains("cas-probe-comm-1234"), "{rendered}");
-
-
     }
 
     #[test]

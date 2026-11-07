@@ -35,13 +35,6 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
 
 
 
-
-
-
-
-
-
-
 });
 
 describe('an unsteady machine reads Unsteady in the footer, as in the header and row (cas-a6f0)', () => {
@@ -52,8 +45,6 @@ describe('an unsteady machine reads Unsteady in the footer, as in the header and
     expect(footer.querySelector('.machine-badge-state')!.textContent).toBeTruthy();
     expect(footer.querySelector('.pairing-dot')!.classList.contains('partial')).toBe(true);
   });
-
-
 });
 
 describe('the machine that is not connected comes first and the footer names it (cas-0739, journey F10)', () => {
@@ -62,10 +53,8 @@ describe('the machine that is not connected comes first and the footer names it 
   const fleet = [live('atlas', 'Atlas · Linux'), live('studio', 'Studio Mac · macOS'), shed, live('forge', 'Forge · Linux')];
 
 
-
   // cas-cae9: the outage words lead and the name follows, so the phone
   // footer's end ellipsis shortens the name, never the verb.
-
 
   it('keeps a long name whole in the title and safe as text (cas-0739 QA round 1)', () => {
     const footer = document.createElement('div');
@@ -78,8 +67,6 @@ describe('the machine that is not connected comes first and the footer names it 
     // The label and the state are separate spans, so CSS can let the state yield.
     expect([...footer.querySelector('#paired-machines-toggle')!.children].map((child) => child.className)).toEqual(['pairing-dot partial', '', 'machine-badge-state']);
   });
-
-
 
 
 

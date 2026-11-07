@@ -71,7 +71,6 @@ fn edit_new_string_crossing_threshold_warns() {
     )
     .expect("tmpfs edit over threshold should warn");
 
-
 }
 
 #[test]
@@ -91,11 +90,7 @@ fn tmpfs_write_crossing_threshold_warns() {
     )
     .expect("tmpfs write over threshold should warn");
 
-
     assert!(warning.contains("/mem"));
-
-
-
 }
 
 #[test]
@@ -173,7 +168,6 @@ fn warning_includes_configured_staging_dir() {
     .expect("tmpfs write over threshold should warn");
 
     assert!(warning.contains("/durable/cas-staging"));
-
 }
 
 #[test]
@@ -249,7 +243,6 @@ fn bash_usage_growth_warns_after_baseline() {
         None,
     )
     .expect("persistent usage growth past threshold should warn");
-
 }
 
 #[test]
@@ -312,7 +305,6 @@ fn bash_persistent_large_file_still_warns() {
     let warning =
         maybe_tmpfs_guardrail_warning_with(tmp.path(), &input, &mounts(), &usage, 10, None)
             .expect("persistent growth is staged residency and must warn");
-
 }
 
 #[test]
@@ -349,7 +341,6 @@ fn write_and_bash_accounting_do_not_clobber_each_other() {
     let warning =
         maybe_tmpfs_guardrail_warning_with(tmp.path(), &write_4, &mounts(), &usage, 10, None)
             .expect("written bytes should still reach the second threshold");
-
 }
 
 #[test]
@@ -386,7 +377,6 @@ fn write_warning_does_not_suppress_bash_usage_warning() {
         None,
     )
     .expect("confirmed usage-growth threshold should warn even after a write warning");
-
 }
 
 #[test]
@@ -416,7 +406,6 @@ fn bash_samples_all_tmpfs_mounts_not_just_cwd_and_tmp() {
     )
     .expect("persistent /dev/shm fill should be sampled and warned");
     assert!(warning.contains("/dev/shm"));
-
 }
 
 #[test]

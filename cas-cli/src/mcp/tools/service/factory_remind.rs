@@ -1143,12 +1143,6 @@ mod tests {
         let error =
             validate_external_reminder("ci_completed", Some(&filter), false, 0).unwrap_err();
 
-
-
-
-
-
-
         // branch_contained_in names both missing fields and their aliases.
         let error = validate_external_reminder(
             "branch_contained_in",
@@ -1158,8 +1152,6 @@ mod tests {
         )
         .unwrap_err();
 
-
-
         // A malformed value is reported with the other problems.
         let error = validate_external_reminder(
             "ci_completed",
@@ -1168,7 +1160,5 @@ mod tests {
             0,
         )
         .unwrap_err();
-
-
     }
 }

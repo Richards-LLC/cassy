@@ -1882,7 +1882,6 @@ mod tests {
             }
         }
         let refusal = merge_gate(&task, &qa, &stale, &tip).unwrap_err();
-
     }
 
     /// cas-6c75 (GH #1078): the branch and the open dispatch are both at the
@@ -2240,7 +2239,6 @@ mod tests {
     /// cas-e371 (GH #1023 finding 1): the rejection bar no longer turns a
     /// pre-existing defect on a touched page into a rejection.
 
-
     #[test]
     fn qa_issues_split_into_pre_existing_follow_ups_and_delivery_issues() {
         let (pre, delivery) = split_qa_issues(Some(
@@ -2458,7 +2456,6 @@ mod tests {
         );
         let body = follow_up_description(&delivery, &round, &pre[1], "/a/LEDGER.md");
         assert!(body.contains("visual-qa.mjs940 waits50ms"), "{body}");
-
     }
 
     /// cas-2849: an issue that gives only its id takes its text from the
@@ -2501,7 +2498,6 @@ mod tests {
         let (mut pre, _) =
             split_qa_issues(Some(r#"[{"scope":"pre-existing","severity":"normal"}]"#)).unwrap();
         let refusal = complete_pre_existing_issues(&mut pre, "# ledger\n").unwrap_err();
-
 
         let (mut unknown, _) =
             split_qa_issues(Some(r#"[{"id":"F99","scope":"pre-existing"}]"#)).unwrap();

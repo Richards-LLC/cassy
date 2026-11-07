@@ -1185,7 +1185,6 @@ mod tests {
 
                 assert_eq!(error.data.as_ref().unwrap()["retry_safe"], false);
 
-
                 let reference = error.data.as_ref().unwrap()["reconciliation_id"].as_str().unwrap();
                 if let Some(id) = request_id {
                     assert_eq!(reference, id);
@@ -1302,10 +1301,7 @@ mod tests {
         uuid::Uuid::parse_str(reference.strip_prefix("local-").unwrap()).unwrap();
         assert!(error.message.contains(reference), "{error}");
 
-
-
         assert!(error.message.contains(&url), "retain the underlying transport error: {error}");
-
         }
     }
 

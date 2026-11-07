@@ -534,9 +534,6 @@ mod tests {
         ];
         let text = spawn_queue_health_warnings(now, &pending, Some(&wedged)).unwrap();
 
-
-
-
         assert!(text.contains("restart_spawn_queue"), "{text}");
     }
 
@@ -547,12 +544,10 @@ mod tests {
         silent.written_at = now - chrono::Duration::seconds(300);
         let text = spawn_queue_health_warnings(now, &[], Some(&silent)).unwrap();
 
-
         let mut slow = status(now, 1);
         slow.in_flight_spawn = Some("vivid-finch-91".into());
         slow.in_flight_started_at = Some(now - chrono::Duration::seconds(400));
         let text = spawn_queue_health_warnings(now, &[], Some(&slow)).unwrap();
-
     }
 
     #[test]

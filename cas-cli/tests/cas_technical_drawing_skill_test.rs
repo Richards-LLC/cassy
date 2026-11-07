@@ -130,7 +130,6 @@ fn clean_model_renders_every_sheet_kind_and_passes_every_check() {
     assert!(section.contains("class=\"cut-face\""), "section sheet has no hatched cut faces");
     let joint = fs::read_to_string(ws.out.join("shelf-box-joint-1.svg")).unwrap();
 
-
     let (ok, report) = run(&node, &ws.script, &["check", ws.model.to_str().unwrap()]);
     assert!(ok, "check reported failures on the clean model:\n{report}");
 

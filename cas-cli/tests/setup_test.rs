@@ -35,7 +35,6 @@ fn dry_run_prints_the_complete_fresh_machine_plan_without_writes() {
         .assert()
         .success()
 
-
         .stdout(predicate::str::contains("cas login"))
         .stdout(predicate::str::contains("cas device register"))
         .stdout(predicate::str::contains("cas hub service install"))

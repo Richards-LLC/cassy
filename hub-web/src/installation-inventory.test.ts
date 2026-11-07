@@ -79,7 +79,6 @@ describe("recognizable browser installations (cas-2e77)", () => {
     const visible = dialog.cloneNode(true) as HTMLElement;
     visible.querySelector("details")?.remove();
     expect(visible.textContent).toContain("Old tablet");
-
   });
 
   it("clamps hub activity ahead of this browser's clock while retaining the exact local and UTC times (QA F03)", async () => {

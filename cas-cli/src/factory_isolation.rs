@@ -578,7 +578,6 @@ mod tests {
     fn my_context_reports_a_shared_trunk_binding_as_a_misbinding() {
         let rendered = render_worker_binding("zen-bear-56", true, Some("/repo"), Some("main"));
 
-
         assert!(rendered.contains("factory/zen-bear-56"), "{rendered}");
     }
 
@@ -608,10 +607,8 @@ mod tests {
     }
 
 
-
     /// Supervisors legitimately sit on trunk in the shared checkout; the
     /// worker-identity check must not fire for them.
-
 
     /// cas-73b8: a worker whose `factory/<name>` is frozen for a parked
     /// delivery commits its next task on `factory/<name>-<task-id>`.

@@ -1819,8 +1819,6 @@ fn build_add_worker_config_propagates_factory_session_for_dynamic_spawns() {
             "the assigned launch must keep the brief out of argv for {cli:?}");
         assert_eq!(env_value(&config, "CAS_INTERNAL_WORKER_STARTUP_BRIEF"), Some(assignment));
 
-
-
     }
 
 }
@@ -3777,7 +3775,6 @@ fn flv2_pty_write_never_blocks_lane() {
         "a PTY write waited {slowest:?} on a pane that does not read"
     );
     let refused = refused.expect("the full pane stops taking input");
-
 
     // The other pane still echoes promptly.
     let started = std::time::Instant::now();

@@ -1114,15 +1114,12 @@ mod tests {
         failing.args(["-c", "echo 'HTTP 401: Bad credentials' >&2; exit 4"]);
         let error = run_bounded_detailed(failing, Duration::from_secs(5)).unwrap_err();
 
-
         let missing = Command::new("/nonexistent/cas-0169-gh");
         let error = run_bounded_detailed(missing, Duration::from_secs(5)).unwrap_err();
-
 
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 5"]);
         let error = run_bounded_detailed(slow, Duration::from_millis(100)).unwrap_err();
-
 
         let mut ok = Command::new("sh");
         ok.args(["-c", "printf done"]);

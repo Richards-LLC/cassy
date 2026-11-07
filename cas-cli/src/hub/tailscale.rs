@@ -1020,7 +1020,6 @@ mod tests {
             crate::test_paths::warm_stub(&binary, &script);
             let error = manager.ensure(4174, 443).unwrap_err().to_string();
 
-
             assert_eq!(fs::read_to_string(&state).unwrap(), foreign);
         }
     }
@@ -1133,7 +1132,6 @@ mod tests {
         let manager = TailscaleServeManager::with_executable(temp.path().join("hub"), &binary);
         let error = manager.ensure(4173, 443).unwrap_err().to_string();
         assert!(error.contains("GUI") && error.contains("TAILSCALE_BE_CLI"), "{error}");
-
     }
 
     #[cfg(unix)]

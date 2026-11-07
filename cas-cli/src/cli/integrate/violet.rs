@@ -4760,7 +4760,6 @@ auth = "env:{token}"
         let before = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(before.severity, DoctorSeverity::Error, "{before:?}");
 
-
         let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(report.is_green(), "{report:?}");
         assert_eq!(report.registration, WriteState::Written);
@@ -5294,7 +5293,6 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(row.severity, DoctorSeverity::Warning);
 
-
         let args = VioletArgs {
             bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
             url: violet_hub_url().to_string(),
@@ -5307,7 +5305,6 @@ auth = "env:{token}"
         assert_eq!(row.severity, DoctorSeverity::Ok, "{row:?}");
         assert!(row.message.contains("violet_read"), "{row:?}");
         // GH #1157: the row states `cas violet` readiness, not just registration.
-
 
         assert!(!row.message.contains(FAKE_TOKEN));
     }
@@ -5332,8 +5329,6 @@ auth = "env:{token}"
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains(TEST_TOKEN_ENV), "{row:?}");
-
-
     }
 
     #[test]
@@ -5393,7 +5388,6 @@ auth = "env:{token}"
                 .contains(&paths.user_proxy.display().to_string()),
             "{row:?}"
         );
-
 
         let project = write_project_proxy(
             dir.path(),
@@ -5524,7 +5518,6 @@ auth = "env:{token}"
         let row = doctor_row(None, &paths, &env, &FakeProbe(broken));
         assert_eq!(row.severity, DoctorSeverity::Error, "{row:?}");
         assert!(row.message.contains("violet_post"), "{row:?}");
-
     }
 
     /// A machine whose project file still lists the retired `slack_*` names
@@ -5645,7 +5638,6 @@ auth = "env:{token}"
 
         let before = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
         assert_eq!(before.severity, DoctorSeverity::Error, "{before:?}");
-
 
         let report = run(
             &args,
@@ -6024,7 +6016,6 @@ auth = "env:{token}"
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("401"), "{row:?}");
         assert!(row.message.contains("invalid_token"), "{row:?}");
-
 
         assert!(!row.message.contains(FAKE_TOKEN));
     }

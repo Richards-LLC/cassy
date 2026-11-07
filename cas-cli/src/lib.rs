@@ -144,7 +144,6 @@ pub mod tracing;
 pub mod ui;
 pub mod worktree;
 
-
 #[cfg(test)]
 mod test_env_guard;
 

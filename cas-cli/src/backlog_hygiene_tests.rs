@@ -152,7 +152,6 @@ fn close_calls_name_the_task_and_its_evidence() {
     };
     let call = epic_close_call(&epic);
     assert!(call.starts_with("task action=close id=cas-e1 "), "{call}");
-
 }
 
 fn git(repo: &Path, args: &[&str]) {

@@ -2311,7 +2311,6 @@ async fn queued_task_starts_after_close_or_park_cas_8488() {
                 "action":"start", "id":first.id,
             })).unwrap())).await.unwrap_err();
 
-
             assert_eq!(f.task(&first.id).status, TaskStatus::Open);
             assert_eq!(f.task(&next.id).status, TaskStatus::Blocked);
             assert!(agents.get_lease(&first.id).unwrap().is_none());

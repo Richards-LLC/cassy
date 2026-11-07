@@ -103,10 +103,6 @@ mod tests {
         .to_string();
         assert!(error.contains("/work/cas-src/.cas"), "{error}");
         assert!(error.contains("/work/violet_ps/.cas"), "{error}");
-
-
-
-
     }
 
     #[test]

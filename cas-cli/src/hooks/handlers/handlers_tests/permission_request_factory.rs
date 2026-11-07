@@ -63,7 +63,6 @@ fn supervisor_write_permission_request_is_auto_approved_without_cas_root() {
     let input = input_for("Write", Some("/tmp/foo.txt"));
     let out = handle_permission_request(&input, None).expect("handler ok");
     let reason = allow_reason(&out).expect("expected allow");
-
 }
 
 #[test]
@@ -101,7 +100,6 @@ fn supervisor_write_permission_request_is_auto_approved_with_cas_root() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_permission_request(&input, Some(tmp.path())).expect("handler ok");
     let reason = allow_reason(&out).expect("expected allow");
-
 }
 
 // ============================================================================

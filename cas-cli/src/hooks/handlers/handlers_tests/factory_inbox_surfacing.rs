@@ -773,7 +773,6 @@ fn cas_27ad_first_hook_claim_ignores_queue_processing_timestamp() {
     let output = handle_user_prompt_submit(&input("worker"), Some(temp.path())).unwrap();
     let rendered = context_of(&output);
 
-
     assert!(store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap().is_empty());
 }
 

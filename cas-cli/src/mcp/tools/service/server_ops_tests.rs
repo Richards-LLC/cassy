@@ -40,7 +40,6 @@ fn listing_answers_what_is_listening_and_who_started_it() {
     assert!(line.contains("web"), "names the server: {line}");
     assert!(line.contains("1234"));
 
-
     assert!(line.contains("5173"));
 
     assert!(line.contains("young-finch-81") && line.contains("cas-7c93"));
@@ -109,7 +108,6 @@ fn listing_ignores_the_host_process_tree_at_the_record_pid_cas_5a88() {
 fn shared_and_private_entries_state_their_teardown_fate() {
     let shared = render_server_line(&record("web", true), ServerLiveness::Live, &[5173], 0);
 
-
     let private = render_server_line(&record("web", false), ServerLiveness::Live, &[5173], 0);
     assert_ne!(shared, private);
 }
@@ -119,8 +117,6 @@ fn shared_and_private_entries_state_their_teardown_fate() {
 #[test]
 fn a_running_record_whose_process_is_gone_reads_as_dead() {
     let gone = render_server_line(&record("web", true), ServerLiveness::Gone, &[], 0);
-
-
 
     let reused = render_server_line(&record("web", true), ServerLiveness::Replaced, &[], 0);
     assert_ne!(gone, reused);
@@ -135,7 +131,6 @@ fn a_running_record_whose_process_is_gone_reads_as_dead() {
 fn an_expected_port_is_distinguished_from_an_observed_one() {
     let observed = render_server_line(&record("web", true), ServerLiveness::Live, &[4321], 0);
     assert!(observed.contains("4321"));
-
 
     let claimed = render_server_line(&record("web", true), ServerLiveness::Live, &[], 0);
     assert!(claimed.contains("5173"));

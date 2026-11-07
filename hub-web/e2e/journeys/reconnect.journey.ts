@@ -142,7 +142,6 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // The outage holds until the next stage releases it, so this stage's
     // receipt screenshot (taken after the body returns) shows the drop, not
     // the reconnect (cas-793b, journey eval 3.52 F01).
-
   });
 
   await journey.stage("It reconnects on its own", async () => {

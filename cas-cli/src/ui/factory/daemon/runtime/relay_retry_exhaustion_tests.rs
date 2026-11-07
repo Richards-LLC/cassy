@@ -80,7 +80,6 @@ async fn exhausted_message(body: String, summary: &str, context: &[&str]) {
         "identify the failed wake: {detail}"
     );
 
-
     for expected in context {
         assert!(
             detail.contains(expected),
@@ -285,10 +284,8 @@ async fn cas_af23_exhausted_lifecycle_abandons_only_on_positive_stale_evidence()
         assert_eq!(report.stage == cas_store::DeliveryStage::Abandoned, abandoned, "{case}: {report:?}");
         assert!(report.pending_detail.is_some());
         if case != "task moved on" {
-
         }
         if death {
-
         }
     }
 }

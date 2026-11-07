@@ -264,12 +264,10 @@ mod tests {
             assert!(matches!(rows[0].status, CheckStatus::Warning));
             let name = provider.name();
 
-
             // Plain --fix: the empty slot is linked, the real item only previewed.
             let rows = autofix_in(h, |_| false);
             let messages: Vec<&str> = rows.iter().map(|row| row.message.as_str()).collect();
             assert_eq!(messages.len(), 2, "{messages:?}");
-
 
             assert_eq!(std::fs::read_link(account.join(shared[0])).unwrap(), base.join(shared[0]));
             assert!(account.join(shared[1]).join("mine.md").is_file());

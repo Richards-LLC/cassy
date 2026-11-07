@@ -165,7 +165,6 @@ fn merged_delivery_is_classified_as_close_blocked_with_rejection_and_reclose() {
         !rendered.contains("mcp__"),
         "event facts cannot assume a recipient harness"
     );
-
 }
 
 #[test]

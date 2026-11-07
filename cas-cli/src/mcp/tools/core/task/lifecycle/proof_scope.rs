@@ -555,9 +555,6 @@ mod tests {
 
         let error = guard_task_proof_scope(root.path(), &task, ProofScopeOperation::ParentLink)
             .expect_err("a parent link that would retarget a parked delivery must be locked");
-
-
-
     }
 
     fn receipt_input(task_id: &str) -> WorkerCompletionReceiptInput {
@@ -614,7 +611,6 @@ mod tests {
                 },
             )
             .unwrap_err();
-
         }
 
         let root = TempDir::new().unwrap();
@@ -837,9 +833,6 @@ mod tests {
         )
         .unwrap_err();
 
-
-
-
         let dispatch = cas_store::get_latest_verification_dispatch(root.path(), &task.id)
             .unwrap()
             .unwrap();
@@ -860,8 +853,6 @@ mod tests {
             },
         )
         .expect_err("an approved resolved verdict must keep its reviewed scope frozen");
-
-
 
         verification.status = VerificationStatus::Skipped;
         verification.summary = "explicitly skipped exact task scope".into();
@@ -934,8 +925,6 @@ mod tests {
             },
         )
         .expect_err("the proof exception must not unlock sibling scope fields");
-
-
     }
 
     #[test]
@@ -1005,7 +994,5 @@ mod tests {
             },
         )
         .unwrap_err();
-
-
     }
 }

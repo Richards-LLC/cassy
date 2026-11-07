@@ -152,8 +152,6 @@ url = "https://neon.example.test/mcp"
         );
     }
 
-
-
     assert!(stdout.contains("--skip-verify"), "{stdout}");
 }
 
@@ -260,7 +258,6 @@ async fn violet_rejected_probe_keeps_json_clean_and_human_diagnostics() {
             assert_eq!(report["probe"]["result"], "unauthorized");
         } else {
             let stdout = String::from_utf8(output.stdout.clone()).unwrap();
-
         }
         for secret in ["fixture-bearer", "fixture-bypass"] {
             assert!(!String::from_utf8_lossy(&output.stdout).contains(secret));

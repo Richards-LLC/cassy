@@ -710,7 +710,6 @@ fn run_grok_factory_contract(grok_binary: PathBuf, version: &str) {
             "Grok 1.0.40 must not serialize the --rules launch argument into system_prompt.txt"
         );
     } else {
-
         assert!(system_prompt.contains("cas__task") && system_prompt.contains("cas__coordination"));
     }
     assert!(

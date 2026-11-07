@@ -1961,7 +1961,6 @@ mod tests {
                 ..IngestBatch::default()
             })
             .unwrap_err();
-
     }
 
     #[test]

@@ -834,7 +834,6 @@ mod tests {
             }))
             .await
             .unwrap_err();
-
     }
 
     #[test]

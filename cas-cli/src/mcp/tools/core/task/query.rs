@@ -1218,13 +1218,10 @@ mod tests {
         let limited_text = list_text(core.cas_task_list(Parameters(limited)).await.unwrap());
         assert_eq!(listed_ids(&limited_text).len(), 5);
 
-
-
         let mut epic_request = list_request();
         epic_request.epic = Some("cas-row000".into());
         let epic_text = list_text(core.cas_task_list(Parameters(epic_request)).await.unwrap());
         assert_eq!(listed_ids(&epic_text), listed_ids(&text));
-
 
         assert_eq!(store.get("cas-row007").unwrap().status, TaskStatus::Open);
         assert!(
@@ -1251,7 +1248,6 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(listed_ids(&text), expected);
-
     }
 
     #[tokio::test]
@@ -1314,25 +1310,17 @@ mod tests {
             ["cas-keep".to_string()].into_iter().collect()
         );
 
-
-
-
         let mut req = list_request();
         req.include_foreign = true;
         req.scope = "all".into();
         let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
         assert!(listed_ids(&text).contains("cas-foreign"));
 
-
-
-
         let mut req = list_request();
         req.status = Some("closed".into());
         req.label = Some("keep".into());
         let text = list_text(core.cas_task_list(Parameters(req)).await.unwrap());
         assert!(listed_ids(&text).is_empty());
-
-
     }
 
     #[test]

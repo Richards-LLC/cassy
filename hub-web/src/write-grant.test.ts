@@ -96,7 +96,6 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
   // cas-42c0: the connection turns a 403 into AuthenticationError
   // ("scope-mismatch"); that is a permission refusal, not a lost pairing.
 
-
   it("renders the form, the confirmation and the receipt", () => {
     const handlers: WriteAccessHandlers = { changed: vi.fn(), review: vi.fn(), revoke: vi.fn(), confirm: vi.fn(), cancel: vi.fn() };
     const state = filled();

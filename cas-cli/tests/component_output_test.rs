@@ -57,7 +57,6 @@ fn pty_report_validation_accepts_captured_wrapped_doctor() {
         .expect("verbatim successful Doctor output from the 80-column PTY");
     let error = validate_report_text(CAPTURED_DOCTOR_PTY_REPORT, false, ReportKind::Plain, false)
         .expect_err("a real report cannot hide a failed child");
-
 }
 
 #[test]
@@ -86,7 +85,6 @@ fn report_validation_rejects_failed_children_with_captured_reports() {
     ] {
         let output = report_fixture(report, "23");
         let error = validate_piped_report(&output, kind).expect_err("failed real-report child");
-
     }
 }
 
@@ -104,7 +102,6 @@ fn report_validation_rejects_incomplete_machine_reports() {
             .expect_err("incomplete machine report or command echo is not a successful report");
     }
 }
-
 
 
 #[test]
@@ -153,7 +150,6 @@ fn report_validation_rejects_command_echo() {
     ] {
         let output = report_fixture(echo, "0");
         let error = validate_piped_report(&output, kind).expect_err("echo is not a report");
-
     }
 }
 
@@ -169,7 +165,6 @@ fn report_validation_rejects_empty_success() {
     ] {
         let error =
             validate_piped_report(&output, kind).expect_err("empty success is not a report");
-
     }
 }
 
@@ -184,7 +179,6 @@ fn report_validation_rejects_failed_children_with_completed_output() {
     ] {
         let output = report_fixture(report, "23");
         let error = validate_piped_report(&output, kind).expect_err("failed child is not success");
-
     }
 }
 
@@ -267,7 +261,6 @@ fn pty_report_validation_rejects_echo_empty_and_failed_children() {
             )
             .unwrap();
         let error = completed_pty_report(&mut runner, kind).expect_err("invalid PTY report");
-
     }
 }
 
@@ -326,7 +319,6 @@ fn snapshot_redaction_preserves_stable_counts() {
         "host: [N] finding(s) — see `cas doctor --host`\ncas: 2 entries, 3 rules (1 proven), 4 high-value\nEntries: 2\nTasks: 5\nSchema: 42\n"
     );
 }
-
 
 
 
@@ -431,7 +423,6 @@ fn completed_pty_report_timeout(
         .map_err(|error| format!("{error}\nexit: {status}"))?;
     Ok(output)
 }
-
 
 
 fn cas_cmd(dir: &Path) -> Command {

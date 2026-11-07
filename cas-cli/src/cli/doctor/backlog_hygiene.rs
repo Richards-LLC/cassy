@@ -177,13 +177,11 @@ mod tests {
 
         let unknown = check_for(&BacklogReport { delivery_unknown: Some("no git repository".into()), ..BacklogReport::default() });
 
-
         let only_reverted = check_for(&BacklogReport {
             reverted: report().delivered,
             ..BacklogReport::default()
         });
         assert!(matches!(only_reverted.status, CheckStatus::Warning));
-
 
         // Keep subsequent evidence in the JSON diagnostic instead of
         // accidentally parsing it as the reverted entry's remedy.

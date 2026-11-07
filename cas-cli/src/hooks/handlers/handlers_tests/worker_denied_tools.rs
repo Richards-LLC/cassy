@@ -38,9 +38,6 @@ fn denial(output: HookOutput) -> Option<String> {
 
 fn assert_operator_credential_refusal(output: HookOutput, attempt: &str) {
     let reason = denial(output).unwrap_or_else(|| panic!("worker access was allowed: {attempt}"));
-
-
-
 }
 
 fn role_env(role: &str) -> (TestEnvGuard, tempfile::TempDir) {
@@ -82,8 +79,6 @@ fn a_worker_is_refused_default_clis_however_wrapped() {
             let reason = denial(handle_pre_tool_use(&bash(command, home.path()), root).unwrap())
                 .unwrap_or_else(|| panic!("{command} was allowed (root {root:?})"));
             assert!(reason.contains(cli));
-
-
         }
     }
     for command in ["git log --grep vercel", "cat vercel.json", "git log --grep neonctl", "cat .env.cas-db", "npm run build"] {
@@ -136,8 +131,6 @@ fn a_worker_is_refused_a_matching_mcp_tool() {
     ] {
         let reason = denial(handle_pre_tool_use(&input(tool, args, home.path()), None).unwrap())
             .unwrap_or_else(|| panic!("{tool} was allowed"));
-
-
     }
     let output = handle_pre_tool_use(
         &input("mcp__github__get_issue", json!({"number": 1}), home.path()),
@@ -446,7 +439,6 @@ fn supervisor_and_plain_session_may_read_operator_auth_stores_cas_5120() {
             )
             .unwrap();
             let reason = denial(output).expect("unrelated credentials must stay protected");
-
         }
     }
 }

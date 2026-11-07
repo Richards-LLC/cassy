@@ -605,7 +605,6 @@ async fn test_skill_update_validation_failure_is_atomic() {
 
     let error = result.expect_err("the existing failing validation script must reject update");
 
-
     let stored = skill_store.get(&id).unwrap();
     assert_eq!(stored.description, "Revised description");
     assert_eq!(stored.validation_script, "true");

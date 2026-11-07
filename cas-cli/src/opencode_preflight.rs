@@ -902,7 +902,6 @@ mod tests {
             preflight_local_endpoint(&endpoint, "qwen-local", Duration::from_secs(2)).unwrap_err();
         thread.join().unwrap();
         assert!(error.contains("qwen-local"), "{error}");
-
     }
 
     #[test]
@@ -910,7 +909,6 @@ mod tests {
         assert!(preflight_provider_env_key("cloud", "PROVIDER_KEY", Some("secret")).is_ok());
         let error = preflight_provider_env_key("cloud", "PROVIDER_KEY", None).unwrap_err();
         assert!(error.contains("PROVIDER_KEY"), "{error}");
-
     }
 
     #[test]
@@ -934,7 +932,6 @@ mod tests {
         let error = opencode_route_for_selector("qwen3.8-max").unwrap_err();
         assert!(error.contains("provider/model"), "{error}");
         let error = opencode_route_for_selector("cloud/qwen3.8-max").unwrap_err();
-
     }
 
     #[test]
@@ -944,8 +941,6 @@ mod tests {
         }
         for effort in [cas_mux::Effort::Minimal, cas_mux::Effort::High] {
             let error = validate_hosted_effort(Some(effort)).unwrap_err();
-
-
         }
         assert!(validate_hosted_effort(None).is_ok());
     }
@@ -999,7 +994,6 @@ mod tests {
                 .unwrap_err();
         assert!(error.contains(DASHSCOPE_API_KEY_ENV), "{error}");
         assert!(error.contains("pending-key"), "{error}");
-
     }
 
     #[test]
@@ -1116,7 +1110,6 @@ mod tests {
         let error = require_supported_selector("alibaba/qwen3.8-max").unwrap_err();
         assert!(error.contains("hosted-payg"), "{error}");
         assert!(error.contains("pending-conformance"), "{error}");
-
 
         let local = support_claim_for_selector("local/qwen3.8").unwrap();
         assert_eq!(local.route, ServingRoute::Local);

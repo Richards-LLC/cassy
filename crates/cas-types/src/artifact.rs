@@ -163,7 +163,6 @@ mod tests {
         artifact.name = "reports/brief.pdf".to_string();
         let error = artifact.validate().unwrap_err().to_string();
 
-
         artifact.name = r"reports\brief.pdf".to_string();
         assert!(artifact.validate().is_err(), "a backslash escapes too");
     }
@@ -192,7 +191,6 @@ mod tests {
 
         artifact.size_bytes = ARTIFACT_MAX_BYTES + 1;
         let error = artifact.validate().unwrap_err().to_string();
-
 
         artifact.size_bytes = 0;
         assert!(

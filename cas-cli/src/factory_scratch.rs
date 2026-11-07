@@ -475,7 +475,6 @@ mod tests {
         let report = render_relocated(&cas);
 
         assert!(report.contains(&project.join("targets/worker-2").display().to_string()), "{report}");
-
     }
 
     #[test]
@@ -497,7 +496,6 @@ mod tests {
         .unwrap_err();
         let refusal = error.downcast_ref::<CrossFilesystemSeed>().expect("typed refusal");
         assert_eq!((refusal.build_cache_dev, refusal.target_dev), (1, 2));
-
 
         ensure_same_filesystem_with(&cache, &target, |_| Ok(7)).unwrap();
         // The real probe measures the nearest existing ancestor.

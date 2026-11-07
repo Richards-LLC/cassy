@@ -258,16 +258,12 @@ fn test_factory_error_display() {
     let worker_exists = FactoryError::WorkerExists("worker-1".to_string());
     assert!(worker_exists.to_string().contains("worker-1"));
 
-
     let worker_not_found = FactoryError::WorkerNotFound("worker-2".to_string());
     assert!(worker_not_found.to_string().contains("worker-2"));
 
-
     let supervisor_exists = FactoryError::SupervisorExists;
 
-
     let no_supervisor = FactoryError::NoSupervisor;
-
 
     let supplied = "test mux error";
     let mux_error = FactoryError::Mux(supplied.to_string());

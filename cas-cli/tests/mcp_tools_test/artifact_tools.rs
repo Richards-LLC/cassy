@@ -149,8 +149,6 @@ async fn a_path_outside_the_publishable_roots_is_refused_with_a_usable_message()
         .artifact(Parameters(request))
         .await
         .expect_err("a path outside both roots must be refused");
-
-
 }
 
 #[tokio::test]
@@ -162,7 +160,6 @@ async fn a_missing_file_is_refused_rather_than_recorded() {
     request.path = Some(temp.path().join("absent.pdf").display().to_string());
 
     let error = service.artifact(Parameters(request)).await.unwrap_err();
-
 
     let mut list = req("list");
     list.task_id = Some("cas-b72a".to_string());
@@ -191,9 +188,7 @@ async fn required_fields_are_named_when_missing() {
         .await
         .unwrap_err();
 
-
     let error = service.artifact(Parameters(req("show"))).await.unwrap_err();
-
 
     let error = service.artifact(Parameters(req("list"))).await.unwrap_err();
     assert!(error.message.contains("task_id"), "{}", error.message);
@@ -207,7 +202,6 @@ async fn an_unknown_action_lists_the_valid_ones() {
         .artifact(Parameters(req("upload")))
         .await
         .unwrap_err();
-
 }
 
 #[tokio::test]
@@ -481,7 +475,6 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             ))
             .await
             .unwrap_err();
-
     }
     let override_attempt = service
         .task(Parameters(

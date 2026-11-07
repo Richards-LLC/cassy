@@ -160,16 +160,12 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
     let flat = text.replace("\n  ", " ");
     // pin: the dry run's verdict and every kind of change.
 
-
-
-
     // cas-e1f4 QA F03: the conflict line says which copy every account now reads.
 
     // cas-e1f4 QA F01: an empty shared folder is created and linked in the first run.
     assert_eq!(plan.empty_dirs, ["workflows"]);
 
     assert!(links.contains(&(".claude-c@x.com", "workflows")));
-
 
     assert!(text.lines().all(|line| line.chars().count() <= 80), "{text}");
 

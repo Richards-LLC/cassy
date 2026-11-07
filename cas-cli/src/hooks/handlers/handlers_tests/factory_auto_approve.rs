@@ -88,7 +88,6 @@ fn supervisor_write_is_auto_approved() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     let reason = allow_reason(&out).expect("expected allow");
-
 }
 
 #[test]
@@ -455,7 +454,6 @@ fn supervisor_write_is_auto_approved_without_cas_root() {
     let out = handle_pre_tool_use(&input, None).expect("handler ok");
     let reason = allow_reason(&out)
         .expect("supervisor Write must auto-approve even when cas_root is None (deadlock case)");
-
 }
 
 #[test]
@@ -569,7 +567,6 @@ fn worker_cd_primary_checkout_git_add_commit_is_denied_with_resolved_cas_root() 
 
     let out = handle_pre_tool_use(&input, Some(cas_root.path())).expect("handler ok");
     let reason = deny_reason(&out).expect("primary-checkout git write must be denied");
-
 }
 
 fn resolved_primary_checkout_git_fixture()

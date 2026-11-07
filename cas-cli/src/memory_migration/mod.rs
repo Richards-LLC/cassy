@@ -422,7 +422,6 @@ mod tests {
     }
 
 
-
     #[test]
     fn the_quarantine_report_names_id_title_and_token() {
         let report = render_quarantine(&[QuarantineRecord {
@@ -435,7 +434,6 @@ mod tests {
         assert!(report.contains("p-q1"));
         assert!(report.contains("FINAL QBO State"));
         assert!(report.contains("QBO"));
-
     }
 
     #[test]

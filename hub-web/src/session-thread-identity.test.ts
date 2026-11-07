@@ -134,9 +134,6 @@ describe("session-bound thread history (cas-55a4)", () => {
 
 
 
-
-
-
 });
 
 describe("grouped project sessions (cas-55a4)", () => {
@@ -186,7 +183,6 @@ describe("grouped project sessions (cas-55a4)", () => {
     // A lone session on its machine needs no codename: its card names the project.
     expect(parse(row("solo", 1)).querySelector(".conversation-supervisor-name")).toBeNull();
   });
-
 
 
   it("keeps sessions of one project on different machines apart", () => {

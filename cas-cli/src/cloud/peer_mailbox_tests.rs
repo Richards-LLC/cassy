@@ -954,7 +954,6 @@ async fn cas_4ac8_persistent_ack_rate_limit_is_bounded_and_named_in_mailbox_heal
     .await
     .unwrap();
     assert!(!report.errors.is_empty());
-
 }
 
 #[tokio::test]

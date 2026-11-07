@@ -3443,14 +3443,9 @@ mod tests {
         };
         let report = assemble_markdown(Path::new("."), "9.99.1", "v9.99.1", &sources);
 
-
-
         assert_eq!(sources.changes.len(), 2);
         assert_eq!(sources.issue_count, 0);
         assert!(!sources.release_evidence.has_reportable_publication_timing());
-
-
-
     }
 
     #[test]
@@ -3566,16 +3561,13 @@ Dev reply
         ));
         let report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
 
-
         // cas-a629: the whole wall clock and each blocker's cost.
-
 
         sources.release_evidence.record_latency(&parse_key_values(
             "PUBLISH_START_KIND=gate-green\nPUBLISH_LATENCY_SECONDS=626\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
         sources.release_evidence.green_to_published_seconds = Some(626);
         let green_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-
 
         sources.release_evidence.record_latency(&parse_key_values(
             "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
@@ -3584,11 +3576,7 @@ Dev reply
         sources.release_evidence.main_to_published_seconds = Some(616);
         let main_landed_report = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
 
-
-
-
         // cas-9734: the release's lesson recurrence rate.
-
 
         let recorded: LessonRecurrence = serde_json::from_str(
             r#"{"version":"9.98.0","rescues":4,"recurrences":2,"rate":0.5,"classes":["scratch-base","version-literals"]}"#,
@@ -3600,7 +3588,6 @@ Dev reply
         sources.release_evidence.lesson_recurrence = None;
         sources.release_evidence.record_latency(&HashMap::new());
         let unavailable = assemble_markdown(Path::new("."), "2.4.0", "v2.4.0", &sources);
-
 
         let user = was_now_sections(&sources, true);
         let dev = was_now_sections(&sources, false);

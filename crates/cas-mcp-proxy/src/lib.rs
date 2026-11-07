@@ -3071,7 +3071,6 @@ mod tests {
             panic!("a worker must not reach neon.create_branch");
         };
 
-
         assert!(reason.contains("neon.create_branch"), "{reason}");
         // Supervisors and plain sessions keep the full allowlist.
         for role in [Supervisor, Standard] {
@@ -3520,9 +3519,6 @@ for line in sys.stdin:
 
         let absent = call_fake(&engine, "echo").await.unwrap_err().to_string();
 
-
-
-
         engine.health.write().await.get_mut("fake").unwrap().next_retry_at_ms = Some(0);
         let epoch = engine.health_epoch();
         let recovered = call_fake(&engine, "echo").await;
@@ -3585,9 +3581,6 @@ for line in sys.stdin:
             .map(|result| result.text)
             .unwrap_err()
             .to_string();
-
-
-
     }
 
     #[test]
@@ -3835,7 +3828,6 @@ for line in sys.stdin:
             Err(e) => e,
         };
         let msg = format!("{err:#}");
-
     }
 
     #[test]

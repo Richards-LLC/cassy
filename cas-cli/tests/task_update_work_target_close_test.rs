@@ -561,8 +561,6 @@ async fn anchored_no_code_task_can_add_parked_proof_and_close_without_code_hook(
         .expect_err("task_type updates must be rejected explicitly");
     assert!(task_type_error.message.contains("TASK UPDATE REJECTED"));
 
-
-
     let proof = "artifact:reports/cas-f1f8-no-code-anchor.html";
     let update = service
         .task(Parameters(task_request(serde_json::json!({

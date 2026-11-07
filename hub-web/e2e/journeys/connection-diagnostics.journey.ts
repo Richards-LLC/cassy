@@ -43,7 +43,6 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     await expect(page.locator(".connection-log-technical > summary")).toContainText(/\S/);
     // cas-97d58 F08: the lead is one plain sentence; the layer and the raw JSON wait behind Technical details.
 
-
     await expect(page.locator(".connection-log-technical")).not.toHaveAttribute("open", /.*/);
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export safe diagnostics" }).click();

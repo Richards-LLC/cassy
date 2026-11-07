@@ -216,7 +216,6 @@ mod tests {
             cid_file,
         };
         let error = docker.stop(temp.path()).unwrap_err();
-
     }
 
     #[cfg(unix)]

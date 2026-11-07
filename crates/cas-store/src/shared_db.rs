@@ -1745,8 +1745,6 @@ mod tests {
         let message = result.expect_err("the holder outlasts the budget").to_string();
         holder.join().unwrap();
 
-
-
     }
 
     /// A store connection must cap the WAL file so a long-lived writer fleet
@@ -2687,7 +2685,6 @@ mod tests {
         holder.join().unwrap();
 
         let message = error.to_string();
-
 
         assert!(waited < Duration::from_millis(800), "waited {waited:?}");
         let conn = shared.try_lock().expect("the mutex is released on failure");

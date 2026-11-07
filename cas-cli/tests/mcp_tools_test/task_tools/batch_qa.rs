@@ -753,7 +753,6 @@ async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() 
     // The published report names cas-bq01 and cas-bq02 only.
     let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq03"]))).await.unwrap_err();
 
-
     fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap();
     let close = fx.close("cas-bq01").await;
     assert!(close.contains("no `qa-bundle:` note"), "{close}");
@@ -850,7 +849,6 @@ async fn release_verdict_cannot_bypass_review_or_reclose_returned_work_cas_f497(
     own.assignee = None;
     tasks.update(&own).unwrap();
     let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap_err();
-
 
     tasks.update(&bind("cas-bq01", TaskStatus::AwaitingMerge, "test-agent")).unwrap();
     assert!(tasks.record_merge_admission("cas-bq01", &fx.staging, cas_types::MergeCiAdmission::Override).unwrap());

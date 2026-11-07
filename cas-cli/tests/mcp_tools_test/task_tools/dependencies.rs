@@ -703,7 +703,6 @@ async fn task_update_blocked_by_rejects_unknown_self_and_empty_values() {
         .await
         .expect_err("self-blocking must be rejected");
 
-
     let empty = service
         .task(Parameters(task_req(serde_json::json!({
             "action": "update",
@@ -756,7 +755,6 @@ async fn task_update_blocked_by_rejects_the_parent_epic() {
         }))))
         .await
         .expect_err("a task must not be blocked by its own epic");
-
 }
 
 #[tokio::test]
@@ -848,7 +846,6 @@ async fn task_update_blocked_by_rejects_the_epic_set_in_the_same_call() {
         }))))
         .await
         .expect_err("epic and blocker must not be the same task in one call");
-
 }
 
 #[tokio::test]

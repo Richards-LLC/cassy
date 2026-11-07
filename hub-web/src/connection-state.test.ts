@@ -44,7 +44,6 @@ describe("Commander connection lifecycle contract", () => {
   });
 
 
-
   it("reports elapsed stage time from the transition timestamp", () => {
     const snapshot: ConnectionSnapshot = {
       phase: "dialing", stage: "dialing", since: 10_000, attempt: 0, missedHeartbeats: 0, degraded: false,

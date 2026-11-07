@@ -12,12 +12,6 @@ use tempfile::TempDir;
 
 
 
-
-
-
-
-
-
 #[test]
 fn optional_stack_skills_follow_detection_and_explicit_enable() {
     for harness in [

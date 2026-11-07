@@ -298,8 +298,6 @@ mod tests {
         let error = select_alias_record(&body, "shared", None)
             .unwrap_err()
             .to_string();
-
-
     }
 
     /// cas-092e: the live registry lists a legacy personal `accounting` bucket

@@ -88,7 +88,6 @@ fn task_risk_requires_a_declaration_for_code_tasks() {
         None,
     )
     .expect_err("code-bearing task creates must declare risk");
-
 }
 
 #[test]
@@ -128,7 +127,6 @@ fn supervisor_override_requires_role_and_audit_reason() {
     )
     .expect_err("workers cannot use supervisor override");
 
-
     let error = validate_task_risk_declaration(
         cas_types::TaskType::Task,
         None,
@@ -138,7 +136,6 @@ fn supervisor_override_requires_role_and_audit_reason() {
         Some("  "),
     )
     .expect_err("override must carry a non-empty reason");
-
 }
 
 #[test]

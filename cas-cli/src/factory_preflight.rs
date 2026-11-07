@@ -2089,7 +2089,6 @@ mod tests {
             .expect("cloud queue health warning");
         assert_eq!(finding.severity, PreflightSeverity::Warning);
 
-
         assert!(finding.message.contains("Network error: offline"));
 
         assert!(!report.factory_blocked);
@@ -2179,7 +2178,6 @@ mod tests {
             assert!(report.findings.iter().any(|finding| finding.code == code));
             assert!(!report.factory_blocked);
             if state == ComponentState::Ready {
-
             }
 
             facts.binary.configured_sha = Some("7654321".to_string());

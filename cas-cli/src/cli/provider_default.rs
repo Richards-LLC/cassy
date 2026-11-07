@@ -105,7 +105,6 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
     }
 }

@@ -163,7 +163,6 @@ fn create_branch_from_rejects_unresolvable_start_without_writing_ref_cas_42a4() 
         .create_branch_from("epic/must-not-exist", "epic/corrupt-base")
         .expect_err("a corrupt start point must fail before branch creation");
 
-
     assert!(
         !repo_path
             .join(".git/refs/heads/epic/must-not-exist")
@@ -194,7 +193,6 @@ fn create_worktree_rejects_unresolvable_start_without_writing_ref_cas_42a4() {
             Some("epic/corrupt-worktree-base"),
         )
         .expect_err("a corrupt worktree start point must fail before ref creation");
-
 
     assert!(!worktree_path.exists(), "failure must not create a worktree");
     assert!(
@@ -1281,7 +1279,6 @@ fn epic_base_notice_names_the_full_stack_not_just_the_parent() {
             && notice.contains("'epic/a' → 'epic/b' → 'epic/c'"),
         "the notice must name the ancestry AND the landing order: {notice}"
     );
-
 }
 
 #[test]
@@ -2426,7 +2423,6 @@ fn an_unreadable_checkout_inventory_refuses_before_touching_anything() {
         GitError::CheckoutInventoryUnavailable { branch, .. } => assert_eq!(branch, &target),
         other => panic!("expected CheckoutInventoryUnavailable, got {other:?}"),
     }
-
 
     // Nothing moved: not the ref, not the sibling's HEAD, not its files.
     assert_eq!(git.resolve_commit(&target).unwrap(), tip_before);

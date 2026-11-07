@@ -663,8 +663,6 @@ fn malformed_config_error_names_line_and_repair_remedy() {
     .unwrap();
 
     let error = Config::load(temp.path()).unwrap_err().to_string();
-
-
 }
 
 #[test]
@@ -1643,7 +1641,6 @@ fn factory_claude_and_scratch_root_refuse_invalid_values_cas_569f_940c_3f93() {
         let error = config.set(key, bad).unwrap_err().to_string();
         assert_eq!(config.get(key).as_deref(), Some(good), "{key} kept after {bad:?}");
         if key == "factory.scratch_root" {
-
         }
     }
     config.set("factory.claude.fallback_model", "").unwrap();

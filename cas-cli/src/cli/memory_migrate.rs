@@ -299,7 +299,6 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("--global-root"), "{err}");
-
     }
 
     #[test]

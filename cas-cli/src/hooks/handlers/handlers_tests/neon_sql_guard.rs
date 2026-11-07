@@ -56,14 +56,12 @@ fn worker_write_without_branch_or_on_production_is_denied_naming_the_branch() {
     let default_reason =
         deny_reason(&handle_pre_tool_use(&no_branch, None).unwrap()).expect("default denied");
 
-
     let mut config = crate::config::Config::load(&cas_root).unwrap_or_default();
     config.set("factory.worker_denied_mcp_tools", "").unwrap();
     config.save(&cas_root).unwrap();
 
     let reason =
         deny_reason(&handle_pre_tool_use(&no_branch, Some(&cas_root)).unwrap()).expect("denied");
-
 
     let prod = input(
         "mcp__neon__run_sql_transaction",

@@ -5690,7 +5690,6 @@ mod spawn_base_tests {
         commit_file(&repo, "human-work.txt", "unpublished project work");
         let error = super::spawn_readiness_tests::prepare_existing_task(&repo, &cas_dir, &task.id)
             .err().expect("mixed divergence still refuses").to_string();
-
     }
 
     #[test]
@@ -5710,7 +5709,6 @@ mod spawn_base_tests {
             let error = super::spawn_readiness_tests::prepare_existing_task(&f.repo, &f.root, &task.id)
                 .err().expect("unpublished branch must name the publication requirement").to_string();
             assert!(error.contains("origin/feature/unpublished"));
-
 
             assert_eq!(full_sha(&f.repo, "feature/unpublished").as_deref(), Some(f.old.as_str()));
             assert!(!ref_exists(&f.repo, "factory/legacy-path-worker"));
@@ -5834,8 +5832,6 @@ mod spawn_base_tests {
         init_repo(&project);
         let error = validate_live_spawn_repo_root(manager.repo_root(), &project)
             .expect_err("changed repository context must fail this spawn loudly");
-
-
     }
 
     #[test]
@@ -5952,7 +5948,6 @@ mod spawn_base_tests {
         )
         .unwrap();
         let notice = worker_base_mismatch_notice(manager.repo_root(), "main", "epic/ahead").unwrap();
-
 
         assert!(notice.contains("epic/ahead"));
     }
@@ -6330,7 +6325,6 @@ mod spawn_base_tests {
         let error = super::spawn_readiness_tests::prepare_recorded_lane(&repo, "epic/behind", "main")
             .expect_err("an unpublished local parent must refuse epic refresh");
 
-
         assert_eq!(head_sha(&repo, "epic/behind"), epic_tip);
         assert_eq!(head_sha(&origin, "epic/behind"), epic_tip);
     }
@@ -6600,7 +6594,6 @@ mod spawn_base_tests {
         assert_eq!(prepared.worktree_info.as_ref().unwrap().parent_branch, "epic/outer");
         let notice = prepared.warnings.join("\n");
 
-
         assert_eq!(head_sha(&repo, "epic/outer"), parent_tip);
         assert_eq!(
             head_sha(&origin, "epic/outer"),
@@ -6664,7 +6657,6 @@ mod spawn_base_tests {
 
         assert!(refusal.contains("epic/diverged"), "{refusal}");
         assert!(refusal.contains("main"), "{refusal}");
-
 
         assert_eq!(
             head_sha(&repo, "epic/diverged"),
@@ -6788,7 +6780,6 @@ mod spawn_base_tests {
 
         let notice = stale_spawn_base_notice(&repo, "main", "main")
             .expect("a base behind its own remote must produce a notice");
-
     }
 
     /// No warning when the base is current — the notice has to stay rare enough

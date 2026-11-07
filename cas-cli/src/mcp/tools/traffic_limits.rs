@@ -238,10 +238,6 @@ mod tests {
         );
         let error = validate_message_body("worker", "123456", &config, false, false, "cas-449b")
             .expect_err("message cap must reject cap + 1");
-
-
-
-
     }
 
     #[test]
@@ -278,9 +274,6 @@ mod tests {
             "blocker", "12345678", &config, "cas-449b", false, false, None,
         )
         .expect_err("note cap must reject cap + 1");
-
-
-
     }
 
     #[test]
@@ -304,7 +297,6 @@ mod tests {
         let error =
             validate_note_body("decision", long_note, &config, "cas-449b", true, true, None)
                 .expect_err("override reason must be mandatory");
-
     }
 
     #[test]
@@ -320,7 +312,6 @@ mod tests {
             Some("review finding"),
         )
         .expect_err("only a registered supervisor may override");
-
     }
 
     /// cas-6ee6 (GH #1006 item 1): a 1,503-character supervisor ruling was
@@ -398,8 +389,6 @@ mod tests {
             chrono::Utc::now(),
         )
         .expect_err("no root means the refusal remains");
-
-
     }
 
     #[test]

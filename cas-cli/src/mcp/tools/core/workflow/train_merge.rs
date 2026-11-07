@@ -629,7 +629,6 @@ mod tests {
             .factory(Parameters(request))
             .await
             .expect_err("worker cannot reserve a train");
-
     }
 
     #[tokio::test]

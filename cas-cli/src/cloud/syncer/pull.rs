@@ -3923,9 +3923,7 @@ mod tests {
         )
         .unwrap_err();
 
-
         assert!(error.contains("id=p-malformed-created"), "{error}");
-
     }
 
     #[test]

@@ -143,7 +143,6 @@ async fn project_hold_refuses_merge_even_with_overrides_and_leaves_tasks_untouch
         .await
         .unwrap_err()
         .to_string();
-
 }
 
 #[tokio::test]

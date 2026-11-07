@@ -14,7 +14,6 @@ use cas::builtins::{
     CODEX_BUILTIN_SKILLS, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS, REQUIRED_FACTORY_AGENTS,
 };
 
-
 #[path = "support/builtin_catalog.rs"]
 mod builtin_catalog;
 
@@ -46,13 +45,9 @@ fn all_flavors(relative: &str) -> [String; 3] {
 
 
 
-
-
 // ---------------------------------------------------------------------------
 // 1. Doc family: shared hygiene reference, real signals only
 // ---------------------------------------------------------------------------
-
-
 
 
 
@@ -102,9 +97,6 @@ fn doc_hygiene_reference_is_registered_in_every_flavor() {
 
 
 
-
-
-
 // ---------------------------------------------------------------------------
 // 2. Merges, inlines, retirements
 // ---------------------------------------------------------------------------
@@ -148,7 +140,6 @@ fn merged_and_inlined_builtins_are_gone_from_disk_and_from_every_catalog() {
         }
     }
 }
-
 
 
 /// Nothing in the codebase spawns these two: `grep -rn` outside the builtins
@@ -199,14 +190,9 @@ fn unwired_agents_are_retired_from_every_agent_registry() {
 
 
 
-
-
 // ---------------------------------------------------------------------------
 // 5. P3 hygiene
 // ---------------------------------------------------------------------------
-
-
-
 
 
 

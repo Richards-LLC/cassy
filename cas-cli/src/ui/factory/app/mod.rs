@@ -7548,8 +7548,6 @@ mod spawn_isolation_tests {
             .expect_err("a diverged lane must not be taken over")
             .to_string();
 
-
-
         // A lane that is only behind or ahead of its pushed copy is reusable.
         other(&[
             "update-ref",
@@ -7709,8 +7707,6 @@ mod spawn_isolation_tests {
         // Simulate the bug: the worker process started in the MAIN checkout,
         // not in its factory/worker-X worktree.
         let err = verify_isolated_worker_branch("worker-x", &repo, "factory/worker-x").unwrap_err();
-
-
     }
 
     // -----------------------------------------------------------------
@@ -8047,7 +8043,6 @@ mod spawn_isolation_tests {
         )
         .unwrap();
         let error = admit_worker_spawn(&worktree, floor).unwrap_err().to_string();
-
     }
 
     #[cfg(unix)]

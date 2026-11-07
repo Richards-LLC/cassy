@@ -84,7 +84,6 @@ fn codex_worker_recovery_uses_cs_alias_not_cas(/* cas-5b4f */) {
 }
 
 
-
 /// cas-314d: supervisors and workers share one bounded, push-first reminder
 /// contract. The on-demand reference avoids inflating the SessionStart skill
 /// bodies, but all three installed flavors must retain identical semantics.
@@ -125,7 +124,6 @@ fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
     assert_eq!(contents[0], contents[1]);
     assert_eq!(contents[0], contents[2]);
 }
-
 
 
 /// cas-2c61/cas-62ab, audit D1: no Codex catalog entry hardcodes Claude's
@@ -181,9 +179,6 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
             contract.contains(&format!("{prefix}verification action=qa_record")),
             "{contract}"
         );
-
-
-
     }
 }
 
@@ -219,8 +214,6 @@ fn cas_bb7e_worker_skill_allows_independent_qa_verdicts_in_every_flavor() {
             details.contains("verification action=qa_record"),
             "{flavor}: {details}"
         );
-
-
     }
 }
 
@@ -236,9 +229,6 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
 
         let reference = load(&base.join("cas-supervisor/references/reference.md"));
         let model_selection = load(&base.join("cas-supervisor/references/model-selection.md"));
-
-
-
 
 
     }

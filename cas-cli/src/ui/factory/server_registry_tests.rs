@@ -334,7 +334,6 @@ fn stop_does_not_claim_a_legacy_wrapper_is_the_whole_workload() {
     // ancestry. Honest failure is the only provable outcome.
     record.cgroup = None;
     let error = stop(&cas_root, &record).unwrap_err();
-
 }
 
 /// AC: "dead pids are marked dead, not resurrected."

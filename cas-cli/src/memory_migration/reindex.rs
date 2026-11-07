@@ -248,7 +248,6 @@ mod tests {
             ..PageIndexReport::default()
         };
         let err = report.check().unwrap_err().to_string();
-
     }
 
     #[test]
@@ -259,7 +258,6 @@ mod tests {
             ..PageIndexReport::default()
         };
         let err = report.check().unwrap_err().to_string();
-
     }
 
     #[test]

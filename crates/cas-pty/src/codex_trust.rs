@@ -1893,7 +1893,6 @@ mod tests {
             );
             assert!(!message.contains(['\u{85}', '\u{202e}']), "{message:?}");
             if prefix == "codex_main_checkout_hooks_stale:" {
-
             }
             assert!(!message.contains("`git -C "), "{message:?}");
             // pin: refusing an unsafe remedy must leave the tracked hook bytes intact.

@@ -247,7 +247,6 @@ mod tests {
         ] {
             assert!(rendered.contains(repo), "missing {repo}: {rendered}");
         }
-
     }
 
     #[test]

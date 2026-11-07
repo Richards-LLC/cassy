@@ -1912,7 +1912,6 @@ mod tests {
         let refused = execute("list_projects")
             .await
             .expect_err("a worker must not call a supervisor-only route");
-
     }
 
     /// Guards `cas serve`'s startup banner and empty-registry guard against

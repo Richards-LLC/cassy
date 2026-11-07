@@ -839,7 +839,6 @@ mod tests {
         let plan = plan_db("test", &db).unwrap();
         let err = purge_db(&plan, &backup).unwrap_err().to_string();
 
-
         // And the refusal was total: nothing was deleted.
         assert_eq!(plan_db("test", &db).unwrap().fixture_total(), 10);
     }

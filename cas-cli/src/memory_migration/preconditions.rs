@@ -150,7 +150,6 @@ mod tests {
         let err = check_structural(&conn, temp.path(), "project")
             .unwrap_err()
             .to_string();
-
     }
 
     #[test]

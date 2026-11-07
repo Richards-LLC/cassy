@@ -110,8 +110,6 @@ fn cas_7e24_operator_receipts_pass_and_breach() {
         (0, 0, Some(1))
     );
 
-
-
     assert_eq!(m.breach_count(), 1);
     // Mixed: an enrolled turn still pending its receipt breaches; the
     // unenrolled snapshot stays out of the denominator.
@@ -131,7 +129,6 @@ fn cas_7e24_operator_receipts_pass_and_breach() {
         ),
         (0, 1, Some(1))
     );
-
 
     assert_eq!(m.breach_count(), 2);
     conn.execute("DELETE FROM operator_delivery_outbox", [])

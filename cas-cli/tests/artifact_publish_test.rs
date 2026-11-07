@@ -241,7 +241,6 @@ fn a_file_over_the_ceiling_is_refused_before_any_network_call() {
     assert!(!output.status.success(), "an oversized file must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-
     // The `.expect(0)` above is verified here: had the ceiling been checked
     // after `begin`, this call count would be 1.
     runtime.block_on(async { server.verify().await });
@@ -276,7 +275,6 @@ fn a_path_escaping_the_publishable_roots_is_refused() {
     assert!(!output.status.success(), "an escaping symlink must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-
     // A plain path outside the roots is refused the same way.
     let output = project
         .cmd()
@@ -300,7 +298,6 @@ fn a_path_escaping_the_publishable_roots_is_refused() {
         !output.status.success(),
         "publishing the token cache must fail"
     );
-
 }
 
 #[test]

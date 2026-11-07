@@ -1001,7 +1001,6 @@ mod codex_fallback_tests {
         );
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("alice"));
-
     }
 
     /// cas-8535: mid-session `spawn_workers` resolves one shared spec before
@@ -1042,7 +1041,6 @@ mod codex_fallback_tests {
             apply_codex_fallback_with(&mut specs, false, None, WORKER_LABEL, || true, |_| false)
                 .unwrap();
         assert_eq!(specs[0].cli, SupervisorCli::Claude);
-
     }
 
     /// cas-a487 Tests spec: "strict mode -> error returned" — and no spec
@@ -1388,7 +1386,6 @@ mod codex_fallback_tests {
             ],
             "supervisor banner wording must remain unchanged"
         );
-
     }
 
     /// Strict mode on the supervisor path errors the same way as workers —

@@ -150,8 +150,6 @@ async fn cas_97ff_one_live_two_stale_names_the_live_peer_and_counts_stale() {
     }
 
     assert!(!full.contains("old-owl"), "stale peers collapse to a count: {full}");
-
-
 }
 
 #[tokio::test]
@@ -193,7 +191,6 @@ fn cas_97ff_unreachable_cloud_is_one_honest_unknown_line() {
     let (_dir, root) = project(Some(endpoint));
     let block = session_start_peers(&root, None, PREFIX).expect("unknown is reported");
     assert_eq!(block.full.lines().count(), 1, "{}", block.full);
-
 
     assert!(block.full.contains("coordination action=peers"), "{}", block.full);
 }
@@ -239,10 +236,8 @@ fn cas_97ff_block_fits_the_session_start_budget() {
         "{full}"
     );
 
-
     let compact = compact_session_start_peers(&report, PREFIX).unwrap();
     assert!(compact.len() < 200, "{compact}");
-
 }
 
 #[test]
@@ -257,17 +252,12 @@ fn cas_97ff_block_and_cas_peers_read_one_snapshot() {
         if peer.live {
             let row = full.lines().find(|line| line.contains(&peer.name)).unwrap();
             assert!(row.contains(&format!("on {}", peer.machine)), "{row}");
-
-
         }
     }
     let live = report.peers.iter().filter(|d| d.supervisor.live).count();
     let stale = report.peers.len() - live;
 
-
 }
-
-
 
 #[test]
 fn cas_97ff_untrusted_metadata_cannot_break_the_block() {

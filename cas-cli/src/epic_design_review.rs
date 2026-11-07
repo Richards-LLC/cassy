@@ -497,7 +497,6 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-
         }
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let notices = queue

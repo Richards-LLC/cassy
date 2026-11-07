@@ -707,7 +707,6 @@ mod pre_compact_flush_tests {
         .expect_err("non-HTTPS destinations must be rejected before sending")
         .to_string();
 
-
         let name = concat!(module_path!(), "::notification_webhook_sender_rejects_non_https");
         let name = name.strip_prefix("cas::").unwrap_or(name);
         let fakebin = tempfile::tempdir().unwrap();

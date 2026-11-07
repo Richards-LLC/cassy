@@ -102,8 +102,6 @@ mod tests {
 
         let error = set_telemetry_consent(true).unwrap_err().to_string();
 
-
-
         assert_eq!(std::fs::read_to_string(config_path).unwrap(), original);
     }
 }

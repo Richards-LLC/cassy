@@ -473,7 +473,6 @@ mod tests {
                 .unwrap_err()
                 .to_string();
                 // pin: the refusal explains how to correct evidence stored outside the task.
-
             }
             std::fs::write(path, &original).unwrap();
         }

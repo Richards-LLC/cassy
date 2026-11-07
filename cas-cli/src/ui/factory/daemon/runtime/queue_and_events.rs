@@ -15552,7 +15552,6 @@ mod tests {
     }
 
 
-
     #[test]
     fn worker_exit_info_reports_status_and_bounded_tail_without_guessing() {
         let code = worker_exit_info(Some(23), None, Some("last worker line"));
@@ -15678,7 +15677,6 @@ mod tests {
             payload.summary,
             "Supervisor hasn't seen: cas-a894 is awaiting merge (10m)"
         );
-
 
         assert!(
             sweep().is_empty(),
@@ -16123,7 +16121,6 @@ mod tests {
         // pin: the stale-row notice names the exact quarantined message and recipient.
         assert!(notice.prompt.contains(&format!("Message {ancient} to wise-raven-21")));
         // pin: the notice classifies the stale queue item so the supervisor knows it needs action.
-
     }
 
     /// cas-d047 / GH #70 at the daemon boundary: a message the worker already
@@ -16379,7 +16376,6 @@ mod tests {
         assert!(!decision.allowed, "{}", decision.reason);
         assert_eq!(decision.kind, WakeOutcome::NotApplicable);
 
-
         // A stamped row whose agent id no longer resolves is equally refused:
         // deregistration is not a shortcut.
         let stale = FactoryDaemon::supervisor_wake_decision(
@@ -16548,7 +16544,6 @@ mod tests {
             now,
         );
         assert!(!unstamped.allowed, "{}", unstamped.reason);
-
     }
 
     /// cas-619f: a user-facing delivery parked for merge needs a reviewer
@@ -17657,7 +17652,6 @@ mod tests {
             assert!(!store.claim_recipient_transport(id, "supervisor").unwrap());
             assert!(store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().is_empty());
             let rendered = crate::hooks::handlers::handlers_middle::factory_inbox::render_surfaced(&claimed);
-
         }
     }
 
@@ -18803,7 +18797,6 @@ mod tests {
             !decision.allowed,
             "unknown evidence must still clear the conservative silence bar"
         );
-
     }
 
     /// The supervisor shape: a worker parked in `awaiting_merge` must be able
@@ -19240,7 +19233,6 @@ mod tests {
         let rows = queue.recent_spawn_lifecycle("session-a", 10).unwrap();
         let row = rows.iter().find(|r| r.id == request_id).unwrap();
         assert_eq!(row.state, SpawnLifecycleState::Failed);
-
     }
 
     /// A `preassign` failure reports a task-binding problem, not a spawn
@@ -19855,8 +19847,6 @@ mod tests {
             "{}",
             prompts[0].prompt
         );
-
-
     }
 
     #[test]
@@ -20787,7 +20777,6 @@ mod urgent_wake_probe_tests {
         assert_eq!(attempt, cas_store::WakeAttempt::Failed);
 
         let flag = normal_delivery_watchdog_flag_detail(NormalDeliveryTurnEvidence::NoTurn);
-
     }
 
     #[test]

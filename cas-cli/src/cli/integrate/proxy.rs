@@ -287,7 +287,6 @@ mod tests {
             "content": [{ "type": "text", "text": "auth failure" }]
         });
         let err = unwrap_envelope(&v).unwrap_err().to_string();
-
     }
 
     #[test]
@@ -296,7 +295,6 @@ mod tests {
             "content": [{ "type": "text", "text": "this is not json" }]
         });
         let err = unwrap_envelope(&v).unwrap_err().to_string();
-
     }
 
     #[test]

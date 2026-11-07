@@ -40,9 +40,6 @@ for (const width of [390, 1280]) {
           const feedback = dialog.locator(".pair-status");
           await expect(feedback).toBeVisible();
 
-
-
-
           await expect(feedback).toBeInViewport({ ratio: 1 });
           await expect(feedback).toBeFocused();
           await expect(feedback).toHaveAttribute("role", "alert");

@@ -853,7 +853,6 @@ async fn recovery_tracked_merge_rejects_old_qa_and_selects_current_tip_cas_c6e1(
         .await
         .expect_err("tracked merge must require QA for current recovered tip");
 
-
     cas_store::waive_qa_pass(
         &cas_dir,
         TASK,

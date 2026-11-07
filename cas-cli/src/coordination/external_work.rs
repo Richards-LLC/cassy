@@ -2443,7 +2443,6 @@ mod tests {
             .execute(reply_intent(REQUEST_ID, Some("1760616000.123456")))
             .unwrap_err();
 
-
     }
 
     /// cas-f869 (GH #1272): reply_intent sends Cloud's exact wire request and

@@ -902,7 +902,6 @@ mod tests {
     use super::*;
 
 
-
     #[test]
     fn section_four_claim_fixture_is_byte_faithful() {
         let expected: serde_json::Value = serde_json::from_str(include_str!(
@@ -1162,8 +1161,6 @@ mod tests {
 
         let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
 
-
-
         health.join().unwrap();
     }
 
@@ -1182,9 +1179,6 @@ mod tests {
 
         let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
 
-
-
-
         health.join().unwrap();
     }
 
@@ -1195,10 +1189,6 @@ mod tests {
         write_live_record(&paths, 0, Some("https://record.example"));
 
         let error = resolve_hub_url(&paths, None, None).unwrap_err().to_string();
-
-
-
-
     }
 
     #[derive(Default)]
@@ -1482,8 +1472,6 @@ mod tests {
                 .unwrap_err()
                 .to_string();
 
-
-
         assert!(relay.claims.lock().unwrap().is_empty());
         assert!(relay.completed_invitation_urls.lock().unwrap().is_empty());
 
@@ -1521,7 +1509,6 @@ mod tests {
         health.join().unwrap();
         redirect.join().unwrap();
         let redirected_requests = ready.join().unwrap();
-
 
         assert_eq!(redirected_requests, 0, "health probe followed the redirect");
         assert!(relay.claims.lock().unwrap().is_empty());
@@ -1706,7 +1693,6 @@ mod tests {
             error.contains("invitation_url"),
             "relay endpoint {endpoint}; {error}"
         );
-
 
         assert!(
             error.contains("https://commander.example/#pair=<redacted>&hub=machine-uuid"),

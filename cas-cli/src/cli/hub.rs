@@ -4737,7 +4737,6 @@ mod tests {
         stale.launched_at = Some("2026-09-01T12:34:56Z".to_owned());
         let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
-
         assert!(rendered.contains(stale.launched_by.as_deref().unwrap()), "{rendered}");
         assert!(rendered.contains(stale.launched_at.as_deref().unwrap()), "{rendered}");
     }
@@ -4828,13 +4827,11 @@ mod tests {
             assert_eq!(json["pid"], record.pid);
             if state == (HubDisplayState::Unresponsive { age_secs: 91 }) {
                 let _ = json["remedy"].as_str().unwrap();
-
             }
         }
         let served = self::record("3.4.1", DEFAULT_HUB_PORT, Some(443));
         let rendered = render_status(&served, HubDisplayState::Exited, "3.7.7");
         let json = hub_record_state_json(&served, HubDisplayState::Exited);
-
 
         let _ = json["remedy"].as_str().unwrap();
     }

@@ -5167,7 +5167,6 @@ This is the body content."#;
             extract_body(include_str!("builtins/skills/cas-supervisor.md"))
                 .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
         );
-
     }
 
     #[test]
@@ -5238,7 +5237,6 @@ This is the body content."#;
     /// The checklist is a separate skill invocable via /cas-supervisor-checklist.
     /// Bundling it into supervisor_guidance() would push the SessionStart
     /// payload over the ~10KB harness cap (cas-ecd5, 2026-06-01).
-
 
     /// SessionStart additionalContext gets truncated by the Claude Code harness
     /// once the payload exceeds its ~10KB threshold (measured empirically by
@@ -5354,7 +5352,6 @@ This is the body content."#;
             extract_body(include_str!("builtins/skills/cas-worker.md"))
                 .replacen(TOOL_NAMING_LINE, SESSION_TOOL_NAMING_LINE, 1)
         );
-
 
     }
 
@@ -5477,7 +5474,6 @@ This is the body content."#;
 
     /// The same owner rule must survive real installation for every harness;
     /// drift used to leave no owner for full tests in no-queue projects.
-
 
     /// Worker launch surfaces expose the close action using supported call syntax.
     #[test]
@@ -6122,7 +6118,6 @@ This is the body content."#;
                 is_managed_by_cas(entry.content),
                 "{label} design-spec SKILL.md must be managed_by: cas"
             );
-
         }
     }
 
@@ -6251,7 +6246,6 @@ This is the body content."#;
     /// cas-4e45 (GH #1062): a failed or partial read is never "no new
     /// replies". Agents must check `ok` and `complete` before concluding a
     /// thread has no answer, and know the include_threads failure mode.
-
 
     /// cas-1184 (GH #1129): attachments, including Slack Connect files from
     /// external orgs, have a Violet-only read route that names the exact error
@@ -6916,7 +6910,6 @@ This is the body content."#;
             banner.full
         );
 
-
         // Once the local edit is reconciled, the banner must fall silent.
         std::fs::write(&target, SHIPPED_NEW).unwrap();
         sync_all_builtins_inner(&target_dir, &[], &[BODY_FILE, NEW_FILE]).unwrap();
@@ -7255,7 +7248,6 @@ This is the body content."#;
                     .content;
                 assert!(body.contains("design-md-first.md"), "{label} {reader} must link {RULE}");
             }
-
         }
     }
 
@@ -7503,7 +7495,6 @@ This is the body content."#;
             "auth-fixture-template.md .claude and .codex copies must be byte-identical",
         );
     }
-
 
 
     /// cas-6219: the supervisor's model-selection rubric must be registered on
@@ -7778,7 +7769,6 @@ This is the body content."#;
     /// Audit D1: each role file states the per-harness prefix once, verbatim,
     /// and the SessionStart guidance swaps that line for a single-prefix form
     /// that `remap_tool_prefix` rewrites to the reader's own spelling.
-
 
     // cas-1532: the user-level prune must drop removed managed cas-* builtins
     // while preserving unmanaged user skills and current builtins. Covers all
@@ -8575,7 +8565,6 @@ This is the body content."#;
                             builtin.path
                         );
                     }
-
                 }
             }
         }

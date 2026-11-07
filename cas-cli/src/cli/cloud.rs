@@ -8137,7 +8137,6 @@ mod team_cmd_tests {
         )
         .unwrap_err();
 
-
         assert!(records.is_empty());
     }
 
@@ -9067,19 +9066,16 @@ mod team_cmd_tests {
         // uuid crate would parse this as a simple form; our length gate
         // rejects it so the stored value never drifts from canonical.
         let err = parse_team_uuid("550e8400e29b41d4a716446655440000").unwrap_err();
-
     }
 
     #[test]
     fn parse_team_uuid_rejects_braced_form() {
         let err = parse_team_uuid("{550e8400-e29b-41d4-a716-446655440000}").unwrap_err();
-
     }
 
     #[test]
     fn parse_team_uuid_rejects_urn_form() {
         let err = parse_team_uuid("urn:uuid:550e8400-e29b-41d4-a716-446655440000").unwrap_err();
-
     }
 
     fn make_team_info(id: &str, slug: &str, name: &str) -> TeamInfo {
@@ -9148,8 +9144,6 @@ mod team_cmd_tests {
             .to_string();
         assert!(err.contains("missing-team"));
         assert!(err.contains("petra-stella"));
-
-
     }
 
     #[test]
@@ -9192,8 +9186,6 @@ mod team_cmd_tests {
         let err = resolve_team_set_target(None, &config, true)
             .unwrap_err()
             .to_string();
-
-
     }
 
     #[test]
@@ -10092,7 +10084,6 @@ mod purge_foreign_safety_tests {
 
         let error = delete_purge_rows(&mut conn, &set).unwrap_err();
 
-
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM entries", [], |row| {
                 row.get::<_, i64>(0)
@@ -10171,7 +10162,6 @@ mod purge_foreign_safety_tests {
         ));
 
         let error = verify_purge_delete_set_hash(&expected, &changed).unwrap_err();
-
 
     }
 
@@ -10332,7 +10322,6 @@ mod purge_foreign_safety_tests {
         assert_eq!(refusals[0].code(), "stale_pull");
         let reason = refusals[0].reason();
 
-
         assert!(reason.contains("2026-05-01T00:00:00Z"), "{reason}");
     }
 
@@ -10355,7 +10344,6 @@ mod purge_foreign_safety_tests {
             let refusals = evaluate_purge_safety(missing, &[], now(), 7);
             assert_eq!(refusals.len(), 1, "for {missing:?}");
             assert_eq!(refusals[0].code(), "never_pulled");
-
         }
     }
 
@@ -10365,7 +10353,6 @@ mod purge_foreign_safety_tests {
 
         assert_eq!(refusals.len(), 1);
         assert_eq!(refusals[0].code(), "unreadable_pull_timestamp");
-
     }
 
     #[test]
@@ -10860,7 +10847,6 @@ mod purge_foreign_safety_tests {
             .unwrap();
 
         let err = pending_content_pushes(&conn).unwrap_err();
-
     }
 
     #[test]
@@ -10877,7 +10863,6 @@ mod purge_foreign_safety_tests {
         .unwrap();
 
         let err = pending_content_pushes(&conn).unwrap_err();
-
     }
 
     #[test]

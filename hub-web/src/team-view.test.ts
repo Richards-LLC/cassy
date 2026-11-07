@@ -56,7 +56,6 @@ it("keeps unavailable, empty and stale staffing explicit without inventing worke
 });
 
 
-
 it("puts reported trouble ahead of same-state peers and names the worker in attention navigation", () => {
   const root = document.createElement("section"); document.body.append(root);
   const progress = vi.fn();

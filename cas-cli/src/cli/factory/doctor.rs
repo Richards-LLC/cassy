@@ -953,10 +953,6 @@ mod tests {
         let row = report.rows.iter().find(|row| row.name == "Claude").unwrap();
         assert_eq!(row.state, DoctorState::Missing);
         assert!(report.has_required_failure());
-
-
-
-
     }
 
     #[test]
@@ -1109,14 +1105,12 @@ effort = "high"
     fn doctor_rejects_astra_invalid_effort() {
         let error =
             doctor_routing_error(r#"{"cli":"codex","model":"gpt-6-astra","effort":"ultra"}"#);
-
     }
 
     #[test]
     fn doctor_rejects_suspended_terra_with_registry_alternatives() {
         let error =
             doctor_routing_error(r#"{"cli":"codex","model":"gpt-5.6-terra","effort":"xhigh"}"#);
-
 
         assert!(error.contains("codex_luna"), "{error}");
     }
@@ -1126,8 +1120,6 @@ effort = "high"
         let error =
             doctor_routing_error(r#"{"cli":"codex","model":"gpt-5.6-luna","effort":"high"}"#);
 
-
         assert!(error.contains("codex_luna"), "{error}");
-
     }
 }

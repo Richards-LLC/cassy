@@ -280,7 +280,6 @@ fn qa_impact_marks_a_planned_spec_as_planned_not_reviewable() {
     .unwrap();
     let journey = &report.journeys[0];
     assert_eq!(journey.spec, None);
-
 }
 
 #[test]
@@ -313,7 +312,6 @@ fn qa_impact_labels_unowned_with_longest_codemap_and_falls_back() {
     assert_eq!(report.areas[0].prefix, "src/deep");
     assert_eq!(report.areas[0].files.len(), 2);
     assert_eq!(report.warnings.len(), 3);
-
 
     write(
         repo,

@@ -932,7 +932,6 @@ mod tests {
                 );
             }
             if refused {
-
             }
             let no_build = BuildGuardSnapshot {
                 requested_builders: 0,
@@ -1130,7 +1129,6 @@ mod tests {
                 .iter()
                 .any(|violation| violation.contains("max_concurrent_builders=4"))
         );
-
     }
 
     #[test]
@@ -1181,7 +1179,6 @@ mod tests {
         assert!(!snapshot.violations().is_empty());
         let refusal = snapshot.refusal_message();
         assert!(refusal.contains("expected_build=yes"), "{refusal}");
-
     }
 
     #[test]
@@ -1218,6 +1215,5 @@ mod tests {
         let notice = throttle_notice(&config, 4, &snapshot);
         assert!(notice.contains("CARGO_BUILD_JOBS=8"), "{notice}");
         assert!(notice.contains("nice -n 10"), "{notice}");
-
     }
 }

@@ -464,7 +464,6 @@ mod tests {
         let report = run_with_env(&config, dir.path(), ctx(), &lookup(&dangling)).unwrap();
         assert!(!report.is_ready());
 
-
         let env_file = dir.path().join("backend.env");
         std::fs::write(&env_file, "STAGING_SECRET=do-not-print-me-123\n").unwrap();
         let mut ready = HashMap::new();

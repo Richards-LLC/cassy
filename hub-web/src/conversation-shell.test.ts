@@ -80,8 +80,6 @@ describe("cold-load list states (journey F14)", () => {
 
 
 
-
-
   it("footer names never-live machines that failed as unreachable, and its dot shows the worst machine (cas-b789)", async () => {
     const { CANT_REACH_RETRYING, machineFooterMarkup } = await import("./paired-machines");
     const row = { id: "a", label: "Atlas", address: "atlas.test", connection: CANT_REACH_RETRYING, connected: false, lastSeen: "" };

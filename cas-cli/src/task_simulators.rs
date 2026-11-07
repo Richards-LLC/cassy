@@ -312,7 +312,6 @@ mod tests {
         let (deleted, failed) = reclaim(&simctl, &simulators);
         assert_eq!((deleted, failed), (vec!["cas-10e9-proof".to_string()], Vec::<String>::new()));
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "U-OLD\n");
-
     }
 
     /// Another project holding the same task ids.

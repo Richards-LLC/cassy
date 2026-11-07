@@ -1372,9 +1372,6 @@ mod tests {
         let error = normalize_spec_for_harness(&mut spec, &default, true, true)
             .expect_err("explicit cross-harness values must fail closed")
             .to_string();
-
-
-
     }
 
     fn valid_registry() -> &'static str {
@@ -1651,8 +1648,6 @@ candidates = ["codex_luna"]
         let error = validate_explicit(&invalid, &CapabilitySnapshot::default())
             .expect_err("undeclared OpenCode effort must fail registry policy")
             .to_string();
-
-
     }
 
     #[test]
@@ -1697,8 +1692,6 @@ candidates = ["codex_luna"]
         let error = validate_explicit(&spec, &CapabilitySnapshot::default())
             .expect_err("Sol 6.1 has no minimal reasoning mode")
             .to_string();
-
-
     }
 
     #[test]
@@ -1719,7 +1712,6 @@ candidates = ["codex_luna"]
         let source =
             valid_registry().replace("status = \"active\"", "status = \"active\"\nunknown = true");
         let error = parse_registry(&source).expect_err("unknown recipe keys are fatal");
-
     }
 
     #[test]
@@ -1729,7 +1721,6 @@ candidates = ["codex_luna"]
             "[lanes.standard]\ncandidates = [\"missing\"]",
         );
         let error = parse_registry(&source).expect_err("unknown recipe references are fatal");
-
     }
 
     #[test]
@@ -1786,7 +1777,6 @@ candidates = ["second"]
 candidates = ["first"]
 "#;
         let error = parse_registry(source).expect_err("fallback cycles are fatal");
-
     }
 
     #[test]
@@ -2041,7 +2031,6 @@ candidates = ["primary", "fallback"]
         ] {
             assert!(error.contains(detail), "missing {detail:?}: {error}");
         }
-
     }
 
     #[test]
@@ -2081,8 +2070,6 @@ candidates = ["primary", "fallback"]
         let error = resolve_lane_from_registry("test", &snapshot, &registry)
             .expect_err("unknown fallback must fail closed")
             .to_string();
-
-
     }
 
     #[test]
@@ -2127,7 +2114,6 @@ no_fallback = true
         let error = resolve_lane_from_registry("test", &snapshot, &registry)
             .expect_err("no-fallback lane must fail closed")
             .to_string();
-
     }
 
     #[test]
@@ -2136,9 +2122,6 @@ no_fallback = true
             .expect_err("lane and explicit model are ambiguous")
             .to_string();
 
-
-
-
     }
 
     #[test]
@@ -2146,7 +2129,6 @@ no_fallback = true
         let error = validate_lane_request("  ", false, false, false)
             .expect_err("empty lane is not a request")
             .to_string();
-
 
     }
 
@@ -2184,10 +2166,6 @@ no_fallback = true
             terra, before,
             "validation must not rewrite an explicit spec"
         );
-
-
-
-
     }
 
     /// cas-556a: `max` is accepted exactly where the registry recipe lists it
@@ -2222,7 +2200,6 @@ no_fallback = true
         .expect_err("Luna max must fail closed")
         .to_string();
 
-
         for model in ["haiku", "haiku-4.5", "claude-haiku-4-5-20251001"] {
             let haiku = validate_explicit(
                 &spec(SupervisorCli::Claude, model),
@@ -2230,7 +2207,6 @@ no_fallback = true
             )
             .expect_err("Haiku must be rejected at every effort")
             .to_string();
-
         }
         // Defaults are untouched: no lane recipe defaults to max.
         let registry = registry().unwrap();
@@ -2258,10 +2234,6 @@ no_fallback = true
             .expect_err("Luna below xhigh must fail closed")
             .to_string();
 
-
-
-
-
     }
 
     #[test]
@@ -2282,9 +2254,6 @@ no_fallback = true
         }
 
         assert!(!recipes.contains("gpt-5.6-terra"));
-
-
-
 
         assert!(table.contains("qwencloud_qwen"));
         assert!(table.contains("opencode-1.18.23-hosted-token-plan-2026-08-27"));

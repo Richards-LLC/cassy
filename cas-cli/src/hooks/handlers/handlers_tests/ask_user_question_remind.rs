@@ -55,10 +55,6 @@ fn factory_supervisor_ask_user_question_is_denied_with_plain_text_guidance() {
         handle_pre_tool_use(&hook_input("AskUserQuestion"), Some(tmp.path())).expect("handler ok");
 
     let reason = deny_reason(&out).expect("supervisor AskUserQuestion must be denied");
-
-
-
-
 }
 
 #[test]
@@ -74,7 +70,6 @@ fn factory_supervisor_ask_user_question_is_denied_from_hook_input_role() {
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
 
     let reason = deny_reason(&out).expect("HookInput supervisor role must deny AskUserQuestion");
-
 }
 
 #[test]
@@ -89,8 +84,6 @@ fn grok_factory_supervisor_ask_user_question_uses_grok_prefix() {
         handle_pre_tool_use(&hook_input("AskUserQuestion"), Some(tmp.path())).expect("handler ok");
 
     let reason = deny_reason(&out).expect("grok supervisor AskUserQuestion must be denied");
-
-
 }
 
 #[test]
@@ -105,8 +98,6 @@ fn factory_worker_ask_user_question_is_denied_with_supervisor_message_guidance()
         handle_pre_tool_use(&hook_input("AskUserQuestion"), Some(tmp.path())).expect("handler ok");
 
     let reason = deny_reason(&out).expect("worker AskUserQuestion must be denied");
-
-
 }
 
 // ============================================================================
@@ -158,5 +149,4 @@ fn factory_supervisor_ask_user_question_is_denied_without_cas_root() {
     let out = handle_pre_tool_use(&hook_input("AskUserQuestion"), None).expect("handler ok");
 
     let reason = deny_reason(&out).expect("cas_root=None AskUserQuestion must still be denied");
-
 }

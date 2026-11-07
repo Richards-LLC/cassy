@@ -2322,7 +2322,6 @@ pub fn generate_prompt_at(
 
 /// cas-5597: the built supervisor merge relay, read by the instruction parity test.
 
-
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, TaskSummary};
@@ -2519,7 +2518,6 @@ mod tests {
         )
         .expect("idle prompt is generated");
 
-
         let observed_at = snapshot_at.format("%Y-%m-%d %H:%M:%SZ").to_string();
         assert!(
             prompt.text.contains(&observed_at),
@@ -2592,8 +2590,6 @@ mod tests {
             None,
         )
         .expect("idle prompt is generated");
-
-
 
     }
 
@@ -3009,8 +3005,6 @@ mod tests {
                 assert_eq!(envelope.task_id, task.id);
 
                 assert!(notices[0].prompt.contains(&format!("actor=\"{actor}\"")));
-
-
             } else {
                 assert!(
                     notices.is_empty(),
@@ -3069,11 +3063,7 @@ mod tests {
 
         assert!(prompt.text.contains("Implement feature X"));
 
-
         // Response instructions should be appended
-
-
-
     }
 
     /// A supervisor may close a gate task they own, but that transition must
@@ -3182,7 +3172,6 @@ mod tests {
 
                 for stale in ["mcp__cas__", "mcp__cs__", "cas__"] {
                     if stale != prefix {
-
                     }
                 }
             }
@@ -3366,7 +3355,6 @@ mod tests {
         // because the director filters tasks to the current epic scope. We verify
         // that the prompt directs the supervisor to the live command instead.
 
-
         // cas-ed6c: every WorkerIdle prompt must tag its worker so a stale
         // queued copy can be retracted later if the worker gets assigned
         // real work before the supervisor ever reads this row.
@@ -3432,7 +3420,6 @@ mod tests {
         )
         .expect("newly registered taskless worker should enqueue a ready prompt");
 
-
         assert_eq!(prompt.retract_worker.as_deref(), Some("swift-fox"));
         assert_eq!(prompt.drop_if_worker_assigned.as_deref(), Some("swift-fox"));
 
@@ -3470,7 +3457,6 @@ mod tests {
             None,
         )
         .unwrap();
-
 
         let mut finished = make_data(0);
         finished.agents[0].registered_at -= chrono::Duration::minutes(5);
@@ -3571,7 +3557,6 @@ mod tests {
 
         assert!(prompt.text.contains("MERGE REQUIRED"));
 
-
         // cas-73fa: an idle relay names what the supervisor must do.
         // pin: the named next action is the relay's contract with the supervisor.
 
@@ -3586,13 +3571,11 @@ mod tests {
         // bug this task fixes) — it stays on the generic informational
         // wording, which doesn't name a factory source branch.
         assert!(
-
             !prompt.text.contains("factory/swift-fox"),
             "InProgress + stale MERGE REQUIRED echo must NOT get the actionable \
              merge-queue framing (cas-6883): {}",
             prompt.text
         );
-
     }
 
     /// cas-6db4: a delivery whose declared target is protected main gets the
@@ -3636,8 +3619,6 @@ mod tests {
             let text =
                 merge_required_idle_prompt_text("wise-badger-5", &task, &data, "", None);
             assert!(text.contains(target), "{text}");
-
-
         }
     }
 
@@ -3820,7 +3801,6 @@ mod tests {
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("cas-8eff"), "{}", prompt.text);
         assert!(
-
             prompt.text.contains("factory/recipe{a,b}!e"),
             "must name source factory branch: {}",
             prompt.text
@@ -3833,12 +3813,6 @@ mod tests {
             prompt.text
         );
 
-
-
-
-
-
-
         let lower = prompt.text.to_lowercase();
         assert!(
             !lower.contains("poll") || lower.contains("do not poll"),
@@ -3850,7 +3824,6 @@ mod tests {
             "AwaitingMerge must not be worded as idle-needing-assign: {}",
             prompt.text
         );
-
     }
 
     #[test]
@@ -3971,7 +3944,6 @@ mod tests {
         assert!(prompt.text.contains("CODE REVIEW REQUIRED"));
 
         assert!(
-
             !prompt.text.contains("factory/swift-fox"),
             "non-merge rejection must not use the merge-queue template: {}",
             prompt.text
@@ -4156,8 +4128,6 @@ mod tests {
             "Epic completion prompt must not prescribe branch/merge/main instructions: {}",
             prompt.text
         );
-
-
     }
 
     #[test]
@@ -4184,10 +4154,6 @@ mod tests {
 
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("calm-owl"));
-
-
-
-
     }
 
     #[test]
@@ -4214,9 +4180,6 @@ mod tests {
 
         assert_eq!(prompt.target, "supervisor");
         assert!(prompt.text.contains("calm-owl"));
-
-
-
     }
 
     #[test]
@@ -4386,9 +4349,6 @@ mod tests {
             } else {
                 ("mcp__cs__", "mcp__cas__")
             };
-
-
-
         }
 
         // Events that name no worker keep the session default.
@@ -4409,7 +4369,6 @@ mod tests {
         // Original message should be preserved
         assert!(wrapped.starts_with(message));
         // Response instructions should be at the end
-
 
         assert!(wrapped.contains("target=supervisor"));
     }
@@ -4494,8 +4453,6 @@ mod tests {
             None,
         )
         .unwrap();
-
-
 
             assert!(prompt.text.contains("swift-fox"));
         assert!(!prompt.text.contains("sess-id-abc123"));
@@ -4684,8 +4641,6 @@ mod tests {
             None,
         )
         .unwrap();
-
-
 
             assert!(prompt.text.contains("calm-owl"));
         assert!(!prompt.text.contains("sess-id-abc123"));
@@ -5105,11 +5060,8 @@ mod tests {
             "cas-efc4 AC3: prompt must target the Codex worker"
         );
 
-
         // Response instruction: Codex worker replies to Claude supervisor using
         // its own coordination tool.
-
-
     }
 
     /// cas-efc4 AC3 (other direction): TaskAssigned to a Claude worker from a
@@ -5142,9 +5094,6 @@ mod tests {
             prompt.target, "claude-worker",
             "cas-efc4 AC3: prompt must target the Claude worker"
         );
-
-
-
     }
 
     /// cas-efc4 AC5 / cas-8aaf (prompt layer): TaskCompleted for a Codex worker
@@ -5240,9 +5189,7 @@ mod tests {
         );
         // Close instruction uses the worker's prefix (Codex → mcp__cs__)
 
-
         // Response instruction: supervisor (Claude) uses its own coordination tool
-
     }
 
     /// cas-efc4 AC5 / cas-dbbb: WorkerIdle for a Codex worker with a Claude
@@ -5308,11 +5255,7 @@ mod tests {
 
         // Ready-check uses supervisor's prefix
 
-
-
         // Response instruction: supervisor (Claude) uses its own tool to reply
-
-
 
             assert!(prompt.text.contains("codex-worker"));
         assert!(!prompt.text.contains("sess-id-codex-worker"));
@@ -5416,8 +5359,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(prompt.target, "supervisor");
-
-
 
         assert!(
             revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None).is_some(),
@@ -5789,9 +5730,6 @@ mod tests {
         .expect("owner should get a prompt");
         assert_eq!(owner_prompt.target, "owner-sup");
 
-
-
-
         // Prompt for foreign supervisor is suppressed
         let foreign_prompt = generate_prompt(
             &event,
@@ -5809,7 +5747,6 @@ mod tests {
             "foreign supervisor must not get epic-complete prompt"
         );
     }
-
 
 
     fn cas06ca_epic_summary(status: TaskStatus) -> TaskSummary {
@@ -6175,11 +6112,7 @@ mod tests {
             // names the pull-request path, not a local merge and push. The
             // PR's base must still come from the WorkTarget (cas-b62d).
 
-
-
-
             assert!(
-
                 !prompt.text.contains("epic/pinned-focus"),
                 "an unrelated focused epic must never appear as the merge destination: {}",
                 prompt.text
@@ -6475,7 +6408,6 @@ mod tests {
             )
             .unwrap();
 
-
             assert!(prompt.text.contains("origin/epic/test-epic"));
         }
 
@@ -6533,9 +6465,6 @@ mod tests {
                 Some(&evidence),
             )
             .unwrap();
-
-
-
         }
 
         fn observation(
@@ -6868,6 +6797,5 @@ fn idle_relays_and_merge_relays_use_the_status_verdict() {
         merge.retract_task = Some("t".into());
         assert!(apply_idle_liveness(&mut merge, "wolf", &observed));
         assert!(merge.text.starts_with(&observed.detail()));
-
     }
 }

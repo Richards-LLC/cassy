@@ -1307,7 +1307,6 @@ fn push_response_rejects_incomplete_or_duplicate_per_row_outcomes() {
         )
         .unwrap_err();
 
-
     let duplicate: PushResponse = serde_json::from_str(
         r#"{"entries":{"rows":[
             {"id":"entry-one","outcome":"inserted"},

@@ -348,7 +348,6 @@ mod tests {
 
         assert!(content.contains("Goal 1"));
 
-
         assert!(content.contains("Feature A"));
 
         assert!(content.contains("Feature B"));

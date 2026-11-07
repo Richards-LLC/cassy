@@ -223,7 +223,6 @@ fn close_request_rejects_retired_bypass_alias() {
     .expect_err("retired override alias must fail at the request boundary");
     let message = error.to_string();
     assert!(message.contains("bypass_code_review"), "{message}");
-
 }
 
 #[test]
@@ -956,7 +955,6 @@ fn test_priority_rejects_unknown_alias_with_helpful_error() {
     )
     .expect_err("unknown alias must be rejected");
     let msg = err.to_string();
-
 }
 
 #[test]
@@ -965,7 +963,6 @@ fn test_priority_rejects_out_of_range_numeric() {
         serde_json::from_str::<TaskRequest>(r#"{"action":"create","title":"x","priority":9}"#)
             .expect_err("priority 9 is out of 0-4 range");
     let msg = err.to_string();
-
 }
 
 #[test]
@@ -995,7 +992,6 @@ fn test_with_deps_rejects_garbage_string_with_helpful_error() {
     )
     .expect_err("garbage bool string must be rejected");
     let msg = err.to_string();
-
 }
 
 #[test]

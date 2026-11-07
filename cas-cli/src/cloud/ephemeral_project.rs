@@ -273,7 +273,6 @@ mod tests {
         let verdict = classify(&dir("/home/dev/fresh-proxy"), false, true, Some(false));
         let message = verdict.explain("fresh-proxy").expect("ephemeral explains");
 
-
         assert_eq!(ProjectDurability::Durable.explain("cas-src"), None);
     }
 }

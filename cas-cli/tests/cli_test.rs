@@ -299,10 +299,7 @@ print(json.dumps(dict(receipt, candidate_dir=str(destination))))
     let human = build(false);
     assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
 
-
     let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
-
-
 }
 
 #[test]
@@ -364,8 +361,6 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
         serde_json::from_slice::<serde_json::Value>(&output).unwrap()
     };
     let first = human("DEBT: 0 problem(s), 1 debt item(s)\nDebt by kind:\n  seeded: 1\n");
-
-
 
     std::fs::write(
         &registry,
@@ -460,7 +455,6 @@ fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
     assert_eq!(debts[0]["subject"], "owner_groups.audit-v2");
     assert!(debts[0]["message"].as_str().unwrap().contains("signup"), "{single}");
     let human = human("DEBT: 0 problem(s), 3 debt item(s)\n");
-
 }
 
 #[test]
@@ -572,12 +566,6 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
             .clone();
         let human = String::from_utf8(human).unwrap();
 
-
-
-
-
-
-
         // A long branch is middle-truncated, so find the measured ref by its SHA.
         let line = human.lines().find(|line| line.contains(&integrated[..7])).unwrap();
         assert!(line.chars().count() <= 80, "{human}");
@@ -586,7 +574,6 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
         } else {
             assert!(line.ends_with(&format!("@{}", &integrated[..7])), "measured SHA lost: {human}");
             assert!(line.contains("origin/epic/") && line.contains("release-suffix@"), "branch ends lost: {human}");
-
         }
         std::fs::write(config_path, config).unwrap();
     }
@@ -853,7 +840,6 @@ fn test_init_yes_flag() {
             "Saving configuration"
         };
 
-
         if text
             .bytes()
             .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
@@ -868,7 +854,6 @@ fn test_init_yes_flag() {
         if failure == "codex" {
             let stderr = String::from_utf8(output.stderr).unwrap();
             let diagnostic = "TOML parse error";
-
 
             let normalized = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
@@ -901,12 +886,9 @@ fn test_init_yes_flag() {
                     config
                 );
             } else {
-
             }
         }
         if failure == "none" {
-
-
             cas_cmd(temp.path())
                 .current_dir(&temp)
                 .arg("status")
@@ -2577,7 +2559,6 @@ fn knowledge_build_timeout_returns_nonzero_and_does_not_start_another_call() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-
     assert_eq!(
         std::fs::read_to_string(calls).unwrap().lines().count(),
         1,
@@ -2626,8 +2607,6 @@ fn knowledge_build_verbose_and_status_full_explain_a_failed_source() {
         "a failed source is recorded for retry"
     );
     let progress = String::from_utf8_lossy(&build.stderr);
-
-
 
     cas_cmd(temp.path())
         .current_dir(&temp)
@@ -2817,9 +2796,7 @@ fn cas_root_override_of_a_differing_cwd_root_is_announced_on_stderr() {
         "stderr must name the working-directory store.\nstderr: {stderr}"
     );
 
-
     // (3) stderr only — stdout stays parseable.
-
 
     // (2) cas-e1c7: refused, and neither store was written.
     assert!(
@@ -2906,7 +2883,6 @@ fn cloud_project_set_across_differing_stores_refuses_and_writes_nothing() {
         "must refuse.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-
     assert!(
         stderr.contains(&format!(
             "CAS_ROOT store:          {}",
@@ -2921,8 +2897,6 @@ fn cloud_project_set_across_differing_stores_refuses_and_writes_nothing() {
         )),
         "stderr: {stderr}"
     );
-
-
 
     assert_eq!(
         std::fs::read_to_string(cas_src_root.join("config.toml")).unwrap(),

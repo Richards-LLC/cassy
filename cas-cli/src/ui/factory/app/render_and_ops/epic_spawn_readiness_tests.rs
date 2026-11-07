@@ -334,7 +334,6 @@ fn cas_5dc9_unpublished_peer_epic_reports_creator_host_and_publish_remedy() {
             }
             if branch == "epic/{a,b}" {
                 // pin: the displayed quoted command comes from actual peer preparation.
-
             }
             if control_ref {
                 // The source operator may push by hand; the refusal prints no command.
@@ -614,7 +613,6 @@ fn spawn_unpublished_diverged_epic_resets_only_without_unique_delivery_cas_dab9(
                     .err()
                     .expect("unique deliveries or unverified publication must refuse")
                     .to_string();
-
 
                 assert_eq!(git(&f.repo, &["rev-parse", "epic/round2"]), tip);
                 assert!(!f.repo.join(".cas/worktrees/round2-worker").exists());
@@ -955,7 +953,6 @@ fn cas_bfa1_round3_cancelled_epic_is_terminal() {
                 .err()
                 .expect("cancelled epic must refuse")
                 .to_string();
-
         }
         assert!(
             git(
@@ -1096,7 +1093,6 @@ fn cas_bfa1_round3_seen_remote_with_failed_fetch_is_unverified_not_deleted() {
             .err()
             .expect("missing local lane with unverified origin must refuse")
             .to_string();
-
 
         assert_eq!(git(&f.origin, &["rev-parse", "epic/round2"]), f.old);
         assert!(
@@ -1260,6 +1256,5 @@ fn design_review_rechecks_queued_spawn_before_provisioning() {
             tasks.add_dependency(&cas_types::Dependency::new(report.id, "cas-round2-epic".into(), cas_types::DependencyType::ParentChild)).unwrap();
         }
         let error = captured.resolve().err().expect("queued spawn must recheck before provisioning");
-
     });
 }

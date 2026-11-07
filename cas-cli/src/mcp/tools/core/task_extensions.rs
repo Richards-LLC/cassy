@@ -214,7 +214,6 @@ mod dep_list_render_tests {
 
         let out = render_dependency_sections("cas-x", &outgoing, &incoming);
 
-
         assert!(out.contains("cas-y"), "blocked-by must name the blocker: {out}");
 
         assert!(
@@ -222,7 +221,6 @@ mod dep_list_render_tests {
             "blocks must name the task waiting on this one: {out}"
         );
     }
-
 
 
     #[test]

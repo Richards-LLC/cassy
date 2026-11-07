@@ -750,7 +750,6 @@ fn registry_upkeep_malformed_untouched_registry_passes_with_warning() {
         );
         let head = commit(repair.repo.path());
         let error = repair.run(&head).unwrap_err();
-
     }
 
     let mut f = Fixture::new("invalid: [");
@@ -828,7 +827,6 @@ fn registry_upkeep_malformed_delivery_g1_escape_preserves_g3() {
     let head = commit(f.repo.path());
 
     let error = f.run(&head).expect_err("old G1 escape cannot bypass G3 for an unreadable delivery");
-
 
     f.decision("registry unchanged: current registry migration reviewed");
     let _ = f.run(&head).unwrap_err();

@@ -1181,7 +1181,6 @@ mod tests {
         let refused = stale_writer.update_if_current(&stale_park, &stale_park)
             .expect_err("a stale re-park must not erase request_changes");
 
-
         let reopened = task_store.get(&task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(reopened.assignee.as_deref(), Some("worker"));
@@ -1224,7 +1223,6 @@ mod tests {
             Utc::now() + chrono::Duration::minutes(10),
         )
         .expect_err("the rejected receipt cannot become a fresh close authority");
-
 
         let mut corrected_input = input();
         corrected_input.commit_sha = "c".repeat(40);
@@ -1327,7 +1325,6 @@ mod tests {
             vec!["a".repeat(40)]
         );
 
-
         assert!(reopened.notes.contains("trailing summary row"));
 
         // The merge itself is a fact and stays recorded; only the proof that
@@ -1422,7 +1419,6 @@ mod tests {
         let reopened = task_store.get(&task.id).unwrap();
         assert_eq!(reopened.status, TaskStatus::Open);
         assert_eq!(reopened.assignee.as_deref(), Some("worker"));
-
 
         let (_, delivery) = get_worker_delivery_by_receipt(root.path(), &delivery.receipt_id)
             .unwrap()

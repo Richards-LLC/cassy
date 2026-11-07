@@ -447,7 +447,6 @@ async fn cas_559c_mcp_peer_detail_lists_claims_workers_branches_without_importin
             .coordination(rmcp::handler::server::wrapper::Parameters(request))
             .await
             .unwrap_err();
-
     }
     // CLI parity uses the actual binary built with this integration harness.
     let output = std::process::Command::new(cas::test_paths::cas_binary())

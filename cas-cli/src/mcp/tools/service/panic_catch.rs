@@ -222,7 +222,6 @@ mod tests {
         .await;
         let err = result.expect_err("expected Err");
         assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
-
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -254,7 +253,6 @@ mod tests {
         .await;
         let err = result.expect_err("expected Err");
         assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
-
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -269,7 +267,6 @@ mod tests {
         .await;
         let err = result.expect_err("expected Err");
         assert_eq!(err.code, ErrorCode::INTERNAL_ERROR);
-
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -292,7 +289,6 @@ mod tests {
                 "iteration {i} wrong code: {:?}",
                 err.code
             );
-
         }
 
         // Runtime must still be usable after 10 panics.

@@ -1628,7 +1628,6 @@ async fn task_note_cap_rejects_without_mutating_the_task() {
         .await
         .expect_err("over-cap task note must be rejected");
 
-
     assert_eq!(task_store.get(&task.id).expect("read unchanged task").notes, "");
 }
 
@@ -2123,7 +2122,6 @@ async fn start_still_refuses_a_row_owned_by_another_project() {
         .cas_task_start(Parameters(IdRequest { id: task_id }))
         .await
         .expect_err("a row owned by another project must not start here");
-
 }
 
 #[tokio::test]
@@ -4538,7 +4536,6 @@ async fn test_worker_rejection_names_resolved_assignee_and_caller_identities() {
         }))
         .await
         .expect_err("different worker must remain refused");
-
 }
 
 #[tokio::test]
@@ -4783,7 +4780,6 @@ async fn test_release_foreign_lease_refusal_uses_registered_role_cas_35af() {
     let error = service.cas_task_release(Parameters(TaskReleaseRequest {
         task_id: task.id.clone(), force: Some(true),
     })).await.expect_err("worker may not release another agent's lease");
-
 
     assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
     assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, worker.id);
@@ -6008,7 +6004,6 @@ async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe()
             assert!(text.contains(&source_id), "{text}");
             let error = started.expect_err("a peer update must not revoke the live lease");
 
-
             let before = agents.get_lease(&id).unwrap().unwrap();
             agents.heartbeat(&source_id).unwrap();
             let after = agents.get_lease(&id).unwrap().unwrap();
@@ -6394,7 +6389,6 @@ async fn a_task_without_a_lease_needs_its_assignee_or_a_supervisor_override() {
         .cas_task_transfer(Parameters(request()))
         .await
         .expect_err("neither the assignee nor a supervisor");
-
 
     let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor_core.set_agent_id_for_testing("supervisor-session-id".to_string());
@@ -7290,10 +7284,7 @@ async fn immutable_qa_assignment_does_not_follow_the_moving_epic() {
             let error = result.expect_err("implementation, unbound label and self-review remain guarded");
             if producer.is_none() {
                 // pin: the real17-commit regression keeps the implementation freshness guard.
-
             } else {
-
-
             }
             assert!(tasks.get(&task.id).unwrap().assignee.is_none());
         }
@@ -7420,7 +7411,6 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         request.assignee = Some(assignee.clone());
         let error = service.cas_task_create(Parameters(request)).await
             .expect_err("create must refuse the stale assignee just as update does");
-
 
         assert_eq!(task_store.list(None).unwrap().len(), before);
         assert!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10)

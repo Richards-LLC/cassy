@@ -2970,7 +2970,6 @@ mod tests {
         .expect("supervisor fallback should resolve");
         assert_eq!(specs[0].model.as_deref(), Some("claude-fable-5-1"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
-
     }
 
     // EPIC cas-8888 (cas-964a, Phase 3): resolve_cli_choice's Grok arm.
@@ -3015,7 +3014,6 @@ mod tests {
             panic!("Claude resolution must not probe Codex")
         })
         .unwrap_err();
-
     }
 
     /// cas-1c3a: preflight must not classify Codex from binary presence or
@@ -3146,9 +3144,6 @@ mod tests {
         let error = normalize_supervisor_spec(&mut spec, &sources)
             .expect_err("explicit Claude model on Codex must be rejected")
             .to_string();
-
-
-
     }
 
     #[test]

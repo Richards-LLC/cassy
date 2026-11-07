@@ -39,7 +39,6 @@ fn cas_a576_rust_module_filter_target_is_refused() {
         ));
         let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
             .expect_err("a structured Rust subset must not satisfy whole-target scope");
-
     }
 }
 
@@ -315,7 +314,6 @@ fn missing_or_contradictory_fields_remain_refused_with_precise_diagnostics() {
             validate_risk_close_proofs(&task, &[], std::path::Path::new(".")).expect_err(receipt);
         assert!(error.contains(expected), "{receipt}: {error}");
 
-
         let gaps = declared_risk_close_gaps(&task, &[], std::path::Path::new(".")).join("; ");
         assert!(gaps.contains(expected), "audit differs: {gaps}");
         assert!(
@@ -331,7 +329,6 @@ fn no_typed_note_reports_all_missing_fields_and_executable_example() {
     task.notes = "progress: target=vitest parallelism=16 loops=3 result=PASS".into();
     let error = validate_risk_close_proofs(&task, &[], std::path::Path::new("."))
         .expect_err("untyped progress cannot satisfy concurrency risk");
-
 
     let example = error
         .split("Accepted example: ")
@@ -537,7 +534,6 @@ fn cas_69b4_numeric_and_word_run_aliases_keep_their_own_values() {
                 std::path::Path::new("."),
             )
             .expect_err(&receipt);
-
         }
     }
     for runs in [
@@ -553,8 +549,6 @@ fn cas_69b4_numeric_and_word_run_aliases_keep_their_own_values() {
         let error =
             validate_risk_close_proofs(&concurrency_task(&receipt), &[], std::path::Path::new("."))
                 .expect_err(&receipt);
-
-
     }
 }
 

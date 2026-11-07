@@ -2416,8 +2416,6 @@ fn restart_force_terminates_a_recordless_lock_holder_and_starts_replacement() {
     );
     let stderr = String::from_utf8_lossy(&restart.stderr);
 
-
-
     let status = cas_command(home.path(), bin.as_os_str())
         .args(["--json", "hub", "status"])
         .output()
@@ -2480,7 +2478,6 @@ fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
          the relaunch-intent early return has leaked into stop: stdout={} stderr={stderr}",
         String::from_utf8_lossy(&stop.stdout)
     );
-
 
     fs::write(barrier.join("release"), b"release\n").unwrap();
     let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));

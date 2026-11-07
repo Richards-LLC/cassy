@@ -444,7 +444,6 @@ fn cas_2a5a_cross_project_message_cannot_interrupt_act_as_operator_or_direct_wor
     // pin: the advisory authority wording is the recipient's only instruction.
 
     // pin: delivered wording the recipient supervisor acts on.
-
 }
 
 #[test]
@@ -505,8 +504,6 @@ fn cas_2a5a_attachment_pointer_arrives_intact_and_is_readable() {
     assert!(matches!(&legacy[0], PeerAttachment::Artifact { task_id: None, .. }));
     let legacy_prompt = render_attachments(&legacy, CASSY);
     // pin: old pointers must offer recovery instead of a fetch missing its required task.
-
-
 
 
     let rows = [
@@ -661,7 +658,6 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
     assert_eq!(first, "[OK] 4 supervisors in 3 projects | 2 live");
     // cas-8522: every live row declares its owned epic, or none.
 
-
     assert!(!text.contains("true-dragon-23"), "stale rows collapse: {text}");
     // pin: stale supervisors are a count per project.
 
@@ -674,7 +670,6 @@ fn cas_2a5a_directory_opens_with_a_verdict_and_collapses_stale_rows() {
     assert!(verbose.contains("swift-owl-75"));
 
     // pin: the empty directory still opens with a verdict.
-
 }
 
 /// cas-8522 (GH #1289): two live supervisors of one project. The project
@@ -705,7 +700,6 @@ fn cas_8522_project_address_names_owned_epics_and_an_epic_resolves_its_owner() {
         supervisor("swift-heron-11", "cas-2570", "Cloud rollout"),
     ];
     let refusal = resolve_user_peer_target(&peers, "supervisor:cassy").unwrap_err();
-
 
     let owner = resolve_user_peer_target(&peers, "supervisor:cas-2570").unwrap().unwrap();
     assert_eq!(owner.name, "swift-heron-11");

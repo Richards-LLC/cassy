@@ -228,7 +228,6 @@ describe("pairing failure copy", () => {
   });
 
 
-
   it("keeps a hub sentence when the hub sends one", () => {
     const failure = pairingExchangeFailure({
       status: 403,
@@ -311,7 +310,6 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
     const { invitation } = fragment(`#pair=${TOKEN}&hub=machine-uuid&scopes=machine:read,session:read,pane:read,factory:manage`);
     expect(invitation?.scopes).toEqual(["machine-read", "session-read", "pane-read", "factory-manage"]);
   });
-
 
 
   it("offers a fleet scope's box only when the invitation grants it, ticked", () => {

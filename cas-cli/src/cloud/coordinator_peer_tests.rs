@@ -517,7 +517,6 @@ async fn cas_4ac8_cleanup_budget_does_not_retry_other_errors_or_early_retry_afte
         let error = result.unwrap_err().to_string();
 
         if code == 429 {
-
         }
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }

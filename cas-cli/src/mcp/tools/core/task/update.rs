@@ -2941,7 +2941,6 @@ mod status_transition_tests {
             .await
             .expect_err("a worker must not promote its active task");
 
-
         assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
 
         // Taking the real update path back to Open must not unlock a P0
@@ -3366,7 +3365,6 @@ mod epic_owner_transfer_auth_tests {
             false,
         )
         .unwrap_err();
-
     }
 
     #[test]
@@ -3383,7 +3381,6 @@ mod epic_owner_transfer_auth_tests {
             true, // even supervisor role without real identity fails
         )
         .unwrap_err();
-
     }
 
     #[test]
@@ -3449,7 +3446,6 @@ mod epic_owner_transfer_auth_tests {
             false,
         )
         .unwrap_err();
-
     }
 
     #[test]
@@ -3487,12 +3483,10 @@ mod epic_owner_transfer_auth_tests {
         let err =
             validate_epic_owner_target_agent(&dead, EPIC_OWNER_TARGET_STALE_SECS).unwrap_err();
 
-
         dead.status = AgentStatus::Active;
         dead.last_heartbeat = chrono::Utc::now() - chrono::Duration::seconds(10_000);
         let err =
             validate_epic_owner_target_agent(&dead, EPIC_OWNER_TARGET_STALE_SECS).unwrap_err();
-
     }
 
     #[test]

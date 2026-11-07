@@ -2471,7 +2471,6 @@ child.wait()
             "{live}"
         );
 
-
         std::fs::write(
             &path,
             serde_json::json!({
@@ -4141,7 +4140,6 @@ PY"#);
         }).collect::<Vec<_>>().join("\n");
         // pin: capacity wait and next retry identify resource waiting to workers and supervisors.
 
-
         assert!(status.contains("max_concurrent_builders=1"), "{status}");
         assert_eq!(status.matches("Capacity wait:").count(), 1);
         let wait = crate::factory_capacity_wait::view(&root, "capacity-worker", chrono::Utc::now()).unwrap().unwrap();
@@ -4968,7 +4966,6 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#);
             None,
         )
         .expect_err("verifiers run named tests only");
-
     }
 
     #[test]

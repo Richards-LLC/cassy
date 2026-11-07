@@ -869,7 +869,6 @@ large_artifact_dir = \"before\"\n",
             "0::/user.slice/app.slice/cas-server-cassy-daemon",
         ] {
             let error = set_project_write_roots("~/Downloads", &cas_root, cgroup).unwrap_err().to_string();
-
         }
         std::os::unix::fs::symlink(&home, home.join("home-link")).unwrap();
         for unsafe_root in [

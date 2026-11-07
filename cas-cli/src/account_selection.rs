@@ -543,7 +543,6 @@ pub(crate) mod tests {
                     if case == "duplicate routes to canonical" {
                         assert!(result.excluded.iter().any(|(account, _)| account.name == "duplicate"));
                     }
-
                 } else {
                     assert_eq!(
                         result.excluded.len(),

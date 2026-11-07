@@ -70,7 +70,6 @@ describe("launch model", () => {
     }
   });
 
-
 });
 
 describe("session launch scope (cas-0f51)", () => {
@@ -84,7 +83,6 @@ describe("session launch scope (cas-0f51)", () => {
     const granted = [...CONTROL, "session-launch"] as Scope[];
     expect(scopeChoices(granted, granted).find((c) => c.scope === "session-launch")).toMatchObject({ granted: true, checked: true });
   });
-
 
 
   it("re-pairs with the current scopes plus launch", () => {
@@ -665,7 +663,6 @@ describe("New session sheet copy (cas-cee5, journey F31-F34)", () => {
     expect(code.textContent).toBe("cas hub pair --origin https://hub.example --scopes machine:read,pane:input,session:launch");
     expect(code.querySelectorAll("wbr")).toHaveLength(2);
   });
-
 
 });
 

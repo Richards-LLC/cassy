@@ -30,7 +30,6 @@ describe("desktop context rail (P10)", () => {
     expect(rail.textContent).not.toContain("patient-pelican-9");
     expect(rail.textContent).not.toContain("cas-src");
     expect(rail.textContent).not.toContain("Atlas");
-
   });
 
   it("folds to the 48px track when the thread has nothing unique", () => {
@@ -67,7 +66,6 @@ describe("desktop context rail (P10)", () => {
     history.reply(reply(2, "blocker", "Please check another row."), at(9, 32));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(false);
-
   });
 
   it("folds with no conversation open: the welcome shell has no rail sections at all", () => {

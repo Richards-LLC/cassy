@@ -354,7 +354,6 @@ mod tests {
     }
 
 
-
     #[test]
     fn json_scalars_map_onto_sqlite_types() {
         use rusqlite::types::Value;

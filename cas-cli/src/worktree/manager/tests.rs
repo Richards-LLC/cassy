@@ -1121,7 +1121,6 @@ fn test_create_epic_branch_rejects_corrupt_base_without_writing_ref_cas_42a4() {
         .create_epic_branch("Must Not Exist")
         .expect_err("a corrupt configured base must abort epic branch creation");
 
-
     assert!(
         !repo_path
             .join(".git/refs/heads/epic/must-not-exist")

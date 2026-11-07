@@ -4283,7 +4283,6 @@ mod tests {
         // three edges publish a number that reads as the whole picture.
         let reason = cov.unmeasurable_reason.expect("partial measurement declared");
 
-
         assert_eq!(
             cov.by_method,
             vec![(LINK_METHOD_FACTORY_ANCHOR.to_string(), 1)]
@@ -5124,7 +5123,6 @@ mod tests {
         let resolved = store.resolve_provenance("/repo", &[sha.to_string()]).unwrap();
         let p = resolved.get(sha).unwrap();
         assert!(p.links.is_empty(), "no usable edge existed: {p:?}");
-
 
         let cov = store.provenance_coverage("/repo").unwrap();
         let edge = cov

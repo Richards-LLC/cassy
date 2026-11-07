@@ -379,7 +379,6 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
         .await
         .expect_err("implementer must be refused");
 
-
     // ...nor record a verdict.
     let ledger = repo.join("LEDGER.md");
     std::fs::write(&ledger, "# ledger\n").unwrap();
@@ -394,7 +393,6 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
         }))))
         .await
         .expect_err("implementer verdict must be refused");
-
 
     // A different agent may start it, which claims the round.
     let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
@@ -582,7 +580,6 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
         }))))
         .await
         .expect_err("a verdict needs its bundle");
-
 
     let round1_head = git(&repo, &["rev-parse", "factory/test-agent"]);
     let ledger1 = round_evidence(&repo.join("round-1"), &task_id, &round1_head);
@@ -1435,7 +1432,6 @@ async fn backend_only_deliveries_are_untouched_and_qa_type_on_add_is_refused() {
         }))))
         .await
         .expect_err("unknown types no longer fall through to task");
-
 }
 
 fn reopened_to_in_progress(cas_dir: &Path, task_id: &str) {
@@ -2832,7 +2828,6 @@ async fn supervisor_can_request_independent_qa_for_a_parked_delivery_cas_74284()
         .await
         .expect_err("only a parked delivery can be requested");
 
-
     let requested = extract_text(
         service
             .verification(Parameters(request(
@@ -2928,7 +2923,6 @@ async fn qa_preflight_blocks_an_unready_reviewer_and_reports_a_ready_one_cas_d5c
         }))
         .await
         .expect_err("an unready reviewer environment is a blocker");
-
 
     assert!(
         blocked.message.contains("blocker=true"),

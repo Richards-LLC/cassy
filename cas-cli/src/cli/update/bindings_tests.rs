@@ -96,7 +96,6 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
     for _ in 0..2 {
         let ProjectPhase::Warning(detail) = run() else { panic!("a refused channel is a warning") };
         assert!(detail.contains(FOREIGN));
-
     }
     let seen = remote.join().unwrap();
     assert_eq!(seen[0], format!("GET /api/channels?project_id={}", PROJECT.replace('/', "%2F")));

@@ -1321,7 +1321,6 @@ mod tests {
         )]);
         let outcome = init(&root, &client).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Skipped);
-
     }
 
     #[test]
@@ -1451,7 +1450,6 @@ mod tests {
         stale_client.stale_ids.push("prj_1".to_string());
         let outcome = verify(&root, &stale_client).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Stale);
-
     }
 
     #[test]
@@ -1596,7 +1594,6 @@ mod tests {
         let claude = std::fs::read_to_string(root.join(REL_CLAUDE_SKILL)).unwrap();
         assert!(claude.contains("prj_fe"));
         assert!(claude.contains("prj_be"));
-
     }
 
     // --- Init: empty SKILL.md is treated as fresh ----------------------
@@ -1703,7 +1700,6 @@ mod tests {
         let client = MockVercelClient::new(vec![]);
         let outcome = verify(&root, &client).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Skipped);
-
     }
 
     // --- read_capped: symlink + size guards -----------------------------
@@ -1718,7 +1714,6 @@ mod tests {
             return;
         }
         let err = read_capped(&link).unwrap_err().to_string();
-
     }
 
     // --- MCP response parsers ------------------------------------------
@@ -1930,7 +1925,6 @@ mod tests {
         let outcome =
             init_with_preseed(&root, &client, Some("prj_unknown")).unwrap();
         assert_eq!(outcome.status, IntegrationStatus::Skipped);
-
     }
 
     // --- verify_report (cas-3efe) ----------------------------------------
@@ -2008,6 +2002,5 @@ mod tests {
         let big = vec![b'a'; (super::super::fs::MAX_FILE_BYTES as usize) + 1];
         std::fs::write(&path, &big).unwrap();
         let err = read_capped(&path).unwrap_err().to_string();
-
     }
 }

@@ -730,7 +730,6 @@ fn malformed_verification_issues_never_cross_protocol_logs_or_sqlite() {
         }
     }
 
-
     for suffix in ["", "-wal", "-shm"] {
         let path = sandbox.cas_root().join(format!("cas.db{suffix}"));
         if let Ok(bytes) = std::fs::read(path) {
@@ -1638,7 +1637,6 @@ fn test_serve_migration_requires_explicit_root_or_installed_binary_cas_a65b() {
         );
         let stderr = client.stop_and_read_stderr();
 
-
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         for table in ["verification_capabilities", "verifications"] {
             assert_eq!(
@@ -1788,7 +1786,6 @@ fn factory_worker_serve_never_starts_the_code_indexer_cas_8256() {
     let mut client = McpTestClient::spawn_command_capturing_stderr(worker);
     client.initialize();
     let stderr = client.stop_and_read_stderr();
-
 
     let files: i64 = rusqlite::Connection::open(sandbox.path().join(".cas/cas.db"))
         .unwrap()

@@ -1880,7 +1880,6 @@ mod tests {
         )
         .unwrap();
 
-
         assert!(result.contains("daring-leopard-21"), "{result}");
         let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
         assert_eq!(split.state, SplitState::Cancelled);
@@ -1909,7 +1908,6 @@ mod tests {
             Some("attempted takeover"),
         )
         .unwrap_err();
-
 
         let split = get_epic_split(root, "split-2c91dc59").unwrap().unwrap();
         assert_eq!(split.state, SplitState::Accepted);

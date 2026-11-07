@@ -1361,7 +1361,6 @@ mod tests {
             log.read_to_string(&mut warning).unwrap();
             assert_eq!(warning.contains("WARN"), failed_read, "{warning}");
             if failed_read {
-
             }
         }
     }

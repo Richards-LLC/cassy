@@ -3519,6 +3519,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   /* One-line sessions keep a 44px touch target on a phone. */
   .project-card .conversation-row { min-height: var(--rail-item-min); }
   .project-card .conversation-end[data-state="idle"] .conversation-end-ask { bottom: var(--space-1); }
+  /* The card's row padding must not undo the End column the row gives up (cas-339a). */
+  .project-card .conversation-row.endable { padding-right: 56px; }
 }
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }

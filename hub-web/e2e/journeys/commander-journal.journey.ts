@@ -478,7 +478,8 @@ test("HUB-J3 replies read before a reload stay read after it (cas-97d58 F14)", j
   await journey.stage("A reload replays the history; what was read is still read", async () => {
     await page.reload();
     await expect(casSrc).toBeVisible({ timeout: 15_000 });
-    await expect(casSrc).toContainText("Read before the reload.");
+    // cas-da546: the row speaks its last turn; it does not show it.
+    await expect(casSrc).toHaveAccessibleName(/Read before the reload\./);
     await expect(casSrc.getByLabel(/unread/)).toHaveCount(0);
   });
 });

@@ -1934,6 +1934,18 @@ impl FactoryDaemon {
             ));
         }
 
+        // A pointer wake for a row the recipient already read (hook surfacing
+        // or its own inbox_poll) opens a turn with nothing new to act on.
+        if let Some(id) = notification_id
+            && pointer_row_already_shown(self.app.cas_dir(), id, &[pane_target, target])
+        {
+            return Ok(NudgeReport::not_attempted(
+                InjectOutcome::Delivered,
+                DeliveryChannel::TeamsInbox,
+                "row already shown to the recipient; no wake needed",
+            ));
+        }
+
         // cas-cdf9: a WAKE, not a second copy of the message. The body was
         // written to the inbox by the primary delivery and is rendered from
         // there; retyping it here is what surfaced every factory message twice.
@@ -1993,6 +2005,20 @@ impl FactoryDaemon {
         };
         Ok(report)
     }
+}
+
+/// Whether `id` was already surfaced to any of `names` by a hook or their own
+/// inbox poll. Unreadable store means "not shown": a wake is never lost to an error.
+pub(crate) fn pointer_row_already_shown(cas_dir: &Path, id: i64, names: &[&str]) -> bool {
+    let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
+        return false;
+    };
+    names.iter().any(|name| {
+        matches!(
+            queue.recipient_receipt(id, name),
+            Ok(Some(cas_store::SurfacingSource::HookSurfaced | cas_store::SurfacingSource::InboxPoll))
+        )
+    })
 }
 
 /// Shared cas-f9e8 delivery envelope for direct and external native writes.
@@ -2903,6 +2929,19 @@ mod tests {
             frame_pty_payload(SupervisorCli::Claude, "supervisor", &wake),
             wake
         );
+    }
+
+    #[test]
+    fn pointer_wake_is_skipped_only_for_a_row_already_shown() {
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let id = queue.enqueue("worker", "supervisor", "merge it").unwrap();
+        assert!(!pointer_row_already_shown(&cas_dir, id, &["supervisor"]));
+        queue.record_recipient_surfaced(id, "supervisor", cas_store::SurfacingSource::TransportDelivered).unwrap();
+        assert!(!pointer_row_already_shown(&cas_dir, id, &["supervisor"]), "a transport handoff is not a read");
+        queue.record_recipient_surfaced(id, "supervisor", cas_store::SurfacingSource::HookSurfaced).unwrap();
+        assert!(pointer_row_already_shown(&cas_dir, id, &["lead", "supervisor"]));
     }
 
     /// The wake names the id so it degrades safely: a recipient woken without

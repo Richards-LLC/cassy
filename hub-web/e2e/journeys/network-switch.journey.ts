@@ -110,7 +110,8 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
 test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", journeyPart, async ({ page, journey }) => {
   await journey.stage("Tailscale goes off, then on again", async () => {
     const { hub, clock, header, held } = await connected(page);
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).locator(".conversation-preview");
+    const rowButton = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
+    const row = rowButton.locator(".conversation-preview");
     const footer = page.locator("#hub-footer-badges .machine-badge-state");
     const panel = page.locator(".status-stale").filter({ visible: true });
     await hub.down("atlas");
@@ -155,7 +156,7 @@ test("HUB-J12 network switch: half-open machine waits for four failed heartbeats
       if (beat === 3) await expect(header).toHaveText(" · Unsteady");
     }
     await expect(header).toHaveText(" · Reconnecting");
-    await expect(row).toHaveText("You: While unsteady");
+    await expect(rowButton).toHaveAccessibleName(/You: While unsteady/);
     await expect(footer).toHaveText("Reconnecting");
     await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Lost connection to Atlas · Linux. Reconnecting…");
     // The composer's line follows the outage from unsteady to lost.

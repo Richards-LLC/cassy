@@ -77,7 +77,7 @@ function said(id: number, kind: OperatorTurnKind, message: string): OperatorRepl
   return { notification_id: id, reply_to: null, message, summary: "", device_id: "d", kind };
 }
 
-it("preserves literal emoji text in sent bubbles, list previews and waiting questions", () => {
+it("preserves literal emoji text in sent bubbles, list drafts and waiting questions", () => {
   const text = "Ready <script> & 👍🏽 👩🏽‍💻 🇯🇵";
   openShell();
   const history = new ConversationHistory();
@@ -87,7 +87,7 @@ it("preserves literal emoji text in sent bubbles, list previews and waiting ques
   document.body.append(view.element); view.update();
   syncContextRail(document, { history, progress: false, attention: 0 });
   const list = document.createElement("div");
-  new ConversationList().render(list, [{ key: "atlas:s", machineId: "atlas", session: "s", supervisor: "patient-pelican-9", host: "Atlas", freshness: "now", connection: "Live", preview: text, attention: 0, selected: false }], () => {});
+  new ConversationList().render(list, [{ key: "atlas:s", machineId: "atlas", session: "s", supervisor: "patient-pelican-9", host: "Atlas", freshness: "now", connection: "Live", draft: text, attention: 0, selected: false }], () => {});
   for (const node of [view.element.querySelector('.bub'), list.querySelector('.conversation-preview'), document.querySelector('.context-text')]) {
     expect(node?.textContent).toContain(text);
     expect([...node!.querySelectorAll('.emoji-text')].map(span => span.textContent)).toEqual(["👍🏽", "👩🏽‍💻", "🇯🇵"]);

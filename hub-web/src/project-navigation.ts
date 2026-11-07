@@ -97,7 +97,8 @@ export class ProjectNavigation {
   private quickFilters(container: HTMLElement, machines: readonly NavigationMachine[], waiting: number): void {
     container.setAttribute("role", "group");
     container.setAttribute("aria-label", "Filter conversations");
-    const machine = this.filter.startsWith("machine:") ? machines.find(item => `machine:${item.id}` === this.filter) : undefined;
+    // A chosen machine that has left the catalog is still named, so the way back stays.
+    const machine = this.filter.startsWith("machine:") ? machines.find(item => `machine:${item.id}` === this.filter) ?? { id: this.filter.slice(8), label: this.filter.slice(8) } : undefined;
     const choices: { value: Filter; label: string; markup: string; pressed: boolean; className: string }[] = [];
     if (waiting > 0 || this.filter === "needs-you") {
       const on = this.filter === "needs-you";

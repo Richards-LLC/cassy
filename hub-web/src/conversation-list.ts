@@ -123,7 +123,7 @@ export function groupConversationRows<T extends ConversationRow>(rows: readonly 
     const recent = mostRecentConversation(group);
     // cas-5d2c: the same noun as the footer's "3 conversations".
     const label = `${rowProjectName(row) ?? row.supervisor} · ${group.length} conversations on ${machineName(row.host)}`;
-    ordered.forEach((member, index) => out.push({ ...member, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));
+    ordered.forEach((member, index) => out.push({ ...member, showCodename: true, group: { key, label, size: group.length, first: index === 0, active: member === recent && rank(member) !== -Infinity } }));
   }
   return out;
 }
@@ -290,7 +290,9 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const version = rowVersion(row);
   const badge = version?.update ? `<span class="supervisor-version update-available" title="${escapeHtml(version.description)}">${escapeHtml(version.version)} <span aria-hidden="true">↑</span><span class="sr-only"> Update available</span></span>` : "";
   // Two sessions of one project on one machine read apart by their codename.
-  const codename = row.showCodename ? `<span class="conversation-supervisor-name codename">${escapeHtml(row.supervisor)}</span>` : "";
+  // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
+  const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
+  const codename = row.showCodename ? `<span class="conversation-supervisor-name codename">${escapeHtml(row.supervisor)}</span>${mark}` : "";
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
     + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">Supervisor</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
     + time

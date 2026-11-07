@@ -29601,6 +29601,13 @@ mod merge_state_gate_tests {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
+            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+                // Publication records the reviewed mapping before sibling work
+                // evolves the same file. Close must reuse that immutable map.
+                git(p, &["push", "-q", "origin", "main"]);
+                let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                core.verify_premerge_promotion(&task, &dispatch, &verdict.id).unwrap();
+            }
             if row == "batch-target-proof" {
                 let proof = super::super::repository_proof::capture_repository_proof_at_target(p, "main", vec![source.clone()]).unwrap();
                 dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(proof), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
@@ -29629,7 +29636,7 @@ mod merge_state_gate_tests {
                 _ => panic!("missing task-bound review: {row}"),
             }
             if matches!(row, "same-line-evolved" | "batch-target-proof") {
-                let ledger = root.join("release-ledger.md");
+                let ledger = p.join("release-ledger.md");
                 std::fs::write(&ledger, "# Release review\ncas-fee3 PASS\n").unwrap();
                 let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
                 let context = crate::artifacts::PublishContext {

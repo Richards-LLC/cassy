@@ -234,7 +234,7 @@ fn release_and_binary_skew_notices_wake_once() {
     let state = serde_json::json!({"outcome":"FAIL", "head":"tested-merge", "run_id":"17", "run_attempt":1,
         "introducing_merge":"tested-merge", "merge_range":[{"sha":"tested-merge", "tasks":["cas-fix"]}],
         "failures":["fixture::regression"], "complete_log":"complete.zip", "artifact":"train-rust-suite", "run_url":"https://example.test/runs/17"});
-    for _ in 0..2 { crate::train_ci::notify(&root, &epic, &state).unwrap(); }
+    for _ in 0..2 { crate::train_ci::notify(&root, &epic, None, &state).unwrap(); }
     let rows = open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
     assert_eq!(rows.len(), 4, "retrying an occurrence must not repeat its wake");
     // pin: train_ci_red is the action-envelope kind consumed by the supervisor.

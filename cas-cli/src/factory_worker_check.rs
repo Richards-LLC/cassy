@@ -290,7 +290,20 @@ fn validate_harness(repo: &Path, test: &TargetedTest) -> Result<()> {
                         })
             })
         });
-    if !found {
+    // Cargo auto-discovers tests/<name>.rs and tests/<name>/main.rs as harnesses
+    // unless the package turns autotests off (cas-cli does, to avoid per-suite binaries).
+    let autotests = value
+        .get("package")
+        .and_then(|package| package.get("autotests"))
+        .and_then(toml::Value::as_bool)
+        != Some(false);
+    let discovered = autotests
+        && path.parent().is_some_and(|dir| {
+            !harness.contains(['/', '\\'])
+                && (dir.join("tests").join(format!("{harness}.rs")).is_file()
+                    || dir.join("tests").join(harness).join("main.rs").is_file())
+        });
+    if !found && !discovered {
         bail!(
             "Worker test refused: {harness} is not an explicit test harness in {} (cas-test-targets.py inventory)",
             test.package
@@ -3839,6 +3852,21 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         assert!(validate_harness(repo.path(), &test).is_err());
         test.harness = Some("integration_factory".into());
         std::fs::remove_file(package.join("harness.rs")).unwrap();
+        assert!(validate_harness(repo.path(), &test).is_err());
+        // Cargo auto-discovered targets (file stem, or dir with main.rs) are harnesses
+        // unless the package sets autotests = false.
+        std::fs::create_dir_all(package.join("tests/dir_suite")).unwrap();
+        std::fs::write(package.join("tests/spec_resolver.rs"), "// fixture").unwrap();
+        std::fs::write(package.join("tests/dir_suite/main.rs"), "// fixture").unwrap();
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"cas\"\n").unwrap();
+        for name in ["spec_resolver", "dir_suite"] {
+            test.harness = Some(name.into());
+            validate_harness(repo.path(), &test).unwrap();
+        }
+        test.harness = Some("missing_suite".into());
+        assert!(validate_harness(repo.path(), &test).is_err());
+        std::fs::write(package.join("Cargo.toml"), "[package]\nname = \"cas\"\nautotests = false\n").unwrap();
+        test.harness = Some("spec_resolver".into());
         assert!(validate_harness(repo.path(), &test).is_err());
     }
 

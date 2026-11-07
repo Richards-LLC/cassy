@@ -2883,7 +2883,8 @@ mod status_transition_tests {
         core.set_agent_id_for_testing(sup.id);
 
         let mut task = Task::new("cas-finding-p".into(), "finding".into());
-        task.priority = Priority::MEDIUM;
+        // Broken × secondary with no journey or repro derives P4.
+        task.priority = Priority(4);
         task.labels = vec!["from-finding".into(), "severity:broken".into(), "reach:secondary".into()];
         tasks.add(&task).unwrap();
 
@@ -2892,7 +2893,7 @@ mod status_transition_tests {
         })).unwrap();
         let text = format!("{:?}", core.cas_task_update(Parameters(request)).await.unwrap());
         let stored = tasks.get(&task.id).unwrap();
-        assert_eq!(stored.priority, Priority::MEDIUM, "severity × reach decides finding priority");
+        assert_eq!(stored.priority, Priority(4), "severity × reach decides finding priority");
         assert!(stored.labels.iter().any(|l| l == "incident"));
         let updated = text.split("Updated task cas-finding-p: ").nth(1).and_then(|r| r.split("\\n").next()).unwrap_or("");
         assert!(!updated.contains("priority"), "priority is not reported as updated: {text}");

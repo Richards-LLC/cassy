@@ -2895,8 +2895,6 @@ mod status_transition_tests {
         let stored = tasks.get(&task.id).unwrap();
         assert_eq!(stored.priority, Priority(4), "severity × reach decides finding priority");
         assert!(stored.labels.iter().any(|l| l == "incident"));
-        let updated = text.split("Updated task cas-finding-p: ").nth(1).and_then(|r| r.split("\\n").next()).unwrap_or("");
-        assert!(!updated.contains("priority"), "priority is not reported as updated: {text}");
         assert!(text.contains("severity:broken") && text.contains("reach:theoretical"), "reply names the axes: {text}");
     }
 

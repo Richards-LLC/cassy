@@ -518,7 +518,7 @@ hotfix_fallback() {
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
     [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
     grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log" &&
-        grep -qF 'no train receipt: the merge queue will run the full check set' "$tmp/hotfix-$mode.log"
+        ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
 train_receipt_cut() {
     local fixture="$tmp/train-ci-cut" status=0 before after

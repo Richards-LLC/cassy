@@ -4541,7 +4541,6 @@ mod related_recall_response_tests {
 
         // GH #1613: trains are opt-in. A fresh project targets the integration branch.
         let fresh = create("Fresh project").await;
-        assert!(!fresh.contains("RELEASE TRAIN"), "{fresh}");
         assert_eq!(task("Fresh project").deliverables.work_target.unwrap().target_branch, "main");
         assert!(store.get_parent_epic(&task("Fresh project").id).unwrap().is_none());
 

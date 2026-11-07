@@ -176,14 +176,15 @@ class Selection(unittest.TestCase):
             (repo / 'scripts').mkdir()
             (repo / 'cas-cli/Makefile').write_text('test-ci-tiers:\n\tcd .. && python3 scripts/test-probe.py\n')
             (repo / 'scripts/test-probe.py').write_text(
-                "import os\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n")
+                "import os, pathlib\nassert not {'FULL_SET', 'BASE_SHA'} & set(os.environ), os.environ\n"
+                "pathlib.Path('scripts/probe-ran').touch()\n")
             env = dict(os.environ, GITHUB_EVENT_NAME='push', GITHUB_REF='refs/heads/epic/release-train-x',
                        CAS_QUEUE_STEP='scripts/test-fast-release-rows.py', FULL_SET='true', BASE_SHA='abc')
             result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all',
                                      '--only', 'scripts/test-probe.py'],
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertIn('PASS python3 scripts/test-probe.py', result.stdout)
+            self.assertTrue((repo / 'scripts/probe-ran').exists(), result.stdout)
 
 
 if __name__ == "__main__":

@@ -460,6 +460,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     .into();
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/worker".into());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:test".into(),
+                target_branch: "epic/train".into(),
+            });
             task.deliverables.parked_close_reason = Some("PASS fixture".into());
             core.open_task_store().unwrap().add(&task).unwrap();
             core.open_worktree_store()

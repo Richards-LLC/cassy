@@ -4979,7 +4979,7 @@ mod tests {
     /// for the attempt to settle; a real failure is not waited on and warns.
     #[test]
     fn update_waits_for_pending_publication_before_warning_gh_1643() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(dir.path());
         let mut pending = record("4.4.0", 42047, None);
         pending.transport_warning = Some(PUBLICATION_PENDING.to_owned());

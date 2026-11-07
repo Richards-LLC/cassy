@@ -1570,13 +1570,14 @@ impl CasCore {
         if let Some(labels) = req.labels.as_deref() {
             triaged_labels.extend(labels.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
         }
-        if req.priority.is_some() && !triaged_labels.iter().any(|l| l == crate::finding_triage::EXPLICIT_PRIORITY_LABEL) {
-            triaged_labels.push(crate::finding_triage::EXPLICIT_PRIORITY_LABEL.into());
-        }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
             crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
                 &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
         } else { None };
+        let priority_notice = req.priority.zip(derived_priority).and_then(|(requested, derived)| {
+            crate::finding_triage::priority_not_applied(
+                &triaged_labels, Priority(requested.min(4) as i32), derived, task.priority)
+        });
         let requested_priority = derived_priority.or_else(|| req.priority.map(|priority| Priority(priority.min(4) as i32)));
         let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);
         let requested_status_is_nonterminal = req
@@ -2540,7 +2541,7 @@ impl CasCore {
         }
 
         if changes.is_empty() {
-            return Ok(Self::success("No changes specified"));
+            return Ok(Self::success(priority_notice.unwrap_or_else(|| "No changes specified".into())));
         }
 
         if let Some(evidence) = direct_close_hook_evidence {
@@ -2794,6 +2795,7 @@ impl CasCore {
 
         // Build response message with warnings if any
         let mut response = format!("Updated task {}: {}", req.id, changes.join(", "));
+        if let Some(notice) = priority_notice { warnings.insert(0, notice); }
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
@@ -2869,7 +2871,7 @@ mod status_transition_tests {
     }
 
     #[tokio::test]
-    async fn supervisor_priority_beats_finding_derived_priority_and_labels_persist() {
+    async fn finding_priority_stays_derived_and_the_reply_says_why_gh1636() {
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         let tasks = core.open_task_store().unwrap();
@@ -2888,18 +2890,13 @@ mod status_transition_tests {
         let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
             "id": task.id, "priority": 0, "labels": "incident",
         })).unwrap();
-        let out = core.cas_task_update(Parameters(request)).await.unwrap();
+        let text = format!("{:?}", core.cas_task_update(Parameters(request)).await.unwrap());
         let stored = tasks.get(&task.id).unwrap();
-        assert_eq!(stored.priority, Priority(0));
+        assert_eq!(stored.priority, Priority::MEDIUM, "severity × reach decides finding priority");
         assert!(stored.labels.iter().any(|l| l == "incident"));
-
-        // Repeating the same request changes nothing and must say so.
-        let again: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-            "id": task.id, "priority": 0,
-        })).unwrap();
-        let text = format!("{:?}", core.cas_task_update(Parameters(again)).await.unwrap());
-        assert!(!text.contains("Updated task cas-finding-p: priority"), "{text}");
-        let _ = out;
+        let updated = text.split("Updated task cas-finding-p: ").nth(1).and_then(|r| r.split("\\n").next()).unwrap_or("");
+        assert!(!updated.contains("priority"), "priority is not reported as updated: {text}");
+        assert!(text.contains("severity:broken") && text.contains("reach:secondary"), "reply names the axes: {text}");
     }
 
     #[tokio::test]

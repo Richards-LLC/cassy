@@ -182,10 +182,23 @@ class QueueRecovery(unittest.TestCase):
         self.assertEqual(len(self.issues), 2)
 
     def test_script_step_retry_publication_and_all_pass_cleanup(self):
+        # Captured from Vitest 3.2.7: npm exec -- vitest run src/live-region.test.ts --reporter=default.
+        vitest_summary=''' Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  22:31:03
+   Duration  878ms (transform 36ms, setup 12ms, collect 19ms, tests 8ms, environment 443ms, prepare 71ms)
+'''
         script = self.repo/'test-script.py'
         script.write_text("""import os,pathlib,sys
 p=pathlib.Path('step-count'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
 case=os.environ['STEP_CASE']
+prefix={'earlier-failure':'FAIL child-a\\n2 passed, 1 failed','earlier-marker':'FAIL child-a',
+        'earlier-count':'2 passed, 1 failed','earlier-assertion':'AssertionError: child failed'}
+if case in prefix or case=='vitest-cleanup':
+ if case in prefix: print(prefix[case],flush=True)
+ print(os.environ['VITEST_SUMMARY'] if case=='vitest-cleanup' else '3 passed, 0 failed',flush=True)
+ print('rm: Permission denied',file=sys.stderr)
+ sys.exit(1)
 if case in ('cleanup','native-cleanup','mixed-summary','late-assertion'):
  print({'cleanup':'19 passed, 0 failed','native-cleanup':'\\x1b[32mSummary [0.01s] 19 tests run: 19 passed\\x1b[0m',
         'mixed-summary':'Tests 1 passed | 1 failed','late-assertion':'19 passed, 0 failed'}[case],flush=True)
@@ -196,13 +209,29 @@ failed=n==1 or case=='persistent'
 print('0 passed, 1 failed' if failed else '1 passed, 0 failed',flush=True)
 sys.exit(int(failed))
 """)
-        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('native-cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL'),('late-assertion',1,2,'FAIL')]:
+        # Simulate a 126-second retry at the execute boundary without sleeping.
+        # The real child still runs when the supplied budget permits it.
+        driver=self.repo/'step-driver.py'
+        driver.write_text('''import os,runpy,sys
+scope=runpy.run_path(sys.argv.pop(1))
+execute=scope['execute']
+def measured(command,cwd,env,log,timeout=None):
+ if env['STEP_CASE']=='long-step' and timeout is not None and timeout<126:
+  log.write_text('step exceeded retry budget')
+  return 124,timeout
+ status,seconds=execute(command,cwd,env,log,timeout)
+ return status,126 if env['STEP_CASE']=='long-step' and timeout is not None else seconds
+scope['step'].__globals__['execute']=measured
+sys.exit(scope['main']())
+''')
+        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('native-cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL'),('late-assertion',1,2,'FAIL'),
+            ('earlier-failure',1,2,'FAIL'),('earlier-marker',1,2,'FAIL'),('earlier-count',1,2,'FAIL'),('earlier-assertion',1,2,'FAIL'),('vitest-cleanup',0,1,'PASS'),('long-step',0,2,'FLAKY')]:
             with self.subTest(case=case):
                 shutil.rmtree(self.repo/'receipts',ignore_errors=True)
                 (self.repo/'step-count').unlink(missing_ok=True)
-                result = subprocess.run([sys.executable,str(SCRIPT),'step','--repo',str(self.repo),
+                result = subprocess.run([sys.executable,str(driver),str(SCRIPT),'step','--repo',str(self.repo),
                     '--id','script/test-release-publish','--out',str(self.repo/'receipts'),
-                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case},cwd=self.repo,capture_output=True,text=True)
+                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case,'VITEST_SUMMARY':vitest_summary},cwd=self.repo,capture_output=True,text=True)
                 self.assertEqual(result.returncode,code,result.stdout+result.stderr)
                 self.assertEqual(int((self.repo/'step-count').read_text()),attempts)
                 receipt=json.loads((self.repo/'receipts/receipt.json').read_text())
@@ -217,8 +246,10 @@ sys.exit(int(failed))
                         SimpleNamespace(repo='fixture/repo',issues=lambda *_:self.issues))
                     self.assertEqual(len(loaded),1)
                     self.assertEqual(loaded[0]['name'],receipt['flaky'][0]['name'])
-                elif case in ('cleanup','native-cleanup'):
+                elif case in ('cleanup','native-cleanup','vitest-cleanup'):
                     self.assertIn('warning',result.stdout.lower())
+                elif case=='long-step':
+                    self.assertGreater(receipt['attempts'][1]['seconds'],120)
 
     def test_non_queue_events_never_rerun(self):
         for engine in ('rust','playwright'):

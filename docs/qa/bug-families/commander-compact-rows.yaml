@@ -1,0 +1,4 @@
+title: The compact one-line session row keeps its time and End column apart on a phone, speaks its last turn rather than showing it, and the loading list keeps the footer actions in view when held sideways
+tasks: [cas-42a9]
+invariants: [HUB-J3-GOAL, HUB-J5-GOAL, HUB-J9-GOAL, HUB-J16-GOAL, HUB-J26-GOAL, HUB-J27-GOAL]
+journeys: [HUB-J3, HUB-J5, HUB-J9, HUB-J16, HUB-J26, HUB-J27]

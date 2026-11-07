@@ -4107,7 +4107,7 @@ Tests assert behavior or stable error/rule IDs, never human-message wording.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain
-valid. Release writing advice does not create vocabulary gates.
+valid.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

@@ -17,6 +17,36 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 REPORT_ADAPTER = ROOT / "release-report-post.py"
 BODY_NAMES = ("user-top-level", "user-reply", "dev-top-level", "dev-reply")
+USER_FORBIDDEN = (
+    "watermark",
+    "metadata",
+    "ingest",
+    "upsert",
+    "envelope",
+    "scope stamp",
+    "canonical id",
+    "team pull",
+    "purge-foreign",
+    "cloud identity",
+    "registration",
+    "harness",
+    "agent",
+    "factory",
+    "worker",
+    "supervisor",
+    "daemon",
+    "epic",
+    "lane",
+)
+USER_SWAPS = {
+    "watermark": "saved position", "metadata": "details", "ingest": "import",
+    "upsert": "save", "envelope": "message", "scope stamp": "access label",
+    "canonical id": "shared ID", "team pull": "team update",
+    "purge-foreign": "remove unrelated data", "cloud identity": "account",
+    "registration": "connection", "harness": "coding tool", "agent": "session",
+    "factory": "workspace", "worker": "session", "supervisor": "session",
+    "daemon": "background service", "epic": "workstream", "lane": "workstream",
+}
 TOP_LEVEL_LABEL = re.compile(
     r"^\*(?:Live on production|Staging|Source on main) — "
     r"(?:User|Dev) — Cassy(?: v[0-9]+\.[0-9]+\.[0-9]+)?\*$"
@@ -74,6 +104,11 @@ def body_errors(index: int, body: str, pre_publication: bool = False) -> list[st
             report(line_number, "slack_heading", "starts with #; use a *bold* heading")
         if re.match(r"^-\s", line):
             report(line_number, "slack_bullet", "uses a hyphen bullet; use •")
+        if index in (0, 1):
+            for forbidden in USER_FORBIDDEN:
+                for match in re.finditer(r"\b" + re.escape(forbidden) + r"(?:e?s)?\b", line, re.IGNORECASE):
+                    report(line_number, "user_word", f"contains forbidden user wording: {match.group()}; "
+                           f"try {USER_SWAPS[forbidden]}")
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
         # Check the eventual title shape without changing the reviewed text.

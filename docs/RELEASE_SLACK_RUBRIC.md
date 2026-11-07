@@ -4,7 +4,13 @@
 mandatory #cas-internal publication workflow. They are separate duties.**
 
 <!-- release-lint:begin -->
-Use the reader’s terms and describe observable changes. Vocabulary is writing advice, never a release admission rule. Automated checks validate message structure and unresolved publication values, not word choices.
+User-thread words the lint refuses (whole words/phrases, case-insensitive):
+`watermark`, `metadata`, `ingest`, `upsert`, `envelope`,
+`scope stamp`, `canonical id`, `team pull`, `purge-foreign`, `cloud identity`,
+`registration`, `harness`, `agent`, `factory`, `worker`,
+`supervisor`, `daemon`, `epic`, `lane`.
+
+Plural forms are refused too, including `registrations`.
 
 Top-level punch: at most 25 words.
 Visible line: at most 300 characters; a `<url|label>` link counts as its label.

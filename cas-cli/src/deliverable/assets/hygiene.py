@@ -9,10 +9,10 @@ Lifted from cas-sow-delivery-report's check-sow.py hygiene. Run by
 Reads the text a reader sees (tags, scripts and styles removed; alt and title
 text kept) and prints one JSON receipt whose findings name each hit with its
 line. Internal output refuses credential shapes and absolute home paths.
-Customer output also refuses internal ticket labels, issue or PR numbers and
-local or preview hostnames. A staging environment URL stays allowed: SOW reports
-name the environment they show. Writing preferences never create findings.
---allow exempts a client-owned identifier that resembles an internal reference.
+Customer output also refuses ticket labels, issue or PR numbers, process
+words, tool names, local or preview hostnames and placeholders. A staging
+environment URL stays allowed: SOW reports name the environment they show. --allow
+exempts a word that is the client's own (a product named "Epic").
 """
 import argparse
 import html as html_lib
@@ -43,7 +43,11 @@ CUSTOMER = INTERNAL + [
         r"\b(?:(?i:cas-[0-9a-f]{4,}|(?:proj|eng)-[0-9]+)|[A-Z][A-Z0-9]+-[0-9]+|"
         r"[A-Za-z]{2,6}-(?=[0-9a-fA-F]*[0-9])(?=[0-9a-fA-F]*[a-fA-F])[0-9a-fA-F]{4,})\b")),
     ("issue or PR number", r"#[0-9]{2,5}\b"),
+    ("process word", r"\bPR\b|pull request|\bbranch\b|\bcommit\b|\bagent\b|\bworker\b"
+                     r"|\bsupervisor\b|\bepic\b|\bsprint\b|\bticket\b"),
+    ("tool name", r"\bCassy\b|\bClaude\b|\bCodex\b"),
     ("local or preview URL", r"localhost|127\.0\.0\.1|\.vercel\.app"),
+    ("placeholder", r"\bTODO\b|lorem"),
 ]
 BLOCK_END = re.compile(r'</(?:p|div|li|tr|h[1-6]|figcaption|section|header|footer|dt|dd|pre|table|caption)>|<br\s*/?>', re.I)
 

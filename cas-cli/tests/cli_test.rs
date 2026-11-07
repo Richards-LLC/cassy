@@ -578,7 +578,8 @@ fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
 
 
 
-        let line = human.lines().find(|line| line.contains(&format!("origin/{branch}"))).unwrap();
+        // A long branch is middle-truncated, so find the measured ref by its SHA.
+        let line = human.lines().find(|line| line.contains(&integrated[..7])).unwrap();
         assert!(line.chars().count() <= 80, "{human}");
         if branch == "main" {
             assert!(line.contains(&measured));

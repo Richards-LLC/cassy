@@ -151,6 +151,7 @@
 - `cas-cli/src/migration/migrations/m292_quality_turns.rs`, `cas-cli/src/migration/migrations/m295_quality_friction.rs`, `cas-cli/src/migration/migrations/m297_quality_estimates.rs` - append-only quality ledger CHECK upgrades (Turn, Friction, estimates/outcomes), shared with store-open repair.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `cas-cli/src/cli/ledger.rs`, `docs/ESTIMATES.md` - append-only quality events, measured reference-class p50/p90 estimates, linked outcomes, live/history queue identities and friction-ledger commands.
 - `cas-cli/src/cli/hub.rs`, `cas-cli/src/cli/hub_service.rs`, `cas-cli/src/hub/tailscale.rs` - hub service lifecycle and Serve target ownership.
+- `cas-cli/src/cli/hub_preview.rs` - `cas hub preview`: serves a candidate Commander dist on a read-only, time-boxed preview origin (`AuthStore::mint_preview_pairing`, `live_previews`).
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE routes and MCP action schemas.
 - `cas-cli/src/hub/auth/`, `cas-cli/src/hub/operator_inbox/`, `cas-cli/src/hub/accounts.rs` - pairing, durable operator input and account projections.
 - `cas-cli/src/hub/dismissed_sessions.rs` - authenticated legacy session tombstones.

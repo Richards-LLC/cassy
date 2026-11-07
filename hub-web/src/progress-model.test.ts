@@ -106,3 +106,17 @@ it("keeps Live epics to the selected project across machines, titled, deduplicat
   expect(live[0]).toMatchObject({ blocked: 1, rows: [{ group: "Open", state: "Blocked" }] });
   expect(quiet).toBe(1);
 });
+
+it("links a parked task to its running preview only, never this page or a non-loopback origin", async () => {
+  const { deliveryPreview } = await import("./progress-model");
+  const now = Date.parse("2026-11-06T21:00:00Z");
+  const parked = { id: "cas-1", status: "AwaitingMerge" };
+  const preview = (origin: string, until = "2026-11-06T22:00:00Z", task = "cas-1") => [{ origin, task, until }];
+  expect(deliveryPreview(parked, preview("http://127.0.0.1:4999"), now, "https://commander.example")).toBe("http://127.0.0.1:4999/");
+  expect(deliveryPreview({ ...parked, status: "InProgress" }, preview("http://127.0.0.1:4999"), now, "https://commander.example")).toBeUndefined();
+  expect(deliveryPreview(parked, preview("http://127.0.0.1:4999", "2026-11-06T20:59:59Z"), now, "https://commander.example")).toBeUndefined();
+  expect(deliveryPreview(parked, preview("http://127.0.0.1:4999", undefined, "cas-2"), now, "https://commander.example")).toBeUndefined();
+  expect(deliveryPreview(parked, preview("http://127.0.0.1:4999"), now, "http://127.0.0.1:4999")).toBeUndefined();
+  expect(deliveryPreview(parked, preview("javascript:alert(1)"), now, "https://commander.example")).toBeUndefined();
+  expect(deliveryPreview(parked, preview("https://evil.example"), now, "https://commander.example")).toBeUndefined();
+});

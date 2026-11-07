@@ -1,3 +1,4 @@
+import type { PreviewWindow } from "./progress-model";
 import type { CheckedAccountUsage } from "./account-usage-check";
 import type { CommandReceipt } from "./supervisor-commands";
 import type { AccountChange, AccountsCatalog } from "./accounts-model";
@@ -67,6 +68,8 @@ export interface HubMachineInfo {
   capabilities: string[];
   /** The supervisor CLI this machine starts sessions with by default, when its hub says. */
   default_supervisor_cli?: string;
+  /** Running `cas hub preview` windows (cas-93d1). */
+  previews?: PreviewWindow[];
 }
 
 /**

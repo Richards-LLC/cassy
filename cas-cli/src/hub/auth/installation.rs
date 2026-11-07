@@ -206,8 +206,13 @@ impl AuthStore {
                 && p.consumed_at.is_none()
                 && p.expires_at >= now
                 && exchange.requested_scopes.is_subset(&p.max_scopes)
+                // cas-93d1: a preview invitation pairs a read-only device, inside its window.
+                && p.preview_until.is_none_or(|until| {
+                    until > now && exchange.requested_scopes.is_subset(&Scope::default_read_only())
+                })
         });
         let invitation = invitation.context("pairing exchange refused")?;
+        let preview_until = state.pairings[invitation].preview_until;
         let matches: Vec<_> = state
             .devices
             .iter()
@@ -289,11 +294,12 @@ impl AuthStore {
             scopes: exchange.requested_scopes,
             issued_at: prior.as_ref().map_or(now, |d| d.issued_at),
             last_used_at: now,
-            expires_at: now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS),
+            expires_at: (now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS)).min(preview_until.unwrap_or(DateTime::<Utc>::MAX_UTC)),
             revoked_at: None,
             credential_hash,
             public_key: exchange.public_key_jwk,
             public_key_thumbprint: thumbprint,
+            preview_until,
         };
         state.pairings[invitation].consumed_at = Some(now);
         state.installations.push(PendingInstallation {
@@ -626,7 +632,7 @@ mod tests {
             operator_label: "test".into(),
             controller_origin: "https://hub.example".into(),
             scopes: c.scopes.clone(),
-            request_id: "test".into(),
+            request_id: "test".into(), preview: false,
         }
     }
 

@@ -78,6 +78,40 @@ fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// cas-25f1: a train's lane must exist on origin the moment it opens, or a
+/// worker retargeted there cannot fetch it. Idempotent: an existing local lane
+/// is kept, a lane already on origin is left alone, and the push retries.
+fn publish_train_branch(repo: &Path, lane: &str, integration: &str) -> Result<(), String> {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git").arg("-C").arg(repo).args(args).output()
+            .map_err(|error| error.to_string())
+    };
+    if ref_exists(repo, &format!("origin/{lane}")) {
+        return Ok(());
+    }
+    if !ref_exists(repo, lane) {
+        let base = [format!("origin/{integration}"), integration.to_string()]
+            .into_iter().find(|candidate| ref_exists(repo, candidate))
+            .ok_or_else(|| format!("no `{integration}` to cut `{lane}` from"))?;
+        let output = run(&["branch", lane, &base])?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        }
+    }
+    let mut last = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(attempt));
+        }
+        let output = run(&["push", "origin", &format!("refs/heads/{lane}:refs/heads/{lane}")])?;
+        if output.status.success() {
+            return Ok(());
+        }
+        last = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    }
+    Err(last)
+}
+
 /// A train has landed when it carried at least one delivered child, none is
 /// still in flight, and every copy of its lane is on the integration branch
 /// (by ancestry, or byte-identical content after a squash).
@@ -277,6 +311,10 @@ impl CasCore {
                 if is_cut_train(&train) || accepts_no_work(&train) {
                     continue;
                 }
+                let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
+                if lane != integration {
+                    let _ = publish_train_branch(&repo, lane, &integration);
+                }
                 return (
                     Some(train.id.clone()),
                     format!(
@@ -331,14 +369,24 @@ impl CasCore {
             );
         }
         match open_trains(store, &integration).into_iter().find(|train| !accepts_no_work(train)) {
-            Some(train) => (
-                Some(train.id.clone()),
-                format!(
-                    "{receipt}\n\nRELEASE TRAIN: opened {} ({}) from `{integration}`; this task joins it.",
-                    train.id,
-                    train.effective_epic_branch().unwrap_or(integration.as_str()),
-                ),
-            ),
+            Some(train) => {
+                let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
+                let published = if lane == integration {
+                    String::new()
+                } else {
+                    match publish_train_branch(&repo, lane, &integration) {
+                        Ok(()) => String::new(),
+                        Err(error) => format!(" Publishing `{lane}` to origin failed ({error}); push it before retargeting work there."),
+                    }
+                };
+                (
+                    Some(train.id.clone()),
+                    format!(
+                        "{receipt}\n\nRELEASE TRAIN: opened {} ({lane}) from `{integration}`; this task joins it.{published}",
+                        train.id,
+                    ),
+                )
+            }
             None => (None, receipt),
         }
     }
@@ -401,6 +449,28 @@ mod tests {
         let trains: Vec<_> = store.list(None).unwrap().into_iter().filter(is_release_train).collect();
         assert_eq!(trains.len(), 1, "{trains:?}");
         assert_eq!(store.get_subtasks(&trains[0].id).unwrap().len(), 2);
+    }
+
+    /// cas-25f1: a train opened on task create is on origin immediately.
+    #[tokio::test]
+    async fn opened_train_branch_is_published_to_origin_cas_25f1() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let temp = repo();
+        let root = temp.path().to_path_buf();
+        let bare = TempDir::new().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(&root, &["remote", "set-url", "origin", &bare.path().to_string_lossy()]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        std::fs::create_dir_all(root.join(".cas")).unwrap();
+        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
+        let store = core.open_task_store().unwrap();
+        let train = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+        let lane = train.effective_epic_branch().unwrap().to_string();
+        let remote = Command::new("git").args(["ls-remote", "--heads", "."]).arg(&lane).current_dir(bare.path()).output().unwrap();
+        assert!(String::from_utf8_lossy(&remote.stdout).contains(&lane), "{lane} not on origin");
     }
 
     /// GH #1613: retirement acts only on a readable config with trains off.

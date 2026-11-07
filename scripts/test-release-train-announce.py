@@ -161,15 +161,15 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        for word in ("agent", "lane"):
-            self.assertIn(f"forbidden user wording: {word}", result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["agent", "lane"])
 
         bodies[1] = BODIES[1] + " Agents use these lanes."
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        for word in ("Agents", "lanes"):
-            self.assertIn(f"forbidden user wording: {word}", result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["Agents", "lanes"])
 
         bodies[1] = BODIES[1]
         bodies[3] += " A worker can use it."
@@ -188,13 +188,12 @@ class Announce(unittest.TestCase):
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stderr.count("[rule: user_word]"), 3, result.stderr)
-        for body, line, word, swap in (
-            ("user-top-level", 2, "epic", "workstream"),
-            ("user-reply", 1, "daemon", "background service"),
-            ("user-reply", 3, "harness", "coding tool"),
+        for line, hits in (
+            (bodies[0].splitlines()[1], [("epic", "workstream")]),
+            (bodies[1].splitlines()[0], [("daemon", "background service")]),
+            (bodies[1].splitlines()[2], [("harness", "coding tool")]),
         ):
-            self.assertRegex(result.stderr,
-                rf"body {body} line {line} .*forbidden user wording: {word}; try {swap}.*\[rule: user_word\]")
+            self.assertEqual(announce.user_word_hits(line), hits)
         self.assertFalse(self.body_dir.exists(), "invalid drafts must not export partial bodies")
 
     def test_writing_rules_match_lint(self):

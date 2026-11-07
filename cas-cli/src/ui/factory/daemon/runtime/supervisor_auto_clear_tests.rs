@@ -12,7 +12,7 @@ use crate::factory_context_reset::{CLEAR_COMMAND_MARKER, CONTEXT_RESET_CONTROL};
 use crate::supervisor_auto_clear::SOURCE;
 
 const SESSION: &str = "factory-5f67";
-const APPROVAL: &str = "[2026-11-07 18:17] ✅ DECISION OPERATOR APPROVED: cut v4.5.1 unattended once green";
+const APPROVAL: &str = "[2026-11-07 18:17] ✅ DECISION OPERATOR APPROVED: cut v9.99.1 unattended once green";
 
 struct Lane {
     _temp: tempfile::TempDir,
@@ -48,7 +48,7 @@ impl Lane {
         store.init().unwrap();
         store.register(&supervisor).unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
-        let mut epic = Task::new("cas-train".into(), "Release train v4.5.1".into());
+        let mut epic = Task::new("cas-train".into(), "Release train v9.99.1".into());
         epic.epic_verification_owner = Some(supervisor.id.clone());
         tasks.add(&epic).unwrap();
         tasks.append_note("cas-train", APPROVAL).unwrap();

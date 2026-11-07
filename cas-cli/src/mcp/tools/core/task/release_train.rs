@@ -316,6 +316,34 @@ mod tests {
         assert_eq!(store.get_subtasks(&trains[0].id).unwrap().len(), 2);
     }
 
+    /// cas-2f4d: a frozen train keeps its own work, but a new task, even one
+    /// aimed at the frozen train, joins the next train.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_work_joins_the_next_train_while_one_is_frozen() {
+        let _env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let temp = repo();
+        let root = temp.path().to_path_buf();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
+        let store = core.open_task_store().unwrap();
+        let frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+        let lane = frozen.effective_epic_branch().unwrap().to_string();
+        let _ = Command::new("git").args(["branch", &lane]).current_dir(&root).output();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
+        let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
+            "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",
+            "epic": frozen.id,
+        }))
+        .unwrap();
+        core.cas_task_create(Parameters(aimed)).await.map_err(|error| error.message).unwrap();
+        let next: Vec<_> = store.list(None).unwrap().into_iter()
+            .filter(|train| is_release_train(train) && train.id != frozen.id).collect();
+        assert_eq!(next.len(), 1, "{next:?}");
+        assert_eq!(store.get_subtasks(&frozen.id).unwrap().len(), 1);
+        assert_eq!(store.get_subtasks(&next[0].id).unwrap().len(), 1);
+    }
+
     /// A train is not landed while a child is in flight, before any child
     /// delivered, or while its lane holds work the integration branch lacks.
     #[test]

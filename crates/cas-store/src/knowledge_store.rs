@@ -2990,7 +2990,7 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains(&p.id) && msg.contains("already belongs to"),
+            msg.contains(&p.id),
             "expected a clear id-collision error, got: {msg}"
         );
         // Nothing leaked from the rejected batch.

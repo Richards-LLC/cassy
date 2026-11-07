@@ -28080,7 +28080,7 @@ mod merge_state_gate_tests {
             "{response:?}"
         );
         assert_eq!(response.is_error, Some(true));
-        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
+        assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff))));
         let message = format!("{response:?}");
         assert!(
             message.contains("epic/current-cas-new-parent")
@@ -28337,7 +28337,7 @@ mod merge_state_gate_tests {
                 assert_ne!(fixture.store.get(&fixture.task_id).unwrap().status, TaskStatus::AwaitingMerge);
             } else {
                 assert!(!text.contains("RULE REFERENCES REQUIRED"), "valid markers must pass: {text}");
-                assert!(text.contains("MERGE REQUIRED"), "the normal merge gate must still run: {text}");
+                assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "the normal merge gate must still run: {text}");
             }
         }
     }
@@ -28375,7 +28375,7 @@ mod merge_state_gate_tests {
             let (_, text) = close_text(&fixture).await;
             if brief.is_empty() {
                 assert!(!text.contains("RULE REFERENCES REQUIRED"), "a process rule needs no marker: {text}");
-                assert!(text.contains("MERGE REQUIRED"), "{text}");
+                assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
             } else {
                 assert!(text.contains("delivery_test.rs: fn test_send() {} needs its adjacent rule-177 marker"), "{text}");
             }
@@ -28412,7 +28412,7 @@ mod merge_state_gate_tests {
         git(fixture.dir.path(), &["reset", "-q", "--hard", &fixture.pushed]);
         let (is_error, text) = close_text(&fixture).await;
         assert_eq!(is_error, Some(true), "{text}");
-        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
         let stored = fixture.store.get(&fixture.task_id).unwrap();
         assert_eq!(stored.status, TaskStatus::AwaitingMerge, "{text}");
         assert_eq!(
@@ -28430,7 +28430,7 @@ mod merge_state_gate_tests {
         git(fixture.dir.path(), &["push", "-q", "origin", &fixture.branch]);
         let (is_error, text) = close_text(&fixture).await;
         assert_eq!(is_error, Some(true), "{text}");
-        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
         let stored = fixture.store.get(&fixture.task_id).unwrap();
         assert_eq!(
             stored.deliverables.factory_branch_anchor.as_deref(),
@@ -28482,7 +28482,7 @@ mod merge_state_gate_tests {
 
             let (is_error, text) = close_text(&fixture).await;
             assert_eq!(is_error, Some(true), "{text}");
-            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
             let stored = fixture.store.get(&fixture.task_id).unwrap();
             assert_eq!(stored.status, TaskStatus::AwaitingMerge, "{text}");
             assert_eq!(
@@ -29165,7 +29165,7 @@ mod merge_state_gate_tests {
             },
         ) {
             MergeStateGateOutcome::Reject(message) => {
-                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
                 assert!(message.contains(&newer), "{message}");
                 assert!(
                     message.contains("request_changes id=cas-test1"),
@@ -29227,7 +29227,7 @@ mod merge_state_gate_tests {
 
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
-                    assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing header: {msg}");
                     // pin: the live close gate quotes the worker delivery ref.
                     assert!(msg.contains("git push origin 'factory/worker{a,b}!e'"), "{msg}");
                     let prefix = coord.strip_suffix("coordination").unwrap();
@@ -29609,7 +29609,7 @@ mod merge_state_gate_tests {
         tasks.add(&sibling).unwrap();
         let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
         let held = format!("{held:?}");
-        assert!(held.contains("MERGE REQUIRED") && held.contains(&b), "{held}");
+        assert!(held.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && held.contains(&b), "{held}");
         assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
         sibling.status = TaskStatus::Closed;
         tasks.update(&sibling).unwrap();
@@ -29617,7 +29617,7 @@ mod merge_state_gate_tests {
         let text = format!("{response:?}");
         let parked = tasks.get(&task.id).unwrap();
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
-        assert!(text.contains("MERGE REQUIRED") && text.contains(&b), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
         assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
@@ -30067,7 +30067,7 @@ esac
         for parent in ["main", "epic/local-lane"] {
             match run_factory_branch_merge_gate(&task, &req, parent, dir.path()) {
                 MergeStateGateOutcome::Reject(msg) => {
-                    assert!(msg.contains("MERGE REQUIRED"), "{parent}: {msg}");
+                    assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parent}: {msg}");
                     assert!(
                         !msg.contains("If this gate has now refused you twice"),
                         "routine merge handoff must not suggest a premise stop: {msg}"
@@ -30119,7 +30119,7 @@ esac
 
             match out {
                 MergeStateGateOutcome::Reject(msg) => {
-                    assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                    assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing header: {msg}");
                     let prefix = coord.strip_suffix("coordination").unwrap();
                     assert!(msg.contains(&format!("{prefix}task action=close")), "{msg}");
                     assert!(
@@ -30550,7 +30550,7 @@ esac
             .join("\n");
         assert!(text.contains("FACTORY BRANCH MISSING"), "{text}");
         assert!(
-            !text.contains("MERGE REQUIRED")
+            !text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)
                 && !text.contains("merge-tree")
                 && !text.contains("git push"),
             "{text}"
@@ -31215,7 +31215,7 @@ esac
                 assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
                 assert_eq!(after.status, status, "QA request must not waive the close gates: {text}");
             } else {
-                assert!(text.contains("MERGE REQUIRED"), "{text}");
+                assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
                 assert_eq!(after.status, TaskStatus::AwaitingMerge, "{text}");
                 assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(corrected.as_str()), "{text}");
             }
@@ -31356,7 +31356,7 @@ esac
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!text.contains("PRE-CLOSE HOOK CONTEXT REJECTED"), "{text}");
-        assert!(text.contains("MERGE REQUIRED"), "{text}");
+        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{text}");
         let parked = store.get(&task.id).unwrap();
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{text}");
         assert!(parked.notes.contains("Task parked as awaiting_merge"), "{}", parked.notes);
@@ -31953,7 +31953,7 @@ esac
                 assert!(
                     !message.contains("has 1 commit")
                         && !message.contains("git push")
-                        && !message.contains("MERGE REQUIRED"),
+                        && !message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff),
                     "{message}"
                 );
                 assert!(
@@ -33239,7 +33239,7 @@ esac
         };
         match close_gate(&req, &window) {
             MergeStateGateOutcome::Reject(message) => {
-                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
                 assert!(message.contains("commit_receipt"), "{message}");
             }
             other => panic!("historical delivery closed without receipt: {other:?}"),
@@ -33258,7 +33258,7 @@ esac
             },
         ) {
             MergeStateGateOutcome::Reject(message) => {
-                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
                 assert!(message.contains("commit_receipt"), "{message}");
             }
             other => panic!("test-first historical delivery closed without receipt: {other:?}"),
@@ -33268,7 +33268,7 @@ esac
         window.identity.known_commits.push(receipt.clone());
         match close_gate(&req, &window) {
             MergeStateGateOutcome::Reject(message) => {
-                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
             }
             other => panic!("unmerged historical receipt closed: {other:?}"),
         }
@@ -33310,7 +33310,7 @@ esac
         );
         match out {
             MergeStateGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing header: {msg}");
                 assert!(
                     msg.contains("1 commit(s) from this task"),
                     "rejection must count only task-attributable commits: {msg}"
@@ -33477,7 +33477,7 @@ esac
         );
         match out {
             MergeStateGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing header: {msg}");
                 assert!(
                     msg.contains("2 commit(s) from this task"),
                     "both rebased commits name the task; the residue does not: {msg}"
@@ -33707,7 +33707,7 @@ esac
         );
         match out {
             MergeStateGateOutcome::Reject(message) => {
-                assert!(message.contains("MERGE REQUIRED"), "{message}");
+                assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
                 assert!(message.contains(&receipt), "{message}");
             }
             other => panic!(
@@ -39965,7 +39965,7 @@ mod epic_status_gate_tests {
         match outcome {
             EpicCloseGateOutcome::Reject(message) | EpicCloseGateOutcome::Incomplete(message) => {
                 assert!(
-                    message.contains("MERGE REQUIRED")
+                    message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)
                         || message.contains("Partial evaluation:")
                             && message.contains("no close mutation was attempted"),
                     "synthetic 50-child close must fail closed: {message}"
@@ -42006,7 +42006,7 @@ mod epic_status_gate_tests {
                     "genuine unmerged work must still be mergeable: {message}"
                 );
                 assert!(
-                    message.contains("MERGE REQUIRED"),
+                    message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff),
                     "headline must stay actionable when merging is correct: {message}"
                 );
                 assert!(
@@ -42066,7 +42066,7 @@ mod epic_status_gate_tests {
         let out = run_epic_close_merge_gate(&task, &req, "main", dir.path(), &subtasks);
         match out {
             EpicCloseGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing header: {msg}");
+                assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing header: {msg}");
                 assert!(msg.contains("cas-754b-test"), "missing epic id: {msg}");
                 assert!(msg.contains("cas-c2"), "missing offending child id: {msg}");
                 assert!(msg.contains("factory/bravo"), "missing branch: {msg}");
@@ -42771,7 +42771,7 @@ mod epic_status_gate_tests {
 
         match run_epic_close_merge_gate(&task, &req, "main", p, &[child]) {
             EpicCloseGateOutcome::Reject(msg) => {
-                assert!(msg.contains("MERGE REQUIRED"), "missing hard block: {msg}");
+                assert!(msg.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "missing hard block: {msg}");
                 assert!(msg.contains("cas-unmerged"), "missing child id: {msg}");
                 assert!(
                     msg.contains("factory/worker"),
@@ -44889,7 +44889,7 @@ mod zero_change_close_tests {
 
         let message = commit_receipt_rejection(dir.path(), "cas-receipt", short_receipt, "main", &reason);
         assert!(message.contains("INVALID TASK COMMIT RECEIPT"), "{message}");
-        assert!(!message.contains("MERGE REQUIRED"), "{message}");
+        assert!(!message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
         assert!(message.contains("not an ancestor of main"), "{message}");
     }
 

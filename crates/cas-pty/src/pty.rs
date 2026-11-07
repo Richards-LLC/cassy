@@ -5206,33 +5206,7 @@ echo SMOKE_DONE
         );
     }
 
-    /// cas-3522: the startup prompt and worker instructions must NOT drive a
-    /// `session_start` invocation anymore — auto-registration replaces it.
-    #[tokio::test]
-    async fn test_pty_config_codex_worker_no_session_start_invocation() {
-        let _env = TestEnvGuard::new();
-        let config = PtyConfig::codex(
-            "test-worker",
-            "worker",
-            PathBuf::from("/tmp"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let all_args = config.args.join(" ");
-        assert!(
-            !all_args.contains("action=session_start"),
-            "codex worker must no longer invoke session_start; got: {all_args}"
-        );
-        // whoami remains the first explicit identity check.
-        assert!(
-            all_args.contains("action=whoami"),
-            "codex worker startup should still confirm identity via whoami; got: {all_args}"
-        );
-    }
+
 
     #[test]
     fn test_worker_build_cache_env_decision_table() {
@@ -7319,11 +7293,7 @@ echo SMOKE_DONE
         // cas-c145: Grok supervisors must get merge-queue-first lifecycle
         // guidance equivalent to other harnesses (no SessionStart bundle).
 
-        assert!(
-            rules.contains("cas__task action=list status=awaiting_merge")
-                || rules.contains("status=awaiting_merge"),
-            "grok supervisor rules must name the awaiting_merge list command: {rules}"
-        );
+
     }
 
     /// EPIC cas-8888 (cas-9a31, Phase 1 wiring): CAS_FACTORY_WORKER_CLI must

@@ -181,7 +181,6 @@
 - `scripts/check-test-shape.py`, `scripts/test-check-test-shape.py` - structural and human-message assertion checks; `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` runs the message check at park.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-changed-markdown.py`.
 - `scripts/check-scoped-test-surface.sh` - committed-path proof discovery with bounded Git pattern batches.
-- `docs/release-reports/` - versioned Markdown, brief, standalone HTML, PDF, visual QA and publication receipts, including restored v3.99.1 evidence.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/` and `hub-web/DESIGN.md`.
 
 ## Entrypoints

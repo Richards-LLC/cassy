@@ -292,7 +292,7 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
             assert!(output.contains("QA evidence bundle"), "delivered UI must owe evidence: {output}");
             assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{output}");
         } else {
-            assert!(output.contains("MERGE REQUIRED"), "API-only delivery must park: {output}");
+            assert!(output.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "API-only delivery must park: {output}");
             assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
             assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
             let state = tasks.get_execution_state(TASK).unwrap().unwrap();
@@ -1336,7 +1336,7 @@ async fn long_note_history_close_stays_well_under_the_tool_budget_cas_3b81() {
         task.notes.len()
     );
 
-    assert!(short_output.contains("MERGE REQUIRED"), "{short_output}");
+    assert!(short_output.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{short_output}");
     assert!(
         elapsed < std::time::Duration::from_secs(15),
         "long-note close took {elapsed:?}; the tool budget is 55s"

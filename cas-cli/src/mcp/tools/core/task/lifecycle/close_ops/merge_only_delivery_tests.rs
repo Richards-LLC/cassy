@@ -86,7 +86,7 @@ fn cas_cfa5_merge_only_delivery_resolves_the_worker_branch_and_parks() {
     assert_eq!(close_measured_factory_branch(p, &task, "worker"), "factory/worker");
     match run_factory_branch_merge_gate(&task, &req(&task.id), "epic/x", p) {
         MergeStateGateOutcome::Reject(message) => {
-            assert!(message.contains("MERGE REQUIRED"), "{message}");
+            assert!(message.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{message}");
             assert!(message.contains("factory/worker"), "{message}");
             assert!(!message.contains("factory/worker-cas-test1"), "{message}");
         }

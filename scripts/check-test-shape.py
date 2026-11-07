@@ -299,8 +299,8 @@ def is_exact_text_pin(body, context):
         r'toMatchSnapshot|snapshot|should)\b|(?:===|==)', context, re.I,
     ) is not None
     source_input = re.search(
-        r'\b(?:source|prompt|workflow|skill|template|contract|read_text|readFile|'
-        r'read_to_string|include_str|markdown|yaml|toml)(?:[_A-Za-z0-9]*)\b', context, re.I,
+        r'\b(?:read_text|readFile|read_to_string|include_str)\b|'
+        r'(?<![\w.])(?:source|prompt|workflow|skill|template|contract|markdown|yaml|toml)(?:[_A-Za-z0-9]*)\b', context, re.I,
     ) is not None
     search = re.search(
         r'\b(?:contains|includes|indexOf|find|assertIn|assertRegex|toContain|'
@@ -358,13 +358,39 @@ def rust_runtime_inputs(source):
             yield ts[i + 1].end, ts[ps[i + 1]].start
 
 
+def js_assertion_diagnostics(source, path):
+    """expect(actual, diagnostic) asserts its first argument only."""
+    masked = list(source)
+    for start, end, _ in text_literals(source, path):
+        masked[start:end] = ' ' * (end - start)
+    code = ''.join(masked)
+    for match in re.finditer(r'\bexpect(?:\.(?:soft|poll))?\s*\(', code):
+        stack = ['(']
+        comma = None
+        for index in range(match.end(), len(code)):
+            char = code[index]
+            if char in '([{':
+                stack.append(char)
+            elif char in ')]}':
+                if not stack or stack[-1] != {')': '(', ']': '[', '}': '{'}[char]:
+                    break
+                stack.pop()
+                if not stack:
+                    if comma is not None:
+                        yield comma + 1, index
+                    break
+            elif char == ',' and len(stack) == 1 and comma is None:
+                comma = index
+
+
 def lint_text_pins(source, path, ranges=None, changed_lines=None):
     """Find brittle prose pins in a conventional test file, independent of language."""
     if not is_test_file(path) and not ranges:
         return []
     hits = []
     literals = list(text_literals(source, path))
-    diagnostics = list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs' else []
+    diagnostics = (list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs'
+                   else list(js_assertion_diagnostics(source, path)) if Path(path).suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs') else [])
     inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
     for start, end, body in literals:
         if any(left <= start < right for left, right in diagnostics):

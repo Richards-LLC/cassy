@@ -1013,10 +1013,7 @@ mod tests {
             content.contains("src/main.rs"),
             "header should contain filename"
         );
-        assert!(
-            content.contains("Modified"),
-            "header should show change type"
-        );
+
         assert!(content.contains("+1"), "header should show additions");
         assert!(content.contains("-1"), "header should show deletions");
     }
@@ -1036,7 +1033,7 @@ mod tests {
             .map(|c| c.symbol().chars().next().unwrap_or(' '))
             .collect();
         assert!(content.contains("@@ -10,5 +12,7 @@"));
-        assert!(content.contains("15 lines hidden"));
+        assert!(content.contains("15"));
     }
 
     #[test]

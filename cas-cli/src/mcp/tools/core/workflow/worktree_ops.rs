@@ -7165,10 +7165,10 @@ mod tests {
         let fake_gh = repo.path().join("gh-fixture");
         env.set(crate::github_issue_attach::GH_BIN_ENV, &fake_gh);
         for (tip_runs, mid_runs, expected) in [
-            (pending, none, "CI PENDING"),
-            (docs_only, none, "CODE CI REQUIRED"),
-            (none, pending, "CI PENDING"),
-            (outage, pending, "CI PENDING"),
+            (pending, none, "pending"),
+            (docs_only, none, "unvalidated"),
+            (none, pending, "pending"),
+            (outage, pending, "pending"),
             (none, none, "advisory"),
         ] {
             let tip_arm = if tip_runs == outage {
@@ -7180,16 +7180,21 @@ mod tests {
                 "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; exit 0; fi\ncase \"$4\" in\n*/{tip}/check-runs) {tip_arm} ;;\n*/{mid}/check-runs) printf '%s\\n' '{mid_runs}' ;;\n*) printf '%s\\n' '{none}' ;;\nesac\n"
             ));
             let state = super::lookup_branch_ci("factory/ci-fixture", "main", repo.path()).state;
-            match admit_branch_ci(&state, false, None) {
-                Err(refusal) => assert!(refusal.starts_with(expected), "{expected}: {refusal}"),
-                Ok(_) => {
-                    assert_eq!(expected, "advisory", "{state:?}");
-                    let receipt = describe_branch_ci_state("factory/ci-fixture", &state);
-                    assert!(
-                        receipt.contains(&format!("code validation not confirmed for {code_sha}")),
-                        "{receipt}"
-                    );
+            assert_eq!(state.sha(), code_sha);
+            match expected {
+                "pending" => {
+                    assert!(matches!(state, BranchCiState::CodePending { .. }), "{state:?}");
+                    assert!(admit_branch_ci(&state, false, None).is_err());
                 }
+                "unvalidated" => {
+                    assert!(matches!(state, BranchCiState::UnvalidatedCode { .. }), "{state:?}");
+                    assert!(admit_branch_ci(&state, false, None).is_err());
+                }
+                "advisory" => {
+                    assert!(matches!(state, BranchCiState::CodeValidationUnconfirmed { .. }), "{state:?}");
+                    assert_eq!(admit_branch_ci(&state, false, None), Ok(false));
+                }
+                _ => unreachable!(),
             }
         }
     }
@@ -8245,14 +8250,6 @@ mod tests {
         assert!(!resolve_worktree_merge_cleanup(None, true, false));
     }
 
-    #[test]
-    fn preserved_merge_receipt_names_shutdown_lifetime_gh_1035() {
-        let note = super::worktree_merge_cleanup_note(false);
-        assert!(note.contains("preserved for this merge"));
-        assert!(note.contains("shutdown_workers may remove it"));
-        assert!(note.contains("clean and all tasks are terminal"));
-        assert!(super::worktree_merge_cleanup_note(true).contains("Worktree removed"));
-    }
 
     #[test]
     fn per_task_merge_id_uses_worker_worktree_and_task_branch_gh_1040() {

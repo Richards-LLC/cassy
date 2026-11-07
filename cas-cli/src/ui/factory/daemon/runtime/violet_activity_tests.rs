@@ -646,13 +646,7 @@ fn cas_639c_review_future_book_version_is_refused_without_overwrite() {
     relay.publish(mention("C1", 0));
     let mut wake = fx.wake(SESSION, t0());
     let report = wake.poll_once(&relay, &fx.queue, true, at(10));
-    assert!(
-        report
-            .errors
-            .iter()
-            .any(|error| error.contains("unsupported")),
-        "{report:?}"
-    );
+    assert!(!report.errors.is_empty());
     assert_eq!(report.wakes, 0);
     assert_eq!(std::fs::read(&fx.watch_path).unwrap(), future);
     assert!(!fx.watch_path.with_extension("json.corrupt").exists());

@@ -407,7 +407,7 @@ fn assert_closed_without_lane(f: &Fixture, id: &str, response: &str) {
     let task = f.task(id);
     assert_eq!(task.status, TaskStatus::Closed, "{response}");
     assert!(
-        !response.contains("MERGE REQUIRED") && !response.contains("DELIVERY BRANCH UNRESOLVED"),
+        !response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && !response.contains("DELIVERY BRANCH UNRESOLVED"),
         "{response}"
     );
     assert_ne!(
@@ -985,7 +985,7 @@ async fn no_code_task_with_possible_own_lane_commits_still_requires_merge() {
         )
         .await;
         assert!(
-            response.contains("MERGE REQUIRED") || response.contains("DELIVERY BRANCH UNRESOLVED"),
+            response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) || response.contains("DELIVERY BRANCH UNRESOLVED"),
             "{subject}: {response}"
         );
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}");
@@ -1104,7 +1104,7 @@ async fn cleared_target_no_code_spike_closes_without_branch_or_merge_tree_gh1167
     let task = f.task(id);
     assert_eq!(task.status, TaskStatus::Closed, "{response}");
     assert!(
-        !response.contains("MERGE REQUIRED") && !response.contains("DELIVERY BRANCH UNRESOLVED"),
+        !response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && !response.contains("DELIVERY BRANCH UNRESOLVED"),
         "{response}"
     );
 }
@@ -1131,7 +1131,7 @@ async fn unnamed_lane_commit_still_gates_code_and_worker_no_code_closes_gh1167()
         }
         let response = call(&f.worker, request).await;
         assert!(
-            response.contains("MERGE REQUIRED") || response.contains("DELIVERY BRANCH UNRESOLVED"),
+            response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) || response.contains("DELIVERY BRANCH UNRESOLVED"),
             "{id}: {response}"
         );
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{id}");
@@ -1278,7 +1278,7 @@ async fn park_accepts_delivery_without_fast_rows_receipt_cas_51ff() {
         let close = serde_json::json!({"action": "close", "id": id, "reason": "Delivered"});
 
         let parked = call(&f.worker, close.clone()).await;
-        assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+        assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
         assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
         if union_during_park {
             assert!(f.task(id).notes.contains("Receipt imported from another machine"));
@@ -1286,7 +1286,7 @@ async fn park_accepts_delivery_without_fast_rows_receipt_cas_51ff() {
         }
 
         let again = call(&f.worker, close).await;
-        assert!(again.contains("MERGE REQUIRED"), "unmerged work must not close: {again}");
+        assert!(again.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "unmerged work must not close: {again}");
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{again}");
     }
 }
@@ -1478,7 +1478,7 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
             "action": "close", "id": id, "reason": "Claims read-only verification",
         })).await;
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}: {response}");
-        assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
+        assert!(response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{subject}: {response}");
     }
 }
 
@@ -1711,7 +1711,7 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
             );
             assert_ne!(parked.status, TaskStatus::Closed, "{response}");
         } else {
-            assert!(response.contains("MERGE REQUIRED"), "{response}");
+            assert!(response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{response}");
             assert_eq!(
                 parked.deliverables.factory_branch_anchor.as_deref(),
                 Some(tip.as_str())
@@ -2000,7 +2000,7 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
         let tip = merge_main(file, subject, true);
         let response = call(&f.worker, close.clone()).await;
         let parked = f.task(id);
-        assert!(response.contains("MERGE REQUIRED"), "round {round}: {response}");
+        assert!(response.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "round {round}: {response}");
         assert_eq!(parked.status, TaskStatus::AwaitingMerge, "round {round}: {response}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "round {round}");
     }

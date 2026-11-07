@@ -1,7 +1,7 @@
 //! CI-safe integration test for the launched-agent skill + instruction parity
 //! conformance gate (cas-bd9d). Runs the real `cas factory parity` command and
 //! asserts the machine-readable 4×2 report proves required skills/agents,
-//! effective role clauses, and tool prefix for every harness/role cell from the
+//! installed instruction sources and tool prefixes for every harness/role cell from the
 //! real launch configuration — with no live model process (the faithful,
 //! deterministic path). This is the Demo: "run one parity command and receive a
 //! 4×2 report".

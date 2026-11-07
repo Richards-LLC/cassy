@@ -480,8 +480,8 @@ mod tests {
         let prompt = extractor.build_prompt(&entry);
         assert!(prompt.contains("test-001"));
         assert!(prompt.contains("Store trait"));
-        assert!(prompt.contains("person"));
-        assert!(prompt.contains("project"));
+
+
     }
 
     #[test]

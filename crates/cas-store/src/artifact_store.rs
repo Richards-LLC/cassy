@@ -485,7 +485,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(
-            error.to_string().contains("CHECK"),
+            matches!(error, rusqlite::Error::SqliteFailure(ref code, _) if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_CHECK),
             "the schema, not just the API, pins the lifecycle: {error}"
         );
     }

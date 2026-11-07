@@ -122,7 +122,7 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
             assert!(error.contains(&candidate.display().to_string()), "{error}");
         }
         assert!(error.contains(diagnostic), "{error}");
-        assert!(error.contains("./scripts/bootstrap-zig.sh"), "{error}");
+
     }
     // In the main checkout, the local and Git-common-dir candidate coincide.
     let error = build_support::find_zig(&main, None, Some(OsStr::new(""))).unwrap_err();

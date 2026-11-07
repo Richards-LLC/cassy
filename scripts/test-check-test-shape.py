@@ -122,6 +122,9 @@ class Shapes(unittest.TestCase):
     def test_non_rust_text_is_clean(self):
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner")).toEqual([expect.stringContaining("Atlas · Linux")]);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect.soft(source, "The original source must preserve every caller value and its exact encoded boundaries.").toEqual(input);', 'payload.test.ts'))
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
     def test_exact_prose_pin_cannot_be_waived_by_comments(self):

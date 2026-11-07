@@ -521,13 +521,31 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                         && agent.status == cas_types::AgentStatus::Active
                 })
             };
+            // The verdict paths finish their merge or notice around the child's
+            // exit, so also wait for each status's own end state.
+            let settled = || {
+                child_done()
+                    && match status {
+                        "approved" => Command::new("git")
+                            .current_dir(repo)
+                            .args(["merge-base", "--is-ancestor", &source, "epic/train"])
+                            .status()
+                            .is_ok_and(|s| s.success()),
+                        "rejected" | "supervisor_call" => !crate::store::open_prompt_queue_store(&root)
+                            .unwrap()
+                            .peek_all(10)
+                            .unwrap()
+                            .is_empty(),
+                        _ => true,
+                    }
+            };
             for _ in 0..600 {
-                if child_done() {
+                if settled() {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
-            assert!(child_done(), "{status}: verifier never finished");
+            assert!(settled(), "{status}: verifier never finished");
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();

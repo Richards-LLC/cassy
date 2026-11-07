@@ -1,3 +1,0 @@
-### Fixed — Hub
-
-- **`cas update` no longer reports a working Tailscale Serve as inactive** — Was: right after restarting a service-managed hub, `cas update` read the hub's "publication pending" placeholder before the background publication finished, and warned "Tailscale Serve inactive … hub remains loopback-only" even though the tailnet URL answered moments later. Now: the update waits up to 20 seconds for that publication to settle, then checks the published URL as usual. A real failure (for example, no Tailscale CLI) still warns, and a publication that's still pending is reported as a pending re-check, not as inactive.

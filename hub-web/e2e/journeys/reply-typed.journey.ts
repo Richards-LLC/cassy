@@ -32,6 +32,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  // cas-da546: a row speaks its last turn rather than showing it.
+  const sessionRow = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
 
@@ -131,7 +133,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // cas-3433: the control the refusal names is on the message itself.
     await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toBeVisible();
     await expect(bubble.getByRole("status")).not.toContainText("forbidden");
-    await expect(list.getByText("Ship it without the gate.", { exact: false })).toBeVisible();
+    await expect(sessionRow).toHaveAccessibleName(/Ship it without the gate\./);
     // The reason is said once, on the message; the composer only points at it (cas-4d92).
     await expect(page.locator("#message-status")).toBeVisible();
     await expect(page.locator('.conversation-turn[data-state="error"] .conversation-refused-next')).toHaveCount(1);
@@ -299,7 +301,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const retired = page.locator('.conversation-turn[data-state="error"]');
     await expect(retired.getByRole("status")).toBeVisible();
     await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
-    await expect(list.getByText("Ship it after the gate passes.", { exact: false })).toBeVisible();
+    await expect(sessionRow).toHaveAccessibleName(/Ship it after the gate passes\./);
   });
 
   await journey.stage("A late receipt after the supervisor talks on never offers Retry", async () => {

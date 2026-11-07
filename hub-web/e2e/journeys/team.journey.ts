@@ -113,7 +113,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(waitingLook[1]).not.toBe(offlineLook[1]);
         const forced = await page.evaluate(() => {
           const color = (selector: string, property: "color" | "borderBottomColor" = "color") => getComputedStyle(document.querySelector(selector)!)[property];
-          return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-supervisor') };
+          return { selected: color("#team-tab", "borderBottomColor"), unselected: color("#conversation-tab", "borderBottomColor"), page: getComputedStyle(document.body).backgroundColor, row: color('.conversation-row[aria-current="true"]'), name: color('.conversation-row[aria-current="true"] .conversation-role') };
         });
         expect(forced.unselected).toBe(forced.page);
         expect(forced.selected).not.toBe(forced.unselected);
@@ -199,9 +199,10 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await expect(epics.locator(".live-epic-title")).toHaveText(["Commander progress rail", "Follow-ups"]);
         await expect(status).not.toContainText("Gabber voice");
         await expect(status).not.toContainText("EPIC");
-
+        await expect(status).not.toContainText("—/—");
         await expect(epics).toContainText("1");
-        expect(statusReads).not.toContain("gabber-session");
+        // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
+        expect(statusReads).toContain("gabber-session");
         expect(statusReads).toContain("remote-session");
         expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(0);
         if (process.env.EPIC_PROGRESS_QA) {
@@ -247,7 +248,8 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await tasks.locator(".live-epic-merged summary").click();
         await expect(tasks.locator(".live-epic-merged")).toContainText("Follow up on the release");
         await expect(peer).toHaveAttribute("aria-expanded", "true");
-        expect(statusReads).not.toContain("gabber-session");
+        // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
+        expect(statusReads).toContain("gabber-session");
         if (process.env.EPIC_PROGRESS_QA) await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}-expanded.png` });
         if (width === 390) {
           await page.keyboard.press("Escape");

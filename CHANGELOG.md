@@ -7,6 +7,82 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.5.0] - 2026-11-07
+
+### Added — Supervisor tooling
+
+- **Read peer transcripts through Cassy** — Supervisors can request a bounded,
+  redacted transcript grep from an own-account peer through coordination or
+  `cas peers --transcript`. The peer daemon replies through the inbox without
+  a shell or a model turn on the peer.
+
+### Fixed — QA batch receipts
+
+- **batch_receipt accepts PR-merged tasks** — Was: a task merged through a GitHub PR had no recorded anchor and batch_receipt refused it. Now: it resolves the task's branch tip (or its squash commit) on the target, as close's commit_receipt does.
+
+### Fixed — Release train
+
+- **`cas update` keeps the install-on-publish agent current** — Was: `install-on-publish.sh --install` copied the script and systemd units once and nothing refreshed them, so hosts kept running an old installer that logged every successful install as failed and never completed the release timer. Now: after the binary swap, `cas update` rewrites the installed script and units from copies embedded in the binary when they differ; a host without the agent is left untouched.
+- **A green train wakes the supervisor** — Was: after a red full set, the green run at the repaired tip sent no notice, and the max-age notice fired once per train, ever. Now: the first green full set at a new tip after a red (or with no earlier verdict) sends one release_cut_ready for that tip, and the max-age notice is keyed by tip, so a changed tip can notify again while an unchanged one never repeats.
+
+### Added — Estimates
+
+- **Measured estimates and promise outcomes** — Ledger estimates show p50/p90 with their reference count and five evidence items. Task references use closed-task and lease history; pipeline references use GitHub run/job timings. Outcomes record early hits or overruns, misses add friction, and ledger reports show hit rate and release trends. Backfill remains idempotent and new Cloud kinds retry independently.
+
+### Fixed — Communication
+
+- **Peer receipts name what is known** — Sending peer mail reports it queued in Cloud. A recipient machine's acknowledgement reports acceptance by that machine and explicitly leaves supervisor surfacing unconfirmed.
+
+### Added — Release freeze
+
+- **Freezing a train for release now stops new merges** — `factory action=train_freeze id=<train>` or the release card's **Freeze for release** button records the train's tip and time. While the freeze holds, merges into the train are refused on every machine with "train frozen for release, parked for the next train". New staffing and CI retries armed against the train are refused too, and new tasks join the next train. The one exception is a `release-repair` task while the train is red: either the train-suite receipt records a red, or GitHub's train run at the frozen tip failed. A repair merged this way is noted on the train.
+- **Measured release ETA** — The release card shows "Frozen 2:05 PM ET · ETA 2:50 PM ET". The ETA adds the median measured minutes of the train suite (skipped when the tip is already green), the merge queue and publishing. If any stage has no measurement, the card says which one is unmeasured.
+- **Lifting a freeze** — A freeze ends when a published release covers its tip (landing on main is not enough), or when the operator taps **Lift freeze** in Commander. No supervisor action can lift it.
+
+### Fixed — Commander left nav on a phone
+
+- **End session keeps its own column on a phone** — In a project card, the End button no longer sits over the session's time; the row keeps the space the button needs.
+- **The landscape loading list fits** — While conversations load on a phone held sideways, the list shows two placeholder rows so the footer's inbox and pairing buttons stay in view.
+
+### Fixed — Factory spawn
+
+- **Spawn survives a brief store stall** — Was: a spawn request failed when its task-queue binding missed the store wait budget during an in-place upgrade. Now: the binding retries once under a fresh bounded budget; a second miss still fails.
+
+### Fixed — Hub
+
+- **`cas update` no longer reports a working Tailscale Serve as inactive** — Was: right after restarting a service-managed hub, `cas update` read the hub's "publication pending" placeholder before the background publication finished, and warned "Tailscale Serve inactive … hub remains loopback-only" even though the tailnet URL answered moments later. Now: the update waits up to 20 seconds for that publication to settle, then checks the published URL as usual. A real failure (for example, no Tailscale CLI) still warns, and a publication that's still pending is reported as a pending re-check, not as inactive.
+
+### Fixed — Factory
+
+- **A successful `cas factory reexec` reports its receipt** — Was: on macOS, after the daemon swapped in place, the command could print `Invalid argument (os error 22)` with no receipt, because the new image closes the reply socket right after writing it and setting a read timeout on a closed socket fails. Now: the client reads the buffered receipt and reports the version, PID and adopted panes; a reexec that did not swap still returns its error.
+- **Exited processes no longer stall review cleanup** — Garbage collection recognizes failed process reads after the PID disappears, including Linux ESRCH errors. Live processes and unreadable process inventories still preserve review output.
+- **Claude first-run startup submission** — A fresh supervisor retries Enter once when its own startup text remains unsent, and reports startup as ok only after observing a native turn. Echo, drafts and modal screens cannot confirm startup.
+- **Allow runtime receipt paths in Python tests** — The test-shape guard recognizes filename literals consumed by Python file reads as inputs, while still rejecting exact returned-text and source-prose pins.
+
+### Fixed — Peer machines
+
+- **One peer answer releases every ask it covers** — Was: when a peer answered several of the supervisor's asks in one reply linked to just one of them, the other asks about the same tasks stayed open and blocked those merges until an override. Now: a typed answer linked to one ask also clears earlier open asks to that peer about the same tasks; an ask about a different task still holds its merge.
+
+### Fixed — Close timeouts
+
+- **A timed-out close keeps its refusal detail** — when a close outlived the response budget and was then refused, the CLOSE_OUTCOME task note recorded only the refusal heading. It now carries the refusal body (offending claim and remedy), capped at 600 bytes.
+
+### Changed — Commander
+
+- **A compact left navigation** — Needs you leads the list, quoting each waiting question. Every project is one card: its name, its machines as dots, a mini train bar and one status line (`train 1/5 · 14 workers · 0 blocked`); quiet projects step back. Each supervisor session is one line. Versions appear only when a machine or supervisor is out of step. The tagline is gone; Operator inbox and Pair a machine sit in the footer, and the Tasks & progress release title uses the interface font.
+
+### Changed — Install
+
+- **Factory sessions update as soon as their own project is refreshed** — Was: `cas update` re-execed every running factory session only after all projects refreshed, so a machine with many projects (31 on one Mac) left each session on the old daemon for four to five minutes. Now: each session re-execs right after its own project's refresh; sessions whose project failed, or that match no refreshed project, still re-exec at the end, and each session appears once in the receipt.
+
+### Fixed — Developer tools
+
+- **Keep changed-string warnings relevant** — Inspect changed literal hunks, preserve complete SQL schemas, skip unrelated SQL fixture setup and name the matched value while retaining genuine assertion warnings.
+
+### Fixed — Pre-merge review
+
+- **One verifier per dispatch** — the merge refusal no longer tells the supervisor to spawn a verifier while the automatic verifier holds the dispatch, and a verifier that finds its dispatch settled or its task closed raises no notice.
+
 ## [4.4.0] - 2026-11-07
 
 ### Fixed — Merge queue

@@ -92,7 +92,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         machine.sessions[0]!.mcp_version = "9.99.2";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await expect(page.locator(".supervisor-version")).toContainText("9.99.2");
+        // In step with its machine the row shows no version (cas-da546).
+        await expect(page.locator(".supervisor-version")).toHaveCount(0);
         await expect(page.locator('[data-reload-cassy="direct"]')).toBeHidden();
         expect(hub.sends).toHaveLength(0);
         await receipt.getByRole("button", { name: "Dismiss command status" }).click();

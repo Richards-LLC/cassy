@@ -1858,6 +1858,8 @@ dialog form > *,
 .conversation-skeleton-row { animation: conversation-skeleton-pulse 1.4s ease-in-out infinite; }
 @keyframes conversation-skeleton-pulse { 50% { opacity: .55; } }
 @media (prefers-reduced-motion: reduce) { .conversation-skeleton-row { animation: none; } }
+/* A landscape phone has room for two placeholder rows beside the footer's two lines (cas-da546). */
+@media (max-height: 30rem) { .conversation-skeleton-row:nth-child(n+3) { display: none; } }
 /* Journey F15: a labelled bar in the list's own flow, above the status footer,
    so it reserves its space instead of floating over "2 paired machines". */
 .compose-fab { display: none; flex-shrink: 0; align-items: center; justify-content: center; gap: var(--space-2); min-height: var(--space-12); margin: auto 12px var(--space-2); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); background: var(--you-bg); color: var(--you-fg); box-shadow: var(--lift); font: var(--weight-semibold) var(--fs-md)/1.2 var(--font-ui); }
@@ -3519,6 +3521,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   /* One-line sessions keep a 44px touch target on a phone. */
   .project-card .conversation-row { min-height: var(--rail-item-min); }
   .project-card .conversation-end[data-state="idle"] .conversation-end-ask { bottom: var(--space-1); }
+  /* The card's row padding must not undo the End column the row gives up (cas-339a). */
+  .project-card .conversation-row.endable { padding-right: 56px; }
 }
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }

@@ -80,6 +80,13 @@ fn report_gate_refuses_the_1627_dump_and_passes_the_exemplar_cas_5d07() {
     );
     assert!(floor.iter().any(|finding| finding.message.contains("distinctiveness 1, fit 2, hierarchy 1")), "{floor:?}");
 
+    // A critique that skips a rubric dimension, or scores outside 1-5, is refused.
+    let partial = crate::deliverable::report_quality::check(
+        &dump,
+        Some("Audience: executive\n\n## Critique\n\n| Dimension | Score | Evidence |\n| --- | --- | --- |\n| Distinctiveness | 5 | x |\n| Fit to argument | 9 | x |\n| Hierarchy | 5 | x |\n| Craft | 5 | x |\n"),
+    );
+    assert!(partial.iter().any(|finding| finding.message.contains("accessibility not scored") && finding.message.contains("fit 9 (scores run 1 to 5)")), "{partial:?}");
+
     let head = commit(repo.path(), &[
         ("docs/reports/2026-11-06-factory-metrics.html", include_str!("../../../../../../builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html")),
         ("docs/reports/2026-11-06-factory-metrics.brief.md", include_str!("../../../../../../builtins/skills/cas-html-reports/references/examples/executive-variance-brief.why.md")),

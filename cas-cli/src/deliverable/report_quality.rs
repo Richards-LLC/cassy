@@ -30,6 +30,8 @@ pub const BRAND_TOKENS: &[&str] = &["bg", "surface", "surface-hero", "ink", "lin
 
 /// The cas-ui-craft floor for a public surface.
 pub const FLOOR_DIMENSIONS: &[&str] = &["distinctiveness", "fit", "hierarchy"];
+/// The rubric's five dimensions; every one must be scored, 1 to 5.
+const RUBRIC_DIMENSIONS: &[&str] = &["distinctiveness", "fit", "hierarchy", "craft", "accessibility"];
 pub const FLOOR: u8 = 4;
 
 /// Estimated page height at 1280 px, by audience: five screens for a
@@ -193,10 +195,11 @@ pub fn check(html: &str, brief: Option<&str>) -> Vec<Finding> {
                 None => findings.push(finding("critique-missing", "the brief has no `## Critique` table: score the render with the cas-ui-craft rubric (critique-rubric.md) and append the table".into())),
                 Some(scores) => {
                     let mut short = Vec::new();
-                    for dimension in FLOOR_DIMENSIONS {
+                    for dimension in RUBRIC_DIMENSIONS {
                         match scores.iter().find(|(name, _)| name == dimension) {
                             None => short.push(format!("{dimension} not scored")),
-                            Some((_, score)) if *score < FLOOR => short.push(format!("{dimension} {score}")),
+                            Some((_, score)) if *score > 5 => short.push(format!("{dimension} {score} (scores run 1 to 5)")),
+                            Some((_, score)) if FLOOR_DIMENSIONS.contains(dimension) && *score < FLOOR => short.push(format!("{dimension} {score}")),
                             Some(_) => {}
                         }
                     }

@@ -239,16 +239,23 @@ def cleanup_after_pass(log):
     parent failure. Unknown infrastructure errors retain their failure status.
     """
     lines = re.sub(r'\x1b\[[0-9;]*m','',log.read_text(errors='replace')).splitlines()
+    failed = re.compile(r'\bFAIL(?:ED)?\b|\b[1-9]\d*\s+failed\b|\bAssertionError\b|'
+        r'(?i:\bassertion\b|^\s*assert\s)')
+    if any(failed.search(line) for line in lines):
+        return False
     summary = re.compile(r'^(?:\s*[1-9]\d* passed,\s*0 failed|\s*Tests\s+[1-9]\d* passed(?:\s+\(\d+\))?|'
         r'\s*Summary\s+\[[^\]]+\]\s+[1-9]\d* tests? run:\s+[1-9]\d* passed(?:, 0 failed)?(?:, \d+ skipped)?|'
         r'test result: ok\. [1-9]\d* passed; 0 failed;[^\n]*|OK)\s*$')
     cleanup = re.compile(r'^(?:rm:|rmdir:|cleanup(?: error| warning| failed)?:)', re.I)
+    vitest_footer = re.compile(r'(?:Start at\s+\d{2}:\d{2}:\d{2}|Duration\s+[\d.]+(?:ms|s)(?:\s+\([^\n]*\))?)')
     for index in range(len(lines)-1, -1, -1):
         if summary.fullmatch(lines[index]):
             if lines[index]=='OK' and not any(re.fullmatch(r'Ran [1-9]\d* tests? in .+', row) for row in lines[:index]):
                 return False
             tail = [row.strip() for row in lines[index+1:] if row.strip()]
-            return bool(tail) and all(cleanup.match(row) for row in tail)
+            vitest = lines[index].lstrip().startswith('Tests ')
+            return any(cleanup.match(row) for row in tail) and all(
+                cleanup.match(row) or (vitest and vitest_footer.fullmatch(row)) for row in tail)
     return False
 
 
@@ -270,7 +277,7 @@ def step(args):
         attempt=out/('initial' if index==0 else 'rerun')
         attempt.mkdir(parents=True,exist_ok=True)
         log=attempt/'console.log'
-        status,seconds=execute(command,Path.cwd(),os.environ.copy(),log,120 if index else None)
+        status,seconds=execute(command,Path.cwd(),os.environ.copy(),log,300 if index else None)
         raw=status
         warning=status>0 and cleanup_after_pass(log)
         if warning:

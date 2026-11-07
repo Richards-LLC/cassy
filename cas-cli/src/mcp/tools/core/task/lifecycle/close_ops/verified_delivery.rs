@@ -123,14 +123,6 @@ impl ReviewedDelivery {
                 first
             }
         };
-        // The verifier reviewed the merged candidate, including target edits
-        // beside source hunks. Its exact tree at the first landing is stronger
-        // evidence than reverse-applying the source's older patch context.
-        if resolve_branch_sha(repo, &format!("{landing}^{{tree}}")).as_deref()
-            == Some(candidate.tree.as_str())
-        {
-            return true;
-        }
         // Prove the complete reviewed patch at that immutable landing. Later
         // ordinary edits to the same lines do not undo a legitimate delivery.
         // A private index keeps HEAD, the worktree and the real index untouched.

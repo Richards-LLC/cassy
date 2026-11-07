@@ -29516,6 +29516,7 @@ mod merge_state_gate_tests {
             git(p, &["checkout", "-q", "main"]);
             std::fs::write(p.join("seed.txt"), "old\nmiddle\ntarget\n").unwrap();
             git(p, &["commit", "-qam", "same-epic work beside the delivery"]);
+            git(p, &["push", "-q", "origin", "main"]);
             let wt = tempfile::tempdir().unwrap();
             git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
             let root = p.join(".cas");
@@ -29584,6 +29585,9 @@ mod merge_state_gate_tests {
             git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
             let landed = head_sha(p);
             assert_ne!(landed, candidate.proof.head_commit);
+            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
+                assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
+            }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
             if row == "batch-target-proof" {
                 let proof = super::super::repository_proof::capture_repository_proof_at_target(p, "main", vec![source.clone()]).unwrap();

@@ -329,20 +329,12 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         env.set("CAS_TEST_HUB_PATH", &bin);
         env.remove("CODEX_HOME");
+        // cas-c386: the default home is logged out and the logged-in account
+        // has no usage yet, so no account is recommended on capacity alone.
+        std::fs::create_dir_all(env.home().join(".codex")).unwrap();
         let account = env.home().join(".codex-review");
         std::fs::create_dir_all(account.join("sessions")).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
-        std::fs::write(
-            account.join("sessions/usage.jsonl"),
-            serde_json::json!({
-                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
-                    "primary": {"used_percent": 20.0, "window_minutes": 10080,
-                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
-                }}
-            })
-            .to_string(),
-        )
-        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         let script = bin.join("codex");
         std::fs::write(

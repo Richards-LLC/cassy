@@ -233,10 +233,10 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         jobs = self.ci()['jobs']
         preflight = jobs['fast-validation-preflight']
         archive = jobs['fast-validation-suite-build']
-        check = next(s for s in preflight['steps'] if s.get('run') == 'cargo check -p cas')
+        check = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-4:] == ['cargo','check','-p','cas'])
         build = next(s for s in archive['steps'] if 'cargo nextest archive --workspace' in s.get('run', ''))
         self.assertNotIn('--no-default-features', shlex.split(build['run']))
-        portable = next(s for s in preflight['steps'] if s.get('run') == 'cargo build -p cas --no-default-features')
+        portable = next(s for s in preflight['steps'] if shlex.split(s.get('run',''))[-5:] == ['cargo','build','-p','cas','--no-default-features'])
         consumer = next(s for s in preflight['steps'] if 'export CAS_TEST_BINARY=' in s.get('run', ''))
         context = {'github.event_name': 'merge_group',
                    'github.ref': 'refs/heads/gh-readonly-queue/main/pr-1',
@@ -302,7 +302,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         elif not any(op in body for op in ('==', '!=', '&&', '||', '(')):
             return body  # a literal such as runs-on: ubuntu-latest
         body = re.sub(r'\b(?:github|needs|steps|vars|inputs|env)\.[\w.-]+', lambda m: repr(context.get(m.group(0), '')), body)
-        body = body.replace('always()', 'True').replace('&&', ' and ').replace('||', ' or ')
+        body = body.replace('always()', 'True').replace('cancelled()', 'False').replace('success()', 'True').replace('&&', ' and ').replace('||', ' or ')
         body = re.sub(r'!(?!=)', ' not ', body)
         return eval(body, {'__builtins__': {}, 'startsWith': lambda a, b: str(a).startswith(b), 'fromJSON': json.loads,
                            'format': lambda template, *args: template.format(*args)})
@@ -311,6 +311,34 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
     def gh_expr(cls, expression, context):
         """Evaluate a GitHub `if:` expression over a flat context mapping."""
         return bool(cls.gh_value(expression, context))
+
+    def test_cached_full_jobs_skip_work_but_republish_their_evidence(self):
+        jobs=self.ci()['jobs']
+        cached=[]
+        for name,job in jobs.items():
+            restores=[s for s in job.get('steps',[]) if s.get('id')=='job-receipt']
+            if not restores: continue
+            cached.append(name)
+            for shard in job.get('strategy',{}).get('matrix',{}).get('shard',[None]):
+                for step in job['steps']:
+                    # Cheap classification and trust checks still execute.
+                    if (step.get('id') in ('job-receipt','classify-diff') or
+                        step.get('uses')=='actions/checkout@v4' or
+                        'SELF_HOSTED_ENABLED' in step.get('env',{})):
+                        continue
+                    context={'inputs.full-set':True,'steps.job-receipt.outputs.reused':'true',
+                        'github.event_name':'push','github.ref':'refs/heads/epic/release-train-fixture'}
+                    runs=self.gh_expr(step.get('if','true'),context)
+                    # Republish the native train reports restored by job-check
+                    # and the shared job receipt. Everything expensive skips.
+                    evidence=(step.get('with',{}).get('phase')=='save' or
+                        step.get('with',{}).get('name','').startswith('train-suite-shard-'))
+                    self.assertEqual(runs,evidence,(name,shard,step))
+        self.assertEqual(len(cached),8)
+        # Cross-run archive reuse must point consumers at its original run.
+        download=next(s for s in jobs['fast-validation-suite-shards']['steps']
+            if s.get('with',{}).get('name')=='fast-validation-suite-archive')
+        self.assertEqual(download['with']['run-id'], '${{ needs.fast-validation-suite-build.outputs.producer-run || github.run_id }}')
 
     def test_slim_factory_lanes_run_only_in_lane_yml_on_opted_in_runners_cas_32e9_cas_3b5e(self):
         """cas-14e0/cas-32e9: factory pushes start in lane.yml. Slim on: only
@@ -444,6 +472,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         build = next(step for step in archive['steps'] if step.get('name') == 'Build full suite archive')
         seed = next(step for step in prime['steps'] if step.get('name') == 'Prime full suite archive dependencies')
         self.assertEqual(build['run'], seed['run'])
+        (self.root/'scripts').mkdir(exist_ok=True)
+        shutil.copyfile(policy.ROOT/'scripts/ci-queue-flakes.py',self.root/'scripts/ci-queue-flakes.py')
         calls = self.root / 'cargo.calls'
         bin_dir = self.root / 'cache-bin';bin_dir.mkdir()
         cargo = bin_dir / 'cargo'
@@ -492,7 +522,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                     if primes and self.gh_expr(seed['if'],context):
                         calls.write_text('')
                         result = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
-                                                           'CALLS':str(calls)})
+                                                           'CALLS':str(calls),'GITHUB_EVENT_NAME':event,'GITHUB_REF':ref})
                         self.assertEqual(result.returncode,0,result.stderr)
                         self.assertEqual(calls.read_text().splitlines(),[
                             'nextest archive --workspace --archive-file fast-validation-suite.tar.zst'])
@@ -513,7 +543,8 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
             'vars.CASSY_MERGE_QUEUE_SELF_HOSTED':'enabled'}))
         calls.write_text('')
         failed = self.run_body(seed['run'], {'PATH':f'{bin_dir}:{os.environ["PATH"]}',
-                                           'CALLS':str(calls),'CARGO_STATUS':'17'})
+                                           'CALLS':str(calls),'CARGO_STATUS':'17',
+                                           'GITHUB_EVENT_NAME':'push','GITHUB_REF':'refs/heads/main'})
         self.assertEqual(failed.returncode,17, 'a compile failure cannot become a claimed prime')
 
     def test_macos_check_only_warms_missing_main_cache_after_queue_proof(self):

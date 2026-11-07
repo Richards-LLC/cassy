@@ -154,6 +154,127 @@ def elapsed(started, ended=None):
     return seconds
 
 
+def job_identity(args):
+    # Runtime selection, matrix and toolchain inputs matter even on one tree.
+    inputs=json.loads(args.inputs)
+    workflow=git(args.repo,'ls-tree','-r','HEAD','--','.github','scripts/train-ci.py','scripts/ci-queue-flakes.py')
+    digest=hashlib.sha256(json.dumps({'workflow':workflow,'inputs':inputs,
+        'os':os.environ.get('RUNNER_OS'),'arch':os.environ.get('RUNNER_ARCH')},sort_keys=True).encode()).hexdigest()
+    tree=git(args.repo,'rev-parse','HEAD^{tree}')
+    key=hashlib.sha256(json.dumps([tree,args.job,digest]).encode()).hexdigest()
+    return {'schema':2,'scope':'job','tree':tree,'job':args.job,'job_name':args.job_name,
+        'inputs_hash':digest,'key':key,'artifact':'full-gate-job-'+key}
+
+
+def job_save(args):
+    expected=job_identity(args)
+    previous=args.out/'receipt.json'
+    reused=json.loads(previous.read_text()) if previous.is_file() else {}
+    if any(reused.get(key)!=value for key,value in expected.items()): reused={}
+    recovery=[]
+    for path in (args.repo/'target/queue-flakes').rglob('receipt.json'):
+        record=json.loads(path.read_text())
+        if record.get('schema')==1 and record.get('run_id')==os.environ['GITHUB_RUN_ID']:
+            recovery.append(record)
+    result={**identity(),**expected,'outcome':'PASS' if args.status=='success' else 'FAIL',
+        'recovery':recovery,'producer_run':reused.get('producer_run',os.environ['GITHUB_RUN_ID'])}
+    if reused.get('reused_from'):
+        result['reused_from']=reused['reused_from']
+    # Keep the native train reports with their job, so a cache hit can feed
+    # the existing full-suite collector without inventing a second approval.
+    reports=args.repo/'target/train-suite'
+    if reports.is_dir():
+        shutil.copytree(reports,args.out/'train-suite',dirs_exist_ok=True)
+    write(previous,result)
+    return result
+
+
+def job_check(args):
+    expected=job_identity(args)
+    result={**expected,'reused':False,'producer_run':os.environ['GITHUB_RUN_ID']}
+    (args.out/'receipt.json').unlink(missing_ok=True)
+    slug=os.environ.get('GITHUB_REPOSITORY') or command([args.gh,'repo','view','--json','nameWithOwner','--jq','.nameWithOwner'],args.repo)
+    def api(endpoint):
+        return json.loads(command([args.gh,'api',f'repos/{slug}/{endpoint}'],args.repo))
+    try:
+        artifacts=api('actions/artifacts?name='+expected['artifact']+'&per_page=100')['artifacts']
+        for artifact in artifacts:
+            if artifact['name']!=expected['artifact'] or artifact.get('expired'):
+                continue
+            run_id=str(artifact['workflow_run']['id'])
+            if run_id==os.environ['GITHUB_RUN_ID']:
+                continue
+            run=api('actions/runs/'+run_id)
+            if run.get('status')!='completed' or run.get('path') not in ('.github/workflows/'+WORKFLOW,WORKFLOW):
+                continue
+            if run.get('event') not in ('merge_group','push'):
+                continue
+            with tempfile.TemporaryDirectory() as temporary:
+                command([args.gh,'run','download',run_id,'--name',expected['artifact'],'--dir',temporary],args.repo)
+                record=json.loads((Path(temporary)/'receipt.json').read_text())
+                reports={str(path.relative_to(Path(temporary)/'train-suite')):path.read_bytes()
+                    for path in (Path(temporary)/'train-suite').rglob('*') if path.is_file()}
+            if any(record.get(key)!=value for key,value in expected.items()) or record.get('outcome')!='PASS':
+                continue
+            if record.get('run_id')!=run_id or record.get('head')!=run.get('head_sha'):
+                continue
+            jobs=api('actions/runs/'+run_id+'/jobs?filter=latest&per_page=100')['jobs']
+            proven=[job for job in jobs if job['name'].split(' / ')[-1]==args.job_name and job.get('conclusion')=='success']
+            if len(proven)!=1:
+                continue
+            producer=record.get('producer_run',run_id)
+            if args.requires_artifact:
+                outputs=api('actions/runs/'+str(producer)+'/artifacts')['artifacts']
+                if not any(item['name']==args.requires_artifact and not item.get('expired') for item in outputs):
+                    continue
+            if any(item.get('tree')!=expected['tree'] or item.get('outcome') not in ('PASS','FLAKY') for item in record.get('recovery',[])):
+                continue
+            native=[json.loads(body) for name,body in reports.items() if name.endswith('shard.json')]
+            if any(row.get('head')!=record['head'] or row.get('run_id')!=run_id or
+                   row.get('status')!=0 or not row.get('tests') or row.get('failures') for row in native):
+                continue
+            for name,body in reports.items():
+                target=args.repo/'target/train-suite'/name
+                target.parent.mkdir(parents=True,exist_ok=True)
+                if name.endswith('shard.json'):
+                    row=json.loads(body)
+                    write(target,{**row,**identity(),'reused_from':run_id})
+                else:
+                    target.write_bytes(body)
+            # Rebind transport identity only. Keep the observation's original
+            # run so a cached flake never counts as a new independent failure.
+            for index,recovery in enumerate(record.get('recovery',[])):
+                rebound={**recovery,'head':os.environ['GITHUB_SHA'],'tree':expected['tree'],
+                    'run_id':os.environ['GITHUB_RUN_ID'],
+                    'observation_run_id':recovery.get('observation_run_id',recovery['run_id'])}
+                write(args.repo/'target/queue-flakes/reused'/str(index)/'receipt.json',rebound)
+            result.update(reused=True,reused_from=run_id,producer_run=record.get('producer_run',run_id))
+            write(args.out/'receipt.json',{**record,**identity(),'reused_from':run_id})
+            break
+    except (ValueError,OSError,KeyError,subprocess.SubprocessError) as error:
+        # Cache outage or malformed evidence means execution, never approval.
+        print('Job receipt unavailable; executing: '+str(error),file=sys.stderr)
+    return result
+
+
+def job_export(args):
+    """Feed this run's per-job observations into the existing flake fan-in."""
+    tree=git(args.repo,'rev-parse','HEAD^{tree}')
+    count=0
+    for path in args.evidence.rglob('receipt.json'):
+        record=json.loads(path.read_text())
+        if record.get('scope')!='job' or record.get('schema')!=2:
+            continue
+        if record.get('run_id')!=os.environ['GITHUB_RUN_ID'] or record.get('tree')!=tree:
+            raise ValueError('job receipt does not belong to the evaluated run/tree')
+        for recovery in record.get('recovery',[]):
+            if recovery.get('tree')!=tree or recovery.get('run_id')!=os.environ['GITHUB_RUN_ID'] or recovery.get('head')!=os.environ['GITHUB_SHA']:
+                raise ValueError('recovery observation does not belong to the evaluated run/tree')
+            write(args.out/str(count)/'receipt.json',recovery)
+            count+=1
+    return {'observations':count}
+
+
 def full_collect(args):
     jobs = json.loads(args.jobs_json)
     required = list(REQUIRED_JOBS)
@@ -167,7 +288,14 @@ def full_collect(args):
     head = git(args.repo, 'rev-parse', 'HEAD')
     if subprocess.run(['git', 'merge-base', '--is-ancestor', main, head], cwd=args.repo).returncode:
         failures.append('main baseline is not included in the tested tree')
-    receipt = {**identity(), 'schema': 2, 'scope': 'full-set',
+    job_receipts=[]
+    for path in (args.evidence/'jobs').rglob('receipt.json'):
+        job=json.loads(path.read_text())
+        if job.get('scope')=='job':
+            if job.get('tree')!=git(args.repo,'rev-parse','HEAD^{tree}') or job.get('run_id')!=os.environ['GITHUB_RUN_ID']:
+                raise ValueError('per-job proof is for another evaluated run/tree')
+            job_receipts.append(job)
+    receipt = {**identity(), 'schema': 2, 'scope': 'full-set', 'job_receipts':job_receipts,
                'tree': git(args.repo, 'rev-parse', 'HEAD^{tree}'), 'main_baseline': main,
                'parent': git(args.repo, 'rev-parse', 'HEAD^1'),
                'artifact': ARTIFACT, 'run_url': f'https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
@@ -419,8 +547,30 @@ def main():
         read.add_argument('--head')
         read.add_argument('--out', type=Path)
         read.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))
+    for name in ('job-check','job-save'):
+        job=sub.add_parser(name)
+        job.add_argument('--repo',type=Path,default=Path.cwd())
+        job.add_argument('--job',required=True)
+        job.add_argument('--job-name',required=True)
+        job.add_argument('--inputs',default='{}')
+        job.add_argument('--out',type=Path,required=True)
+        job.add_argument('--github-output',type=Path)
+        job.add_argument('--gh',default=os.environ.get('GH_BIN','gh'))
+        job.add_argument('--requires-artifact')
+        if name=='job-save': job.add_argument('--status',required=True)
+    export=sub.add_parser('job-export')
+    export.add_argument('--repo',type=Path,default=Path.cwd())
+    export.add_argument('--evidence',type=Path,required=True)
+    export.add_argument('--out',type=Path,required=True)
     args = parser.parse_args()
-    if args.command == 'prepared':
+    if args.command in ('job-check','job-save','job-export'):
+        result={'job-check':job_check,'job-save':job_save,'job-export':job_export}[args.command](args)
+        if getattr(args,'github_output',None):
+            with args.github_output.open('a') as stream:
+                for key in ('reused','artifact','producer_run'):
+                    if key in result: stream.write(f'{key}={str(result[key]).lower()}\n')
+        print(json.dumps(result))
+    elif args.command == 'prepared':
         source = prepared(args.repo, args.head)
         if not source:
             return 1

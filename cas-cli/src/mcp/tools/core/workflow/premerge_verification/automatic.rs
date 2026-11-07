@@ -145,7 +145,7 @@ fn launch_command(
         let result = review(&core, &live, &child.id, &mut command, &input, &output);
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
-        if let Err(error) = result && chrono::Utc::now() < live.deadline_at {
+        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&core, &live) {
             let _ = attention(&core, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
         }
         if let Ok(agents) = core.open_agent_store() {
@@ -153,6 +153,22 @@ fn launch_command(
         }
     }).map_err(|e| e.to_string())?;
     Ok(Some(handle))
+}
+
+/// A dispatch that already holds a verdict, or whose task is terminal, needs no
+/// supervisor notice when a second verifier finds it settled.
+fn resolved(core: &CasCore, dispatch: &VerificationDispatch) -> bool {
+    cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|d| {
+        matches!(
+            d.state,
+            cas_types::VerificationDispatchState::Resolved
+                | cas_types::VerificationDispatchState::Invalidated
+        )
+    }) || core
+        .open_task_store()
+        .ok()
+        .and_then(|s| s.get(&dispatch.task_id).ok())
+        .is_some_and(|t| t.is_terminal())
 }
 
 fn review(
@@ -512,6 +528,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             handle.join().unwrap();
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
+            // cas-f2dc: a late verifier error on a settled dispatch stays silent.
+            assert_eq!(resolved(&core, &claimed), status == "approved", "{status}");
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
             if matches!(status, "malformed" | "harness_failed") {
                 assert!(verdict.is_none(), "failed transport cannot approve");

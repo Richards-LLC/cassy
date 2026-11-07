@@ -1815,15 +1815,14 @@ impl CasCore {
             format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
         };
 
-        let caller_is_supervisor = self.get_registered_agent_id_read_only().ok()
-            .and_then(|id| self.open_agent_store().ok()?.get(&id).ok())
-            .is_some_and(|agent| agent.role == cas_types::AgentRole::Supervisor);
-        if task.priority.0 != 2 && caller_is_supervisor
-            && !task.labels.iter().any(|l| l == crate::finding_triage::EXPLICIT_PRIORITY_LABEL)
-        {
-            task.labels.push(crate::finding_triage::EXPLICIT_PRIORITY_LABEL.into());
-        }
+        let requested_priority = task.priority;
         crate::finding_triage::apply(&self.cas_root, &mut task);
+        let assignee_receipt = match crate::finding_triage::priority_not_applied(
+            &task.labels, requested_priority, task.priority, requested_priority,
+        ) {
+            Some(notice) if requested_priority != Priority::MEDIUM => format!("{assignee_receipt}\n{notice}"),
+            _ => assignee_receipt,
+        };
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -4890,6 +4889,9 @@ mod related_recall_response_tests {
         ] {
             let (_temp, repo) = epic_lane_repo();
             let root = epic_lane_cas_root(&repo);
+            // Trains are opt-in (GH #1613); this case covers riding one.
+            std::fs::write(root.join("config.toml"),
+                "[project]\ncanonical_id = \"github.com/example/epic-lane\"\n\n[factory]\nrelease_train = true\n").unwrap();
             let core = CasCore::with_daemon(root.clone(), None, None);
             let store = core.open_task_store().unwrap();
             let agents = core.open_agent_store().unwrap();

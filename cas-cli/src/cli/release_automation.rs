@@ -585,6 +585,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, train, _, args) = fixture();
+        // Trains are opt-in (GH #1613); this case covers the next train.
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
         let _cwd = env.enter_dir(temp.path());
         track(&args, &root).unwrap();
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);

@@ -1570,6 +1570,9 @@ impl CasCore {
         if let Some(labels) = req.labels.as_deref() {
             triaged_labels.extend(labels.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
         }
+        if req.priority.is_some() && !triaged_labels.iter().any(|l| l == crate::finding_triage::EXPLICIT_PRIORITY_LABEL) {
+            triaged_labels.push(crate::finding_triage::EXPLICIT_PRIORITY_LABEL.into());
+        }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
             crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
                 &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
@@ -1672,11 +1675,11 @@ impl CasCore {
         }
 
         if let Some(priority) = requested_priority {
+            if priority != task.priority { changes.push("priority"); }
             task.priority = priority;
-            changes.push("priority");
         }
 
-        if req.labels.is_some() || derived_priority.is_some() {
+        if triaged_labels != task.labels {
             task.labels = triaged_labels;
             changes.push("labels");
         }
@@ -2863,6 +2866,40 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn supervisor_priority_beats_finding_derived_priority_and_labels_persist() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let sup = Agent::new_with_role("sup-id".into(), "sup".into(), AgentRole::Supervisor);
+        agents.register(&sup).unwrap();
+        core.set_agent_id_for_testing(sup.id);
+
+        let mut task = Task::new("cas-finding-p".into(), "finding".into());
+        task.priority = Priority::MEDIUM;
+        task.labels = vec!["from-finding".into(), "severity:broken".into(), "reach:secondary".into()];
+        tasks.add(&task).unwrap();
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0, "labels": "incident",
+        })).unwrap();
+        let out = core.cas_task_update(Parameters(request)).await.unwrap();
+        let stored = tasks.get(&task.id).unwrap();
+        assert_eq!(stored.priority, Priority(0));
+        assert!(stored.labels.iter().any(|l| l == "incident"));
+
+        // Repeating the same request changes nothing and must say so.
+        let again: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0,
+        })).unwrap();
+        let text = format!("{:?}", core.cas_task_update(Parameters(again)).await.unwrap());
+        assert!(!text.contains("Updated task cas-finding-p: priority"), "{text}");
+        let _ = out;
     }
 
     #[tokio::test]

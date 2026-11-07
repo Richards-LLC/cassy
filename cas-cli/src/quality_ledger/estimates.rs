@@ -437,6 +437,12 @@ fn record_task(root: &Path, task: &cas_types::Task) -> Result<usize> {
     Ok(inserted)
 }
 
+/// Reusable-workflow jobs are named `<caller job> / <job>`; match the last segment.
+pub(crate) fn is_suite_job(name: &str) -> bool {
+    let n = name.rsplit(" / ").next().unwrap_or(name);
+    n.starts_with("Fast Validation") && n.contains("suite")
+}
+
 /// GitHub's created time includes runner acquisition; job completion, unlike a
 /// run's updated_at, cannot be moved by a later metadata update.
 pub(crate) fn github_history(root: &Path, limit: usize, since: DateTime<Utc>) -> Result<usize> {
@@ -445,6 +451,8 @@ pub(crate) fn github_history(root: &Path, limit: usize, since: DateTime<Utc>) ->
     };
     let mut inserted = 0;
     for (workflow, event, stage) in [
+        ("full-validation.yml", "push", "train_tip_suite"),
+        ("full-validation.yml", "merge_group", "merge_queue"),
         ("ci.yml", "push", "train_tip_suite"),
         ("ci.yml", "merge_group", "merge_queue"),
         ("release.yml", "push", "release_publish"),
@@ -488,9 +496,7 @@ pub(crate) fn github_history(root: &Path, limit: usize, since: DateTime<Utc>) ->
             }
             if stage == "train_tip_suite"
                 && !jobs["jobs"].as_array().into_iter().flatten().any(|job| {
-                    job["name"]
-                        .as_str()
-                        .is_some_and(|n| n.starts_with("Fast Validation") && n.contains("suite"))
+                    job["name"].as_str().is_some_and(is_suite_job)
                 })
             {
                 continue;
@@ -587,6 +593,12 @@ fn gh_json(path: &str) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn full_validation_qualified_job_names_count_as_suite_jobs() {
+        assert!(is_suite_job("Shared train and queue graph / Fast Validation — suite shard 2"));
+        assert!(is_suite_job("Fast Validation — suite shard 1"));
+        assert!(!is_suite_job("Shared train and queue graph / Full-set gate"));
+    }
     fn fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,

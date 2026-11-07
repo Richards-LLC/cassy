@@ -1331,7 +1331,7 @@ pub(crate) fn read_github(
             let jobs:Result<serde_json::Value,_>=transport.gh_json(&["api".into(),format!("repos/{}/actions/runs/{}/jobs?per_page=100",transport.repo,run.id)]);
             if let Ok(jobs)=jobs {
                 if stage=="train_tip_suite" && !jobs["jobs"].as_array().into_iter().flatten()
-                    .any(|j|j["name"].as_str().is_some_and(|n|n.starts_with("Fast Validation") && n.contains("suite"))) { continue; }
+                    .any(|j|j["name"].as_str().is_some_and(crate::quality_ledger::estimates::is_suite_job)) { continue; }
                 if let Some(end)=jobs["jobs"].as_array().into_iter().flatten()
                 .filter_map(|j|j["completed_at"].as_str().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok()).map(|t|t.with_timezone(&chrono::Utc))).max() {
                 crate::quality_ledger::estimates::record_pipeline_completion(cas_dir,stage,run.id,Some(&run.head_sha),start,end,Some(&run.html_url));

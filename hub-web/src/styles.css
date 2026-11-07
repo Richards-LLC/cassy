@@ -3451,7 +3451,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-machine-chips { display: flex; flex: 0 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 0 var(--space-1); min-width: 0; }
 .project-machine-chip { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: 0 var(--space-1); border: 0; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
-.project-machine-chip .machine-version { padding: 0 var(--space-1); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-inline); }
+.project-machine-chip .machine-version { padding: 0 var(--space-1); border: var(--line-width) solid var(--state-warn); border-radius: var(--radius-card); }
 .machine-version { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; max-width: 100%; color: var(--warn-text); font-size: var(--fs-xs); overflow-wrap: anywhere; }
 .machine-version-installed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .machine-version-update { color: var(--warn-text); }
@@ -3466,7 +3466,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-card.is-quiet .project-card-name { color: var(--ink-mid); }
 .project-card-rows { display: flex; flex-direction: column; min-width: 0; }
 .project-card-rows[hidden] { display: none; }
-.project-card .conversation-row { grid-template-columns: 26px minmax(0, 1fr) auto auto; column-gap: var(--space-2); min-height: 36px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-control); border-top: var(--line-width) solid var(--line-subtle); }
+.project-card .conversation-row { grid-template-columns: 26px minmax(0, 1fr) auto auto; column-gap: var(--space-2); min-height: 36px; padding: var(--space-1) var(--space-2); border-radius: var(--radius-card); border-top: var(--line-width) solid var(--line-subtle); }
 .project-card .conversation-row:first-child { border-top: 0; }
 .project-card .conversation-row[aria-current="true"]::before { top: var(--space-2); bottom: var(--space-2); left: 1px; }
 .project-card .conversation-avatar { grid-row: auto; width: 26px; height: 26px; font-size: 11px; }
@@ -3483,8 +3483,9 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-card .conversation-preview { grid-column: 2 / -1; -webkit-line-clamp: 1; line-clamp: 1; max-height: 1.4em; font-size: var(--fs-xs); }
 .conversation-filters { display: flex; flex: none; gap: var(--space-1); min-width: 0; }
 .conversation-filters[hidden] { display: none; }
-.conversation-search-row { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
-.conversation-search-row > .conversation-search { flex: 1 1 auto; min-width: 0; }
+/* Search keeps a usable width; the Needs you pill wraps beneath it before squeezing it. */
+.conversation-search-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; margin-top: var(--space-4); }
+.conversation-search-row > .conversation-search { flex: 1 1 16rem; min-width: min(16rem, 100%); margin-top: 0; }
 .conversation-filter { flex: none; display: inline-flex; align-items: center; gap: var(--space-1); min-height: 32px; padding: var(--space-1) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); white-space: nowrap; }
 .conversation-filter.needs-you-filter { border-color: var(--state-warn); background: var(--tint-warn); }
 .conversation-filter[aria-pressed="true"] { border-color: var(--color-action); background: var(--bg-active); color: var(--color-action); }
@@ -3492,7 +3493,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .needs-you-count, .needs-you-badge { min-width: 18px; padding: 0 var(--space-1); border-radius: var(--radius-pill); background: var(--ask-bg, var(--state-warn)); color: var(--ask-fg, var(--ink)); text-align: center; font: var(--weight-semibold) var(--fs-xs)/1.4 var(--font-ui); }
 .project-nav-eyebrow { margin: var(--space-2) var(--space-2) var(--space-1); color: var(--ink-mid); font: var(--weight-semibold) var(--fs-xs)/var(--line-ui) var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase; }
 .needs-you-section { flex: none; display: flex; flex-direction: column; gap: var(--space-1); margin-block-end: var(--space-2); }
-.needs-you-shortcut { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); text-align: left; border: var(--line-width) solid var(--state-warn); border-inline-start-width: 3px; border-radius: var(--radius-surface); background: var(--bg-raised); color: var(--ink); }
+.needs-you-shortcut { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); min-height: var(--rail-item-min); padding: var(--space-2) var(--space-3); text-align: left; border: var(--line-width) solid var(--state-warn); border-inline-start-width: 3px; border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
 .needs-you-shortcut:hover { background: var(--bg-hover); color: var(--ink); }
 .needs-you-line { display: flex; align-items: baseline; gap: var(--space-1); min-width: 0; }
 .needs-you-line strong { flex: none; font: var(--weight-semibold) var(--fs-meta)/var(--line-ui) var(--font-ui); }
@@ -3512,7 +3513,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-list-heading { padding: calc(var(--space-3) + env(safe-area-inset-top)) calc(var(--space-3) + env(safe-area-inset-right)) var(--space-2) calc(var(--space-3) + env(safe-area-inset-left)); }
   .conversation-list-title { margin-top: var(--space-2); }
-  .conversation-search { margin-top: var(--space-2); }
+  .conversation-search-row { margin-top: var(--space-2); }
   .conversation-filter { min-height: var(--rail-item-min); }
   .project-machine-chip { min-height: var(--rail-item-min); }
   /* One-line sessions keep a 44px touch target on a phone. */

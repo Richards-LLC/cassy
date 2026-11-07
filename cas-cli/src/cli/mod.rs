@@ -11,6 +11,7 @@ mod claude_md;
 pub(crate) mod codex;
 mod codemap_cmd;
 mod history_cmd;
+mod install_on_publish;
 mod artifact_cmd;
 pub use artifact_cmd::render_artifact_line;
 pub(crate) mod hub;

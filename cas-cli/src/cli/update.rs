@@ -4762,6 +4762,7 @@ fn execute_post_swap(args: &UpdateArgs, cli: &Cli, current_version: &str) -> any
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("post-swap mode requires --from"))?;
     remove_quarantine_if_present(&std::env::current_exe()?)?;
+    super::install_on_publish::refresh_installed();
     // The hub goes first so it picks up the new binary immediately rather than
     // waiting behind a full refresh. Its verification is drawn from data in
     // the findings; anything else it printed still reaches the operator.

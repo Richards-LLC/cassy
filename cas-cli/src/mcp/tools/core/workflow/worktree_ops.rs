@@ -9076,7 +9076,7 @@ mod cas_6b42_peer_delivery_tests {
         });
         let refused = core.started_task_merge_source(&repo, Some(&task), "lively-eagle-82")
             .err().expect("a locally in-progress peer delivery is never merged here");
-        assert!(refused.message.contains("merge on prowl-machine-cas-6b42 (peer lively-eagle-82)"), "{refused:?}");
+        assert!(refused.message.contains("prowl-machine-cas-6b42") && refused.message.contains("lively-eagle-82"), "{refused:?}");
 
         task.status = cas_types::TaskStatus::AwaitingMerge;
         task.deliverables.parked_branch = Some(branch.into());

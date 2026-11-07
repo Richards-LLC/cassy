@@ -2353,6 +2353,8 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
     let mut args = update_test_args();
     args.version = None;
     args.yes = true;
+    // As `--render-fixture` does: a replay never reexecs the host's live factory daemons.
+    args.render_fixture = Some(path.clone());
 
     let (result, output) = capture_phase(true, || {
         crate::cli::update::fixture::render(&path, &args, &update_test_cli(false))

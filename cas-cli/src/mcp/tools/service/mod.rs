@@ -755,6 +755,7 @@ impl CasService {
 
             let action = req.action.clone();
             let result = match req.action.as_str() {
+                "estimate" => this.system_estimate(req).await,
                 "version" => this.system_version().await,
                 "preflight" => this.system_preflight().await,
                 "doctor" => this.system_doctor(req).await,
@@ -777,7 +778,7 @@ impl CasService {
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
                     format!(
-                        "Unknown system action: {}. Valid: version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
+                        "Unknown system action: {}. Valid: estimate, version, preflight, doctor, stats, info, reindex, maintenance_run, maintenance_status, config_docs, config_search, report_cas_bug{}",
                         req.action,
                         if cfg!(feature = "mcp-proxy") { ", proxy_add, proxy_remove, proxy_list, proxy_health" } else { "" }
                     ),

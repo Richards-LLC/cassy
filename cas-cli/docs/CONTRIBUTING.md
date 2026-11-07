@@ -4444,3 +4444,7 @@ The hold filters parked rows at MCP list and startup presentation boundaries;
 internal task lists retain them for ownership fences, re-close exemptions and
 recovery checks. READY TO MERGE generation stops before caching or queueing an
 alert during the hold; lifting it alone generates no stale READY backlog.
+
+### Measured ledger estimates
+
+`cas ledger estimate pipeline <stage> --instance <sha>` and MCP `system action=estimate query=pipeline:<stage>:<sha>` record promises from successful measured runs; task/epic lookup uses closed project tasks. `--preview` is read-only. `cas ledger backfill --sync` derives historical facts and synchronizes the ledger without inventing promises. Estimate/outcome kinds use migration m297 and store-open reconciliation, preserving append-only sequence and history. See [ESTIMATES](../../docs/ESTIMATES.md) for endpoints, calibration, outcome semantics and supervisor-owned two-machine backfill proof.

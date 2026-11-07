@@ -196,3 +196,5 @@ The conversation's phase line uses the selected supervisor's recorded lifecycle 
 domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs", "crates/cas-types/src/entry.rs"]
 watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
 -->
+
+Measured estimates reuse the friction ledger: `cas ledger estimate` and MCP `system action=estimate` return typical (p50) and bad-day (p90) minutes, counts and five references, with explicit uncalibrated results for small samples. Task references rank closed project tasks and retained lease/model/file metadata; pipeline references use GitHub run/job timings. Landed subjects emit linked outcomes; actual ≤ p90 is a hit, early completions are marked separately, and overruns add friction. Ledger reports show hit rate, misses and release history. The new Cloud-kind lane holds rejected rows for replay while ordinary pushes and pulls continue. See [estimate semantics and post-install fleet backfill](ESTIMATES.md).

@@ -216,6 +216,7 @@ pub const SEARCH_ACTIONS: &[&str] = &[
 ];
 
 pub const SYSTEM_ACTIONS: &[&str] = &[
+    "estimate",
     "version",
     "preflight",
     "doctor",

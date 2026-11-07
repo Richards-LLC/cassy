@@ -1189,6 +1189,23 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
     tasks.add(&reused).unwrap();
     let err = fx.supervisor.verification(Parameters(request("cas-start"))).await.unwrap_err();
     assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    // A reused lane that moved on for other work is not this task's delivery either.
+    git(&fx.repo, &["checkout", "-qb", "pr/cas-moved", &fx.staging]);
+    std::fs::write(fx.repo.join("other.css"), "b{gap:2px}\n").unwrap();
+    git(&fx.repo, &["add", "other.css"]);
+    git(&fx.repo, &["commit", "-qm", "unrelated work for another task"]);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge unrelated lane", "pr/cas-moved"]);
+    let moved_staging = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let mut moved = reused.clone();
+    moved.id = "cas-moved".into();
+    moved.deliverables.parked_branch = Some("pr/cas-moved".into());
+    moved.deliverables.factory_branch_start.as_mut().unwrap().branch = "pr/cas-moved".into();
+    tasks.add(&moved).unwrap();
+    let mut moved_request = serde_json::to_value(request("cas-moved")).unwrap();
+    moved_request["staging_sha"] = moved_staging.into();
+    let err = fx.supervisor.verification(Parameters(serde_json::from_value(moved_request).unwrap())).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
     fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
     let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(receipts[0].task_heads["cas-pr"], merged);

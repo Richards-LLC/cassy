@@ -61,6 +61,23 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
         if !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(repo, task, branch, &tip) {
             continue;
         }
+        // A lane that moved on for other work still ends at someone else's tip:
+        // the task must own at least one commit between its start and the tip.
+        if let Some(start) = d.factory_branch_start.as_ref().filter(|start| start.branch == branch) {
+            use crate::mcp::tools::core::task::lifecycle::close_ops::{commit_is_task_attributable, task_commit_identity};
+            let identity = task_commit_identity(task, None);
+            let range = Command::new("git")
+                .args(["rev-list", &format!("{}..{tip}", start.base_sha)])
+                .current_dir(repo)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default();
+            if !range.lines().any(|c| commit_is_task_attributable(repo, c, &identity)) {
+                continue;
+            }
+        }
         if integration_state(repo, &tip, target) == Some(true) {
             return Some(tip);
         }

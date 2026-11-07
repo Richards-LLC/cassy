@@ -106,7 +106,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// zero-context id would hide a target edit beside a delivered hunk (`if ok`
 /// to `if !ok` two lines away); only full-context identity may rebind. An
 /// empty or unreadable patch is an error, never a match.
-fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {

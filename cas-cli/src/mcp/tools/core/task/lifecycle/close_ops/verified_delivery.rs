@@ -123,6 +123,26 @@ impl ReviewedDelivery {
                 first
             }
         };
+        // The verifier reviewed the merged candidate, including target edits
+        // beside source hunks. Its exact tree at the first landing is stronger
+        // evidence than reverse-applying the source's older patch context.
+        if resolve_branch_sha(repo, &format!("{landing}^{{tree}}")).as_deref()
+            == Some(candidate.tree.as_str())
+        {
+            return true;
+        }
+        // A later unrelated target advance can change the full landing tree.
+        // Compare the actual merge delta with the reviewed candidate delta,
+        // retaining full patch context and whitespace in the existing hash.
+        if let Some(parent) = resolve_branch_sha(repo, &format!("{landing}^1"))
+            && let Ok(reviewed) = premerge_verification::delivered_patch_id(
+                repo, &candidate.target_sha, &candidate.tree,
+            )
+            && premerge_verification::delivered_patch_id(repo, &parent, &landing)
+                .is_ok_and(|landed| landed == reviewed)
+        {
+            return true;
+        }
         // Prove the complete reviewed patch at that immutable landing. Later
         // ordinary edits to the same lines do not undo a legitimate delivery.
         // A private index keeps HEAD, the worktree and the real index untouched.

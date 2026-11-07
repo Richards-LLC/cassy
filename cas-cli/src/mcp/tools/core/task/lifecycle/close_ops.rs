@@ -29485,7 +29485,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29572,12 +29572,18 @@ mod merge_state_gate_tests {
             } else {
                 recorded.unwrap();
             }
+            if row == "queue-target-progress" {
+                std::fs::write(p.join("target-progress.txt"), "independent target work after review\n").unwrap();
+                git(p, &["add", "target-progress.txt"]);
+                git(p, &["commit", "-qm", "advance target after candidate review"]);
+            }
             if row == "source-absent" {
                 // Identical patch content without the bound source identity is insufficient.
                 std::fs::write(p.join("delivery.rs"), "// task delivery\n").unwrap();
                 std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
                 std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
-                git(p, &["add", ".gitignore", "delivery.rs", "second.rs"]);
+                std::fs::write(p.join("seed.txt"), "new\nmiddle\ntarget\n").unwrap();
+                git(p, &["add", ".gitignore", "delivery.rs", "second.rs", "seed.txt"]);
             } else {
                 git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
                 if row == "partial-patch" { git(p, &["rm", "-q", "-f", "second.rs"]); }
@@ -29586,6 +29592,12 @@ mod merge_state_gate_tests {
             let landed = head_sha(p);
             assert_ne!(landed, candidate.proof.head_commit);
             if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
+                assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
+            }
+            if row == "queue-target-progress" {
+                assert_ne!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
+            }
+            if row == "source-absent" {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
@@ -29612,7 +29624,7 @@ mod merge_state_gate_tests {
                 Err(_) if row == "foreign-candidate" => {},
                 Ok(Some(reviewed)) => assert_eq!(
                     reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
+                    matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
                 ),
                 _ => panic!("missing task-bound review: {row}"),
             }
@@ -29637,7 +29649,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }

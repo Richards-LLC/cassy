@@ -67,6 +67,18 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
     None
 }
 
+/// The delivery identity every receipt consumer shares: the recorded anchor, or,
+/// when none was ever recorded (PR merge), the merged branch tip. Invalid
+/// recorded anchors never fall back.
+pub(crate) fn resolved_delivery_anchor(repo: &Path, task: &Task, target: &str) -> Option<String> {
+    delivery_anchor(repo, task).or_else(|| {
+        let d = &task.deliverables;
+        (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
+            .then(|| merged_branch_anchor(repo, task, target))
+            .flatten()
+    })
+}
+
 pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     let code = Command::new("git")
         .args(["merge-base", "--is-ancestor", from, to])
@@ -362,13 +374,7 @@ pub(crate) fn prepare_receipt(
                 None => return Err(author_refusal(id, &author_id)),
             }
         }
-        let anchor = delivery_anchor(&repo, &task)
-            .or_else(|| {
-                let d = &task.deliverables;
-                (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
-                    .then(|| merged_branch_anchor(&repo, &task, &target))
-                    .flatten()
-            })
+        let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
@@ -523,7 +529,7 @@ fn covering_receipt(
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
         return Ok(None);
     }
-    let Some(anchor) = delivery_anchor(repo, task) else {
+    let Some(anchor) = resolved_delivery_anchor(repo, task, target) else {
         return Ok(None);
     };
     // Retired history can recover only reviewed delivery. Without an active

@@ -1159,6 +1159,7 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
         git(&fx.repo, &["commit", "-qm", id]);
         let mut task = Task::new(id.into(), "PR merged".into());
         task.assignee = Some("test-agent".into());
+        task.status = TaskStatus::AwaitingMerge;
         task.deliverables.parked_branch = Some(format!("pr/{id}"));
         tasks.add(&task).unwrap();
     }
@@ -1177,6 +1178,10 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
     fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
     let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(receipts[0].task_heads["cas-pr"], merged);
+    // The receipt must also close it: consumers resolve the same identity.
+    let closed = tasks.get("cas-pr").unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{:?}", closed.pending_close_note());
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
 }
 
 #[tokio::test]

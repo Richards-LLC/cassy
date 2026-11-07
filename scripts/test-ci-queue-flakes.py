@@ -71,6 +71,7 @@ class QueueRecovery(unittest.TestCase):
                     "CARGO":str(self.bin/'cargo'), "GITHUB_EVENT_NAME":"merge_group",
                     "GITHUB_RUN_ID":"101", "GITHUB_REPOSITORY":"fixture/repo"}
         self.issues = []
+        self.issue_read_failure = False
         self.refs = {}
         self.lose_create_response = False
         owner = self
@@ -105,6 +106,7 @@ class QueueRecovery(unittest.TestCase):
                     # expose the current record (live acceptance regression).
                     result = owner.issues if query.get('state')==['all'] and not query.get('labels') else []
                     if query.get('page',['1'])[0] != '1': result = []
+                    if owner.issue_read_failure: code, result = 503, {'message':'fixture issue read unavailable'}
                 elif path == '/issues' and method == 'POST':
                     result = {**data,'number':len(owner.issues)+1,'state':'open',
                               'html_url':f'https://github.com/fixture/repo/issues/{len(owner.issues)+1}',
@@ -278,6 +280,41 @@ class QueueRecovery(unittest.TestCase):
                 self.assertEqual(receipt['quarantine'][0]['runner'],engine)
                 self.assertEqual(len(self.calls()),1)
                 self.assertIn(self.issues[0]['html_url'],result.stdout)
+
+    def test_bad_quarantine_reads_warn_and_never_replace_shard_results(self):
+        for engine in ('rust','playwright'):
+            with self.subTest(engine=engine):
+                self.issue_read_failure = False
+                test = {'runner':engine,'binary':'fixture::lib','name':'sometimes',
+                        'project':'journeys','file':'fixture.journey.ts','titles':['sometimes']}
+                self.issues.clear()
+                for number in range(1,6):
+                    candidate = dict(test)
+                    if number == 4: candidate.update(name='other',titles=['other'])
+                    if number == 5: candidate.update(binary=None,titles=['sometimes',17])
+                    state = {'schema':1,'test':candidate,'runs':['100','101']}
+                    self.issues.append({'number':number,'state':'open',
+                        'html_url':f'https://github.com/fixture/repo/issues/{number}',
+                        'labels':[{'name':'flaky-quarantine'}],
+                        'body':'<!-- cas-queue-flake: '+json.dumps(state)+' -->' if number != 1 else 'missing metadata'})
+                self.issues[1]['html_url'] = 'https://github.com/FIXTURE/REPO/issues/2'
+                self.issues[3]['html_url'] = 'https://github.com/foreign/repo/issues/4'
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                result = self.run_queue(engine)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual([t['issue'] for t in receipt['quarantine']],[self.issues[1]['html_url']])
+                self.assertEqual(len(self.calls()),1)
+                for number in (1,3,4,5): self.assertIn(f'#{number}',result.stderr)
+                for unavailable in (False,True):
+                    self.issue_read_failure = unavailable
+                    (self.repo/'attempts.jsonl').unlink()
+                    result = self.run_queue(engine,'always-fail')
+                    self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+                    self.assertEqual(len(self.calls()),2)
+                    self.assertIn('quarantine',result.stderr.lower())
+                    receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                    self.assertEqual(receipt['outcome'],'FAIL')
 
 
 def live_acceptance(out):

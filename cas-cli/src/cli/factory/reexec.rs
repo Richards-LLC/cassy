@@ -32,7 +32,13 @@ fn read_exact_before(
     deadline: Instant,
 ) -> Result<()> {
     while !data.is_empty() {
-        stream.set_read_timeout(Some(time_left(deadline)?))?;
+        // After the swap the new image writes the receipt and closes. macOS
+        // then refuses socket options with EINVAL while the receipt is still
+        // buffered; a read of a closed socket cannot block, so read it anyway.
+        match stream.set_read_timeout(Some(time_left(deadline)?)) {
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
+            result => result?,
+        }
         match stream.read(data) {
             Ok(0) => bail!("Daemon disconnected before completing its response"),
             Ok(n) => data = &mut data[n..],
@@ -305,6 +311,33 @@ mod tests {
         live.after_project(&roots[1]);
         assert_eq!(sessions(&live.outcomes), ["fast", "slow"]);
         assert_eq!(sessions(&live.finish()), ["fast", "slow"]);
+    }
+
+    #[test]
+    fn swapped_daemon_receipt_is_read_after_the_new_image_closes_cas_60a0() {
+        let (mut client, mut daemon) = UnixStream::pair().unwrap();
+        let receipt = ReexecReceipt {
+            session: "s".into(),
+            nonce: "n".into(),
+            pid: 7,
+            old_version: "9.99.0".into(),
+            version: "9.99.1".into(),
+            build: "b".into(),
+            panes_adopted: 2,
+            fallback: false,
+            error: None,
+            at: chrono::Utc::now(),
+        };
+        let frame = encode_message(&DaemonMessage::ReexecResult { receipt }).unwrap();
+        daemon.write_all(&frame).unwrap();
+        drop(daemon);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        match read_frame(&mut client, deadline).unwrap() {
+            DaemonMessage::ReexecResult { receipt } => {
+                assert_eq!((receipt.pid, receipt.panes_adopted), (7, 2))
+            }
+            other => panic!("expected the receipt, got {other:?}"),
+        }
     }
 
     #[test]

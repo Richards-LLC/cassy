@@ -51,6 +51,15 @@ When task start's close checks list a Ledger or `Adversarial probe` line, run
 Fill it from the real walk, then fix every `cas qa ledger check <path> --task <id>`
 diagnostic. A structural PASS does not judge captures.
 
+## Report deliverables
+
+A report under `docs/` (an `.html` beside its same-basename `.md`) parks only as a
+triplet: the `.md`, the `.brief.md` (with `Audience:` and a `## Critique` table meeting the
+cas-ui-craft floor) and the `.html`. The HTML must declare the DESIGN.md tokens, use no network,
+put its `data-verdict` first and stay within its height budget. Business reports carry no
+task ids and no jargon. A visual-QA PASS is necessary, not sufficient. The G7 refusal lists each gap;
+see [cas-html-reports](../../cas-html-reports/SKILL.md).
+
 ## Merge and freshness
 
 A successful park reads `PARKED <sha> on <branch>; awaiting merge verdict; nothing more to do`.

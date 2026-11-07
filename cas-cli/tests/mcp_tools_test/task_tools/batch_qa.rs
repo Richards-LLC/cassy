@@ -1147,6 +1147,39 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
 }
 
 #[tokio::test]
+async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    // Two anchorless tasks on PR branches; only cas-pr is squash-merged to main.
+    for (id, file) in [("cas-pr", "pr.css"), ("cas-open", "open.css")] {
+        git(&fx.repo, &["checkout", "-qb", &format!("pr/{id}"), &fx.staging]);
+        std::fs::write(fx.repo.join(file), "a{gap:4px}\n").unwrap();
+        git(&fx.repo, &["add", file]);
+        git(&fx.repo, &["commit", "-qm", id]);
+        let mut task = Task::new(id.into(), "PR merged".into());
+        task.assignee = Some("test-agent".into());
+        task.deliverables.parked_branch = Some(format!("pr/{id}"));
+        tasks.add(&task).unwrap();
+    }
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", "pr/cas-pr"]);
+    git(&fx.repo, &["commit", "-qm", "PR #1 (squash)"]);
+    let merged = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let request = |id: &str| -> VerificationRequest {
+        let mut r = serde_json::to_value(fx.request()).unwrap();
+        r["task_ids"] = serde_json::json!([id]);
+        r["staging_sha"] = merged.clone().into();
+        serde_json::from_value(r).unwrap()
+    };
+    let err = fx.supervisor.verification(Parameters(request("cas-open"))).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
+    let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert_eq!(receipts[0].task_heads["cas-pr"], merged);
+}
+
+#[tokio::test]
 async fn batch_qa_authority_and_no_self_review_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);

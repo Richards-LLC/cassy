@@ -38,6 +38,35 @@ pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
         .and_then(|head| commit(repo, head))
 }
 
+/// GH #1641: a task merged through a GitHub PR has no recorded anchor. Resolve
+/// it as close's `commit_receipt` does: its recorded branch tip once integrated
+/// on `target`, else the commit on `target` whose tree equals that tip (squash).
+fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::find_squash_tree_match;
+    let d = &task.deliverables;
+    let branches = d
+        .parked_branch
+        .iter()
+        .chain(d.factory_branch_start.iter().map(|s| &s.branch))
+        .chain(d.handoff_branches.iter());
+    for branch in branches {
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Some(tip) = [format!("origin/{branch}"), branch.to_string()]
+            .iter()
+            .find_map(|r| commit(repo, r))
+        else {
+            continue;
+        };
+        if integration_state(repo, &tip, target) == Some(true) {
+            return Some(tip);
+        }
+        if let Some(squash) = find_squash_tree_match(repo, &tip, target) {
+            return Some(squash);
+        }
+    }
+    None
+}
+
 pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     let code = Command::new("git")
         .args(["merge-base", "--is-ancestor", from, to])
@@ -334,6 +363,12 @@ pub(crate) fn prepare_receipt(
             }
         }
         let anchor = delivery_anchor(&repo, &task)
+            .or_else(|| {
+                let d = &task.deliverables;
+                (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
+                    .then(|| merged_branch_anchor(&repo, &task, &target))
+                    .flatten()
+            })
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {

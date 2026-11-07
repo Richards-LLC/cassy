@@ -224,7 +224,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
     for (const sibling of machine.sessions) sibling.last_activity_at = new Date(minute + 1_000).toISOString();
     machine.sessions[1]!.last_activity = `supervisor → ready-${width}`;
     await hub.announceCatalog("atlas");
-    await expect(row("calm-puma-34")).toContainText(`Messaged ready-${width}`);
+    await expect(row("calm-puma-34")).toHaveAccessibleName(new RegExp(`Messaged ready-${width}`));
     await journey.stage(`Alternating activity holds the badge at ${width}px`, async () => {
       const before = await rects();
       await page.evaluate(() => {
@@ -243,7 +243,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
         sibling.last_activity_at = new Date(minute + 10_000 + frame * 400).toISOString();
         sibling.last_activity = `supervisor → frame-${width}-${frame}`;
         await hub.announceCatalog("atlas");
-        await expect(row(sibling.supervisor!)).toContainText(`Messaged frame-${width}-${frame}`);
+        await expect(row(sibling.supervisor!)).toHaveAccessibleName(new RegExp(`Messaged frame-${width}-${frame}`));
       }
       const changes = await page.evaluate(() => {
         const probe = (window as unknown as { recencyProbe: { changes: unknown[]; observer: MutationObserver } }).recencyProbe;
@@ -315,12 +315,10 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
     await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
-    // cas-5d2c: under a heading that names the project and machine once, each
-    // row leads with its codename and says what its session last did, before
-    // any of them is opened; the heading and footer count the same noun.
-    await expect(rows.locator(".conversation-title")).toHaveCount(3);
-    for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
-    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "Mixdown preview rendered: 3 stems.", "You wrote to it"]);
+    // cas-da546: one line a session; siblings on one machine read apart by
+    // codename, and what each last did is spoken, not shown.
+    await expect(rows.locator(".conversation-preview")).toHaveCount(0);
+    await expect(row("calm-puma-34")).toHaveAccessibleName(/Messaged bright-robin-85/);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
     // A useful incoming preview can grow the last row beyond the list's
@@ -596,21 +594,20 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(studio().locator(".project-card-name")).toHaveAttribute("title", "github.com/acme/studio");
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
     await expect(studio().getByRole("button", { name: "Filter conversations on Borealis, online", exact: true })).toBeVisible();
-    await expect(studio().locator(".conversation-account")).toHaveText("operator@example.test");
+    await expect(studio().locator(".conversation-row").first()).toHaveAccessibleName(/operator@example\.test/);
     // DESIGN.md Avatars: each provider's mark at a legible 24px, not a glyph.
     for (const [harness, provider] of [["codex", "OpenAI"], ["claude", "Claude"]]) {
       await expect(studio().locator(`[data-harness="${harness}"]`)).toHaveAttribute("title", provider);
       expect((await studio().locator(`[data-harness="${harness}"] svg.provider-mark`).boundingBox())?.width).toBeGreaterThanOrEqual(20);
     }
-    await expect(studio().locator(".project-card-summary")).toHaveText("1 live worker");
+    await expect(studio().locator(".project-card-summary")).toHaveText(/^1 worker/);
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
-    await expect(old.locator(".conversation-account")).toHaveCount(0);
     await expect(old.locator("[data-harness]")).toHaveCount(0);
-    await expect(old.locator(".project-card-summary")).toBeHidden();
+    await expect(old.locator(".project-card-summary")).toContainText("no workers");
     const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });
     await expect(pulseMachine).toBeVisible();
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));
-    const liveSupervisor = old.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" });
+    const liveSupervisor = old.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]');
     await expect(liveSupervisor.locator(".supervisor-state")).not.toHaveClass(/offline/);
     await expect(old.locator(".conversation-row")).toHaveCount(1);
     await expect(old.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
@@ -620,8 +617,8 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await journey.stage(`Running idle stays green in ${mode}`, async () => {
       await page.emulateMedia({ colorScheme: mode === "dark" ? "dark" : "light", forcedColors: mode === "forced-colors" ? "active" : "none" });
       const card = list.getByRole("group", { name: /^pulse-card ·/ });
-      const idle = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Idle", exact: true });
-      await card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).click();
+      const idle = card.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]').getByRole("img", { name: "Idle", exact: true });
+      await card.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]').click();
       await expect(page.locator("html")).toHaveAttribute("data-scheme", mode === "dark" ? "dark" : "light");
       await expect(idle).toHaveAttribute("title", "Idle");
       const look = (dot: typeof idle) => dot.evaluate(node => { const s = getComputedStyle(node); return [s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius]; });
@@ -638,7 +635,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       }
       // Gray belongs to an unreachable machine's last-known running row.
       await hub.down("atlas", { sockets: "close" });
-      const offline = card.locator(".conversation-row").filter({ hasText: "golden-jaguar-44" }).getByRole("img", { name: "Offline", exact: true });
+      const offline = card.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]').getByRole("img", { name: "Offline", exact: true });
       await expect(offline).toHaveAttribute("title", "Offline");
       expect(await look(offline)).not.toEqual(idleLook);
       await hub.up("atlas");
@@ -689,15 +686,15 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
   });
 
   await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
-    await filters.getByRole("button", { name: "Needs you", exact: true }).click();
+    await filters.getByRole("button", { name: /^Needs you/ }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await filters.getByRole("button", { name: "Borealis", exact: true }).click();
+    await studio().getByRole("button", { name: "Filter conversations on Borealis, online", exact: true }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
+    await expect(list.locator(".conversation-row")).toHaveAccessibleName(/wild-shark-68/);
     await page.getByRole("searchbox", { name: "Search conversations" }).fill("calm-puma");
     await expect(list.locator(".conversation-row")).toHaveCount(0);
     await expect(list.getByText("No conversations match this filter. Choose All to see your projects.")).toBeVisible();
-    await filters.getByRole("button", { name: "All", exact: true }).click();
+    await filters.getByRole("button", { name: /Show every machine/ }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(1);
     await list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button").click();
     await expect(page.getByRole("log")).toContainText("Which mix should I export?");
@@ -719,11 +716,12 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const dialog = page.locator("#paired-machines-dialog");
     await dialog.getByRole("group", { name: "Filter conversations" }).getByRole("button", { name: "Borealis", exact: true }).click();
     await expect(dialog).toBeHidden();
-    await expect(filters.getByRole("button", { name: "Borealis", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(filters.locator(".machine-filter")).toHaveAttribute("aria-pressed", "true");
+    await expect(filters.locator(".machine-filter")).toContainText("Borealis");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
+    await expect(list.locator(".conversation-row")).toHaveAccessibleName(/wild-shark-68/);
     await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
-    await filters.getByRole("button", { name: "All", exact: true }).click();
+    await filters.getByRole("button", { name: /Show every machine/ }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(3);
     // A kept catalog's positive online bit must yield to a lost connection.
     await hub.down("atlas", { sockets: "close" });

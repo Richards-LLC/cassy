@@ -225,3 +225,18 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
     quiet: all.length - live.length,
   };
 }
+
+/** What a project card's status line needs from one session's status: the
+ * release train's split, as Tasks & progress draws it, and how many of the
+ * reported tasks are blocked. Undefined when the status carries no tasks or epics. */
+export interface ProjectStatusLine { readonly train?: EpicCounts & { total: number }; readonly blocked: number }
+export function projectStatusLine(status: Record<string, unknown> | undefined, supervisors: readonly string[]): ProjectStatusLine | undefined {
+  if (!status) return undefined;
+  const epics = ((status.epics as ReleaseEpic[] | undefined) ?? []).filter(epic => typeof epic?.id === "string");
+  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[] | undefined) ?? []), ...((status.tasks_ready as ProgressTask[] | undefined) ?? [])].map(task => [task.id, task])).values()];
+  const train = releaseProgress(epics, typeof status.focused_epic === "string" ? status.focused_epic : null, tasks, supervisors);
+  return {
+    train: train ? displayCounts(train, tasks.filter(task => task.epic_id === train.id)) : undefined,
+    blocked: tasks.filter(task => task.delivery_state !== "merged" && statusLabel(task.status) === "Blocked").length,
+  };
+}

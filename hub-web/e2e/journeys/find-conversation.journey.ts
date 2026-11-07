@@ -29,8 +29,8 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
   const studio = page.locator('.project-machine-chip[data-project-machine="studio"]');
   await expect(atlas).toContainText("Cassy 3.9.0");
   await expect(atlas).toContainText("Update available → 3.88.0");
-  await expect(studio).toContainText("Cassy 3.88.0");
-  await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+  // cas-da546: a version shows only on skew.
+  await expect(studio.locator(".machine-version")).toHaveCount(0);
   await expect(page.locator('[title="Web client release and build"]')).toHaveText(/^Web \d+\.\d+\.\d+ · [a-f0-9]{8}$/);
   const atlasSupervisor = page.locator(`[data-thread-key="atlas:${PELICAN}"] .supervisor-version`);
   const studioSupervisor = page.locator(`[data-thread-key="studio:${OTTER}"] .supervisor-version`);
@@ -38,8 +38,8 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     await expect(atlasSupervisor).toContainText("3.90.0");
     await expect(atlasSupervisor).toContainText("↑");
     await expect(atlasSupervisor).toHaveAttribute("title", /3\.91\.1.*Reconnect MCP/);
-    await expect(studioSupervisor).toHaveText("3.91.1");
-    await expect(studioSupervisor).not.toHaveClass(/update-available/);
+    // In step with its machine: no version on the row (cas-da546).
+    await expect(studioSupervisor).toHaveCount(0);
   });
   const captureVersions = async (name: string) => {
     if (!process.env.VERSION_QA) return;
@@ -75,8 +75,7 @@ test("HUB-J3 machine versions distinguish installed runtimes, cached updates and
     versions.studio = "unknown";
     supervisors[1]!.sessions[0]!.mcp_version = undefined;
     await page.reload();
-    await expect(studio).toContainText("Version unknown");
-    await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+    await expect(studio.locator(".machine-version")).toHaveCount(0);
     await expect(studioSupervisor).toHaveCount(0);
     await expect(atlas).toContainText("Update available → 3.88.0");
     expect(checks).toBe(initialChecks);
@@ -178,7 +177,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(control).toHaveText("+ New session");
     const [h1, button] = await Promise.all([heading.boundingBox(), control.boundingBox()]);
     expect(Math.abs((h1!.y + h1!.height / 2) - (button!.y + button!.height / 2)), "heading and New session on one row").toBeLessThan(6);
-    await expect(page.locator(".conversation-list-top #pair-toggle")).toBeVisible();
+    await expect(page.locator(".conversation-sidebar footer #pair-toggle")).toBeVisible();
   };
   const filter = page.getByRole("searchbox", { name: "Filter commands" });
   /**
@@ -230,10 +229,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expectOneRowHeading();
     firstWelcome = await welcomeLayout();
     expect(firstWelcome).toMatchObject({ contextOpen: false, railWidth: 0, mainRight: 1280, centred: true });
-    // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse). Rows are titled by project, then machine; the codename is tertiary.
-    await expect(list.locator(".conversation-project")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
-    await expect(list.locator(".conversation-machine")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
-    await expect(list.locator(".conversation-supervisor-name")).toHaveText([PELICAN, OTTER, "quiet-heron-7"]);
+    // cas-ade2: project cards sort by name (cas-src, gabber-studio, lighthouse); each row names its role and machine (cas-da546).
+    await expect(list.locator(".project-card-name")).toHaveText(["cas-src", "gabber-studio", "lighthouse"]);
+    await expect(list.locator(".conversation-machine-name")).toHaveText(["Atlas", "Studio Mac", "Forge build box with an unusual hostname"]);
     await expect(search).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations (Ctrl K)");
   });
@@ -266,7 +264,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await hub.announceCatalog("atlas");
     const unopened = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
     await expect(unopened.getByLabel("1 unread")).toBeVisible();
-    await expect(unopened.locator(".conversation-preview")).toContainText("The bank feed for October is ready.");
+    await expect(unopened).toHaveAccessibleName(/The bank feed for October is ready\./);
   });
 
   await journey.stage("Open the conversation, then notice its next reply", async () => {
@@ -286,11 +284,11 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // A project name leaves its conversation as the only row.
     await search.fill("gabber");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
+    await expect(list.locator(".project-card-name")).toHaveText(["gabber-studio"]);
     // The machine and the supervisor codename find it too.
     await search.fill("atlas");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("cas-src");
+    await expect(list.locator(".project-card-name")).toHaveText(["cas-src"]);
     // cas-786a (journey F29): the row Enter opens carries its "Enter ↵" hint
     // and its unread count side by side, never one drawn over the other. Every
     // point of the count is the count's own, not the hint painted on top.
@@ -309,7 +307,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(await page.locator(hinted).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
+    await expect(list.locator(".project-card-name")).toHaveText(["gabber-studio"]);
     await search.fill("no-such-project");
     await expect(list.locator(".conversation-row")).toHaveCount(0);
     await expect(page.locator("#conversation-empty")).toContainText("No conversation matches “no-such-project”.");
@@ -322,7 +320,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // tech as the field's active descendant.
     const target = list.locator('.conversation-row[data-enter-target="true"]');
     await expect(target).toHaveCount(1);
-    await expect(target).toContainText("gabber-studio");
+    await expect(target).toHaveAccessibleName(/gabber-studio/);
     await expect(search).toHaveAttribute("aria-activedescendant", (await target.getAttribute("id"))!);
     await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the gabber-studio supervisor", exact: true })).toBeVisible();

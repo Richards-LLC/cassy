@@ -25,9 +25,11 @@ it("shows the live supervisor's own Cassy version and flags an installed upgrade
     view.innerHTML = conversationRowMarkup(row);
     const badge = view.querySelector<HTMLElement>(".supervisor-version");
     if (!state.shown) { expect(badge).toBeNull(); continue; }
-    expect(badge?.textContent).toContain(state.shown);
-    expect(badge?.classList.contains("update-available")).toBe(state.update);
     expect(conversationRowSpokenName(row)).toContain(`Cassy ${state.shown}`);
+    // cas-da546: the row shows a version only on skew; the spoken name always says it.
+    if (!state.update) { expect(badge).toBeNull(); continue; }
+    expect(badge?.textContent).toContain(state.shown);
+    expect(badge?.classList.contains("update-available")).toBe(true);
     if (state.update) {
       expect(badge?.title).toContain("3.91.1");
       expect(badge?.title).toContain("Reconnect MCP");
@@ -449,26 +451,11 @@ describe('conversation evidence', () => {
     expect(quiet.className).toBe('conversation-row machine-accent-0');
     expect(unread.className).toBe('conversation-row machine-accent-1');
     expect(waiting.querySelector('.conversation-avatar')?.textContent).toBe('A');
-    // Journey F7: the title is the project, then the machine; the codename is tertiary text beneath.
-    expect(waiting.querySelector('.conversation-who > .conversation-title > strong.conversation-project')?.textContent).toBe('cas-src');
-    expect(waiting.querySelector('.conversation-title > .conversation-project + .conversation-machine')).not.toBeNull();
-    expect(waiting.querySelector('.conversation-who > .conversation-title + .conversation-supervisor > .conversation-supervisor-name')?.textContent).toBe('patient-pelican-9');
-    expect(waiting.querySelector('.conversation-who')?.textContent).toBe('cas-srcAtlaspatient-pelican-9');
-    expect(waiting.querySelector('.project-badge')).toBeNull();
-    // P13: the title leads with the project, never a stray dot; the only separator rides with the machine.
-    expect(waiting.querySelector('.conversation-who > .conversation-sep, .conversation-title > .conversation-sep')).toBeNull();
-    expect(waiting.querySelectorAll('.conversation-sep')).toHaveLength(1);
-    // P14: the codename is one unbreakable word.
-    expect(waiting.querySelector('.conversation-supervisor')?.classList.contains('codename')).toBe(true);
-    // The machine is named as text on every row, after the project, with its own wrapping separator.
-    expect(waiting.querySelector('.conversation-machine')?.textContent).toBe('Atlas');
-    expect(waiting.querySelector('.conversation-machine')?.innerHTML).toBe('<span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">Atlas</span>');
-    // cas-1ca1: the machine name can ellipsise; the title attribute keeps it whole.
-    expect(waiting.querySelector('.conversation-machine')?.getAttribute('title')).toBe('Atlas');
-    expect(unread.querySelector('.conversation-machine')?.textContent).toBe('Studio Mac');
-    expect(unread.querySelector('.conversation-project')?.textContent).toBe('gabber-studio');
-    expect(waiting.querySelector('.conversation-preview')?.textContent).toBe('Fix <it>?');
-    expect(waiting.querySelector('script, it')).toBeNull();
+    // cas-da546: one line, role then machine; the card names the project.
+    expect(waiting.querySelector('.conversation-who')?.textContent).toBe('SupervisorAtlas');
+    expect(waiting.querySelector('.conversation-who')?.getAttribute('title')).toBe('patient-pelican-9');
+    expect(unread.querySelector('.conversation-machine-name')?.textContent).toBe('Studio Mac');
+    expect(waiting.querySelector('.conversation-preview')).toBeNull();
     expect(waiting.querySelector('.conversation-when')?.className).toBe('conversation-when hot');
     expect(waiting.querySelector('.conversation-flag')?.getAttribute('aria-label')).toBe('Waiting for you');
     expect(waiting.querySelector('.conversation-marks > .conversation-flag')).not.toBeNull();
@@ -477,23 +464,13 @@ describe('conversation evidence', () => {
     expect(unread.querySelector('.conversation-unread')?.textContent).toBe('2');
     // P13: an unread row keeps its time at the headline end; the count sits beneath it.
     expect(unread.querySelector('.conversation-when')?.textContent).toBe('Tue');
-    expect([...unread.children].map((child) => child.className)).toEqual(['conversation-avatar', 'conversation-who', 'conversation-when', 'conversation-preview bold', 'conversation-marks']);
+    expect([...unread.children].map((child) => child.className)).toEqual(['conversation-avatar', 'conversation-who', 'conversation-when', 'conversation-marks']);
     expect(unread.querySelector('.conversation-marks > .conversation-unread')).not.toBeNull();
     expect(unread.querySelector('.conversation-flag')).toBeNull();
-    expect(unread.querySelector('.conversation-preview')?.className).toBe('conversation-preview bold');
     expect(quiet.querySelector('.conversation-when')?.textContent).toBe('Tue');
-    expect(quiet.querySelector('.conversation-preview')?.textContent).toBe('Live');
-    expect(quiet.querySelector('.conversation-preview')?.className).toBe('conversation-preview');
     expect(quiet.querySelector('.conversation-flag, .conversation-unread, .conversation-marks')).toBeNull();
   });
-  it('titles a row with no project by its codename, not a status phrase (cas-1ca1 F03)', () => {
-    const markup = conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'calm-otter-4', host: 'Atlas · Linux', freshness: 'now', connection: 'Live', attention: 0, selected: false });
-    const row = document.createElement('div'); row.innerHTML = markup;
-    expect(row.querySelector('.conversation-project')?.textContent).toBe('calm-otter-4');
-    expect(row.querySelector('.conversation-project')?.classList.contains('codename')).toBe(true);
-    expect(row.querySelector('.conversation-supervisor')).toBeNull();
-    expect(row.textContent).not.toContain('Project unavailable');
-    expect(row.querySelector('.conversation-machine-name')?.textContent).toBe('Atlas');
+  it('titles a conversation with no project by its codename, not a status phrase (cas-1ca1 F03)', () => {
     const header = document.createElement('div');
     header.innerHTML = conversationShellMarkup({ selected: true, supervisor: 'calm-otter-4', host: 'Atlas · Linux', machineId: 'a', loaded: true, paired: true });
     expect(header.querySelector('.conversation-identity h1')?.textContent).toBe('calm-otter-4');
@@ -536,16 +513,17 @@ describe('conversation evidence', () => {
       const root = document.createElement('div');
       root.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: true, launch });
       const title = root.querySelector('.conversation-list-title')!;
-      // The heading row holds the h1 and New session only; Pair a machine sits with the appearance control.
+      // The heading row holds the h1 and New session only; Pair a machine and the inbox sit in the footer (cas-da546).
       expect([...title.querySelectorAll('button')].map((button) => button.textContent)).toEqual(['+ New session']);
-      expect(root.querySelector('#pair-toggle')?.closest('.conversation-list-top')).not.toBeNull();
+      expect(root.querySelector('#pair-toggle')?.closest('footer')).not.toBeNull();
+      expect(root.querySelector('#inbox-toggle')?.closest('footer')).not.toBeNull();
       expect(root.textContent).not.toContain('Allow new sessions');
       expect(root.querySelector('#new-session-toggle')?.hasAttribute('data-launch-grant')).toBe(launch === 'grant');
     }
     const unpaired = document.createElement('div');
     unpaired.innerHTML = conversationShellMarkup({ selected: false, loaded: true, paired: false });
     expect(unpaired.querySelector('.conversation-list-actions')).toBeNull();
-    expect(unpaired.querySelector('#pair-toggle')?.closest('.conversation-list-top')).not.toBeNull();
+    expect(unpaired.querySelector('#pair-toggle')?.closest('footer')).not.toBeNull();
   });
   it('names the palette shortcut the way this keyboard prints it, the same on every surface (journey F16)', () => {
     expect(applePlatform({ platform: 'Linux x86_64' })).toBe(false);
@@ -597,11 +575,11 @@ describe('conversation evidence', () => {
     expect(keys('/p/')).toEqual([]);
     expect(keys('zzz')).toEqual([]);
   });
-  it('strips supervisor markdown from conversation-list previews', () => {
+  it('strips markdown from the second line of a row', () => {
     const list = new ConversationList(); const container = document.createElement('nav');
-    list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: '**Ready**\n\n- `cargo check`', selected: false }], vi.fn());
+    list.render(container, [{ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, draft: '**Ready**\n\n- `cargo check`', selected: false }], vi.fn());
     const preview = container.querySelector('.conversation-preview');
-    expect(preview?.textContent).toBe('Ready cargo check');
+    expect(preview?.textContent).toBe('Draft: Ready cargo check');
     expect(preview?.textContent).not.toContain('**');
     expect(preview?.querySelector('code')).toBeNull();
   });
@@ -610,24 +588,25 @@ describe('conversation evidence', () => {
     const preview = truncateConversationPreview(longReply);
     expect(preview).toHaveLength(160);
     expect(preview.endsWith('…')).toBe(true);
-    expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: longReply, selected: false })).toContain(`>${preview}</span>`);
+    expect(conversationRowMarkup({ key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Reconnecting', interrupted: true, attention: 0, selected: false })).toContain('>Reconnecting</span>');
   });
   it('does not repeat a machine outage or retain a stopped supervisor for a pending instruction (cas-f8ab)', () => {
     const dormant = { name: 's', supervisor: 'sup', workers: [], liveness: 'stale_metadata' as const, dormant: true, unreachable: true };
     expect(visibleCatalog([dormant])).toEqual([]);
     expect(pendingSessionLabel(dormant, false)).toBeUndefined();
-    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', attention: 0, preview: 'Keep this instruction visible.', selected: false };
-    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Keep this instruction visible.</span>');
+    // A row whose machine is down says Last known, not its last turn (cas-da546).
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', machine_online: false, attention: 0, preview: 'An older turn.', selected: false };
+    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Last known</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };
     expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview draft">Draft: Please keep the release notes short</span>');
     expect(conversationRowSpokenName(row)).toContain('Draft: Please keep the release notes short');
     // The open conversation shows its draft in the composer, not the row.
-    expect(conversationRowMarkup({ ...row, selected: true })).toContain('>Gate run 3 of 3 is going.</span>');
+    expect(conversationRowMarkup({ ...row, selected: true })).not.toContain('conversation-preview');
     // A connection problem still leads, so the row agrees with the header.
     expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
-    expect(conversationRowMarkup({ ...row, draft: '   ' })).toContain('<span class="conversation-preview">Gate run 3 of 3 is going.</span>');
+    expect(conversationRowMarkup({ ...row, draft: '   ' })).not.toContain('conversation-preview');
   });
   it('renders the fixture list with a footer count equal to the rows rendered', () => {
     const app = document.createElement('div'); document.body.replaceChildren(app);
@@ -636,7 +615,7 @@ describe('conversation evidence', () => {
     expect(rows).toBe(6);
     expect(app.querySelector('.hub-footer-meta span')?.textContent).toBe(`${rows} conversations`);
     expect(new Set([...app.querySelectorAll('.conversation-row')].map((row) => row.className)).size).toBe(3);
-    expect([...app.querySelectorAll('.conversation-project')].map((project) => project.textContent)).toContain('petra-stella-cloud');
+    expect([...app.querySelectorAll('.project-card-name')].map((project) => project.textContent)).toContain('petra-stella-cloud');
   });
   it('puts the selected machine accent on the shell root and a compose FAB in the operator colour', () => {
     const shell = conversationShellMarkup({ selected: true, supervisor: 'patient-pelican-9', projectDir: '/projects/cas-src', host: 'Atlas · Linux', machineId: 'atlas-linux', loaded: true, paired: true });

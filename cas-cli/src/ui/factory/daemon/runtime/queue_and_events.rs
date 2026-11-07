@@ -12106,8 +12106,10 @@ impl FactoryDaemon {
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         if let Some(request_id) = request_id {
-                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
-                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            let bound = retry_once_on_wait_budget_miss(|| {
+                                cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                    .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
+                            });
                             if let Err(error) = bound {
                                 append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
                                     Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
@@ -12201,8 +12203,10 @@ impl FactoryDaemon {
                             "Preparing worker in cancellable off-loop provisioner (including base resolution).",
                         );
                         if let Some(request_id) = request_id {
-                            let bound = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
-                                .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name));
+                            let bound = retry_once_on_wait_budget_miss(|| {
+                                cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(self.app.cas_dir())
+                                    .and_then(|queues| queues.bind_spawn(request_id, &self.session_name, &worker_name))
+                            });
                             if let Err(error) = bound {
                                 append_spawn_audit(self.app.cas_dir(), &self.session_name, Some(request_id),
                                     Some(&worker_name), "provision", "failed", &format!("Task queue binding failed: {error}"));
@@ -13750,12 +13754,47 @@ fn matches_json_filter(filter: Option<&serde_json::Value>, event_data: &serde_js
     }
 }
 
+/// GH #1640: a spawn's task-queue binding can miss the loop pass's store wait
+/// budget while an in-place upgrade holds the shared connection. Retry once
+/// under a fresh bounded budget; a second miss, or any other error, fails.
+fn retry_once_on_wait_budget_miss<T>(
+    mut attempt: impl FnMut() -> Result<T, cas_store::StoreError>,
+) -> Result<T, cas_store::StoreError> {
+    match attempt() {
+        Err(error) if error.to_string().contains("wait budget") => {
+            let _grant = cas_store::wait_budget::grant_waits_for(
+                super::store_worker::SHUTDOWN_STORE_WAIT_BUDGET,
+            );
+            attempt()
+        }
+        other => other,
+    }
+}
+
 fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
     agent.name == worker_name
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spawn_binding_retries_one_wait_budget_miss_gh1640() {
+        let miss = || cas_store::wait_budget::budget_exhausted_store_error("shared SQLite connection held by another thread");
+        let mut calls = 0;
+        let ok = super::retry_once_on_wait_budget_miss(|| {
+            calls += 1;
+            if calls == 1 { Err(miss()) } else { Ok(calls) }
+        });
+        assert_eq!((ok.unwrap(), calls), (2, 2));
+        let mut calls = 0;
+        let err = super::retry_once_on_wait_budget_miss::<()>(|| {
+            calls += 1;
+            Err(miss())
+        });
+        assert!(err.is_err());
+        assert_eq!(calls, 2, "only one retry");
+    }
+
     #[test]
     fn claude_startup_submit_owns_only_unsent_composer_cas_aa10() {
         for (composer, footer, expected) in [

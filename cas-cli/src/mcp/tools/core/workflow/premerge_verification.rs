@@ -176,7 +176,14 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
     let Ok(Some(remote)) = operations.fetch_merge_target(target) else {
         return Ok(());
     };
-    let local = git(repo, &["rev-parse", target])?;
+    // cas-bfa8: a train created on another machine has no local branch until
+    // the merge creates it. Origin is then the only copy, so nothing diverges.
+    let Ok(local) = git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{target}^{{commit}}")],
+    ) else {
+        return Ok(());
+    };
     let ordered = |older: &str, newer: &str| {
         git(repo, &["merge-base", "--is-ancestor", older, newer]).is_ok()
     };

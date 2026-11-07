@@ -28,6 +28,7 @@ mod outbox;
 mod workers;
 pub(crate) use workers::WorkerDirectory;
 mod runtime;
+pub mod transcript;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};
 pub use runtime::{PeerMailboxPoller, PeerMailboxRuntime, mailbox_status_section};
 
@@ -1208,6 +1209,7 @@ pub fn deliver_claimed_with(
         &RecipientHistory::default(),
         None,
         &|_, _| Ok(None),
+        &|_, _| Ok(None),
         &|recipient, message| on_admitted(recipient, message).map(|()| PeerAckOutcome::Delivered),
     )
 }
@@ -1224,6 +1226,7 @@ fn deliver_claimed_with_history(
     history: &RecipientHistory,
     workers: Option<(&Path, &str)>,
     queue_key: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<String>, String>,
+    on_query: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<Option<PeerAckOutcome>, String>,
     on_admitted: &dyn Fn(&crate::types::Agent, &ClaimedPeerMessage) -> Result<PeerAckOutcome, String>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
@@ -1439,6 +1442,21 @@ fn deliver_claimed_with_history(
             // Claim renewal/expiry may race discovery; never acknowledge away
             // a message solely because that observation lacks shared scope.
             if matches!(pair, Ok(None)) { continue; }
+        }
+        match on_query(recipient, message) {
+            Ok(Some(outcome)) => {
+                match outcome {
+                    PeerAckOutcome::Delivered => report.delivered += 1,
+                    PeerAckOutcome::Rejected => report.rejected += 1,
+                }
+                acks.push((message.id.clone(), outcome));
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                report.errors.push(format!("peer query {} failed: {error}", message.id));
+                continue; // Reply transport failure retries with the same dedupe key.
+            }
         }
         let key = match if recipient.role == AgentRole::Worker { Ok(None) } else { queue_key(recipient, message) } {
             Ok(key) => key.unwrap_or_else(|| format!("peer:{}", message.id)),

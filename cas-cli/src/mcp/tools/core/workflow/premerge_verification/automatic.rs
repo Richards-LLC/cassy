@@ -158,13 +158,7 @@ fn launch_command(
 /// A dispatch that already holds a verdict, or whose task is terminal, needs no
 /// supervisor notice when a second verifier finds it settled.
 fn resolved(core: &CasCore, dispatch: &VerificationDispatch) -> bool {
-    cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|d| {
-        matches!(
-            d.state,
-            cas_types::VerificationDispatchState::Resolved
-                | cas_types::VerificationDispatchState::Invalidated
-        )
-    }) || core
+    cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id).is_ok_and(|v| v.is_some()) || core
         .open_task_store()
         .ok()
         .and_then(|s| s.get(&dispatch.task_id).ok())

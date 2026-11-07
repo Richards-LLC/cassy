@@ -711,7 +711,8 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
                 script = self.root / 'fixture.sh'
                 script.write_text('set -eu\nbase=$(mktemp -d "$CAS_RELEASE_GATE_HOME_DIR.XXXXXX")\n'
                     'python3 "$HELPER" --owner-dir "$CAS_RELEASE_GATE_SCRATCH_RUN_DIR" --path "$base" register\n'
-                    'mkdir "$base/extract"\nprintf "%s" "$base" > "$READY"\nexec python3 -c "import time;time.sleep(60)"\n')
+                    'mkdir "$base/extract"\nprintf "%s" "$base" > "$READY.tmp"\nmv "$READY.tmp" "$READY"\n'
+                    'exec python3 -c "import time;time.sleep(60)"\n')
                 env = dict(self.env, CAS_RELEASE_GATE_HOME_DIR=str(self.base), HELPER=str(Path(scratch.__file__).resolve()), READY=str(ready))
                 process = subprocess.Popen([sys.executable, str(Path(scratch.__file__).resolve()), '--repo', str(self.repo), '--base', str(self.base), 'guard', '--', 'bash', str(script)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
                 try:
@@ -719,7 +720,9 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
                     process.send_signal(sig)
                     process.communicate(timeout=10)
                     self.assertNotEqual(process.returncode, 0)
-                    self.assertFalse(Path(ready.read_text()).exists())
+                    base = ready.read_text()
+                    self.assertTrue(base)
+                    self.assertFalse(Path(base).exists())
                     self.assertFalse(list(self.parent.glob('cas-release-gate.*')))
                 finally:
                     if process.poll() is None:

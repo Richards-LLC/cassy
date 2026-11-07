@@ -30,12 +30,14 @@ pub(crate) struct Freeze {
     pub tip: String,
 }
 
-/// The freeze recorded on an open release train, landed or not.
+/// The freeze recorded on an open release train, landed or not. `freeze`
+/// writes exactly one label; task updates only append labels, so the first
+/// one is authoritative and a later appended label cannot move its tip.
 pub(crate) fn freeze_of(train: &Task) -> Option<Freeze> {
     if !is_release_train(train) || train.is_terminal() {
         return None;
     }
-    train.labels.iter().rev().find_map(|label| {
+    train.labels.iter().find_map(|label| {
         let (secs, tip) = label.strip_prefix(FROZEN_LABEL)?.split_once(':')?;
         Some(Freeze { at: DateTime::from_timestamp(secs.parse().ok()?, 0)?, tip: tip.to_string() })
     })

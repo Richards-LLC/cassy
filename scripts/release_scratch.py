@@ -232,7 +232,9 @@ def process_uses(path, own_lock_fd=None, lease_managed=False):
                     if (len(fields) == 6 and fields[5].startswith("/") and name in fields[5]
                             and contains(path, Path(fields[5]))):
                         return True
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
+                # An exiting process's /proc entries vanish (ENOENT) or refuse
+                # reads (ESRCH) mid-scan; either way it no longer holds the path.
                 if process.exists() and not lease_managed:
                     return True  # Missing evidence of a still-present process is unknown.
             except (PermissionError, ValueError, IndexError):

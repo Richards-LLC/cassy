@@ -704,6 +704,18 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
         with mock.patch.object(scratch.os, 'readlink', side_effect=unreadable):
             self.assertTrue(scratch.process_uses(self.parent / 'nonexistent'))
 
+    def test_a_process_exiting_mid_scan_does_not_hold_lease_scratch(self):
+        if not self.proc.is_dir():
+            self.skipTest('Linux proc fixture')
+        original = os.readlink
+        def exiting(path, *args, **kwargs):
+            if Path(path) == self.proc / str(os.getpid()) / 'cwd':
+                raise ProcessLookupError(3, 'No such process')
+            return original(path, *args, **kwargs)
+        with mock.patch.object(scratch.os, 'readlink', side_effect=exiting):
+            self.assertFalse(scratch.process_uses(self.parent / 'nonexistent', lease_managed=True))
+            self.assertTrue(scratch.process_uses(self.parent / 'nonexistent'))
+
     def test_guard_signals_reap_before_base_and_extract_cleanup(self):
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             with self.subTest(signal=sig):
@@ -718,11 +730,11 @@ with m.ChildScope() as scope, m.OwnedDirectory('base.',sys.argv[2]) as directory
                 try:
                     self.wait_until(ready.exists)
                     process.send_signal(sig)
-                    process.communicate(timeout=10)
+                    _, stderr = process.communicate(timeout=10)
                     self.assertNotEqual(process.returncode, 0)
                     base = ready.read_text()
                     self.assertTrue(base)
-                    self.assertFalse(Path(base).exists())
+                    self.assertFalse(Path(base).exists(), stderr.decode(errors='replace'))
                     self.assertFalse(list(self.parent.glob('cas-release-gate.*')))
                 finally:
                     if process.poll() is None:

@@ -1356,8 +1356,12 @@ async fn one_release_verdict_closes_tier_one_while_tier_two_keeps_its_probe_cas_
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
     assert!(recorded.contains("Release verdict"), "{recorded}");
     assert!(recorded.contains("Closed 3: "), "{recorded}");
-    assert!(recorded.contains(&format!("- {}: Tier 2:", named[5])), "{recorded}");
-    assert!(recorded.contains("Still held (2):"), "{recorded}");
+    // cas-e06c: deliveries with their own review retry ordinary close, so the
+    // Tier 2 delivery is held for its probe beside the dispatch-held rows.
+    assert!(recorded.contains(&format!("- {}: QA EVIDENCE REJECTED: Tier 2", named[5])), "{recorded}");
+    assert!(recorded.contains("Still held (3):"), "{recorded}");
+    assert!(recorded.contains(&format!("- {}: ⚠️ VERIFICATION REQUIRED", named[2])), "{recorded}");
+    assert!(recorded.contains(&format!("- {}: ⚠️ VERIFICATION TIMED OUT", named[3])), "{recorded}");
 
     for (index, (id, path)) in deliveries.iter().enumerate() {
         if path.starts_with("src/") {

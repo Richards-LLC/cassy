@@ -238,6 +238,9 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
     Path('dist/new-chunk.js').write_text('new chunk')
 ''')
         (self.repo / 'bin/npm').chmod(0o755)
+        # The build body runs through the real queue step; this models a
+        # non-queue event, where that step runs the build once.
+        self.write('scripts/ci-queue-flakes.py', (ROOT / 'scripts/ci-queue-flakes.py').read_text())
         self.commit()
         seed = self.git('rev-parse', 'HEAD').stdout.strip()
         workflow = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text())
@@ -280,6 +283,7 @@ if os.environ.get('EXTRA_OUTPUT') == 'true':
                                         cwd=self.repo / 'hub-web', text=True, capture_output=True,
                                         env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'],
                                                  CHECK_COMMITTED_DIST=decision.get('web-dist-check-needed', ''),
+                                                 GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/1/merge',
                                                  EXTRA_OUTPUT=str(change == 'new-output').lower(),
                                                  FAIL_BUILD=str(fail_build).lower()))
                 self.assertEqual(result.returncode, exit_code, result.stdout + result.stderr)

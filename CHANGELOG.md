@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.4.0] - 2026-11-07
+
+### Fixed — Merge queue
+
+- **Keep earlier test failures visible** — Cleanup errors cannot turn a run green when any earlier output reports a failure or assertion. Vitest's normal timing footer is accepted after an all-pass summary, and individual step retries have a five-minute budget.
+- **Run shards despite bad quarantine metadata** — Duplicate or malformed quarantine entries warn with their issue number and are skipped. Read failures run tests without exclusions, and valid GitHub issue links accept repository name casing. Actual test failures keep their failing result.
+
+### Fixed — Tasks
+
+- **Finding priority stays derived, and the reply says why** — Was: an explicit priority on a finding replaced the severity × reach priority, so a theoretical finding could be promoted by hand. Now: finding priority always comes from severity × reach; when a requested priority is not applied, the create or update reply says so and names the labels that decide it, and priority is never listed as updated when it did not change (GH #1636).
+
+### Fixed — Release trains
+
+- **Release trains are opt-in** — `factory.release_train` now defaults to off, so tasks in projects that ship through pull requests to staging or main target that branch instead of joining a train whose branch never exists on origin. In a project with trains off, trains the old default opened retire on their own: each unfinished task leaves its train for the integration branch, with a decision note, and the emptied train is cancelled. Projects that use trains set `factory.release_train = true`.
+- **No cut notice on a red train** — Was: the supervisor was told to cut a train whose tip full set was red or unrecorded. Now: ready and max-age notices wait for a green full-set verdict at the current tip.
+
+### Fixed — Release validation
+
+- **Prove the whole release on the train** — Train pushes and the merge queue share one complete check graph, tree-bound full-set receipts, quarantine and one rerun. Release preparation rejects partial proof; unchanged-main release plumbing reuses the full result with compile and smoke checks. Measured train and queue durations enter the friction ledger.
+- **Keep comparison refs readable** — Factory pre-push output prints the complete comparison ref, including long release-train branch names. Release guard tests identify draft-lint failures by their stable rule ID.
+
+### Fixed — CI
+
+- **Retry only the failed work** — Queue test steps recover one failure in the existing flake policy, including script and web tests. Tree-bound job receipts let a repeated queue run reuse passing jobs while retaining the strict full-set release receipt. A recognized cleanup failure after a harness all-pass summary is reported as a warning.
+- **Green release-train full set** — Script suites no longer inherit the calling job's `FULL_SET`, `BASE_SHA` or queue-step recovery, so their fixtures classify their own diffs. Visual QA writes its CI report outside the tested tree, a script step run by two jobs is two publication slots, and a red full set still records its FAIL receipt.
+
+### Fixed — Factory
+
+- **Close reviewed deliveries after release progress** — Accept a synthetic review candidate when its exact merge tree landed under a different commit. Batch receipts retry close for deliveries with their own review, preserving landed approvals after later sibling edits while retaining unlanded-delivery and dedicated-review refusals.
+
 ## [4.3.0] - 2026-11-06
 
 ### Fixed — Factory

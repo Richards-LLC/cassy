@@ -2667,19 +2667,39 @@ fast rows once in `lane.yml`'s classification job, for both docs and code;
 non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
-Slim lanes omit broad Rust tests for factory pushes. Release-train pushes reuse
-the existing queue archive and exhaustive Rust shards at the newest tip, with
-older runs cancelled. CI preserves complete native logs and a failure list in
-`train-rust-suite`; the existing daemon scan wakes the supervisor once on red.
-This replaces the supervisor's local pre-cut full run. The cut checks the green
-receipt for its starting tip before preparing the version-only commit, whose
-final proof belongs to the merge queue. Park reads, and never
+Slim lanes omit broad Rust tests for factory pushes. Release-train pushes and
+merge-group events call the same reusable `ci.yml` through
+`full-validation.yml`: preflight, every script/CI-tier test, Commander web,
+cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
+Both share quarantine plus one rerun. The schema-2 `train-full-gate` artifact
+binds every required job to the source tree and main baseline; train cuts refuse
+legacy or partial receipts. The queue can reuse this complete proof after only
+release-plumbing changes with main unchanged, then runs compile/source-built
+smoke and asset drift checks. Otherwise the queue runs the full graph. Explicit
+non-train hotfixes retain their emergency cut path, disclose the absent receipt
+and always receive full queue validation. Train and queue wall clocks enter the
+friction ledger once per immutable run attempt. CI retains complete native logs;
+the daemon still holds a red train and wakes its supervisor once.
+
+Each full-set test/build job also publishes a schema-2 job receipt through
+`.github/actions/full-gate-job`. Its key binds the Git tree, stable job/matrix
+identity, workflow/actions, effective selection, main baseline and runner inputs.
+A requeue can reuse a successful producer job from a failed overall run; it
+validates the completed producer workflow and that particular job through GitHub.
+Failed jobs, changed inputs, missing proof and lookup errors execute normally.
+The Rust archive must still exist before its builder can skip; remaining shards
+download from the original producer run. Reused native train reports feed the
+existing full-suite collector. Cached flake observations retain their original
+run identity, so reuse cannot count as another independent failure. The final
+full-set receipt still requires every selected job and durable flake publication;
+a per-job receipt alone never authorizes a release.
+Park reads, and never
 runs, a capped test PASS in every workspace crate whose sources or tests
 changed. A receipt in another crate does not count, and a missing test receipt
 is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
 fallback. The merge queue is the final-tree integration gate
-and the only gate to `main`; its required checks, including the Rust suite, run
-once on the exact merged tree. Commander journeys run there only when `hub-web/`
+and the only gate to `main`; its required checks either run on the exact merged tree or reuse the complete
+source-tree receipt after the strictly checked release-plumbing delta. Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
 follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
@@ -3467,8 +3487,13 @@ read them with an issues-read `GITHUB_TOKEN`, exclude only those identities and
 print the issue links in the job summary. State/label-filtered GitHub lists can
 lag acknowledged updates, so discovery enumerates unfiltered issue history and
 reads each flake candidate directly before deciding its open state and labels.
-Reconciliation adds that label after
-two distinct GitHub run IDs; duplicate shards and run attempts count once.
+Reconciliation adds that label to native test identities after
+two distinct GitHub run IDs; duplicate shards, cached observations and run attempts count once.
+Individual script and web test commands retry once through the same publication
+fan-in. A recovered command receives the label immediately, but remains covered
+on later trees: quarantining a command never excludes its whole suite.
+Only recognized cleanup diagnostics after a positive all-pass summary become
+warnings; mixed pass/fail summaries and later assertions retain failure.
 The fix PR uses `Fixes #N`: closing the issue removes the exclusion from the next
 queue run. No bot PR, new credential or evaluated-tree edit is needed.
 

@@ -320,6 +320,19 @@ fn cut_command(configured: Option<&str>, repo_root: Option<&Path>, train: &str) 
     }
 }
 
+/// The verdict `scripts/release.sh` demands before it cuts: the train-tip
+/// full-set receipt `train_ci::observe` records must be green at the current
+/// tip. Missing, red, stale or unreadable all mean not green.
+fn tip_is_green(cas_dir: &Path, epic: &Task, train: &str) -> bool {
+    let state = crate::train_ci::directory(cas_dir, &epic.id)
+        .ok()
+        .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+    let tip = train_repo_root(cas_dir, epic).ok().and_then(|root| git(&root, &["rev-parse", train]).ok());
+    matches!((state, tip), (Some(state), Some(tip))
+        if state["outcome"] == "PASS" && state["head"].as_str() == Some(tip.as_str()))
+}
+
 /// Send each due "train ready to cut" notice once. `queued` holds branches
 /// whose PR is in the merge queue now; a train in the queue is being cut.
 pub(crate) fn notify_train_cuts(
@@ -346,6 +359,9 @@ pub(crate) fn notify_train_cuts(
             .iter()
             .filter(|child| matches!(child.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge))
             .count();
+        if !tip_is_green(cas_dir, &epic, &train) {
+            continue;
+        }
         let age = now - first.created_at;
         let cut = cut_command(
             factory.release_command.as_deref(),

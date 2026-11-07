@@ -1113,9 +1113,10 @@ pub struct FactoryConfig {
 
     /// One integration per release: a task created with no epic and no
     /// explicit target joins the repository's open release-train epic, cut
-    /// from the integration branch, instead of targeting it directly. Off
-    /// restores per-task trunk targets.
-    #[serde(default = "default_true")]
+    /// from the integration branch, instead of targeting it directly. Opt-in
+    /// (Cassy's own repository sets it); off keeps per-task integration
+    /// targets and retires trains the old default opened (GH #1613).
+    #[serde(default)]
     pub release_train: bool,
 
     /// Operator intent inherited by worker and reviewer briefs.
@@ -1389,7 +1390,7 @@ impl Default for FactoryConfig {
             delivery_stalled_priority_secs: default_delivery_stalled_priority_secs(),
             delivery_stalled_normal_secs: default_delivery_stalled_normal_secs(),
             epic_base_branch: None,
-            release_train: true,
+            release_train: false,
             focus_mode: None,
             strict_cli: false,
             target_cache_high_watermark_percent: default_target_cache_high_watermark_percent(),

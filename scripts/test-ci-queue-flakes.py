@@ -2,6 +2,7 @@
 """Exercise queue recovery through its CLI with native-report runner fixtures."""
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import tempfile
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
+from types import SimpleNamespace
 from urllib.parse import urlparse, parse_qs
 
 SCRIPT = Path(__file__).with_name("ci-queue-flakes.py")
@@ -71,6 +73,7 @@ class QueueRecovery(unittest.TestCase):
                     "CARGO":str(self.bin/'cargo'), "GITHUB_EVENT_NAME":"merge_group",
                     "GITHUB_RUN_ID":"101", "GITHUB_REPOSITORY":"fixture/repo"}
         self.issues = []
+        self.issue_read_failure = False
         self.refs = {}
         self.lose_create_response = False
         owner = self
@@ -105,6 +108,7 @@ class QueueRecovery(unittest.TestCase):
                     # expose the current record (live acceptance regression).
                     result = owner.issues if query.get('state')==['all'] and not query.get('labels') else []
                     if query.get('page',['1'])[0] != '1': result = []
+                    if owner.issue_read_failure: code, result = 503, {'message':'fixture issue read unavailable'}
                 elif path == '/issues' and method == 'POST':
                     result = {**data,'number':len(owner.issues)+1,'state':'open',
                               'html_url':f'https://github.com/fixture/repo/issues/{len(owner.issues)+1}',
@@ -161,17 +165,103 @@ class QueueRecovery(unittest.TestCase):
                     self.assertLess(receipt['rerun_seconds'],30)
                     self.assertEqual(self.git('rev-parse','HEAD^{tree}'),before)
 
+    def test_train_uses_queue_recovery_and_publication(self):
+        self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
+        self.env['GITHUB_EVENT_NAME'] = 'push'
+        for engine in ('rust', 'playwright'):
+            with self.subTest(engine=engine):
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                shutil.rmtree(self.repo/'receipts', ignore_errors=True)
+                result = self.run_queue(engine, event='push')
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                self.assertEqual(len(self.calls()), 2)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'], 'FLAKY')
+                published = self.reconcile()
+                self.assertEqual(published.returncode, 0, published.stdout+published.stderr)
+        self.assertEqual(len(self.issues), 2)
+
+    def test_script_step_retry_publication_and_all_pass_cleanup(self):
+        # Captured from Vitest 3.2.7: npm exec -- vitest run src/live-region.test.ts --reporter=default.
+        vitest_summary=''' Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  22:31:03
+   Duration  878ms (transform 36ms, setup 12ms, collect 19ms, tests 8ms, environment 443ms, prepare 71ms)
+'''
+        script = self.repo/'test-script.py'
+        script.write_text("""import os,pathlib,sys
+p=pathlib.Path('step-count'); n=int(p.read_text())+1 if p.exists() else 1; p.write_text(str(n))
+case=os.environ['STEP_CASE']
+prefix={'earlier-failure':'FAIL child-a\\n2 passed, 1 failed','earlier-marker':'FAIL child-a',
+        'earlier-count':'2 passed, 1 failed','earlier-assertion':'AssertionError: child failed'}
+if case in prefix or case=='vitest-cleanup':
+ if case in prefix: print(prefix[case],flush=True)
+ print(os.environ['VITEST_SUMMARY'] if case=='vitest-cleanup' else '3 passed, 0 failed',flush=True)
+ print('rm: Permission denied',file=sys.stderr)
+ sys.exit(1)
+if case in ('cleanup','native-cleanup','mixed-summary','late-assertion'):
+ print({'cleanup':'19 passed, 0 failed','native-cleanup':'\\x1b[32mSummary [0.01s] 19 tests run: 19 passed\\x1b[0m',
+        'mixed-summary':'Tests 1 passed | 1 failed','late-assertion':'19 passed, 0 failed'}[case],flush=True)
+ if case=='late-assertion': print('AssertionError: parent harness failed',flush=True)
+ print('rm: cannot remove fixture: Directory not empty',file=sys.stderr)
+ sys.exit(1)
+failed=n==1 or case=='persistent'
+print('0 passed, 1 failed' if failed else '1 passed, 0 failed',flush=True)
+sys.exit(int(failed))
+""")
+        # Simulate a 126-second retry at the execute boundary without sleeping.
+        # The real child still runs when the supplied budget permits it.
+        driver=self.repo/'step-driver.py'
+        driver.write_text('''import os,runpy,sys
+scope=runpy.run_path(sys.argv.pop(1))
+execute=scope['execute']
+def measured(command,cwd,env,log,timeout=None):
+ if env['STEP_CASE']=='long-step' and timeout is not None and timeout<126:
+  log.write_text('step exceeded retry budget')
+  return 124,timeout
+ status,seconds=execute(command,cwd,env,log,timeout)
+ return status,126 if env['STEP_CASE']=='long-step' and timeout is not None else seconds
+scope['step'].__globals__['execute']=measured
+sys.exit(scope['main']())
+''')
+        for case,code,attempts,outcome in [('flake',0,2,'FLAKY'),('persistent',1,2,'FAIL'),('cleanup',0,1,'PASS'),('native-cleanup',0,1,'PASS'),('mixed-summary',1,2,'FAIL'),('late-assertion',1,2,'FAIL'),
+            ('earlier-failure',1,2,'FAIL'),('earlier-marker',1,2,'FAIL'),('earlier-count',1,2,'FAIL'),('earlier-assertion',1,2,'FAIL'),('vitest-cleanup',0,1,'PASS'),('long-step',0,2,'FLAKY')]:
+            with self.subTest(case=case):
+                shutil.rmtree(self.repo/'receipts',ignore_errors=True)
+                (self.repo/'step-count').unlink(missing_ok=True)
+                result = subprocess.run([sys.executable,str(driver),str(SCRIPT),'step','--repo',str(self.repo),
+                    '--id','script/test-release-publish','--out',str(self.repo/'receipts'),
+                    '--',sys.executable,str(script)],env={**self.env,'STEP_CASE':case,'VITEST_SUMMARY':vitest_summary},cwd=self.repo,capture_output=True,text=True)
+                self.assertEqual(result.returncode,code,result.stdout+result.stderr)
+                self.assertEqual(int((self.repo/'step-count').read_text()),attempts)
+                receipt=json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual(receipt['outcome'],outcome)
+                self.assertEqual(receipt['attempts'][0]['raw_status'],1)
+                if case=='flake':
+                    published=self.reconcile()
+                    self.assertEqual(published.returncode,0,published.stdout+published.stderr)
+                    self.assertEqual(len(self.issues),1)
+                    self.assertIn('flaky-quarantine',[label['name'] for label in self.issues[0]['labels']])
+                    loaded=runpy.run_path(str(SCRIPT))['quarantine'](
+                        SimpleNamespace(repo='fixture/repo',issues=lambda *_:self.issues))
+                    self.assertEqual(len(loaded),1)
+                    self.assertEqual(loaded[0]['name'],receipt['flaky'][0]['name'])
+                elif case in ('cleanup','native-cleanup','vitest-cleanup'):
+                    self.assertIn('warning',result.stdout.lower())
+                elif case=='long-step':
+                    self.assertGreater(receipt['attempts'][1]['seconds'],120)
+
     def test_non_queue_events_never_rerun(self):
         for engine in ('rust','playwright'):
             for event in ('workflow_dispatch', 'push'):
                 with self.subTest(engine=engine, event=event):
-                    self.env['GITHUB_REF'] = 'refs/heads/epic/release-train-fixture'
+                    self.env['GITHUB_REF'] = 'refs/heads/epic/ordinary-fixture'
                     (self.repo/'attempts.jsonl').unlink(missing_ok=True)
                     result = self.run_queue(engine,event=event)
                     self.assertNotEqual(result.returncode,0)
                     self.assertEqual(len(self.calls()),1)
                     if engine == 'rust':
-                        self.assertEqual('--profile' in self.calls()[0], event == 'push')
+                        self.assertNotIn('--profile', self.calls()[0])
 
     def test_missing_rerun_report_preserves_the_initial_failure(self):
         self.env['FIXTURE_MISSING_RERUN_REPORT'] = '1'
@@ -262,6 +352,41 @@ class QueueRecovery(unittest.TestCase):
                 self.assertEqual(receipt['quarantine'][0]['runner'],engine)
                 self.assertEqual(len(self.calls()),1)
                 self.assertIn(self.issues[0]['html_url'],result.stdout)
+
+    def test_bad_quarantine_reads_warn_and_never_replace_shard_results(self):
+        for engine in ('rust','playwright'):
+            with self.subTest(engine=engine):
+                self.issue_read_failure = False
+                test = {'runner':engine,'binary':'fixture::lib','name':'sometimes',
+                        'project':'journeys','file':'fixture.journey.ts','titles':['sometimes']}
+                self.issues.clear()
+                for number in range(1,6):
+                    candidate = dict(test)
+                    if number == 4: candidate.update(name='other',titles=['other'])
+                    if number == 5: candidate.update(binary=None,titles=['sometimes',17])
+                    state = {'schema':1,'test':candidate,'runs':['100','101']}
+                    self.issues.append({'number':number,'state':'open',
+                        'html_url':f'https://github.com/fixture/repo/issues/{number}',
+                        'labels':[{'name':'flaky-quarantine'}],
+                        'body':'<!-- cas-queue-flake: '+json.dumps(state)+' -->' if number != 1 else 'missing metadata'})
+                self.issues[1]['html_url'] = 'https://github.com/FIXTURE/REPO/issues/2'
+                self.issues[3]['html_url'] = 'https://github.com/foreign/repo/issues/4'
+                (self.repo/'attempts.jsonl').unlink(missing_ok=True)
+                result = self.run_queue(engine)
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                self.assertEqual([t['issue'] for t in receipt['quarantine']],[self.issues[1]['html_url']])
+                self.assertEqual(len(self.calls()),1)
+                for number in (1,3,4,5): self.assertIn(f'#{number}',result.stderr)
+                for unavailable in (False,True):
+                    self.issue_read_failure = unavailable
+                    (self.repo/'attempts.jsonl').unlink()
+                    result = self.run_queue(engine,'always-fail')
+                    self.assertEqual(result.returncode,1,result.stdout+result.stderr)
+                    self.assertEqual(len(self.calls()),2)
+                    self.assertIn('quarantine',result.stderr.lower())
+                    receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
+                    self.assertEqual(receipt['outcome'],'FAIL')
 
 
 def live_acceptance(out):

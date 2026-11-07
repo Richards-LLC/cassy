@@ -63,6 +63,18 @@ pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &st
     Some(priority)
 }
 
+/// GH #1636: a requested priority that the axes override is reported, never
+/// claimed as applied.
+pub(crate) fn priority_not_applied(labels: &[String], requested: Priority, derived: Priority, current: Priority) -> Option<String> {
+    (requested != derived).then(|| format!(
+        "{}: derived from severity:{} × reach:{}; change the labels to change it",
+        if derived == current { format!("priority unchanged (P{})", derived.0) }
+        else { format!("priority P{}, not the requested P{}", derived.0, requested.0) },
+        label_value(labels, "severity:").unwrap_or_default(),
+        label_value(labels, "reach:").unwrap_or_default(),
+    ))
+}
+
 pub(crate) fn apply(root: &Path, task: &mut Task) {
     if let Some(priority) = normalize_labels(root, &mut task.labels, &task.notes) { task.priority = priority; }
 }

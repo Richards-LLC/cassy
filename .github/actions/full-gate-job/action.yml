@@ -1,0 +1,61 @@
+name: Full gate job receipt
+description: Restore or publish one exact-tree job in the shared full-set receipt graph.
+inputs:
+  phase:
+    description: restore or save
+    required: true
+  job:
+    description: Stable job and matrix identity
+    required: true
+  job-name:
+    description: Expanded GitHub job name
+    required: true
+  binding:
+    description: JSON containing effective selection and runner inputs
+    required: true
+  status:
+    description: Job result before publishing
+    default: success
+  requires-artifact:
+    description: Output artifact that must still exist before reusing its producer
+    default: ''
+outputs:
+  reused:
+    description: A matching successful producer job was validated
+    value: ${{ steps.receipt.outputs.reused }}
+  producer_run:
+    description: Run owning the reusable output artifact
+    value: ${{ steps.receipt.outputs.producer_run }}
+runs:
+  using: composite
+  steps:
+    - id: receipt
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PHASE: ${{ inputs.phase }}
+        JOB: ${{ inputs.job }}
+        JOB_NAME: ${{ inputs.job-name }}
+        BINDING: ${{ inputs.binding }}
+        STATUS: ${{ inputs.status }}
+        REQUIRES_ARTIFACT: ${{ inputs.requires-artifact }}
+      run: |
+        args=(--repo "$GITHUB_WORKSPACE" --job "$JOB" --job-name "$JOB_NAME"
+          --inputs "$BINDING" --out "target/full-gate-job-$JOB" --github-output "$GITHUB_OUTPUT")
+        case "$PHASE" in
+          restore)
+            if [[ -n "$REQUIRES_ARTIFACT" ]]; then args+=(--requires-artifact "$REQUIRES_ARTIFACT"); fi
+            python3 scripts/train-ci.py job-check "${args[@]}"
+            ;;
+          save) python3 scripts/train-ci.py job-save "${args[@]}" --status "$STATUS" ;;
+          *) echo "Invalid receipt phase: $PHASE" >&2; exit 1 ;;
+        esac
+    - uses: actions/upload-artifact@v4
+      if: inputs.phase == 'save'
+      with:
+        name: ${{ steps.receipt.outputs.artifact }}
+        path: ${{ github.workspace }}/target/full-gate-job-${{ inputs.job }}/
+        if-no-files-found: error
+        overwrite: true
+        retention-days: 14

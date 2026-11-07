@@ -1815,7 +1815,14 @@ impl CasCore {
             format!("{assignee_receipt}\n{}", assignee_warnings.join("\n"))
         };
 
+        let requested_priority = task.priority;
         crate::finding_triage::apply(&self.cas_root, &mut task);
+        let assignee_receipt = match crate::finding_triage::priority_not_applied(
+            &task.labels, requested_priority, task.priority, requested_priority,
+        ) {
+            Some(notice) if requested_priority != Priority::MEDIUM => format!("{assignee_receipt}\n{notice}"),
+            _ => assignee_receipt,
+        };
         let predicted = qa_impact::predicted(self, &task);
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
@@ -4545,6 +4552,15 @@ mod related_recall_response_tests {
                 .collect::<Vec<_>>()
         };
 
+        // GH #1613: trains are opt-in. A fresh project targets the integration branch.
+        let fresh = create("Fresh project").await;
+        assert!(!fresh.contains("RELEASE TRAIN"), "{fresh}");
+        assert_eq!(task("Fresh project").deliverables.work_target.unwrap().target_branch, "main");
+        assert!(store.get_parent_epic(&task("Fresh project").id).unwrap().is_none());
+
+        // Cassy's own repository opts in.
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let first = create("Fix one").await;
         assert!(first.contains("RELEASE TRAIN: opened"), "{first}");
         assert!(!first.contains("WORK TARGET DEFAULTED"), "{first}");
@@ -4588,10 +4604,9 @@ mod related_recall_response_tests {
         assert_eq!(task("Hotfix").deliverables.work_target.unwrap().target_branch, "main");
 
         // Staging-first repositories cut the train from staging.
-        std::fs::create_dir_all(repo.join(".cas")).unwrap();
         std::fs::write(
             repo.join(".cas/config.toml"),
-            "[factory]\nepic_base_branch = \"staging\"\n",
+            "[factory]\nepic_base_branch = \"staging\"\nrelease_train = true\n",
         )
         .unwrap();
         let staged = create("Use staging").await;
@@ -4611,6 +4626,21 @@ mod related_recall_response_tests {
         assert!(!off.contains("RELEASE TRAIN"), "{off}");
         assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
         assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
+
+        // GH #1613: with trains off, a close leaves the train for the
+        // integration branch and the emptied train is cancelled.
+        let close: crate::mcp::tools::types::TaskCloseRequest =
+            serde_json::from_value(serde_json::json!({"id": task("Use staging").id, "reason": "done"}))
+                .unwrap();
+        let _ = core.cas_task_close(Parameters(close)).await;
+        let healed = task("Use staging");
+        assert_eq!(healed.deliverables.work_target.unwrap().target_branch, "staging");
+        assert!(store.get_parent_epic(&healed.id).unwrap().is_none());
+        assert!(healed.notes.contains(&staging_train.id), "{}", healed.notes);
+        for train in trains("staging").into_iter().chain(trains("main")) {
+            assert!(train.is_terminal(), "{train:?}");
+        }
+        assert_eq!(store.get(&staging_train.id).unwrap().status, TaskStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -4859,6 +4889,9 @@ mod related_recall_response_tests {
         ] {
             let (_temp, repo) = epic_lane_repo();
             let root = epic_lane_cas_root(&repo);
+            // Trains are opt-in (GH #1613); this case covers riding one.
+            std::fs::write(root.join("config.toml"),
+                "[project]\ncanonical_id = \"github.com/example/epic-lane\"\n\n[factory]\nrelease_train = true\n").unwrap();
             let core = CasCore::with_daemon(root.clone(), None, None);
             let store = core.open_task_store().unwrap();
             let agents = core.open_agent_store().unwrap();

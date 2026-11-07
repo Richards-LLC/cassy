@@ -2501,6 +2501,22 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     assert_eq!(f.task("cas-8488-one").assignee, None);
 }
 
+/// cas-526e: a released queue head leaves the queue. Queue repair used to
+/// restart it at once, which blocked the next task's start.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn released_queue_head_stays_open_and_the_next_task_starts_cas_526e() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let _ = queue_control(&f, Some(vec!["cas-8488-one"])).await;
+    let released = call(&f.worker, serde_json::json!({
+        "action":"release", "id":"cas-8488-current",
+    })).await;
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    let head = f.task("cas-8488-current");
+    assert_eq!((head.status, head.assignee), (TaskStatus::Open, None), "{released}");
+    assert_eq!(f.task("cas-8488-one").status, TaskStatus::InProgress, "{released}");
+}
+
 /// Stale entries are recorded and skipped rather than claiming somebody else's
 /// work, terminal work or a task whose start is blocked.
 #[tokio::test]

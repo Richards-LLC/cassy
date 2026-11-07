@@ -936,7 +936,7 @@ fn batch_offers_pending(cas_root: &Path) -> bool {
 /// one notice per distinct uncovered delivery set naming the exact call with
 /// the current target tip. Advancing the tip alone stays quiet. Returns notices sent.
 pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
-    use crate::qa_batch::{ancestor, commit, delivery_anchor, task_context};
+    use crate::qa_batch::{ancestor, commit, resolved_delivery_anchor, task_context};
     use sha2::{Digest, Sha256};
     let pending = cas_store::pending_qa_batch_deferrals(cas_root)?;
     if pending.is_empty() {
@@ -950,7 +950,7 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
             continue;
         }
         let Ok((repo, target)) = task_context(cas_root, &task) else { continue };
-        let (Some(anchor), Some(tip)) = (delivery_anchor(&repo, &task), commit(&repo, &format!("origin/{target}"))) else {
+        let (Some(anchor), Some(tip)) = (resolved_delivery_anchor(&repo, &task, &target), commit(&repo, &format!("origin/{target}"))) else {
             continue;
         };
         if crate::qa_batch::satisfying_receipt(cas_root, &task, &repo, &target, &anchor)

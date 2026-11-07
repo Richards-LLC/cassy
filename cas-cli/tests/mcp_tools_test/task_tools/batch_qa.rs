@@ -1175,6 +1175,20 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
     };
     let err = fx.supervisor.verification(Parameters(request("cas-open"))).await.unwrap_err();
     assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    // A reused lane's tip equal to its start commit is another task's merge, not this one's.
+    git(&fx.repo, &["branch", "pr/cas-start", &fx.staging]);
+    let target = cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() };
+    let mut reused = Task::new("cas-start".into(), "Reused lane".into());
+    reused.assignee = Some("test-agent".into());
+    reused.status = TaskStatus::AwaitingMerge;
+    reused.deliverables.work_target = Some(target.clone());
+    reused.deliverables.parked_branch = Some("pr/cas-start".into());
+    reused.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target, assignee: "test-agent".into(), branch: "pr/cas-start".into(), base_sha: fx.staging.clone(),
+    });
+    tasks.add(&reused).unwrap();
+    let err = fx.supervisor.verification(Parameters(request("cas-start"))).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
     fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
     let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(receipts[0].task_heads["cas-pr"], merged);

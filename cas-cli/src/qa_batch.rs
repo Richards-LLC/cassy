@@ -57,6 +57,10 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
         else {
             continue;
         };
+        // A reused lane is not task identity: skip a tip that is another task's.
+        if !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(repo, task, branch, &tip) {
+            continue;
+        }
         if integration_state(repo, &tip, target) == Some(true) {
             return Some(tip);
         }

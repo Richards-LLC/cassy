@@ -53,6 +53,8 @@ export interface ReleaseEpic {
   readonly progress?: { readonly total: number; readonly merged: number; readonly merges_per_hour: number; readonly last_merged_at?: string | null };
   /** The factory TUI's child split: open (open or blocked), in progress (in progress or parked), merged (delivered closures). */
   readonly counts?: EpicCounts;
+  /** cas-2f4d: a frozen train's measured line, "Frozen 2:05 PM ET · ETA 2:50 PM ET". */
+  readonly freeze?: { readonly frozen_at: string; readonly eta?: string | null; readonly summary: string } | null;
 }
 export interface EpicCounts { readonly open: number; readonly in_progress: number; readonly merged: number }
 

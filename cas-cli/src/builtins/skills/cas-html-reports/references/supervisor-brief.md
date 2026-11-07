@@ -1,6 +1,6 @@
 # Supervisor brief for a report
 
-Copy this template into the task description of any report task. Fill in every `<field>`. Do not brief a report from memory. The workflow, the floor and the gate below are the contract, and a brief that drops them gets a report that only passes visual QA.
+Load `cas-html-reports` and `cas-ui-craft` before briefing or relaying a report. Copy this template into the task description of any report task. Fill in every `<field>`. Do not brief a report from memory. The workflow, the floor and the gate below are the contract, and a brief that drops them gets a report that only passes visual QA.
 
 ## Template
 

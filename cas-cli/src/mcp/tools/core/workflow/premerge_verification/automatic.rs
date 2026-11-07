@@ -29,16 +29,33 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     ))
 }
 
+fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Option<String> {
+    let provider = match cli {
+        cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
+        cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
+        _ => return None,
+    };
+    let accounts =
+        crate::account_registry::collect_for(provider, &dirs::home_dir()?, false).ok()?;
+    let policy = crate::account_selection::load_policy(Some(root));
+    crate::account_selection::launch_choice(&accounts, provider, chrono::Utc::now(), &policy)
+        .recommended
+        .map(|choice| choice.account.name.clone())
+}
+
 fn command(root: &Path, output: &Path) -> Result<Command, String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
     let model = route.spec.model.ok_or("verifier route has no model")?;
     let effort = route.spec.effort.ok_or("verifier route has no effort")?;
     // A daemon may have no provider account selector, even when the host has
-    // authenticated named accounts. Use the same checked launch environment
-    // as supervisor launches, rather than inheriting the daemon's default home.
-    let environment = crate::hub::launch_env::resolve_for_project(route.spec.cli, None, Some(root))
-        .map_err(|e| e.to_string())?;
+    // authenticated named accounts. Choose the account spawn_workers would
+    // (cas-c386), then use the checked launch environment supervisors use,
+    // rather than inheriting the daemon's default home.
+    let account = launch_account(route.spec.cli, root);
+    let environment =
+        crate::hub::launch_env::resolve_for_project(route.spec.cli, account.as_deref(), Some(root))
+            .map_err(|e| e.to_string())?;
     let mut command = Command::new(environment.executable);
     for key in environment.remove {
         command.env_remove(key);

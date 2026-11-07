@@ -1835,6 +1835,13 @@ impl CasCore {
                             data: None,
                         })?;
 
+                    // cas-2f4d: a new assignment is staffing, so a frozen train
+                    // refuses it here, on the path MCP and Commander share.
+                    if task.assignee.as_deref() != Some(canonical_assignee.as_str()) {
+                        crate::epic_design_review::ensure_staffing_allowed(&self.cas_root, &task.id)
+                            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                    }
+
                     // cas-e33f (GH #1004): a reassignment leaves the prior
                     // assignee's commits on their factory branch.
                     if let Some(prior) = task

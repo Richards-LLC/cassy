@@ -4398,6 +4398,23 @@ pinned memories; explicit retrieval by ID still preserves the historical words.
 A leading word such as `SUPERSEDED` in prose never retires a memory or a
 handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
+## Release freeze
+
+`factory action=train_freeze id=<train> [reason=...]` needs a live registered
+supervisor. Commander's `freeze_train` operation (factory:operate) does the
+same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
+label on the train epic, which syncs to peer machines with the task row. One
+gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
+lane (through `check_cut_merge`, before and under the target lock), CI retry
+arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
+covering spawn, assignment and start of tasks that are still open). A
+`release-repair` task is admitted only while the train is red, and each
+admission is noted on the train. Task create retargets new work aimed at a
+frozen train to the next train. The freeze ends when a published release covers its tip (the
+`Release` ledger event that `release-published-receipt.sh` records, whose version tag
+contains the frozen tip), or through the operator-only Commander
+`lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
 ## Ordered train merge queue
 
 A registered supervisor can submit `factory action=train_merge id=<epic>` to

@@ -73,7 +73,7 @@ import { toastPlacementInThread, toastTopAboveAction, toastTopClearOfBanner } fr
 import { relativeTimestamp } from "./time";
 import { fleetControlGate } from "./fleet-permissions";
 import { FleetOpsState, UNDO_WINDOW_MS, requestMergeAction as requestMergeActionFor, type FleetAction, type FleetAgent, type FleetTask } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, undoBar, resultBar, type FleetHeaderPanel, type FleetOpsViewContext } from "./fleet-ops-view";
 import { WriteGrantState, focusAfterResult, sendWriteGrant } from "./write-grant";
 import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
@@ -5782,6 +5782,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   const trainCounts = release ? displayCounts(release, tasks.filter(task => task.epic_id === release.id)) : undefined;
   const lead: HTMLElement[] = [releaseHeader(document, release && trainCounts ? { ...release, counts: trainCounts } : release, release ? { building: trainState("In progress"), parked: trainState("Awaiting merge"), blocked: trainState("Blocked"),
     workers: workers.filter(worker => trainTasks.some(task => task.id === worker.currentTask)).length } : undefined)];
+  const ops = fleetOpsContext(status);
+  if (ops && release) lead[0]!.append(trainControls(document, ops, release));
   const epicSection = liveEpicsSection(document, { ...liveEpics, explorerHref: explorerBase ? explorerUrl(explorerBase, session?.cloud_project_id) : null,
     retry: () => { for (const id of machines.keys()) refreshEpicSessions(id, true); } });
   if (epicSection) lead.push(epicSection);
@@ -5808,7 +5810,6 @@ function renderStatus(status?: Record<string, unknown>): void {
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
   let revealPhoneNotice = false;
-  const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
     document.getElementById("fleet-phone-undo")?.remove();

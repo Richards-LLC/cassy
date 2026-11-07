@@ -180,7 +180,7 @@ fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> f64 {
     (to - from).num_seconds().max(0) as f64 / 60.0
 }
 
-fn median(mut values: Vec<f64>) -> Option<f64> {
+pub(crate) fn median(mut values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         return None;
     }

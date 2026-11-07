@@ -40,7 +40,7 @@ mod qa_polish;
 pub(crate) mod qa_post_release;
 pub(crate) mod qa_rapid_response;
 mod provider_default;
-mod release_report;
+pub(crate) mod release_report;
 mod release_precheck;
 mod release_automation;
 pub mod deliverable;

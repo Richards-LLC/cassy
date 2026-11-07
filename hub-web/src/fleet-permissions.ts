@@ -27,7 +27,10 @@ export type FleetOperation =
   | "stop-worker"
   | "end-session"
   /** cas-ab04: grant or revoke a task's write access outside its worktree. */
-  | "write-access";
+  | "write-access"
+  /** cas-2f4d: freeze the release train, or lift its freeze. */
+  | "freeze-train"
+  | "lift-freeze";
 
 /**
  * Operator decision: Stop, Restart and End session are destructive and need
@@ -44,6 +47,8 @@ const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "stop-worker": FACTORY_MANAGE_SCOPE,
   "end-session": FACTORY_MANAGE_SCOPE,
   "write-access": FACTORY_MANAGE_SCOPE,
+  "freeze-train": FACTORY_OPERATE_SCOPE,
+  "lift-freeze": FACTORY_MANAGE_SCOPE,
 };
 
 export function fleetOperationScope(operation: FleetOperation): Scope {

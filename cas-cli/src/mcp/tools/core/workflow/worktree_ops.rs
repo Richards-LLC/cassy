@@ -4794,7 +4794,7 @@ impl CasCore {
         super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         // Both stored and inferred worktrees pass here. An explicit trunk
@@ -5015,7 +5015,7 @@ impl CasCore {
         super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let pending_observation_recovery = if transactional_delivery.is_none() {

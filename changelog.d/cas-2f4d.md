@@ -1,0 +1,5 @@
+### Added — Release freeze
+
+- **Freezing a train for release now stops new merges** — `factory action=train_freeze id=<train>` or the release card's **Freeze for release** button records the train's tip and time. While the freeze holds, merges into the train are refused on every machine with "train frozen for release, parked for the next train". New staffing and CI retries armed against the train are refused too, and new tasks join the next train. The one exception is a `release-repair` task while the train is red: either the train-suite receipt records a red, or GitHub's train run at the frozen tip failed. A repair merged this way is noted on the train.
+- **Measured release ETA** — The release card shows "Frozen 2:05 PM ET · ETA 2:50 PM ET". The ETA adds the median measured minutes of the train suite (skipped when the tip is already green), the merge queue and publishing. If any stage has no measurement, the card says which one is unmeasured.
+- **Lifting a freeze** — A freeze ends when a published release covers its tip (landing on main is not enough), or when the operator taps **Lift freeze** in Commander. No supervisor action can lift it.

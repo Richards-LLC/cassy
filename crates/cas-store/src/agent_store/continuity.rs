@@ -74,22 +74,10 @@ fn rows(
 }
 
 pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Result<()> {
-    let identity: Option<(String, String, String, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT name, role, registered_at, machine_id, factory_session FROM agents WHERE id=?",
-            [id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            },
-        )
+    let epoch: Option<String> = conn
+        .query_row("SELECT registered_at FROM agents WHERE id=?", [id], |row| row.get(0))
         .optional()?;
-    let Some((name, role, epoch, machine, session)) = identity else {
+    let Some(epoch) = epoch else {
         return Ok(());
     };
     let reason = reason
@@ -111,6 +99,39 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         }
         return Ok(());
     }
+    let Some((handoff, role, machine)) = snapshot(conn, id, reason)? else {
+        return Ok(());
+    };
+    let encoded = serde_json::to_string(&handoff).map_err(|e| StoreError::Other(e.to_string()))?;
+    conn.execute("INSERT INTO agent_session_ends (id,agent_id,registered_at,machine_id,role,reason,payload,ended_at) VALUES (?,?,?,?,?,?,?,?)", params![handoff.id,id,epoch,machine,role,reason,encoded,Utc::now().to_rfc3339()])?;
+    Ok(())
+}
+
+/// The lane facts a session end records, without recording an end. cas-5f67
+/// reuses it for a supervisor whose context is cleared while it keeps running.
+fn snapshot(
+    conn: &Connection,
+    id: &str,
+    reason: &str,
+) -> Result<Option<(SessionEnd, String, Option<String>)>> {
+    let identity: Option<(String, String, String, Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT name, role, registered_at, machine_id, factory_session FROM agents WHERE id=?",
+            [id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((name, role, epoch, machine, session)) = identity else {
+        return Ok(None);
+    };
     let (pid, ppid, pid_starttime, metadata): (Option<u32>, Option<u32>, Option<i64>, String) =
         conn.query_row(
             "SELECT pid,ppid,pid_starttime,metadata FROM agents WHERE id=?",
@@ -255,9 +276,7 @@ pub(super) fn capture(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         handoff.pending.extend(asks);
         handoff.pending.extend(inherited_receipts);
     }
-    let encoded = serde_json::to_string(&handoff).map_err(|e| StoreError::Other(e.to_string()))?;
-    conn.execute("INSERT INTO agent_session_ends (id,agent_id,registered_at,machine_id,role,reason,payload,ended_at) VALUES (?,?,?,?,?,?,?,?)", params![handoff.id,id,epoch,machine,role,reason,encoded,Utc::now().to_rfc3339()])?;
-    Ok(())
+    Ok(Some((handoff, role, machine)))
 }
 
 pub(super) fn end_reason(conn: &Connection, id: &str) -> Result<String> {
@@ -289,6 +308,15 @@ impl SqliteAgentStore {
             tx.commit()?;
             Ok(())
         })
+    }
+
+    /// A live supervisor's lane facts in the session-end receipt shape, with
+    /// nothing recorded: its identity, leases and workers stay as they are.
+    pub fn supervisor_lane_snapshot(&self, id: &str, reason: &str) -> Result<Option<SessionEnd>> {
+        let conn = self.lock_conn()?;
+        Ok(snapshot(&conn, id, reason)?
+            .filter(|(_, role, _)| role == "supervisor")
+            .map(|(handoff, _, _)| handoff))
     }
 
     /// One winner per predecessor, even with concurrent successor startups.

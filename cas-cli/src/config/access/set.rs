@@ -450,6 +450,10 @@ impl Config {
                 let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_wakes_per_hour: {value}")))?;
                 self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_wakes_per_hour = number;
             }
+            "factory.supervisor_wake_input_budget" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_wake_input_budget: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_wake_input_budget = number;
+            }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 factory.message_max_chars = value.parse().map_err(|_| {

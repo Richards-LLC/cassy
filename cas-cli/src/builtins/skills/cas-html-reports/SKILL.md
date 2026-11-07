@@ -21,12 +21,17 @@ this skill tells you where each of those lands in a report.
 
 ## The workflow
 
+A supervisor briefs a report task from [references/supervisor-brief.md](references/supervisor-brief.md),
+never from memory. A worker that receives a report brief without that template follows this
+workflow anyway.
+
 1. **Write the markdown first.** `docs/<area>/YYYY-MM-DD-<topic>.md`. Get the analysis right in plain
    text before any presentation decision. If the markdown is weak, the HTML is decoration on nothing.
 2. **Pick your cell**: report type × audience, from `references/report-types.md`. The cell fixes the
    required sections, their order, and the **hero figure** the type owes the reader.
 3. **Write the concept brief** (`cas-ui-craft` step 1) and commit it beside the markdown as
-   `<basename>.brief.md`, from `cas-ui-craft/references/concept-brief.md`: the single idea; the hero
+   `<basename>.brief.md`, from `cas-ui-craft/references/concept-brief.md`, with
+   `Audience: executive|practitioner|external` on its own line: the single idea; the hero
    form and the reason its shape is the claim; the emotional register; one distinctive move; what is
    deliberately omitted. A brief whose hero is "a paragraph", "a row of numbers", or "a table of
    everything" is rejected before rendering: the hero shows the argument, it does not summarize the
@@ -35,14 +40,30 @@ this skill tells you where each of those lands in a report.
 4. **Render the HTML** beside the markdown: same directory, same basename, `.html`. Obey
    `references/technical-contract.md` (one file, progressive enhancement, accessibility, print,
    provenance, design language) and `references/presentation-rules.md` (encodings, scales, numbers).
-   Chart construction follows `cas-dataviz`.
+   Chart construction follows `cas-dataviz`. These are mandatory:
+   - **The brand.** The project's DESIGN.md tokens (`cas deliverable brand`) are declared in
+     `:root` and used everywhere. System fonts only; no web fonts and no network.
+   - **One verdict, first.** The answer, in at most 40 words, carries `data-verdict` (usually the
+     `<h1>`) and comes before any `<h2>` or table.
+   - **A height budget.** At most 4,000 px at 1280 px wide for an executive or external reader,
+     8,000 px for a practitioner. Case-by-case detail goes in a collapsed `<details>` or stays in the
+     markdown.
+   - **Business readers.** Executive and external reports show no task ids anywhere and no internal
+     vocabulary (workers, lanes, file paths, PR numbers) in the verdict or above the first section.
 5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`) and append the
    table to the brief under `## Critique`. A report ships only when it meets that rubric's floor,
    with its visual-QA receipt, a print preview, and a JS-disabled reload as evidence; then run
-   `references/review-checklist.md`. A grep for expected tags is not a review.
+   `references/review-checklist.md`. A grep for expected tags is not a review. **A visual-QA PASS
+   is necessary, not sufficient:** it proves the page renders, not that the report is clear,
+   branded or short.
 6. **Commit all three files together**: markdown, concept brief, HTML. An HTML artifact without its
    markdown source is a provenance failure; a markdown report whose HTML is stale is worse than no
    HTML at all; a rendered report without its brief cannot be critiqued.
+
+**The close gate enforces this.** For an `.html` under `docs/` beside a same-basename `.md`, the
+close gate (G7) refuses the task and lists each gap: the brief and its audience, the critique floor,
+the brand tokens, network fetches, the verdict, the height budget and, for business readers, task
+ids and jargon. Release, feature, SOW and customer deliverables keep their own skills.
 
 ## What counts as a report
 

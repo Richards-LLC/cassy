@@ -57,6 +57,7 @@ Read once per phase.
 | --- | --- |
 | Create or assign a task | [Brief fields](references/workflow.md#brief-fields-no-spawn-without-them) and [risk declarations](references/reference.md#task-risk-declarations) |
 | Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
+| Report deliverable (brief or relay) | Load `cas-html-reports` and `cas-ui-craft`; brief from [supervisor-brief.md](../cas-html-reports/references/supervisor-brief.md), never from memory. Before relaying, open the 1280 and 390 px screenshots and score distinctiveness, fit and hierarchy yourself (each at least 4). Visual QA PASS is not enough. |
 | Plan or coordinate | [workflow](references/workflow.md) |
 | Merge, QA or assemble | [merge review](references/workflow.md#required-merge-review-discipline), [Batch QA](references/workflow.md#batch-qa) and [epic driving](references/epic-driving.md) |
 | Peer child, grant or shared epic | [peers](references/reference.md#peer-supervisors-on-the-same-repo) |

@@ -88,12 +88,14 @@ describe("unsettled messages across a reload (cas-e7b1)", () => {
     document.body.replaceChildren(view.element);
     view.update();
     const line = (text: string) => [...view.element.querySelectorAll<HTMLElement>(".bub")].find((bubble) => bubble.textContent?.includes(text))?.querySelector(".conversation-delivery")?.textContent;
-    // pin: the initial held-send promise discloses its finite wait and manual Retry.
-    expect(line("Waiting for the network")).toBe("Waiting for the connection — auto-sends for up to 2 minutes; after that, choose Retry.");
+    expect(line("Waiting for the network")).toBeTruthy();
+    expect(reloaded.pendingSends().find(send => send.id === "held")?.state).toBe("held");
     // Two in a row read as one notice on the second (cas-b00c); neither claims it arrived.
     expect(line("On the wire, no receipt yet")).toBeUndefined();
-    expect(line("Receipt never came")).toContain("2 messages not confirmed");
-    expect(line("Refused by the hub")).toContain("Not sent");
+    expect(line("Receipt never came")).toContain("2");
+    expect(view.element.querySelectorAll('.bub[data-state="unconfirmed"]')).toHaveLength(2);
+    expect(line("Refused by the hub")).toBeTruthy();
+    expect(view.element.querySelector('.bub[data-state="error"]')).not.toBeNull();
     // The held message still counts as pending (its session stays listed), and nothing claims the supervisor has it.
     expect(reloaded.hasPending()).toBe(true);
     expect(reloaded.awaitingReply()).toBe(false);

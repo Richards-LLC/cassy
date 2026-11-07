@@ -14,15 +14,28 @@ class Shapes(unittest.TestCase):
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [
             ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),
+            ('test_example.py', r'with self.assertRaisesRegex(ValueError, r"^\S+$"): run()', False),
             ('test_example.py', 'self.assertIn("permission was denied", result.stderr)', True),
+            ('test_example.py', 'self.assertIn("titled category and area format", result.stdout)', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.stdout.contains("please try later")); }', True),
             ('test_example.py', 'self.assertEqual("permission was denied", error.message)', True),
+            ('test_example.py', 'assert "permission was denied" in str(exc)', True),
+            ('test_example.py', 'assert str(error) == "permission was denied"', True),
+            ('test_example.py', 'assert error.code == "scope_denied"', False),
             ('test_example.py', 'self.assertIn("[rule: scope_denied]", result.stderr)', False),
             ('test_example.py', 'self.assertIn("FAIL test-shape", result.stdout)', False),
             ('test_example.py', 'self.assertEqual(saved_payload, "hello from the operator")', False),
             ('src/example.rs', '#[test] fn check() { assert!(error.contains("please try later")); }', True),
             ('src/example.rs', '#[test] fn check() {\n// pin: an old copy preference\nassert!(error.contains("please try later")); }', True),
             ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "scope_denied"); }', False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains('\x1b')); }", False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains(b'\n')); }", False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(output.stdout, b"caller payload bytes"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(receipt, Receipt { warning: Some("caller-provided diagnostic".into()) }); }', False),
+            ('src/example.rs', '#[test] fn check() { let fixture = "caller diagnostic"; assert_eq!(error.message, fixture); }', False),
             ('src/example.rs', '#[test] fn check() { assert_eq!("please try later", error.message); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.unwrap_err().to_string().contains("please try later")); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(get_error().message, "please try later"); }', True),
             ('src/example.rs', '#[test] fn check() { assert!(result.is_err(), "expected an authorization refusal"); }', False),
             ('example.test.ts', 'expect(run()).toThrow("please try later");', True),
             ('example.test.ts', 'expect(run()).toThrow(new Error("please try later"));', True),
@@ -89,8 +102,8 @@ class Shapes(unittest.TestCase):
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
-    def test_exact_prose_pin_needs_a_reasoned_escape(self):
-        # // pin: these fixtures exercise the exact prose pin and its intentional exception.
+    def test_exact_prose_pin_cannot_be_waived_by_comments(self):
+        # These fixtures exercise rejection of exact prose, including pin comments.
         unpinned = '''def test_prompt_contract():
     assert prompt == "When a test fails, name the responsible boundary and preserve its first result."
 def test_workflow_command():
@@ -104,7 +117,7 @@ def test_workflow_command():
             shape.lint_text_pins(unpinned, 'tests/test_prompt.py'),
             [(2, 'exact-text pin'), (4, 'exact-text pin')],
         )
-        self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
+        self.assertEqual(shape.lint_text_pins(pinned, 'tests/test_prompt.py'), [(3, 'exact-text pin')])
 
     def test_rust_assert_diagnostics_are_not_text_pins_cas_cae5(self):
         message = '"preserve original content and routing instructions"'
@@ -232,7 +245,7 @@ def test_workflow_command():
             self.assertIn('tests/test_prompt.py:2:', result.stdout)
             path.write_text('def test_prompt():\n    # // pin: this phrase is an external compatibility contract.\n    assert prompt == "The release gate should identify which component caused this failure."\n')
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
 
     def test_cli_changed_since_checks_only_added_or_modified_pin_lines(self):
         with tempfile.TemporaryDirectory() as root:
@@ -255,8 +268,7 @@ fn old_contract() {
             base = git('rev-parse', 'HEAD')
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
 
-            # An unchanged legacy pin must not fail just because this file has
-            # a newly added, reasoned pin.
+            # Only the added prose pin fails; a pin comment cannot waive it.
             reasoned_pin = '''
 #[test]
 fn added_reasoned_contract() {
@@ -266,7 +278,9 @@ fn added_reasoned_contract() {
 '''
             path.write_text(old_pin + reasoned_pin)
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
+            self.assertNotIn('tests/test_prompt.rs:3:', clean.stdout)
+            self.assertIn('tests/test_prompt.rs:9:', clean.stdout)
 
             # A changed legacy line is in scope, including when only one part
             # of the string literal's text changes.

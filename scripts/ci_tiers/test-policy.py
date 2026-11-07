@@ -725,7 +725,6 @@ else:
         for process, output in zip(processes, outputs):
             self.assertEqual(process.returncode, 0, output)
         self.assertEqual((fixture / 'rustup/install-count').read_text(), 'install\n')
-        self.assertIn('already installed', ''.join(out for out, _ in outputs))
         self.assertEqual((fixture / 'github-env').read_text().splitlines(), ['RUSTUP_TOOLCHAIN=stable'] * 2)
 
     def test_shared_rustup_helper_rejects_corrupt_registry_and_files(self):
@@ -866,7 +865,6 @@ else:
                     (self.root / 'scripts/test-journey-bundles.py').write_text('raise SystemExit(17)\n')
                     failed = self.run_body(run['run'], env)
                     self.assertEqual(failed.returncode, 1, failed.stdout + failed.stderr)
-                    self.assertIn('FAIL (exit 17)', failed.stdout)
                 git('reset', '--hard', 'HEAD^')
                 output.unlink()
 

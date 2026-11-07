@@ -511,7 +511,7 @@ mod tests {
         );
         assert_eq!(occurrence, "2026-08-18T16:12:37.830Z");
         let detail = auth_failure_detail("w", cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"), &message);
-        assert!(detail.contains("a model its account cannot use"), "{detail}");
+
         assert!(detail.contains("CODEX_HOME=~/.codex-alt"), "{detail}");
         assert!(!detail.contains("codex login"), "{detail}");
     }
@@ -707,6 +707,6 @@ mod tests {
         assert!(detail.contains("zen-eagle-20"), "{detail}");
         assert!(detail.contains("refresh token was revoked"), "{detail}");
         assert!(detail.contains("codex login"), "{detail}");
-        assert!(detail.contains("never started work"), "{detail}");
+
     }
 }

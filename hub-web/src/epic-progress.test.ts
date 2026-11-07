@@ -60,6 +60,7 @@ it("draws the split and the task sections from one task state, so a merged deliv
   const section = liveEpicsSection(document, { project: "split", live, quiet: 0, multiMachine: false, pending: [], failed: [], retry: () => {} })!;
   expect(section.querySelector(".live-epic-split")?.textContent).toMatch(new RegExp("(?=[\\s\\S]*1)(?=[\\s\\S]*3)"));
   expect(section.querySelector(".live-epic-ratio")?.textContent).toBe("3/5");
-  expect([...section.querySelectorAll(".live-epic-group-label")].map(label => label.textContent)).toEqual(["In progress · 1", "Open · 1", "Merged · 3"]);
+  expect([...section.querySelectorAll(".live-epic-group")].map(group => [...group.querySelectorAll(".live-epic-task-title")].map(title => title.textContent))).toEqual([["Work"], ["Next"], ["Landed"]]);
+  expect([...section.querySelectorAll(".live-epic-group-label")].map(label => Number(label.textContent?.match(/\d+/)?.[0]))).toEqual([1, 1, 3]);
   expect(section.querySelector(".live-epic-merged")?.textContent).toContain("Landed");
 });

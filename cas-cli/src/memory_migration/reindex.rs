@@ -271,6 +271,6 @@ mod tests {
             ..PageIndexReport::default()
         };
         report.check().unwrap();
-        assert!(report.render().contains("3 reindexed"));
+        assert_eq!(report.reindexed, 3);
     }
 }

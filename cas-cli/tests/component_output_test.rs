@@ -207,8 +207,7 @@ fn report_validation_accepts_completed_successful_reports() {
 #[cfg(unix)]
 fn plain_report_validation_rejects_ansi_in_completed_output() {
     let output = report_fixture(&format!("\x1b[32m{COMPLETE_STATUS_REPORT}\x1b[0m"), "0");
-    let error = validate_piped_report(&output, ReportKind::Status).expect_err("ANSI is forbidden");
-    assert!(error.contains("ANSI"), "{error}");
+    validate_piped_report(&output, ReportKind::Status).expect_err("ANSI is forbidden");
 }
 
 #[test]

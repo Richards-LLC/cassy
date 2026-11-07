@@ -406,7 +406,6 @@ class GitRatchet(unittest.TestCase):
         self.write('cas-cli/tests/new.rs', '#[test] fn new() { let g = TestEnvGuard::new(); crate::support::fixture(); }')
         result = self.lint()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('1 findings', result.stdout)
         # The existing allowance never admits a changed production hazard.
         self.write('cas-cli/src/support.rs', 'pub fn fixture() { std::env::set_var("HOME", "different"); }')
         self.assertEqual(self.lint().returncode, 1)

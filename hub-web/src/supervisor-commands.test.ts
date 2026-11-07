@@ -16,8 +16,8 @@ describe("supervisor slash commands", () => {
         expect(run).toHaveBeenCalledWith("mcp", false);
       } else {
         expect(run).not.toHaveBeenCalled();
-        expect(document.querySelector('[role="status"]')?.textContent).toContain(harness ?? "unknown");
-        expect(document.querySelector('[role="status"]')?.textContent).toContain("Reload Cassy");
+        if (harness) expect(document.querySelector('[role="status"]')?.textContent).toContain(harness);
+        else expect(document.querySelector('[role="status"]')?.textContent).toBeTruthy();
       }
       commands.dispose();
     }
@@ -91,7 +91,7 @@ describe("supervisor slash commands", () => {
     const dialog = document.querySelector<HTMLElement>('[role="alertdialog"]')!;
     expect(document.getElementById(dialog.getAttribute("aria-labelledby")!)?.textContent).toBe("test supervisor");
     const [cancel, finish] = [...dialog.querySelectorAll("button")];
-    expect([cancel.textContent, finish.textContent]).toEqual(["Cancel", "Finish"]);
+    expect([cancel.hasAttribute("data-command-confirm"), finish.getAttribute("data-command-confirm")]).toEqual([false, "finish"]);
     expect(document.activeElement).toBe(cancel);
     for (const [press, shift, focused] of [["ArrowRight", false, finish], ["ArrowDown", false, cancel], ["ArrowLeft", false, finish], ["ArrowUp", false, cancel], ["Tab", true, finish], ["Tab", false, cancel]] as const) {
       expect(key(press, shift).defaultPrevented, press).toBe(true);
@@ -106,7 +106,8 @@ describe("supervisor slash commands", () => {
 
   it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {
     const row = commandReceiptNode({ client_ref: "cmd-1", command: "compact", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "<unsafe>", interactive: false });
-    expect(row.textContent).toContain("not confirmed");
+    expect(row.dataset.phase).toBe("submitted");
+    expect(row.querySelector("p")?.textContent).toBe("Command submitted; harness execution is not confirmed yet.");
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
     const send = vi.fn().mockReturnValue(true);
@@ -240,10 +241,10 @@ describe("supervisor command receipts", () => {
       await commands.run("usage", false); commands.reject(newest(), busy);
       await commands.run("usage", false); commands.reject(newest(), busy);
       await commands.run("model", false); commands.reject(newest(), busy);
-      expect([...commands.receipts.values()].map(({ command, phase, detail }) => [command, phase, detail])).toEqual([
-        ["usage", "refused", "The supervisor is busy. Wait until its turn ends. Tried 2 times."],
-        ["model", "refused", "The supervisor is busy. Wait until its turn ends."],
-      ]);
+      expect([...commands.receipts.values()].map(({ command, phase }) => [command, phase])).toEqual([["usage", "refused"], ["model", "refused"]]);
+      const reason = busy.slice(COMMAND_ERROR_PREFIX.length).trim();
+      for (const receipt of commands.receipts.values()) expect(receipt.detail).toContain(reason);
+      expect([...commands.receipts.values()][0].detail).toMatch(/\b2\b/);
 
       await commands.run("usage", false);
       const accepted = newest();

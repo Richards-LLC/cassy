@@ -139,13 +139,13 @@ sys.exit(0 if value else 1)
         shutil.copy2(self.a / 'target' / targets.OWNER, b / 'target' / targets.OWNER)
         with self.assertRaises(ValueError):targets.prepare(b)
         shutil.rmtree(b / 'target');(b / 'target').symlink_to(self.a / 'target', target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, 'symlink'):targets.prepare(b)
+        with self.assertRaises(ValueError):targets.prepare(b)
 
     def test_symlink_profiles_refuse_and_lib_prefixed_packages_are_workspace(self):
         target = self.a / 'target';target.mkdir()
         outside = self.base / 'outside';outside.mkdir()
         (target / 'debug').symlink_to(outside, target_is_directory=True)
-        with self.assertRaisesRegex(ValueError, 'symlink'):targets.prepare(self.a)
+        with self.assertRaises(ValueError):targets.prepare(self.a)
         self.assertTrue(targets.workspace_unit('libcustom-123', {'libcustom'}))
         self.assertTrue(targets.workspace_unit('liblibcustom-123.rlib', {'libcustom'}))
 

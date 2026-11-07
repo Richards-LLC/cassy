@@ -276,14 +276,14 @@ describe("Open conversation on the conversation already open (cas-d043 G12)", ()
   const actions = (open?: { machineId: string; session?: string }) => {
     const container = document.createElement("div");
     renderAttentionPanel(container, [item("s1")], { act: vi.fn(), dismiss: vi.fn(), copy: vi.fn() }, { now: Date.parse("2026-10-06T12:01:00Z"), ...(open ? { openConversation: open } : {}) });
-    return [...container.querySelectorAll<HTMLButtonElement>(".attention-actions > button")].map((button) => button.textContent);
+    return [...container.querySelectorAll<HTMLButtonElement>(".attention-actions > button")].map((button) => button.dataset.role);
   };
   it("offers only Dismiss for an item about the open conversation", () => {
-    expect(actions({ machineId: "atlas", session: "s1" })).not.toContain("Open conversation");
-    expect(actions({ machineId: "atlas", session: "s1" })).toContain("Dismiss");
+    expect(actions({ machineId: "atlas", session: "s1" })).not.toContain("action");
+    expect(actions({ machineId: "atlas", session: "s1" })).toContain("dismiss");
   });
   it("still opens another conversation", () => {
-    expect(actions({ machineId: "atlas", session: "s2" })).toContain("Open conversation");
-    expect(actions()).toContain("Open conversation");
+    expect(actions({ machineId: "atlas", session: "s2" })).toContain("action");
+    expect(actions()).toContain("action");
   });
 });

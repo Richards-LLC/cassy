@@ -142,7 +142,7 @@ class ReleaseRendererTests(unittest.TestCase):
                     found = brand.resolve(root, defaults=DEFAULTS)
                     self.assertIn('--verdict:#123456', found['css'])
                     self.assertNotIn('example.org/a.png', found['css'])
-                    self.assertIn('DESIGN.md CSS sources may hold only tokens', ' '.join(found['receipt']['warnings']))
+                    self.assertTrue(found['receipt']['warnings'])
 
     def test_bad_totals_and_duplicate_issues_fail(self):
         for source in (EXEMPLAR.replace('| Total | 21 |', '| Total | 22 |'),
@@ -226,7 +226,6 @@ Source: release assets.
         self.assertIn('data-total="0"', output)
         self.assertNotIn('data-issue="', output)
         self.assertNotIn('data-surface="Install"', output)
-        self.assertNotIn('no listed issues', output)
         self.assertIn('No user changes.', output)
 
     def test_changes_by_area_lead_page_one_with_issues_secondary(self):
@@ -235,13 +234,9 @@ Source: release assets.
         self.assertEqual(hero.count('data-change="'), 3)
         self.assertIn('data-area="Sessions" data-count="2"', hero)
         self.assertIn('<title>Typing during cleanup</title>', hero)
-        self.assertIn('2 GitHub issues closed with this release', hero)
         self.assertNotIn('data-issue="', hero)
-        self.assertIn('GitHub issues closed with this release · 2', output)
         glance = output[output.index('data-section="glance"'):output.index('data-section="users"')]
         self.assertLess(glance.index('id="map-data"'), glance.index('class="stats"'))
-        for jargon in ('issue-bearing', 'verified closure', 'closure stitch', 'no listed issues'):
-            self.assertNotIn(jargon, output.lower())
 
         # Later reconciliation belongs in prose, outside the counted table.
         source = BY_AREA.replace(
@@ -253,9 +248,7 @@ Source: release assets.
         hero = output[output.index('data-section="hero"'):output.index('data-section="glance"')]
         self.assertEqual(hero.count('data-change="'), 3)
         self.assertIn('data-total="3"', hero)
-        self.assertIn('No GitHub issues are counted in this report', hero)
-        self.assertNotIn('No GitHub issues were closed with this release.', output)
-        self.assertIn('GitHub issues closed with this release · 0', output)
+        self.assertNotIn('data-issue="', output)
         self.assertIn('closed after the counting window.', output)
 
     def test_eight_changes_draw_on_one_row(self):

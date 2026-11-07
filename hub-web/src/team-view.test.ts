@@ -72,9 +72,9 @@ it("puts reported trouble ahead of same-state peers and names the worker in atte
   };
   renderTeam(root, snapshot, vi.fn(), progress);
   expect([...root.querySelectorAll<HTMLElement>(".team-lane")].map(node => node.dataset.worker)).toEqual(["owl", "lark", "wren"]);
-  expect([...root.querySelectorAll(".team-state")].map(node => node.textContent)).toEqual(["Blocked", "Waiting", "Waiting"]);
-  expect(root.querySelector('.team-lane[data-worker="owl"]')?.textContent).toContain("Blocked");
-  const shortcut = [...root.querySelectorAll("button")].find(button => button.textContent === "owl · Blocked")!;
+  expect([...root.querySelectorAll<HTMLElement>(".team-lane")].map(node => node.dataset.urgency)).toEqual(["critical", undefined, undefined]);
+  expect(root.querySelector('.team-lane[data-worker="owl"][data-urgency="critical"]')).not.toBeNull();
+  const shortcut = root.querySelector<HTMLButtonElement>('[data-team-action="worker:owl"]')!;
   expect(shortcut).toBeDefined(); shortcut.click();
   expect((document.activeElement as HTMLElement).dataset.worker).toBe("owl");
   renderTeam(root, { ...snapshot, agents: snapshot.agents.map(agent => agent.name === "wren" ? { ...agent, liveness: "stalled" } : agent) }, vi.fn(), progress);

@@ -241,7 +241,7 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(args=args, kwargs=kwargs):
                 result = json.loads(self.run_selector(*args, **kwargs).stdout)
                 self.assertEqual({j['id'] for j in result['journeys']}, {'HUB-J1', 'HUB-J2', 'HUB-J3'})
-                self.assertTrue(all('uncertain-source-parser:Unterminated regex literal' in j['reason'] for j in result['journeys']))
+                self.assertTrue(all(j['reason'].startswith('uncertain-source-parser:') for j in result['journeys']))
 
     def test_shared_fixture_option_method_narrows_to_users(self):
         self.write('hub-web/e2e/fixture.ts', 'export class Double {\n private operation(route: unknown): void {\n const fleet = this.options.fleet;\n if (!fleet) return;\n fleet.count = 1;\n }\n}\n')

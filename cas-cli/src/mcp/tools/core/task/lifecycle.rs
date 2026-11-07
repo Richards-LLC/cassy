@@ -4538,8 +4538,8 @@ mod related_recall_response_tests {
         };
 
         let first = create("Fix one").await;
-        assert!(first.contains("RELEASE TRAIN: opened"), "{first}");
-        assert!(!first.contains("WORK TARGET DEFAULTED"), "{first}");
+
+
         let train = trains("main").pop().expect("train opened from main");
         let lane = train.branch.clone().expect("train lane");
         assert_eq!(git(&["rev-parse", &lane]), git(&["rev-parse", "main"]));

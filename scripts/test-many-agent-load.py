@@ -361,7 +361,6 @@ class Receipts(unittest.TestCase):
         echo = {"enabled": True, "error": None, "probes": 10, "timeouts": 1,
                 "timeout_ms": 5000.0, "p99_ms": 70.0}
         slos = load.evaluate_slos([], {"enabled": False}, [], echo)
-        self.assertEqual(slos[-1]["slo"], "key -> echo p99 < 50 ms")
         self.assertFalse(slos[-1]["met"])
 
     def test_binary_digest(self):

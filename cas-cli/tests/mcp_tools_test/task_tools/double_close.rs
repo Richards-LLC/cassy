@@ -232,10 +232,7 @@ async fn test_close_on_already_closed_skips_code_review_gate() {
         .await
         .expect("first close should return a result"),
     );
-    assert!(
-        first.contains("Closed task:"),
-        "first close should succeed: {first}"
-    );
+
     let closed_at = task_store
         .get(&id)
         .expect("task")

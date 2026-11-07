@@ -1879,8 +1879,8 @@ mod tests {
         let mut cancelled = closed.clone();
         cancelled.status = TaskStatus::Cancelled;
         let report = render_pending_encode_chores(&[chore.clone(), closed, unrelated, cancelled]);
-        assert!(report.contains("project backlog: 1"));
-        assert!(report.contains("chore-one [open] encode rule-one as test"));
+
+        assert!(report.contains(&chore.id) && report.contains(&chore.title));
         assert!(!report.contains("chore-closed"));
         assert!(!report.contains("unrelated"));
         for status in [

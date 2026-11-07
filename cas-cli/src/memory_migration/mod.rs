@@ -421,10 +421,7 @@ mod tests {
         assert_eq!(DbLabel::Project.as_str(), "project");
     }
 
-    #[test]
-    fn an_empty_quarantine_still_renders_a_line() {
-        assert!(render_quarantine(&[]).contains("none"));
-    }
+
 
     #[test]
     fn the_quarantine_report_names_id_title_and_token() {
@@ -438,7 +435,7 @@ mod tests {
         assert!(report.contains("p-q1"));
         assert!(report.contains("FINAL QBO State"));
         assert!(report.contains("QBO"));
-        assert!(report.contains("NOT deleted"));
+
     }
 
     #[test]

@@ -3,8 +3,7 @@
 
 Scan Rust tests for constant/literal equality pins and Rust source reads, and
 test files in any language for exact prose snapshots or source/workflow text
-needles. A reasoned // pin: comment immediately above the pinned statement is
-the escape. Vendor code is excluded. Integration tests under cas-cli/tests and
+needles. Prose pins cannot be waived by comments. Vendor code is excluded. Integration tests under cas-cli/tests and
 crates/*/tests must resolve Cargo binaries at runtime rather than through
 env!("CARGO_BIN_EXE_<name>"); this archive-portability rule cannot be exempted.
 Text-pin checks cover changed test files, so legacy pins do not block unrelated
@@ -43,13 +42,21 @@ def message_assertions(source, path, changed_lines=None):
         if not any(0 < line <= len(lines) and re.search(r'[\"\'`]', lines[line - 1]) for line in changed_lines):
             return []
     hits = []
-    channels = r'\b(?:error|err|stderr|refusal|detail|remediation|warning|reason)(?:\b|_)|\.(?:error|stderr|message|detail|remediation|warning|reason)\b'
+    channels = r'(?:\b|_)(?:error|err|exc|exception|stderr|stdout|refusal|detail|remediation|warning|reason)(?:\b|_)|\.(?:message|rejects)\b|\.(?:unwrap_err|expect_err)\('
     if Path(path).suffix in ('.py', '.pyi'):
         try:
             tree = ast.parse(source)
         except SyntaxError:
             return []
         for node in ast.walk(tree):
+            if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
+                operands = [node.test.left, *node.test.comparators]
+                for literal in operands:
+                    if not isinstance(literal, ast.Constant) or not human_message_literal(literal.value):
+                        continue
+                    actual = ' '.join(ast.get_source_segment(source, item) or '' for item in operands if item is not literal)
+                    if re.search(channels, actual) and (changed_lines is None or literal.lineno in changed_lines):
+                        hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             name = node.func.attr
@@ -63,6 +70,10 @@ def message_assertions(source, path, changed_lines=None):
                 receiver = ast.get_source_segment(source, actual) or ''
             else:
                 continue
+            if isinstance(literal, ast.Constant) and isinstance(literal.value, str) and 'Regex' in name:
+                grammar = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', literal.value)
+                if not re.search(r'[A-Za-z]', grammar):
+                    continue  # Shape/encoding checks do not prescribe words.
             if (isinstance(literal, ast.Constant) and human_message_literal(literal.value)
                     and re.search(channels, receiver)
                     and (changed_lines is None or literal.lineno in changed_lines)):
@@ -87,11 +98,16 @@ def message_assertions(source, path, changed_lines=None):
                     continue
                 prefix = source[token.start:literal.start]
                 substring = re.search(r'\.(?:contains|starts_with|ends_with)\(\s*(?:&?format!\(\s*)?$', prefix)
-                scalar = re.fullmatch(r'assert_(?:eq|ne)!\(\s*(?:(?:error|err)(?:[.\w()]+)?\s*,\s*)?', prefix)
+                depth = sum(1 if t.value in ('(', '[', '{') else -1 if t.value in (')', ']', '}') else 0
+                            for t in ts[i + 2:] if t.start < literal.start and not t.string)
+                scalar = token.value in ('assert_eq', 'assert_ne') and depth == 1
                 if not substring and not scalar:
                     continue
                 value = literal.value
-                if value.startswith('"'):
+                # Character operands are protocol/format controls, not prose.
+                if source[literal.start:literal.end].startswith(("'", "b'")):
+                    continue
+                if value.startswith(('"', 'b"')):
                     try:
                         value = ast.literal_eval(value)
                     except (ValueError, SyntaxError):
@@ -224,24 +240,6 @@ def text_literals(source, path):
             continue
 
 
-def has_text_pin_reason(source, start):
-    """A non-empty pin comment may sit on the statement or its adjacent line."""
-    prefix = source[:start]
-    lines = prefix.splitlines()
-    if lines and re.search(r'//\s*pin:\s*\S', lines[-1]):
-        return True
-    for line in reversed(lines[:-1]):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith(('//', '#', '*', '/*')):
-            if re.search(r'//\s*pin:\s*\S', stripped) or re.search(r'#\s*pin:\s*\S', stripped):
-                return True
-            continue
-        break
-    return False
-
-
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
     if '/' in body and not re.search(r'\s', body):
@@ -336,8 +334,6 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
             if changed_lines is not None else []
         )
         if changed_lines is not None and not changed_literal_lines:
-            continue
-        if has_text_pin_reason(source, start):
             continue
         line_start = source.rfind('\n', 0, start) + 1
         line_end = source.find('\n', end)
@@ -601,6 +597,8 @@ def main():
                               f'falling back to option_env!("CARGO_BIN_EXE_{name}")')
                 elif kind == 'TEST_ASSERTION_PROSE':
                     remedy = 'assert behavior, an error code or a rule ID; pin comments do not waive prose checks'
+                elif kind == 'exact-text pin':
+                    remedy = 'assert behavior or machine data; prose pins cannot be waived by comments'
                 else:
                     remedy = 'add // pin: <reason> or replace with a behavior test'
                 hits.append(f'{path}:{line}: {kind}; {remedy}')

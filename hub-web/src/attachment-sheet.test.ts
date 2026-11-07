@@ -122,7 +122,7 @@ describe("a page attachment shows inline in a sandboxed frame (cas-3aff)", () =>
       expect(frame.getAttribute("referrerpolicy")).toBe("no-referrer");
       expect(frame.getAttribute("allow")).toBe("");
       expect(frame.getAttribute("src")).toBe("https://atlas.test/v1/pages/T/card");
-      expect(frame.title).toBe("Release report card.html, a page from the supervisor");
+      expect(frame.title).toContain(card.name);
       expect(page!.querySelector("iframe[srcdoc]")).toBeNull();
       expect(failed!.querySelector("iframe")).toBeNull();
       // pin: the failed frame must say where the page can still be opened.
@@ -340,7 +340,7 @@ it("loads supported inline media into reserved space and keeps the original Open
   }
   const root = inlineAttachment(renderAttachmentSheet(document, brief), brief, async () => ({ ok: true, view: { artifact_id: brief.artifact_id, url: "javascript:alert(1)" } }));
   document.body.append(root);
-  await vi.waitFor(() => expect(root.textContent).toBeTruthy());
+  await vi.waitFor(() => expect(root.querySelector(".rich-media")?.getAttribute("data-preview-state")).toBe("failed"));
   expect(root.querySelector("canvas")).toBeNull(); root.remove();
 });
 
@@ -368,7 +368,7 @@ it("renews a preview once on 401 or expiry, and never retries a refusal in a loo
           await vi.waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toContain("ticket-2"));
           root.querySelector("img")!.dispatchEvent(new Event("error"));
         }
-        await vi.waitFor(() => expect(root.textContent).toBeTruthy());
+        await vi.waitFor(() => expect(root.querySelector(".rich-media")?.getAttribute("data-preview-state")).toBe("failed"));
         expect(resolve).toHaveBeenCalledTimes(reason === "403" ? 1 : 2);
         expect(probe).toHaveBeenCalledTimes(reason === "expired" ? 0 : 1);
         expect(cancelled).toBe(reason === "expired" ? 0 : 1);
@@ -384,7 +384,7 @@ it("retries a disconnected preview when its machine reconnects, preserving cache
   const root = inlineAttachment(renderAttachmentSheet(document, file), file, resolve, { machineId: "atlas", available: () => live });
   document.body.append(root);
   try {
-    await vi.waitFor(() => expect(root.textContent).toBeTruthy());
+    await vi.waitFor(() => expect(root.querySelector(".rich-media")?.getAttribute("data-preview-state")).toBe("waiting"));
     root.querySelector(".rich-media p")!.textContent = "Translated fallback";
     root.remove(); document.body.append(root);
     retryAttachmentPreviews(document, "studio");

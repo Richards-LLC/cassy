@@ -44,7 +44,7 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     expect(retries).toHaveLength(3);
     expect(document.activeElement, "the keyboard user lands on the first Retry").toBe(retries[0]);
     // The × on a message that may have arrived dismisses the notice, and says so.
-    expect([...view.element.querySelectorAll(".conversation-dismiss")].map((button) => button.getAttribute("aria-label"))).toEqual(["Dismiss this notice", "Dismiss this notice", "Dismiss this notice"]);
+    expect(view.element.querySelectorAll(".conversation-dismiss[aria-label]")).toHaveLength(3);
     retries[1]!.click();
     expect(retry).toHaveBeenCalledWith(expect.objectContaining({ id: "b" }));
 
@@ -119,11 +119,11 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     unconfirmed(history, "c", "Ship it if both are green", at(9, 0) + 40_000);
     const { view } = mount(history);
     // Three not confirmed: every count on screen says three.
-    const counts = () => {
-      const said = [view.element.textContent ?? "", ...[...view.element.querySelectorAll("[aria-label]"), ...(view.unsent.hidden ? [] : [view.unsent])].map((node) => node.getAttribute("aria-label") ?? ""), view.unsent.hidden ? "" : view.unsent.textContent ?? ""].join("\n");
-      return [...said.matchAll(/(\d+) (?:messages?|dismissed)[^\n]*?not (?:sent or not )?confirmed/g)].map((match) => `${match[0].includes("dismissed") ? "dismissed" : "thread"}:${match[1]}`);
-    };
-    expect(new Set(counts())).toEqual(new Set(["thread:3"]));
+    const counts = () => ({
+      thread: [...view.element.querySelectorAll(".conversation-unconfirmed[role=status] b")].map(node => Number(node.textContent?.match(/\d+/)?.[0])),
+      dismissed: view.unsent.hidden ? 0 : Number(view.unsent.dataset.count?.split(":")[1]),
+    });
+    expect(counts()).toEqual({ thread: [3], dismissed: 0 });
     // The journey's transition: Review, dismiss all three, then a new run of two.
     view.element.querySelector<HTMLButtonElement>(".conversation-review")!.click();
     for (let index = 0; index < 3; index += 1) view.element.querySelector<HTMLButtonElement>(".conversation-dismiss")!.click();
@@ -138,8 +138,7 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
     expect(view.unsent.textContent).toContain("3");
     expect(view.unsent.getAttribute("aria-label")).toBeTruthy();
     const now = counts();
-    expect(new Set(now.filter((said) => said.startsWith("thread:")))).toEqual(new Set(["thread:2"]));
-    expect(new Set(now.filter((said) => said.startsWith("dismissed:")))).toEqual(new Set(["dismissed:3"]));
+    expect(now).toEqual({ thread: [2], dismissed: 3 });
     // Together they are every message still not confirmed.
     expect(history.dismissedSends().length + 2).toBe(5);
   });
@@ -147,7 +146,8 @@ describe("several unconfirmed messages (cas-b00c, journey F19)", () => {
   it("the list preview says a message is not confirmed until the supervisor replies after it", () => {
     const history = new ConversationHistory();
     unconfirmed(history, "a", "Is the gate green?", at(9, 0));
-    expect(history.preview()).toBe("Not confirmed: Is the gate green?");
+    expect(history.preview()).toContain("Is the gate green?");
+    expect(history.pendingSends()[0]?.state).toBe("unconfirmed");
   });
 });
 

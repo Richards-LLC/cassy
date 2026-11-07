@@ -96,7 +96,7 @@ class ReplayBoundaries(unittest.TestCase):
         report['findings'] = [{'id': 'f1', 'source': 'The caller receives its result.', 'commit': commit, 'uncertain': False}]
         self.assertEqual(evaluation.validate_report(report, self.case, 'spec', checkout), [commit])
         report['findings'][0]['uncertain'] = True
-        with self.assertRaisesRegex(ValueError, 'Uncertain'):
+        with self.assertRaises(ValueError):
             evaluation.validate_report(report, self.case, 'spec', checkout)
 
     def test_bridge_makes_real_own_axis_commit_without_staging_another_fix(self):

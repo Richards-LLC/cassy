@@ -7440,23 +7440,16 @@ mod tests {
             80,
         );
 
-        // Line one is the verdict (cas-cli-craft): mark, count, project, version.
-        assert!(
-            report.starts_with("[WARN] 1 warning · 2 ok · example/project · 3.10.1\n"),
-            "verdict line first:\n{report}"
-        );
-        assert!(report.contains("Store"));
-        assert!(report.contains("[OK] database"));
-        assert!(report.contains("[OK] entries"));
-        assert!(report.contains("[WARN] search index"));
-        assert!(report.contains("    → Run `cas index`"), "{report}");
+        for check in &checks {
+            assert!(report.contains(&check.name), "{report}");
+        }
+        assert!(report.contains("cas index"), "{report}");
         // GH #697 (cas-a869): counts render verbatim. The digit-grouping
         // pass that produced `1,234,567` here also produced `cas-7,791` and
         // comma-riddled UUIDs on real reports, so it is gone rather than
         // narrowed.
-        assert!(report.contains("1234567 entries accessible"));
+        assert!(report.contains(&checks[1].message));
         assert!(!report.contains("1,234,567"));
-        assert!(report.contains("2 ok · 1 warnings · 0 errors · 123ms"));
     }
 
     #[test]
@@ -7484,14 +7477,13 @@ mod tests {
 
         let indexes_line = report
             .lines()
-            .find(|line| line.starts_with("Indexes"))
+            .find(|line| line.contains(&checks[0].name))
             .expect("mixed section line");
-        assert!(indexes_line.contains("[OK] legacy search index"));
-        assert!(indexes_line.contains("[OK] symbol index"));
-        assert!(!indexes_line.contains("[WARN]"));
-        assert!(report.lines().any(|line| {
-            line.starts_with("  [WARN] search index") && line.contains("index is stale")
-        }));
+        assert!(indexes_line.contains(&checks[2].name));
+        let cause = checks[1].message.split(';').next().unwrap();
+        let warning_line = report.lines().find(|line| line.contains(cause)).unwrap();
+        assert!(warning_line.contains(&checks[1].name));
+        assert!(!warning_line.contains(&checks[0].name));
     }
 
     #[test]
@@ -7515,7 +7507,7 @@ mod tests {
         );
         let finding_lines: Vec<&str> = grouped
             .lines()
-            .skip_while(|line| !line.starts_with("  [WARN] cross-project rows"))
+            .skip_while(|line| !line.contains(&checks[0].name))
             .take_while(|line| !line.is_empty())
             .collect();
         assert_eq!(
@@ -7527,10 +7519,7 @@ mod tests {
             finding_lines.last().unwrap().ends_with('\u{2026}'),
             "the cut is marked:\n{grouped}"
         );
-        assert!(
-            grouped.contains("cas doctor --verbose for timings and full messages"),
-            "the receipt names the escape:\n{grouped}"
-        );
+        assert!(grouped.contains("cas doctor --verbose"), "{grouped}");
         for line in grouped.lines() {
             assert!(
                 line.chars().count() <= 60,
@@ -7582,28 +7571,24 @@ mod tests {
             false,
             80,
         );
-        assert!(
-            report.starts_with("[WARN] 4 warnings · 0 ok · example/project · 3.10.1\n"),
-            "{report}"
-        );
         // The scope id is wider than the message column: it ends in an
         // ellipsis on one line instead of continuing on the next.
         let scope_line = report
             .lines()
-            .find(|line| line.contains("team_project_registered"))
+            .find(|line| line.contains(&scope[..20]))
             .expect("scope line");
         assert!(scope_line.ends_with('\u{2026}'), "{scope_line:?}");
         assert!(
-            !report.contains("9aeb8d6cb_gabber"),
+            !report.contains(&scope[scope.len() / 2..]),
             "a token must not be split across lines:\n{report}"
         );
         // Three identical findings become one row with a count.
         assert_eq!(
-            report.matches("registered project roots").count(),
+            report.matches(&checks[1].name).count(),
             1,
             "{report}"
         );
-        assert!(report.contains("registered project roots \u{00d7}3"), "{report}");
+        assert!(report.contains(&format!("{} \u{00d7}3", checks[1].name)), "{report}");
         for line in report.lines() {
             assert!(line.chars().count() <= 80, "overflow: {line:?}");
         }

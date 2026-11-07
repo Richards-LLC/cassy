@@ -27,7 +27,7 @@ describe("system notices (cas-e829)", () => {
     const first = planNotice("atlas", "Accounting-rapid-gazelle-52", watchdog({ source: "relay-watchdog", subject: 3196290 }), (fp) => known.has(fp));
     expect(first).toMatchObject({ action: "raise", fingerprint: "notice:atlas:Accounting-rapid-gazelle-52:3196290" });
     if (first.action !== "raise") throw new Error("expected a raise");
-    expect(first.content).toMatchObject({ headline: "The supervisor missed an update: a worker stopped", severity: "warning", action: "view_pane" });
+    expect(first.content).toMatchObject({ severity: "warning", action: "view_pane" });
     known.add(first.fingerprint);
     // The same relay again (a reload replays history): nothing new.
     expect(planNotice("atlas", "Accounting-rapid-gazelle-52", { ...watchdog({ source: "relay-watchdog", subject: 3196290 }), notification_id: 3196302 }, (fp) => known.has(fp)).action).toBe("none");
@@ -45,7 +45,7 @@ describe("system notices (cas-e829)", () => {
     const plan = planNotice("atlas", "s", watchdog({ source: "relay-watchdog", subject: 7 }), () => false);
     if (plan.action !== "raise") throw new Error("expected a raise");
     const item = createAttentionItem({ id: "i", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-10-01T19:35:00Z" }, plan.content);
-    expect(attentionContent(item)).toMatchObject({ headline: "The supervisor missed an update: a worker stopped", severity: "warning", action: "view_pane", fingerprint: "notice:atlas:s:7" });
+    expect(attentionContent(item)).toMatchObject({ severity: "warning", action: "view_pane", fingerprint: "notice:atlas:s:7" });
   });
 });
 
@@ -67,8 +67,8 @@ describe("notice age (cas-5c22)", () => {
   });
   it("names the phone badge by its count and hides it at zero", () => {
     expect(conversationAttentionBadge(0)).toMatchObject({ hidden: true });
-    expect(conversationAttentionBadge(1)).toEqual({ hidden: false, text: "1", label: "Attention: 1 item for this session" });
-    expect(conversationAttentionBadge(3).label).toBe("Attention: 3 items for this session");
+    expect(conversationAttentionBadge(1)).toMatchObject({ hidden: false, text: "1" });
+    expect(conversationAttentionBadge(3)).toMatchObject({ hidden: false, text: "3" });
   });
 });
 

@@ -212,10 +212,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     FakeWebSocket.instances[0].open();
     await vi.advanceTimersByTimeAsync(3_000);
 
-    expect(callbacks.onSocketError).toHaveBeenCalledWith(
-      "factory-a",
-      "Terminal attach opened but sent no session state within 3s. Retrying…",
-    );
+    expect(callbacks.onSocketError).toHaveBeenCalledWith("factory-a", expect.any(String));
     expect(callbacks.onAttachState.mock.calls.map(([, state]) => [state.phase, state.stage])).toEqual([
       ["auth", "auth"],
       ["dialing", "dialing"],

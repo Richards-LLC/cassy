@@ -246,7 +246,7 @@ mod tests {
         };
 
         let refused = merge(4249).expect("open ask holds its PR");
-        assert!(refused.contains("UNANSWERED PEER ASK") && refused.contains("ask-4249"), "{refused}");
+        assert!(refused.contains("ask-4249"), "{refused}");
         assert!(merge(4250).is_none(), "an ask about another PR holds nothing");
         assert!(
             merge_refusal(&root, "sup-other", "other", None, &MergeSubject { task_id: None, pr: Some(4249), any_pr: false }).is_none(),
@@ -262,11 +262,7 @@ mod tests {
             .unwrap()
             .list_pending("operator")
             .unwrap();
-        assert!(
-            notices.iter().any(|notice| notice.payload.contains("overrode an unanswered ask")
-                && notice.payload.contains("prowl silent 7h")),
-            "{notices:?}"
-        );
+        assert!(notices.iter().any(|notice| notice.payload.contains("prowl silent 7h")), "{notices:?}");
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
         conn.execute(

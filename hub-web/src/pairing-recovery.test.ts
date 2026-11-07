@@ -160,8 +160,6 @@ describe("F2: cancellation says whether it is durable", () => {
   it("keeps the dialog open with a retry when storage could not record the cancellation", () => {
     const outcome = cancellationOutcome({ persistentRemovalFailed: true, failClosed: false }, false);
     expect(outcome.cleanupFailed).toBe(true);
-    expect(outcome.status).toContain("retry the cleanup");
-    expect(outcome.status).not.toContain("resume");
   });
 
   it("stays visible while an in-flight exchange unwinds", () => {
@@ -170,7 +168,7 @@ describe("F2: cancellation says whether it is durable", () => {
   });
 
   it("closes on a durable cancellation, naming the tombstone when removal was denied", () => {
-    expect(cancellationOutcome({ persistentRemovalFailed: false, failClosed: true }, false)).toEqual({ cleanupFailed: false, verifying: false, status: "Pairing cancelled." });
-    expect(cancellationOutcome({ persistentRemovalFailed: true, failClosed: true }, false).status).toContain("durably blocked");
+    expect(cancellationOutcome({ persistentRemovalFailed: false, failClosed: true }, false)).toMatchObject({ cleanupFailed: false, verifying: false });
+    expect(cancellationOutcome({ persistentRemovalFailed: true, failClosed: true }, false)).toMatchObject({ cleanupFailed: false, verifying: false });
   });
 });

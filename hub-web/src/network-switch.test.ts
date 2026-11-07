@@ -236,7 +236,8 @@ describe("held sends (cas-0978)", () => {
     const history = new ConversationHistory();
     history.hold("send-2", "patient-pelican-9", "Hello?", 1_000);
     expect(history.reject("send-2", "Not sent: lost connection to Atlas · Linux.")).toBe(true);
-    expect(history.preview()).toBe("Not sent: Hello?");
+    expect(history.preview()).toContain("Hello?");
+    expect(history.events[0]).toMatchObject({ value: { state: "error" } });
   });
 });
 

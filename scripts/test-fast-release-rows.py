@@ -258,7 +258,6 @@ class FastRows(unittest.TestCase):
         dirty = self.fast()
         self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
         self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
-        self.assertIn("no receipt", dirty.stdout)
 
 
     def test_fast_test_env_skips_unchanged_crate_paths_and_fixture_suite(self):
@@ -404,7 +403,6 @@ class FastRows(unittest.TestCase):
         grown = self.fast()
         self.assertEqual(grown.returncode, 1, grown.stdout + grown.stderr)
         self.assertIn('FAIL test-env', grown.stdout)
-        self.assertIn('baseline growth', grown.stdout)
         self.write('cas-cli/tests/sample.rs', '#[test] fn sample() {}')
         self.commit()
         stale = self.fast()
@@ -421,7 +419,6 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('FAIL test-env', result.stdout)
-        self.assertIn('scripts/check-test-env.py is missing', result.stdout)
 
     def test_optional_shape_checker_receives_the_lane_base_and_failure_is_named(self):
         self.write("scripts/check-test-shape.py", "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad shape fixture.rs:1')\nsys.exit(1)\n")
@@ -499,7 +496,6 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS version-literals", result.stdout)
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
-        self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
         self.assertIn("cas-cli/tests/sample.rs:4:", log)
 
@@ -612,15 +608,15 @@ class FastRows(unittest.TestCase):
         refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
         # pin: push diagnostics name the full comparison ref and offending source line.
-        self.assertIn(f"(base {base})", refused.stderr)
+        self.assertIn(base, refused.stderr)
         self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
         self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
         self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
         # The real hook must keep the detailed child output after the gate's
         # scratch guardian has exited, and tell the worker where it is.
-        retained = re.search(r"pre-push: fast-row logs: (.+)", refused.stderr)
-        self.assertIsNotNone(retained, refused.stderr)
-        logs = Path(retained.group(1))
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [logs] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(logs), refused.stderr)
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
@@ -649,9 +645,10 @@ class FastRows(unittest.TestCase):
         self.commit()
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
-        later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
-        self.assertIsNotNone(later, missing.stderr)
-        self.assertNotEqual(Path(later.group(1)), logs)
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [later] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(later), missing.stderr)
+        self.assertNotEqual(later, logs)
         # pin: retaining evidence means its bytes survive later attempts unchanged.
         self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
@@ -727,7 +724,7 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)
                 row_log = (self.repo / ".git/gate-rows/release-notes-draft.log").read_text()
                 if posted:
-                    self.assertIn(f"release-notes-draft: skipping posted draft {path}", row_log)
+                    self.assertIn(path, row_log)
                     self.assertNotIn("[rule: slack_bold]", row_log)
                 else:
                     self.assertIn("FAIL release-notes-draft", result.stdout)
@@ -750,8 +747,6 @@ class FastRows(unittest.TestCase):
         self.commit()
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no release-notes draft change",
-                      (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
                              "[rule: punch_length]")

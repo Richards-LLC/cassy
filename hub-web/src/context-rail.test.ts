@@ -108,13 +108,12 @@ describe("desktop context rail (P10)", () => {
     expect(section(rail, "waiting").hidden).toBe(false);
     expect(history.pinnedAsk()?.notification_id).toBe(11);
     const jumps = [...rail.querySelectorAll<HTMLButtonElement>(".context-jump")];
-    expect(jumps.map((jump) => [jump.dataset.kind, jump.querySelector(".context-kind")?.textContent, jump.querySelector(".context-text")?.textContent])).toEqual([
-      ["blocker", "Blocker", "The release gate went red."],
-      ["ask", "Question", "Keep the old runner pool for now?"],
+    expect(jumps.map((jump) => [jump.dataset.kind, jump.querySelector(".context-text")?.textContent])).toEqual([
+      ["blocker", "The release gate went red."],
+      ["ask", "Keep the old runner pool for now?"],
     ]);
     // A blocker's entry says how it clears (journey F12); the pinned question shows in its bubble and banner only.
     expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([BLOCKER_HINT, null]);
-    expect(BLOCKER_HINT).toBe("Reply to unblock");
     // Separate machines can use the same queue ids. Only this history owns the rail jump.
     const otherHistory = new ConversationHistory();
     for (const event of history.events) if (event.kind === "reply") otherHistory.reply(event.value, event.at);

@@ -186,7 +186,7 @@ signal.pause()
                 later_binary.write_text(binary.read_text().replace(revision[:7],later[:7]))
                 later_binary.chmod(0o700)
                 with mock.patch.dict(os.environ,{'FIXTURE_STALE':'1','FIXTURE_BINARY':str(later_binary)}), \
-                     self.assertRaisesRegex(ValueError,'served.*digest'):
+                     self.assertRaises(ValueError):
                     candidate['build'](repo,later,destination)
                 self.assertEqual((destination/'RECEIPT.json').read_bytes(),original)
                 # A source change during the compile stamps -dirty, and the candidate is refused.

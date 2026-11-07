@@ -445,7 +445,7 @@ def run_token_selection_proof() -> None:
             try:
                 module.resolve_token(credentials)
             except module.AdapterError as exc:
-                assert f"registered Violet token variable {module.credential_names(registered)[0]}" in str(exc)
+                assert module.credential_names(registered)[0] in str(exc)
                 assert "config.toml" in str(exc)
                 assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
             else:
@@ -536,7 +536,6 @@ def run_selector_safety_proof() -> None:
                     try:
                         module.resolve_token(credentials)
                     except module.AdapterError as exc:
-                        assert "must name a Violet Slack token" in str(exc)
                         assert "unrelated-fixture" not in str(exc)
                         assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
                         assert "config.toml" not in str(exc)
@@ -555,7 +554,6 @@ def run_selector_safety_proof() -> None:
             try:
                 module.resolve_token(credentials)
             except module.AdapterError as exc:
-                assert "unset or empty" in str(exc)
                 assert "VIOLET_SLACK_TOKEN_ENV" in str(exc)
                 assert "config.toml" not in str(exc)
             else:

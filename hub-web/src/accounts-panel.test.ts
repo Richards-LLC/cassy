@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
-import { accountCapacity, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
+import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
 const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
@@ -36,8 +36,8 @@ it("shows read-only pairings their disabled actions and the exact manage-access 
 
   expect(document.body.textContent).toBeTruthy();
   const operations = [...document.querySelectorAll<HTMLButtonElement>("[data-operation]")];
-  expect(operations.map(button => button.textContent)).toEqual(["Set default", "Rename", "Disable", "Remove"]);
-  expect(operations.every(button => button.disabled && button.title === "Needs manage access on this machine")).toBe(true);
+  expect(operations.map(button => button.dataset.operation)).toEqual(["set_default", "rename", "disable", "remove"]);
+  expect(operations.every(button => button.disabled && Boolean(button.title))).toBe(true);
   click("[data-grant-command]"); await settle();
   expect(host.copy).toHaveBeenCalledWith(`cas hub pair --origin ${location.origin} --scopes machine:read,factory:manage`);
   click("[data-login]"); await settle();
@@ -108,7 +108,8 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
   sheet.open(); await settle();
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelector("h4")!.textContent)).toEqual(["Claude · 2", "Needs cleanup · 1"]);
+  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([2, 1]);
+  expect(groups[1]!.querySelector<HTMLElement>(".accounts-identity strong")!.title).toBe(duplicate.key);
   expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
   expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
   expect(groups[0]!.textContent).toContain("~/.claude-work");
@@ -126,8 +127,8 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
 it("formats reset and observation times locally in 12-hour form and clears expired capacity", () => {
   const now = new Date("2026-10-28T16:00:00Z").getTime();
   const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
-  expect(fresh).toContain("weekly 62% left"); expect(fresh).toContain("as of"); expect(fresh).toMatch(/AM|PM/);
-  expect(accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], null, now)[0]).toContain("usage unknown");
+  expect(fresh).toContain("weekly"); expect(fresh).toContain("62%"); expect(fresh).toContain(accountTime("2026-10-28T13:00:00Z")); expect(fresh).toMatch(/AM|PM/);
+  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, resetPast: true });
   const zone = process.env.TZ;
   try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
   finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }

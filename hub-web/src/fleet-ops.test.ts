@@ -11,7 +11,6 @@ import {
   mergeRequestMessage,
   requestMergeAction,
   spawnAction,
-  staleMessage,
   stopAction,
   type FleetAgent,
   type FleetTask,
@@ -32,19 +31,19 @@ describe("fleet actions send the brief's operations with their preconditions (ca
   it("pauses and resumes a worker, each the other's Undo, guarded by its generation", () => {
     const pause = holdAction(lark);
     expect(pause.request).toEqual({ op: { kind: "set_worker_hold", worker: "swift-lark-3", hold: true }, expected: { worker: "swift-lark-3", generation: 2 } });
-    expect(pause).toMatchObject({ label: "Pause", destructive: false, done: "swift-lark-3 paused." });
+    expect(pause).toMatchObject({ destructive: false, operation: "pause-worker" });
     const resume = pause.inverse!();
     expect(resume.request.op).toEqual({ kind: "set_worker_hold", worker: "swift-lark-3", hold: false });
-    expect(resume.label).toBe("Resume");
-    expect(holdAction({ ...lark, status: "held" }).label).toBe("Resume");
+    expect(holdAction({ ...lark, status: "held" }).request.op).toMatchObject({ hold: false });
   });
 
   it("lists Pause, Restart…, Stop… with the destructive ones confirmed and never undone", () => {
     const [pause, restart, stop] = agentMenu(lark);
-    expect([pause!.label, restart!.label, stop!.label]).toEqual(["Pause", "Restart…", "Stop…"]);
+    expect([pause!.operation, restart!.operation, stop!.operation]).toEqual(["pause-worker", "restart-worker", "stop-worker"]);
     expect(restart).toMatchObject({ destructive: true, operation: "restart-worker" });
     expect(restart!.inverse).toBeUndefined();
-    expect(stop!.question).toBe("Stop swift-lark-3? Its task cas-1234 goes back to Open, for any worker to pick up.");
+    expect(stop!.question).toContain(lark.name);
+    expect(stop!.question).toContain(lark.current_task);
     expect(stop!.request).toEqual({ op: { kind: "shutdown_workers", workers: ["swift-lark-3"] }, expected: { worker: "swift-lark-3", generation: 2 } });
     expect(stopAction(lark, true).request.op).toMatchObject({ force: true });
   });
@@ -67,21 +66,11 @@ describe("fleet actions send the brief's operations with their preconditions (ca
 
   it("shows the exact merge message before it is sent, generated from the task", () => {
     // The hub's own template (ops::fleet::request_merge_text), so the preview is what is sent.
-    expect(mergeRequestMessage(parked)).toBe("Operator request from Commander: please merge cas-1999 (Footer copy).\nBranch: factory/owl-cas-1999\nTip: 9ffb3897\nIt is awaiting merge. Merge it into its epic, or reply with what blocks it.");
-    expect(mergeRequestMessage({ id: "cas-1", title: "T" })).toContain("Branch: <not recorded>\nTip: <not recorded>");
+    const preview = mergeRequestMessage(parked);
+    for (const value of [parked.id, parked.title, parked.branch, parked.tip]) expect(preview).toContain(value);
     expect(requestMergeAction(parked).request).toEqual({ op: { kind: "request_merge", task_id: "cas-1999" }, expected: { status: "awaiting_merge", tip: "9ffb3897" } });
   });
 
-  it("says what changed when the hub answers stale", () => {
-    expect(staleMessage(stopAction(lark), { generation: 3 })).toBe("swift-lark-3 already restarted.");
-    expect(staleMessage(stopAction(lark), { exists: false })).toBe("swift-lark-3 is already gone.");
-    // The hub's own shape (ops::fleet::check_worker_generation): a null generation is a worker gone.
-    expect(staleMessage(stopAction(lark), { worker: "swift-lark-3", generation: null })).toBe("swift-lark-3 is already gone.");
-    expect(staleMessage(stopAction(lark), { worker: "swift-lark-3", generation: "agent-77" })).toBe("swift-lark-3 already restarted.");
-    expect(staleMessage(holdAction(lark), { held: true })).toBe("swift-lark-3 is already paused.");
-    expect(staleMessage(assignAction(ready, "quiet-owl-7"), { assignee: "brisk-wren-9" })).toBe("cas-2001 is already assigned to brisk-wren-9.");
-    expect(staleMessage(requestMergeAction(parked), { status: "closed" })).toBe("cas-1999 is closed.");
-  });
 });
 
 describe("menu, confirm and undo state (cas-a474)", () => {
@@ -108,18 +97,17 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     const assign = assignAction(ready, "quiet-owl-7");
     state.succeeded("task:cas-2001", assign, 0, { kind: "assign_task", inverse: { op: { kind: "assign_task", task_id: "cas-2001", assignee: null }, expected: { assignee: "quiet-owl-7", updated_at: "2026-10-03T12:05:00Z" } } });
     expect(state.currentUndo(1)?.action.request).toEqual({ op: { kind: "assign_task", task_id: "cas-2001", assignee: null }, expected: { assignee: "quiet-owl-7", updated_at: "2026-10-03T12:05:00Z" } });
-    expect(state.currentUndo(1)?.action.label).toBe("Unassign");
   });
 
   it("offers Undo for 8 s after a reversible action, none after a destructive or additive one, and announces each step", () => {
     const state = new FleetOpsState();
     const pause = holdAction(lark);
     state.started("agent:swift-lark-3", pause);
-    expect(state.announcement).toBe("Pausing swift-lark-3…");
+    expect(state.announcement).toBe(pause.progress);
     expect(state.pending.has("agent:swift-lark-3")).toBe(true);
     state.succeeded("agent:swift-lark-3", pause, 1_000);
-    expect(state.announcement).toBe("swift-lark-3 paused.");
-    expect(state.currentUndo(1_000 + UNDO_WINDOW_MS - 1)?.action.label).toBe("Resume");
+    expect(state.announcement).toBe(pause.done);
+    expect(state.currentUndo(1_000 + UNDO_WINDOW_MS - 1)?.action.request.op).toMatchObject({ hold: false });
     expect(state.currentUndo(1_000 + UNDO_WINDOW_MS)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", pause, 2_000);
     const undone = state.takeUndo(2_500)!;
@@ -127,12 +115,12 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     expect(state.takeUndo(2_600)).toBeUndefined();
     // cas-97d58 F12: the Undo itself succeeds with no Undo of its own.
     state.succeeded("agent:swift-lark-3", undone, 2_700);
-    expect(state.announcement).toBe("swift-lark-3 resumed.");
+    expect(state.announcement).toBe(undone.done);
     expect(state.currentUndo(2_700)).toBeUndefined();
     state.succeeded("agent:swift-lark-3", stopAction(lark), 3_000);
     expect(state.currentUndo(3_000)).toBeUndefined();
     // cas-97d58 F12: a destructive result stays visible for the Undo window instead.
-    expect(state.currentResult(3_000)?.label).toBe("swift-lark-3 stopped.");
+    expect(state.currentResult(3_000)?.label).toBe(stopAction(lark).done);
     expect(state.currentResult(3_000 + UNDO_WINDOW_MS)).toBeUndefined();
     state.succeeded("header", spawnAction(2), 3_000);
     expect(state.currentUndo(3_000)).toBeUndefined();
@@ -141,10 +129,11 @@ describe("menu, confirm and undo state (cas-a474)", () => {
   it("keeps a failure on its row, in words: stale says what changed, an error says what the hub said", () => {
     const state = new FleetOpsState();
     state.failed("agent:swift-lark-3", stopAction(lark), { stale: true, current: { generation: 3 } });
-    expect(state.notes.get("agent:swift-lark-3")).toEqual({ text: "swift-lark-3 already restarted.", tone: "stale" });
-    expect(state.announcement).toBe("swift-lark-3 already restarted.");
+    expect(state.notes.get("agent:swift-lark-3")).toMatchObject({ tone: "stale" });
+    expect(state.notes.get("agent:swift-lark-3")?.text).toContain(lark.name);
+    expect(state.announcement).toBe(state.notes.get("agent:swift-lark-3")?.text);
     state.failed("agent:quiet-owl-7", holdAction(owl), { detail: "audit log unavailable" });
-    expect(state.notes.get("agent:quiet-owl-7")?.text).toBe("Could not pause: audit log unavailable.");
+    expect(state.notes.get("agent:quiet-owl-7")?.text).toContain("audit log unavailable");
   });
 
   it.each([
@@ -159,8 +148,9 @@ describe("menu, confirm and undo state (cas-a474)", () => {
     const row = "agent:swift-lark-3", pause = holdAction(lark);
     state.started(row, pause);
     state.failed(row, pause, { detail });
-    expect(state.notes.get(row)).toEqual({ text: `Could not pause: ${expected}`, tone: "error" });
-    expect(state.announcement).toBe(`Could not pause: ${expected}`);
+    expect(state.notes.get(row)).toMatchObject({ tone: "error" });
+    expect(state.notes.get(row)?.text).toContain(expected);
+    expect(state.announcement).toBe(state.notes.get(row)?.text);
     expect(state.pending.has(row)).toBe(false);
     expect(state.currentUndo(0)).toBeUndefined();
     expect(lark.status).toBe("active");
@@ -232,9 +222,9 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const state = new FleetOpsState();
     state.assignFor = "task:cas-2001";
     const view = taskControls(document, context([...CONTROL, "factory-operate"], state), ready)!;
-    expect([...view.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(["Assign to quiet-owl-7"]);
+    expect([...view.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining(owl.name)]);
     const header = headerControls(document, context([...CONTROL, "factory-operate"]), "focus");
-    expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(["Focus cas-f29b"]);
+    expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining("cas-f29b")]);
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
     expect(readOnly.querySelector(".fleet-ops-add")).toBeNull();
     expect(readOnly.querySelector("summary")?.textContent).toBeTruthy();

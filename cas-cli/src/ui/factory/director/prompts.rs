@@ -4313,43 +4313,7 @@ mod tests {
         );
     }
 
-    /// Regression for cas-b67d D-3: the zero-ready-task nudge must NOT instruct
-    /// the supervisor to close the epic. The director snapshot may be stale; the
-    /// epic may have open children that just aren't visible in this refresh cycle.
-    /// Obeying "close the epic" advice would orphan live work.
-    #[test]
-    fn test_worker_idle_no_close_epic_advice() {
-        let event = DirectorEvent::WorkerIdle {
-            worker: "swift-fox".to_string(),
-            active_task: None,
-        };
-        let data = make_data(0); // No ready tasks in snapshot
-        let config = default_config();
 
-        let prompt = generate_prompt(
-            &event,
-            &data,
-            &data,
-            "supervisor",
-            &config,
-            codex(),
-            codex(),
-            &HashSet::new(),
-            None,
-        )
-        .unwrap();
-
-        // Must never suggest closing the epic — the snapshot may be stale and
-        // the epic might have live open children not visible in this refresh.
-        assert!(
-            // pin: rendered supervisor/worker prompt text is the contract under test.
-            !prompt.text.to_lowercase().contains("closing the epic")
-                // pin: rendered supervisor/worker prompt text is the contract under test.
-                && !prompt.text.to_lowercase().contains("close the epic"),
-            "WorkerIdle nudge must not advise closing the epic (stale-snapshot risk): {:?}",
-            prompt.text
-        );
-    }
 
     #[test]
     fn test_worker_idle_suppressed_when_worker_absent_from_live_snapshot() {

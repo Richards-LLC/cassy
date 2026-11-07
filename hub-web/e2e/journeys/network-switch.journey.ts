@@ -1048,7 +1048,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
     await expect(notice).toHaveText("3 messages not confirmed · Cassy couldn't confirm delivery to the cas-src supervisor. Review them to retry.");
     await expect(log.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
     await expect(log.getByRole("button", { name: /^Dismiss/ })).toHaveCount(0);
-    await expect(row).toContainText("Not confirmed: Ship it if both are green");
+    await expect(row).toHaveAccessibleName(/Not confirmed: Ship it if both are green/);
     // Unconfirmed sends are not activity the supervisor saw: the row's time is unchanged.
     if (whenBefore === null) await expect(when).toHaveCount(0); else await expect(when).toHaveText(whenBefore);
     const review = log.getByRole("button", { name: "Review 3 messages not confirmed", exact: true });

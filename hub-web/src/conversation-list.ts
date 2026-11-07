@@ -271,14 +271,17 @@ function rowPreviewText(row: ConversationRow, fallback: string): string {
  * One line per session (cas-da546): `avatar · Supervisor · machine · time ·
  * marks`. The project card names the project, so the row names the role and
  * where it runs. A second line appears only for a state the operator must
- * see: ended, unreachable, interrupted, or a reply parked here as a draft.
+ * see: ended, unreachable, interrupted, its machine down, or a reply parked
+ * here as a draft.
  * The last turn is spoken, not shown. The version shows only on skew.
  */
 export function conversationRowMarkup(row: ConversationRow): string {
   const waiting = !row.ended && row.attention > 0;
   const unread = row.unread ?? 0;
   const draft = row.draft?.trim() && !row.selected;
-  const note = row.ended || row.unreachable || row.interrupted || draft ? truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, row.connection))) : "";
+  // A machine that is down says so ("Last known") rather than its last turn.
+  const outage = !row.ended && !row.unreachable && !row.interrupted && row.machine_online === false;
+  const note = outage ? row.connection : row.ended || row.unreachable || row.interrupted || draft ? truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, row.connection))) : "";
   // cas-6acf: assistive tech hears the time in words ("20 minutes ago"), not "20m".
   const time = row.when
     ? `<span class="conversation-when${waiting ? " hot" : ""}" title="${escapeHtml(row.freshness)}"${row.whenSpoken ? ' aria-hidden="true"' : ""}>${escapeHtml(row.when)}</span>`

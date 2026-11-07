@@ -284,7 +284,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     // A project name leaves its conversation as the only row.
     await search.fill("gabber");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
+    await expect(list.locator(".project-card-name")).toHaveText(["gabber-studio"]);
     // The machine and the supervisor codename find it too.
     await search.fill("atlas");
     await expect(list.locator(".conversation-row")).toHaveCount(1);
@@ -307,7 +307,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     expect(await page.locator(hinted).ariaSnapshot(), "the row's aria snapshot").not.toContain("Enter");
     await search.fill(OTTER);
     await expect(list.locator(".conversation-row")).toHaveCount(1);
-    await expect(list.locator(".conversation-row").first()).toContainText("gabber-studio");
+    await expect(list.locator(".project-card-name")).toHaveText(["gabber-studio"]);
     await search.fill("no-such-project");
     await expect(list.locator(".conversation-row")).toHaveCount(0);
     await expect(page.locator("#conversation-empty")).toContainText("No conversation matches “no-such-project”.");

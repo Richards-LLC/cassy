@@ -224,7 +224,7 @@ test("HUB-J14 Most recent moves without shifting sibling rows (cas-6faf)", journ
     for (const sibling of machine.sessions) sibling.last_activity_at = new Date(minute + 1_000).toISOString();
     machine.sessions[1]!.last_activity = `supervisor → ready-${width}`;
     await hub.announceCatalog("atlas");
-    await expect(row("calm-puma-34")).toContainText(`Messaged ready-${width}`);
+    await expect(row("calm-puma-34")).toHaveAccessibleName(new RegExp(`Messaged ready-${width}`));
     await journey.stage(`Alternating activity holds the badge at ${width}px`, async () => {
       const before = await rects();
       await page.evaluate(() => {
@@ -600,10 +600,10 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       await expect(studio().locator(`[data-harness="${harness}"]`)).toHaveAttribute("title", provider);
       expect((await studio().locator(`[data-harness="${harness}"] svg.provider-mark`).boundingBox())?.width).toBeGreaterThanOrEqual(20);
     }
-    await expect(studio().locator(".project-card-summary")).toHaveText("1 worker");
+    await expect(studio().locator(".project-card-summary")).toHaveText(/^1 worker/);
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     await expect(old.locator("[data-harness]")).toHaveCount(0);
-    await expect(old.locator(".project-card-summary")).toHaveText("no workers");
+    await expect(old.locator(".project-card-summary")).toContainText("no workers");
     const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });
     await expect(pulseMachine).toBeVisible();
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));

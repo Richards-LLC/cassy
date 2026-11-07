@@ -594,6 +594,9 @@ describe('conversation evidence', () => {
     const dormant = { name: 's', supervisor: 'sup', workers: [], liveness: 'stale_metadata' as const, dormant: true, unreachable: true };
     expect(visibleCatalog([dormant])).toEqual([]);
     expect(pendingSessionLabel(dormant, false)).toBeUndefined();
+    // A row whose machine is down says Last known, not its last turn (cas-da546).
+    const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Last known', machine_online: false, attention: 0, preview: 'An older turn.', selected: false };
+    expect(conversationRowMarkup(row)).toContain('<span class="conversation-preview">Last known</span>');
   });
   it('marks a parked draft in another conversation, under any connection problem (cas-97d58 F19)', () => {
     const row: ConversationRow = { key: 'a:s', machineId: 'a', session: 's', supervisor: 'sup', host: 'Atlas', freshness: 'now', connection: 'Live', attention: 0, preview: 'Gate run 3 of 3 is going.', selected: false, draft: 'Please keep the release notes short' };

@@ -29486,6 +29486,16 @@ mod merge_state_gate_tests {
             let p = dir.path();
             git(p, &["config", "user.name", "CAS fixture"]);
             git(p, &["config", "user.email", "cas@example.test"]);
+            // cas-e06c: source and target independently edit nearby lines. The
+            // reviewed merge lands intact, but reversing the source patch at
+            // the merge-base fails because target changed its patch context.
+            git(p, &["checkout", "-q", "main"]);
+            std::fs::write(p.join("seed.txt"), "old\nmiddle\nbase\n").unwrap();
+            git(p, &["commit", "-qam", "shared context before delivery"]);
+            git(p, &["checkout", "-q", "factory/worker"]);
+            git(p, &["merge", "-q", "main", "--no-edit"]);
+            std::fs::write(p.join("seed.txt"), "new\nmiddle\nbase\n").unwrap();
+            git(p, &["add", "seed.txt"]);
             std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
             std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
             git(p, &["add", ".gitignore", "second.rs"]);
@@ -29493,6 +29503,8 @@ mod merge_state_gate_tests {
             let source = head_sha(p);
             git(p, &["push", "-q", "origin", "factory/worker"]);
             git(p, &["checkout", "-q", "main"]);
+            std::fs::write(p.join("seed.txt"), "old\nmiddle\ntarget\n").unwrap();
+            git(p, &["commit", "-qam", "same-epic work beside the delivery"]);
             let wt = tempfile::tempdir().unwrap();
             git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
             let root = p.join(".cas");

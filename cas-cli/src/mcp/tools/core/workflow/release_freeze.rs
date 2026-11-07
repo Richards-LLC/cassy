@@ -6,7 +6,7 @@
 //! staffing on it and CI retries armed against it. A `release-repair` task is
 //! the one exception, and only while the train is red: a recorded
 //! train-suite red, or a failed GitHub train run at the frozen tip. The freeze
-//! ends when its tip lands on the integration branch, or when the operator
+//! ends when a published release covers its tip, or when the operator
 //! lifts it in Commander. A supervisor cannot lift it.
 
 use std::path::{Path, PathBuf};
@@ -30,7 +30,7 @@ pub(crate) struct Freeze {
     pub tip: String,
 }
 
-/// The freeze recorded on an open release train, landed or not. `freeze`
+/// The freeze recorded on an open release train, published or not. `freeze`
 /// writes exactly one label; task updates only append labels, so the first
 /// one is authoritative and a later appended label cannot move its tip.
 pub(crate) fn freeze_of(train: &Task) -> Option<Freeze> {
@@ -56,16 +56,22 @@ fn repo_of(root: &Path, train: &Task) -> Option<PathBuf> {
     crate::train_guardrails::train_repo_root(root, train).ok()
 }
 
-/// A freeze that still holds: its tip has not reached the integration branch.
+/// A freeze that still holds: no published release covers its tip. The
+/// publication evidence is the friction-ledger `Release` event that
+/// `release-published-receipt.sh` records after it verifies the published
+/// assets: its version's tag must contain the frozen tip. Landing on the
+/// integration branch does not end a freeze; the cut still has to publish.
 pub(crate) fn active(root: &Path, train: &Task) -> Option<Freeze> {
     let freeze = freeze_of(train)?;
-    let integration = train.deliverables.work_target.as_ref().map(|target| target.target_branch.as_str());
-    let landed = repo_of(root, train).zip(integration).is_some_and(|(repo, integration)| {
-        [integration.to_string(), format!("origin/{integration}")]
+    let published = repo_of(root, train).is_some_and(|repo| {
+        cas_store::quality_events_between(root, Some(freeze.at), None)
+            .unwrap_or_default()
             .iter()
-            .any(|target| is_ancestor(&repo, &freeze.tip, target))
+            .filter(|event| event.project_id.is_empty() && matches!(event.payload, cas_store::QualityPayload::Release { .. }))
+            .filter_map(|event| event.release_version.as_deref())
+            .any(|version| is_ancestor(&repo, &freeze.tip, &format!("refs/tags/v{version}")))
     });
-    (!landed).then_some(freeze)
+    (!published).then_some(freeze)
 }
 
 fn short(sha: &str) -> &str {
@@ -127,7 +133,7 @@ fn refusal(train: &Task, freeze: &Freeze, subject: &str) -> String {
     format!(
         "TRAIN FROZEN: train frozen for release, parked for the next train. {} has been frozen since {} at tip {}; {subject}. \
          No merge was attempted. Only a `{REPAIR_LABEL}` task merges while the train is red. \
-         The freeze ends when the release lands or the operator lifts it in Commander.",
+         The freeze ends when the release is published or the operator lifts it in Commander.",
         train.id,
         eastern(freeze.at),
         short(&freeze.tip),
@@ -304,7 +310,7 @@ pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&s
     Ok(format!(
         "TRAIN FROZEN: {train_id} at {}. {}. Merges, new staffing and CI retries into {lane} are refused on every machine \
          except `{REPAIR_LABEL}` tasks while the train is red; new tasks join the next train. \
-         The freeze ends when the release lands or the operator lifts it in Commander.",
+         The freeze ends when the release is published or the operator lifts it in Commander.",
         short(&freeze.tip),
         summary(root, &task, &freeze, now)
     ))
@@ -387,7 +393,7 @@ mod tests {
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,
     /// a feature is refused and a repair is refused until the train is red,
     /// by receipt or by GitHub. A peer reads only the synced task row, and
-    /// the freeze ends when its tip lands on main.
+    /// the freeze ends when a published release covers its tip.
     #[cfg(unix)]
     #[test]
     fn frozen_train_refuses_features_and_admits_repairs_of_a_red_tip() {
@@ -424,7 +430,19 @@ mod tests {
         let notes = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
         assert!(notes.contains("cas-fix"), "{notes}");
 
+        // Landing on main does not end the freeze; only publication does.
         git(repo, &["merge", "-q", "--no-ff", lane, "-m", "release"]);
+        assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "landed, not published");
+        assert!(check_staffing(&root, "cas-feat").is_err(), "landed, not published");
+        // The published-release receipt records a Release event whose tag holds the tip.
+        git(repo, &["tag", "v9.9.9"]);
+        let mut published = cas_store::NewQualityEvent::new(
+            "release|9.9.9",
+            cas_store::QualityPayload::Release { commit_to_main_minutes: None, main_to_published_minutes: None, ejections: 0, rescues: 0 },
+        );
+        published.release_version = Some("9.9.9".into());
+        published.occurred_at = Utc::now();
+        cas_store::record_quality_event(&root, &published).unwrap();
         check_merge(&root, lane, Some("cas-feat")).unwrap();
         check_staffing(&root, "cas-feat").unwrap();
     }

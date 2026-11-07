@@ -202,7 +202,7 @@ export function focusEpicAction(epicId: string, current: string | null): FleetAc
   };
 }
 
-/** cas-2f4d: freeze the release train at its tip. One tap; only the release landing or Lift ends it. */
+/** cas-2f4d: freeze the release train at its tip. One tap; only the release publishing or Lift ends it. */
 export function freezeTrainAction(epicId: string): FleetAction {
   return {
     id: `freeze:${epicId}`,

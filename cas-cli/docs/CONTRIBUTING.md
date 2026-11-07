@@ -4388,8 +4388,9 @@ arming (`factory_ci_retry::arm`) and staffing (`ensure_staffing_allowed`,
 covering spawn, assignment and start of tasks that are still open). A
 `release-repair` task is admitted only while the train is red, and each
 admission is noted on the train. Task create retargets new work aimed at a
-frozen train to the next train. The freeze ends when its tip is an ancestor of
-the integration branch, or through the operator-only Commander
+frozen train to the next train. The freeze ends when a published release covers its tip (the
+`Release` ledger event that `release-published-receipt.sh` records, whose version tag
+contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
 
 ## Ordered train merge queue

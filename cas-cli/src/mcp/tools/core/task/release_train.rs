@@ -466,9 +466,9 @@ mod tests {
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\nepic_base_branch = \"main\"\n").unwrap();
         let core = CasCore::with_daemon(root.clone(), None, None);
-        core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
+        let created = core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
-        let train = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+        let train = store.list(None).unwrap().into_iter().find(is_release_train).unwrap_or_else(|| panic!("no train: {created:?}"));
         let lane = train.effective_epic_branch().unwrap().to_string();
         let remote = Command::new("git").args(["ls-remote", "--heads", "."]).arg(&lane).current_dir(bare.path()).output().unwrap();
         assert!(String::from_utf8_lossy(&remote.stdout).contains(&lane), "{lane} not on origin");

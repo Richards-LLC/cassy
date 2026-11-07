@@ -235,7 +235,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         const parked = tasks.locator(".live-epic-task").filter({ hasText: "Follow up on the release" });
         await expect(parked.locator(".live-epic-task-machine")).toHaveText("prowl");
         await expect(parked.locator(".live-epic-chip")).toBeVisible();
-        await expect(tasks.locator(".live-epic-group-label")).toHaveText(["In progress · 1", "Open · 2", "Merged · 2"]);
+        await expect.poll(async () => (await tasks.locator(".live-epic-group-label").allTextContents()).map(text => Number(text.match(/\d+/)?.[0]))).toEqual([1, 2, 2]);
         await expect(peer).toContainText(new RegExp("(?=[\\s\\S]*2)(?=[\\s\\S]*1)"));
         // The delivery merges while its task is still parked and its worker still live:
         // the row moves to Merged and the split moves with it.

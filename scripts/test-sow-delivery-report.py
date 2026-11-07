@@ -48,7 +48,10 @@ class SowGateTests(unittest.TestCase):
     def test_hygiene_accepts_client_prose_and_dates(self):
         for prose in ('Self-feed and self-feed work since mid-2026.',
                       'COVID-19', 'SHA-256', 'UTF-8', 'ISO-9001', 'ISO-27001', 'GPT-4',
-                      'Q3-2026', 'FY-2026', 'FY-26', 'SOC-2', 'ASC-606'):
+                      'Q3-2026', 'FY-2026', 'FY-26', 'SOC-2', 'ASC-606',
+                      'A branch, agent or worker may be part of the client product.',
+                      'Cassy, Claude and Codex can be named by the client.',
+                      'TODO and lorem are writing hints, never publication gates.'):
             with self.subTest(prose=prose):
                 self.assertEqual(hygiene.scan(f'# Northwind round 1\n\n{prose}\n', 'customer'), [])
 

@@ -431,11 +431,12 @@ mod tests {
         let rules = project.join(".claude/rules");
         fs::create_dir_all(&rules).unwrap();
         let guidance = rules.join("database.md");
-        let body = "Use mcp__acme__run_sql\nUse the Neon CLI and Vercel CLI.\nUse any available MCP server.\nCall mcp__cs__task.\n";
-        fs::write(&guidance, body).unwrap();
+        let retired_server = "acme";
+        let body = format!("Use mcp__{retired_server}__run_sql\nUse the Neon CLI and Vercel CLI.\nUse any available MCP server.\nCall mcp__cs__task.\n");
+        fs::write(&guidance, &body).unwrap();
         fs::write(
             env.home().join(".claude.json"),
-            r#"{"mcpServers":{"acme":{"command":"fixture"}}}"#,
+            serde_json::json!({"mcpServers": {(retired_server): {"command": "fixture"}}}).to_string(),
         )
         .unwrap();
         assert!(
@@ -444,13 +445,13 @@ mod tests {
         );
         fs::write(
             project.join(".mcp.json"),
-            r#"{"mcpServers":{"acme":{"disabled":true}}}"#,
+            serde_json::json!({"mcpServers": {(retired_server): {"disabled": true}}}).to_string(),
         )
         .unwrap();
         let row = check(&root);
         assert!(matches!(row.status, CheckStatus::Warning));
         assert!(
-            row.message.contains("database.md:1") && row.message.contains("acme"),
+            row.message.contains("database.md:1") && row.message.contains(retired_server),
             "{}",
             row.message
         );

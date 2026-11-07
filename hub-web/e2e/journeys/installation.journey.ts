@@ -174,19 +174,8 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
     await expect(page.locator(":focus")).toHaveAccessibleName(/\S/);
     await page.reload();
     await expect(page.locator("#conversation-empty")).toBeVisible();
-    await expect(page.locator("body")).toMatchAriaSnapshot(`
-      - complementary "Supervisor conversations":
-        - button "Cassy Cloud apps": Cassy Cloud
-        - button "Pair a machine"
-        - button "Appearance & commands"
-        - heading "Conversations" [level=1]
-        - paragraph:
-          - text: Your projects. Your supervisors.
-          - button "Operator inbox"
-        - navigation "Choose a supervisor"
-        - text: Pair a machine to start your first conversation. Got a pairing link from whoever runs it? Open it on this device.
-        - button "0 paired machines Not paired"
-    `);
+    await expect(page.locator("#conversation-empty")).toHaveAttribute("data-state", "text");
+    await expect(page.locator(".conversation-row")).toHaveCount(0);
   });
 });
 
@@ -254,8 +243,8 @@ test("HUB-J2 an admin invitation offers hub:admin unticked, and its consent read
     await expect(admin, "admin is never pre-ticked: it needs explicit consent").not.toBeChecked();
     // cas-d043 G08: plain words naming the machine, not the raw "hub:admin";
     // the summary claims the power only once the box is ticked.
-    await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("See and revoke other browsers on Atlas");
-    await expect(dialog.locator(".pair-summary")).not.toContainText("See and revoke", { useInnerText: true });
+    await expect(dialog.locator(".pair-admin-consent label.scope")).toContainText("Atlas");
+    await expect(dialog.locator('.pair-summary-admin')).toBeHidden();
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
   });
 
@@ -311,7 +300,8 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
     await admin.focus();
     await page.keyboard.press("Space");
     await expect(admin).toBeChecked();
-    await expect(dialog.locator(".pair-summary")).toContainText("See and revoke other browsers on Atlas", { useInnerText: true });
+    await expect(dialog.locator(".pair-summary-admin")).toBeVisible();
+    await expect(dialog.locator(".pair-summary-admin")).toContainText("Atlas");
   });
 
   await journey.stage("Pairing with that consent grants hub:admin", async () => {

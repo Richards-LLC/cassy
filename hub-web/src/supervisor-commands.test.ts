@@ -105,9 +105,10 @@ describe("supervisor slash commands", () => {
   });
 
   it("keeps submission separate from execution and allows only Close for uncertain Usage", async () => {
-    const row = commandReceiptNode({ client_ref: "cmd-1", command: "compact", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "<unsafe>", interactive: false });
+    const detail = "Command submitted; harness execution is not confirmed yet.";
+    const row = commandReceiptNode({ client_ref: "cmd-1", command: "compact", phase: "submitted", detail, output: "<unsafe>", interactive: false });
     expect(row.dataset.phase).toBe("submitted");
-    expect(row.querySelector("p")?.textContent).toBe("Command submitted; harness execution is not confirmed yet.");
+    expect(row.querySelector("p")?.textContent).toBe(detail);
     expect(row.querySelector("unsafe")).toBeNull();
     expect(row.querySelector("pre")?.textContent).toBe("<unsafe>");
     const send = vi.fn().mockReturnValue(true);

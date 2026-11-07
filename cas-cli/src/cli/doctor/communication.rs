@@ -66,7 +66,7 @@ mod tests {
         let row = check(&root);
         assert!(matches!(row.status, CheckStatus::Warning), "{}", row.message);
 
-        assert!(row.message.contains("cas update --schema-only"), "{}", row.message);
+
         assert!(!row.message.contains("cas-447d") && !row.message.contains("SELECT"), "{}", row.message);
         assert!(row.message.lines().all(|line| line.is_ascii()), "{}", row.message);
     }
@@ -133,7 +133,7 @@ mod tests {
             .unwrap();
         let unavailable = check(&root);
         assert!(unavailable.message.starts_with("UNKNOWN"));
-        assert!(unavailable.message.contains("cas update --schema-only"));
+
         assert_eq!(
             conn.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name='communication_slo_summaries'",

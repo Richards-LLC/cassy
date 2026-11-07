@@ -125,7 +125,6 @@ describe("a page attachment shows inline in a sandboxed frame (cas-3aff)", () =>
       expect(frame.title).toContain(card.name);
       expect(page!.querySelector("iframe[srcdoc]")).toBeNull();
       expect(failed!.querySelector("iframe")).toBeNull();
-      // pin: the failed frame must say where the page can still be opened.
       expect(failed!.querySelector(".visual-status")?.textContent).toBeTruthy();
       history.reply(reply(81, "Also tagged.", undefined, "answer"), at(10, 2)); view.update();
       expect(view.element.querySelector("iframe")).toBe(frame);
@@ -271,7 +270,7 @@ it("inspects only the turn's images with zoom, pan, gallery, failure and restore
     vi.spyOn(canvas, "getBoundingClientRect").mockReturnValue({ width: 200, height: 200, left: 0, top: 0, right: 200, bottom: 200, x: 0, y: 0, toJSON: () => ({}) });
     Object.defineProperties(image(), { naturalWidth: { value: 800 }, naturalHeight: { value: 800 } });
     image().dispatchEvent(new Event("load"));
-    expect(document.activeElement).toBe(button("Close image viewer"));
+    expect(document.activeElement).toBe(dialog.querySelector("header > button"));
     dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true }));
     expect(image().style.transform).toContain("scale(1.5)");
     dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", shiftKey: true, bubbles: true }));
@@ -293,7 +292,7 @@ it("inspects only the turn's images with zoom, pan, gallery, failure and restore
     expect(button("Next image").disabled).toBe(true);
     button("Try image again").focus();
     dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
-    expect(document.activeElement).toBe(button("Close image viewer"));
+    expect(document.activeElement).toBe(dialog.querySelector("header > button"));
     dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(document.querySelector(".image-viewer")).toBeNull();
     expect(document.activeElement).toBe(sheet);

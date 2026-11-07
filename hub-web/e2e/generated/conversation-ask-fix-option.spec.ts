@@ -26,7 +26,7 @@ test.describe("Conversation question", () => {
     const questionInLog = thread.getByRole("group", { name: "Question from patient-pelican-9" });
     await expect(questionInLog.locator('[aria-label="You replied: Fix in-train"]')).toBeVisible();
     await expect(thread.getByRole("log").getByRole("paragraph").filter({ hasText: /^Fix in-train$/ })).toBeVisible();
-    await expect(thread.getByRole("log").getByRole("status")).toHaveText("Sending…");
+    await expect(thread.getByRole("log").locator('.bub[data-state="sending"] .conversation-delivery')).toBeVisible();
     await expect(waitingRegion).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"]')).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] .context-waiting li')).toHaveCount(0);

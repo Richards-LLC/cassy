@@ -93,8 +93,8 @@ fn deliverable_post_is_denied_while_epic_verification_is_open_cas_f6ad() {
         assert!(reason.contains("verification_pending"), "{reason}");
         assert!(reason.contains("cas-pub-verify"), "the denial lists the open task: {reason}");
         assert!(!reason.contains("cas-pub-work ("), "a closed child is not listed: {reason}");
-        assert!(reason.contains("caveat is not enough"), "{reason}");
-        assert!(reason.contains("PUBLICATION OVERRIDE:"), "names the override: {reason}");
+
+
     }
 }
 

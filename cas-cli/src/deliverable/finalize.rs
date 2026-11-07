@@ -92,7 +92,7 @@ pub struct FinalizeRequest {
     pub root: PathBuf,
     pub surface: Option<PathBuf>,
     pub tokens: Option<PathBuf>,
-    /// Words that are the client's own and pass hygiene.
+    /// Client-owned identifiers exempted from publication hygiene.
     pub allow: Vec<String>,
     pub budget: Budget,
     /// Paper formats to print; empty prints nothing.

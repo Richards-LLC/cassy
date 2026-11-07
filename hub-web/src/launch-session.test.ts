@@ -552,7 +552,8 @@ describe("re-pairing and session launch (cas-0e14 F29)", () => {
   });
 
   it("says plainly after a re-pair that starting sessions was not kept, and how to get it back", () => {
-    expect(launchDroppedNotice("Atlas · Linux").detail).toContain("Atlas · Linux");
+    const machineLabel = "Atlas · Linux";
+    expect(launchDroppedNotice(machineLabel).detail).toContain(machineLabel);
   });
 
   it("leads the grant view with the dropped permission", async () => {

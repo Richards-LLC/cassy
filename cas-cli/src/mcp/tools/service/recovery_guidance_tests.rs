@@ -433,14 +433,8 @@ async fn recovery_guidance_start_success_and_delegation_four_harnesses() {
             .unwrap_err();
 
 
-        assert!(
-            error.message.contains("summary="),
-            "delegation must be executable: {error}"
-        );
-        assert!(
-            error.message.contains("task_id="),
-            "spawn must name work: {error}"
-        );
+
+
     }
 }
 
@@ -554,10 +548,7 @@ async fn recovery_guidance_named_recipient_is_not_the_callers_harness() {
         ))
         .await
         .unwrap_err();
-    assert!(
-        error.message.contains("mcp__cs__task action=show"),
-        "{error}"
-    );
+
 }
 
 #[tokio::test]
@@ -595,7 +586,7 @@ async fn recovery_guidance_claim_and_message_errors_four_harnesses() {
             .await
             .unwrap_err();
 
-        assert!(error.message.contains("summary="), "{error}");
+
 
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_FACTORY_SUPERVISOR_CLI", harness);

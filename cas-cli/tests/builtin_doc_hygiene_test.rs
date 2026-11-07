@@ -378,12 +378,3 @@ fn operator_data_lint_catches_what_it_names() {
         );
     }
 }
-
-
-
-/// One registry owns contract-bearing text; ordinary prose is free to change.
-
-
-/// cas-1c1f: a supervisor's plain pane exit shuts its whole factory down, so no
-/// shipped text may present one as something its workers outlive. Only
-/// `factory action=restart_supervisor` spares them (cas-b492).

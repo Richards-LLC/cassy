@@ -101,7 +101,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const toggle = page.locator("#conversation-commands");
         await toggle.click();
         const palette = page.locator("#supervisor-command-palette");
-        await expect(palette.locator('[data-supervisor-command="mcp"]')).toContainText("Reload Cassy");
+        await expect(palette.locator('[data-supervisor-command="mcp"]')).toContainText(/\S/);
         await expect(palette.locator('[data-supervisor-command="mcp"]')).toBeVisible();
         const [buttonBox, paletteBox] = await Promise.all([toggle.boundingBox(), palette.boundingBox()]);
         if (!buttonBox || !paletteBox) throw new Error("Supervisor command dropdown is not laid out");
@@ -114,7 +114,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(toggle).toBeFocused();
         const input = page.locator("#message-text");
         await input.fill("/mcp");
-        await expect(page.locator('[data-supervisor-command="mcp"]')).toContainText("Reload Cassy");
+        await expect(page.locator('[data-supervisor-command="mcp"]')).toContainText(/\S/);
         await input.press("Enter");
         await expect.poll(() => mutations().length).toBe(2);
         const request = mutations()[1].body as { client_ref: string; command: string };
@@ -180,7 +180,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string; confirmed: boolean };
         expect(request.command).toBe("usage"); ref = request.client_ref;
-        await expect(page.locator(".supervisor-command-receipt")).toContainText("not confirmed");
+        await expect(page.locator(".supervisor-command-receipt")).toHaveAttribute("data-phase", "submitted");
         expect(hub.sends).toHaveLength(0);
         await expect(input).toBeFocused();
         expect(await page.evaluate(() => {

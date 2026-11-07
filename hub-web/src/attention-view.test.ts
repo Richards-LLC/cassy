@@ -80,7 +80,7 @@ describe("attention timeline", () => {
     const item = event("one", "checkpoint");
     renderAttentionPanel(root, [item], cb, { now });
     const dismiss = root.querySelector<HTMLButtonElement>(".attention-action")!;
-    expect(dismiss.textContent).toBe("Dismiss");
+    expect(dismiss.dataset.role).toBe("dismiss");
     dismiss.click();
     expect(cb.dismiss).toHaveBeenCalledWith([item]);
   });

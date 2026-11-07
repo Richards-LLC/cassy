@@ -216,7 +216,7 @@ for (const [width, height, colorScheme] of [[1440, 800, "light"], [1440, 800, "d
             await expect.poll(async () => Number(await progress.getAttribute("aria-valuenow"))).toBeGreaterThan(0);
             expect(Number(await progress.getAttribute("aria-valuenow"))).toBeLessThan(100);
             await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-progress-${width}-${colorScheme}.png` });
-            await expect(page.locator(".composer-uploads")).toContainText("Saving slow-photo.png", { timeout: 30_000 });
+            await expect(progress).toHaveAttribute("aria-valuenow", "100", { timeout: 30_000 });
             expect(receivedBytes).toBe(10 * 1024 * 1024);
             await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/upload-saving-${width}-${colorScheme}.png` });
             releaseSaving();

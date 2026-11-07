@@ -21,18 +21,40 @@ from rust_test_source import tokens, pairs
 
 
 def human_message_literal(value):
-    """Machine identifiers are tokens; readable messages contain whitespace.
+    """Recognize structured machine data without consulting English vocabulary.
 
     Rule markers and gate-row records are structured identifiers, even when
     their wire spelling includes spaces. No English vocabulary is consulted.
     """
     if not isinstance(value, str) or not value.strip():
         return False
-    machine = (re.fullmatch(r'\[rule:\s*[\w.-]+\]', value)
+    static = re.sub(r'\$?\{[^{}]*\}', '', value)
+    if not any(char.isalpha() for char in static):
+        return False  # Controls and interpolation-only payloads do not prescribe words.
+    machine = (re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z', value)
+               or re.fullmatch(r'[a-z][\w-]*:[A-Za-z0-9_.-]+', value)
+               or re.fullmatch(r'[\w./\\-]+:\d+(?::\d+)?', value)
+               or re.fullmatch(r'[A-Za-z_][\w.-]*=[A-Za-z0-9_.-]+', value)
+               or re.fullmatch(r'HTTP [1-5]\d{2}', value)
+               or re.fullmatch(r'\.[\w.-]+', value)
+               or re.fullmatch(r'\[rule:\s*[\w.-]+\]', value)
                or re.fullmatch(r'(?:PASS|FAIL|SKIP) [\w.-]+', value)
-               or re.fullmatch(r'[0-9]+|[A-Z][A-Z0-9_]+|[a-z0-9]+(?:[_.-][a-z0-9]+)+', value)
+               or re.fullmatch(r'[0-9]+|[A-Z][A-Z0-9_]+|[A-Za-z0-9]+(?:[_.-][A-Za-z0-9]+)+', value)
+               or re.fullmatch(r'\$[A-Z][A-Z0-9_]*|[0-9a-fA-F]{7,40}', value)
                or (not re.search(r'\s', value) and ('/' in value or value.startswith('--'))))
     return not machine
+
+
+def python_literal_value(node):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return ''.join(part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str))
+    return None
+
+
+def machine_id_receiver(expression):
+    return re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
 
 
 def message_assertions(source, path, changed_lines=None):
@@ -52,10 +74,10 @@ def message_assertions(source, path, changed_lines=None):
             if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
                 operands = [node.test.left, *node.test.comparators]
                 for literal in operands:
-                    if not isinstance(literal, ast.Constant) or not human_message_literal(literal.value):
+                    if not human_message_literal(python_literal_value(literal)):
                         continue
                     actual = ' '.join(ast.get_source_segment(source, item) or '' for item in operands if item is not literal)
-                    if re.search(channels, actual) and (changed_lines is None or literal.lineno in changed_lines):
+                    if re.search(channels, actual) and not machine_id_receiver(actual) and (changed_lines is None or literal.lineno in changed_lines):
                         hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
@@ -70,20 +92,41 @@ def message_assertions(source, path, changed_lines=None):
                 receiver = ast.get_source_segment(source, actual) or ''
             else:
                 continue
-            if isinstance(literal, ast.Constant) and isinstance(literal.value, str) and 'Regex' in name:
-                grammar = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', literal.value)
+            value = python_literal_value(literal)
+            if isinstance(value, str) and 'Regex' in name:
+                grammar = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
                 if not re.search(r'[A-Za-z]', grammar):
                     continue  # Shape/encoding checks do not prescribe words.
-            if (isinstance(literal, ast.Constant) and human_message_literal(literal.value)
-                    and re.search(channels, receiver)
+            if (human_message_literal(value)
+                    and re.search(channels, receiver) and not machine_id_receiver(receiver)
                     and (changed_lines is None or literal.lineno in changed_lines)):
                 hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
         return hits
     if Path(path).suffix == '.rs':
         ts = tokens(source)
         ps = pairs(ts)
+        test_ranges = []
+        test_file = is_test_file(path)
+        if not test_file:
+            for begin, end in ps.items():
+                if ts[begin].value == '{' and 'cfg(test)' in ''.join(t.value for t in ts[max(0, begin - 15):begin]):
+                    test_ranges.append((ts[begin].start, ts[end].end))
+            for index, item in enumerate(ts):
+                if item.string or item.value != 'fn':
+                    continue
+                previous = index - 1
+                while previous >= 0 and ts[previous].value not in ('}', ';', '{'):
+                    previous -= 1
+                attributes = ''.join(t.value for t in ts[previous + 1:index])
+                if not ('#[test]' in attributes or re.search(r'::test(?:\([^\]]*\))?\]', attributes) or 'cfg(test)' in attributes):
+                    continue
+                body = next((j for j in range(index + 1, len(ts)) if not ts[j].string and ts[j].value in ('{', ';')), None)
+                if body is not None and ts[body].value == '{':
+                    test_ranges.append((ts[body].start, ts[ps[body]].end))
         for i, token in enumerate(ts[:-2]):
             if token.string or token.value not in ('assert', 'assert_eq', 'assert_ne') or ts[i + 1].value != '!' or i + 2 not in ps:
+                continue
+            if not test_file and not any(left <= token.start < right for left, right in test_ranges):
                 continue
             close = ps[i + 2]
             end = ts[close].start
@@ -93,15 +136,15 @@ def message_assertions(source, path, changed_lines=None):
             expression = source[token.start:end]
             if not re.search(channels, re.sub(r'"(?:\\.|[^"\\])*"', '""', expression)):
                 continue
-            for literal in ts[i + 3:close]:
+            for literal_index, literal in enumerate(ts[i + 3:close], start=i + 3):
                 if not literal.string or literal.start >= end:
                     continue
                 prefix = source[token.start:literal.start]
                 substring = re.search(r'\.(?:contains|starts_with|ends_with)\(\s*(?:&?format!\(\s*)?$', prefix)
                 depth = sum(1 if t.value in ('(', '[', '{') else -1 if t.value in (')', ']', '}') else 0
-                            for t in ts[i + 2:] if t.start < literal.start and not t.string)
+                            for t in ts[i + 2:literal_index] if not t.string)
                 scalar = token.value in ('assert_eq', 'assert_ne') and depth == 1
-                if not substring and not scalar:
+                if machine_id_receiver(prefix) or (not substring and not scalar):
                     continue
                 value = literal.value
                 # Character operands are protocol/format controls, not prose.
@@ -132,6 +175,8 @@ def message_assertions(source, path, changed_lines=None):
         if beginning < source.rfind(';', 0, start) or beginning < 0:
             continue
         context = source[beginning:start]
+        if machine_id_receiver(context):
+            continue
         if (re.search(r'\.toThrow(?:Error)?\(\s*(?:new\s+[\w.]+\(\s*)?$', context)
                 or (re.match(r'assert\.(?:throws|rejects)\(', context)
                     and context.count('(') - context.count(')') == 1 and re.search(r',\s*$', context))
@@ -158,9 +203,9 @@ def is_test_file(path):
     }
     suffix = Path(name).suffix
     return (
-        any(part in ('test', 'tests', '__tests__', 'spec', 'specs') for part in parts[:-1])
+        any(part in ('test', 'tests', '__tests__', 'spec', 'specs', 'e2e') for part in parts[:-1])
         or name.startswith(('test_', 'test-'))
-        or (suffix in source_suffixes and re.search(r'(?:[._-])(test|spec)(?:[._-]|$)', name) is not None)
+        or (suffix in source_suffixes and re.search(r'(?:[._-])(test|tests|spec|specs|journey)(?:[._-]|$)', name) is not None)
     )
 
 
@@ -242,8 +287,9 @@ def text_literals(source, path):
 
 def is_exact_text_pin(body, context):
     """Recognize long exact prose and short needles into source-like inputs."""
-    if '/' in body and not re.search(r'\s', body):
-        return False  # Resource routes are machine paths, not human wording.
+    if ('/' in body and not re.search(r'\s', body)
+            or re.fullmatch(r'[A-Z][A-Z0-9_]*=[A-Za-z0-9_.-]+', body)):
+        return False  # Machine resource routes and key-value records.
     words = re.findall(r"[A-Za-z0-9_'-]+", body)
     prose = len(body.strip()) >= 55 and len(words) >= 8 and (
         '\n' in body or re.search(r'[.!?](?:\s|$)', body) is not None

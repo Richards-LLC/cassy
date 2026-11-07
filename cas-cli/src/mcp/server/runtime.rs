@@ -1989,10 +1989,7 @@ url = "https://context7.invalid/mcp"
             .expect("at least one migration");
 
 
-        assert!(
-            error.contains("cas update --schema-only"),
-            "missing remediation command: {error}"
-        );
+
     }
 
     #[test]

@@ -136,7 +136,6 @@ describe("ten seconds of heartbeats, measured the way the defect was", () => {
     expect(document.activeElement).toBe(composer);
     expect(composer.value).toHaveLength(20);
     // The regions kept moving the whole time — this is not a frozen page.
-    // pin: the last heartbeat's own sentence proves the regions kept updating.
     expect(root.querySelector(".status-stale")!.textContent).toContain("19s");
   });
 });

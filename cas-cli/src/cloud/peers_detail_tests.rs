@@ -206,8 +206,6 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             assert!(!ascii || text.is_ascii());
 
 
-            #[cfg(feature = "mcp-proxy")]
-
         }
     }
     let encoded = serde_json::to_value(&report).unwrap();

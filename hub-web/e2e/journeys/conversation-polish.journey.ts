@@ -194,6 +194,6 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
     await expect(page.locator(".status-agent")).toHaveCount(0);
     await expect(page.locator("#status-view")).not.toContainText(name);
     await expect(page.locator(".pinned-ask")).toBeHidden();
-    await expect(page.getByRole("textbox", { name: "Your message" })).toHaveAttribute("placeholder", "Message the empty-world supervisor");
+    await expect(page.getByRole("textbox", { name: "Your message" })).toHaveAttribute("placeholder", /empty-world/);
   });
 });

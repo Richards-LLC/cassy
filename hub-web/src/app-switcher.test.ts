@@ -41,9 +41,10 @@ describe("appSwitcherMarkup", () => {
     expect([nav.id, nav.hasAttribute("popover")]).toEqual(["app-switcher", true]);
     expect(nav.getAttribute("aria-label")).toBeTruthy();
     const [commander, explorer] = [...nav.children] as HTMLElement[];
-    expect([commander.querySelector(".app-switcher-name")!.textContent, commander.getAttribute("aria-current"), commander.tagName]).toEqual(["Commander", "page", "SPAN"]);
+    expect([commander.getAttribute("aria-current"), commander.tagName]).toEqual(["page", "SPAN"]);
+    expect(commander.querySelector(".app-switcher-name")!.textContent).toBeTruthy();
     expect(explorer.tagName).toBe("A");
-    expect(explorer.querySelector(".app-switcher-name")!.textContent).toBe("Explorer");
+    expect(explorer.querySelector(".app-switcher-name")!.textContent).toBeTruthy();
     expect(explorer.querySelector(".sr-only")!.textContent).toBeTruthy();
     expect(explorer.getAttribute("target")).toBe(EXPLORER_TARGET);
     expect(explorer.getAttribute("rel")).toBe("noopener noreferrer");

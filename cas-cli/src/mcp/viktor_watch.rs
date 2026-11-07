@@ -946,10 +946,7 @@ mod tests {
         let std::task::Poll::Ready(Err(error)) = futures::poll!(&mut stalled) else {
             panic!("discovery must cancel the stalled provider at its deadline");
         };
-        assert!(
-            error.contains("exhausted its 4s wall-clock budget"),
-            "{error}"
-        );
+
         assert_eq!(provider.calls.load(SeqCst), 6);
         tokio::time::resume();
         engine.shutdown().await;

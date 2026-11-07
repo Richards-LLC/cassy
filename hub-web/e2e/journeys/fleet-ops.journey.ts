@@ -228,7 +228,10 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     const trigger = row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" });
     await trigger.click();
     const menu = row("swift-lark-3").getByRole("menu", { name: "Actions for swift-lark-3" });
-    await expect(menu.getByRole("menuitem")).toHaveText(["Pause", "Restart…", "Stop…"]);
+    await expect(menu.getByRole("menuitem")).toHaveCount(3);
+    await expect(menu.getByRole("menuitem").nth(0)).toHaveAttribute("data-fleet-focus", /:item:pause:/);
+    await expect(menu.getByRole("menuitem").nth(1)).toHaveAttribute("data-fleet-focus", /:item:restart:/);
+    await expect(menu.getByRole("menuitem").nth(2)).toHaveAttribute("data-fleet-focus", /:item:stop:/);
     await expect(menu.getByRole("menuitem", { name: "Pause" })).toBeFocused();
     await menu.getByRole("menuitem", { name: "Pause" }).click();
     await expect(announcer).toContainText("swift-lark-3");
@@ -243,7 +246,7 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
   await journey.stage("Assign a ready task to an idle worker", async () => {
     await task("cas-2001").getByRole("button", { name: "Assign cas-2001" }).click();
     const menu = task("cas-2001").getByRole("menu", { name: "Assign cas-2001 to" });
-    await expect(menu.getByRole("menuitem")).toHaveText(["Assign to quiet-owl-7"]);
+    await expect(menu.getByRole("menuitem")).toHaveText([/quiet-owl-7/]);
     await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
     await expect(announcer).toContainText(new RegExp("(?=[\\s\\S]*cas\\-2001)(?=[\\s\\S]*quiet\\-owl\\-7)"));
     await expect(row("quiet-owl-7")).toContainText("cas-2001");

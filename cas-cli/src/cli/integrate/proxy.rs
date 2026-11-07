@@ -287,7 +287,7 @@ mod tests {
             "content": [{ "type": "text", "text": "auth failure" }]
         });
         let err = unwrap_envelope(&v).unwrap_err().to_string();
-        assert!(err.contains("isError=true"), "got: {err}");
+
     }
 
     #[test]

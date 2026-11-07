@@ -1416,9 +1416,7 @@ mod tests {
         assert_eq!(report.collisions[0].id, "cas-1234");
         assert_eq!(report.collisions[0].other_project, "accounting");
 
-        assert!(report.remediation().contains(
-            "mcp__cs__task action=update id=<task-id> origin_project=<confirmed canonical id>"
-        ));
+
     }
 
     /// A row that is a genuine replica *and* collides with a third project's

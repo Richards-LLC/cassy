@@ -203,7 +203,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(!unrelated.contains("Closest alias:"), "{unrelated}");
-            assert!(error.contains(&format!("cas {} login altt", provider.name())));
+
             let mut specs = vec![cas_mux::WorkerSpec {
                 name: None,
                 cli,

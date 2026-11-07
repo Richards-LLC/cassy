@@ -63,14 +63,12 @@ describe("cold-load list states (journey F14)", () => {
     expect(unpaired.kind).toBe("text");
     // cas-a56c: someone sent a link by whoever runs the machine is told where it goes.
     const empty = conversationListState(true, [{ catalogReceived: true, phase: "live" }, { catalogReceived: false, phase: "failed" }]);
-    // pin: the empty state must name its live action and never offer stopped sessions.
     expect(empty.kind).toBe("text");
     // cas-a56c: the way on is named in the controls' own words, without "recovery" jargon.
     const unreachable = conversationListState(true, [{ catalogReceived: false, phase: "backoff" }]);
     expect(unreachable.kind).toBe("text");
     // cas-97d58 F16: a browser that blocks every machine is named as the cause.
     const blocked = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }]);
-    // pin: cas-97d58 F16's exact sentence naming the browser as the cause.
     expect(blocked.kind).toBe("text");
     const mixed = conversationListState(true, [{ catalogReceived: false, phase: "backoff", browserBlocked: true }, { catalogReceived: false, phase: "backoff" }]);
     expect(mixed.kind).toBe("text");

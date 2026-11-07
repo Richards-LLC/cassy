@@ -21,11 +21,29 @@ class Shapes(unittest.TestCase):
             ('test_example.py', 'self.assertEqual("permission was denied", error.message)', True),
             ('test_example.py', 'assert "permission was denied" in str(exc)', True),
             ('test_example.py', 'assert str(error) == "permission was denied"', True),
+            ('test_example.py', 'assert f"please retry {name} later" in str(exc)', True),
+            ('test_example.py', 'self.assertIn(f"please retry {name} later", result.stderr)', True),
             ('test_example.py', 'assert error.code == "scope_denied"', False),
+            ('test_example.py', 'assert error.code == "forbidden"', False),
+            ('test_example.py', 'self.assertEqual(error.code, "forbidden")', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "forbidden"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("2026-05-01T00:00:00Z")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("entry:e1")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("database.md:42")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("protected=4")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("project=acme")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("HTTP 503")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains(".claude-alt")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("SKILL.md")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("$UNKNOWN_ROOT")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("4dd898a71")); }', False),
+            ('example.test.ts', 'expect(error.code).toBe("forbidden");', False),
             ('test_example.py', 'self.assertIn("[rule: scope_denied]", result.stderr)', False),
             ('test_example.py', 'self.assertIn("FAIL test-shape", result.stdout)', False),
             ('test_example.py', 'self.assertEqual(saved_payload, "hello from the operator")', False),
             ('src/example.rs', '#[test] fn check() { assert!(error.contains("please try later")); }', True),
+            ('src/example.rs', 'fn validate(error: &str) { assert!(error.contains("required input phrase")); }', False),
+            ('src/example.rs', '#[cfg(test)] mod tests { fn helper(error: &str) { assert!(error.contains("please try later")); } }', True),
             ('src/example.rs', '#[test] fn check() {\n// pin: an old copy preference\nassert!(error.contains("please try later")); }', True),
             ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "scope_denied"); }', False),
             ('src/example.rs', r"#[test] fn check() { assert!(!error.contains('\x1b')); }", False),
@@ -33,6 +51,7 @@ class Shapes(unittest.TestCase):
             ('src/example.rs', '#[test] fn check() { assert_eq!(output.stdout, b"caller payload bytes"); }', False),
             ('src/example.rs', '#[test] fn check() { assert_eq!(receipt, Receipt { warning: Some("caller-provided diagnostic".into()) }); }', False),
             ('src/example.rs', '#[test] fn check() { let fixture = "caller diagnostic"; assert_eq!(error.message, fixture); }', False),
+            ('src/example.rs', r'#[test] fn check() { assert!(stderr.contains(&format!("{FIXTURE}\n{SECOND}\n"))); }', False),
             ('src/example.rs', '#[test] fn check() { assert_eq!("please try later", error.message); }', True),
             ('src/example.rs', '#[test] fn check() { assert!(result.unwrap_err().to_string().contains("please try later")); }', True),
             ('src/example.rs', '#[test] fn check() { assert_eq!(get_error().message, "please try later"); }', True),
@@ -41,6 +60,8 @@ class Shapes(unittest.TestCase):
             ('example.test.ts', 'expect(run()).toThrow(new Error("please try later"));', True),
             ('example.test.ts', 'expect(error).toMatchObject({\nmessage: "please try later"\n});', True),
             ('example.test.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('example.journey.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('src/example_tests.rs', 'fn helper(error: &str) { assert!(error.contains("please try later")); }', True),
             ('example.test.ts', 'expect(error.message).toMatch(/permission was denied/);', True),
             ('example.test.ts', 'expect(error.message).toMatch(/\\S/);', False),
             ('example.test.mjs', 'assert.equal(error.message, "please try later");', True),
@@ -100,6 +121,7 @@ class Shapes(unittest.TestCase):
 
     def test_non_rust_text_is_clean(self):
         self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
+        self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
     def test_exact_prose_pin_cannot_be_waived_by_comments(self):

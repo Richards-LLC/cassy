@@ -89,12 +89,11 @@ omitted* field.
 
 ## Vocabulary and hygiene
 
-The report goes to the client, so it carries only the client's and the SOW's
-vocabulary. `cas deliverable finalize --audience customer` checks the text a
-reader sees in the final HTML. It exits 1 and names each line that holds a
-ticket label, a PR number, a branch, commit, agent, worker, supervisor, epic,
-sprint or ticket word, a tool name (Cassy, Claude, Codex), a local or preview
-URL, a credential, a home path, `TODO` or placeholder text.
+The report goes to the client. `cas deliverable finalize --audience customer`
+checks the visible text for credentials, home paths, internal ticket and PR
+references, and local or preview URLs. Those publication boundaries are enforced.
+Word choice remains writing advice: process terms, tool names and placeholder
+words do not create findings.
 
 The checker accepts common identifier families by default: COVID-19, SHA
 hash names, UTF encodings, ISO standard numbers, GPT model numbers, and
@@ -103,8 +102,8 @@ prefixes are checked in either case; other numeric tracker prefixes use their
 canonical uppercase form. A standard identifier on a line does not exempt a
 tracker label elsewhere on that line.
 
-If a hit is the client's own word (a product genuinely named "Epic"), pass
-`--allow Epic` to `finalize` and record the reason in the brief. Other forbidden content:
+If a client-owned identifier resembles a tracker reference, pass `--allow` with
+that identifier and record the reason in the brief. Writing advice for the report:
 
 - internal team or agent names;
 - process narration ("after three attempts…");

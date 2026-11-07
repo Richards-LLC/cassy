@@ -93,7 +93,7 @@ class FastRows(unittest.TestCase):
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
                        "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
                        "check-test-env.py", "rust_test_source.py",
-                       "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
+                       "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
                        "release-diary-thread.py"):

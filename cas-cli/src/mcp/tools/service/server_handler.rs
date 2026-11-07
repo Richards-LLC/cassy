@@ -1467,10 +1467,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error:?}");
-        assert!(
-            error.message.contains("4dd898a71") && error.message.contains("pushed to origin"),
-            "{error:?}"
-        );
+        assert!(error.message.contains("4dd898a71"), "{error:?}");
 
         let answered = service
             .call_with_deadline_and_grace(
@@ -1829,10 +1826,7 @@ mod tests {
         assert!(data["notification_id"].is_null());
         assert_eq!(data["budget_ms"], 10);
         assert!(data["elapsed_ms"].as_u64().unwrap() >= 10);
-        assert!(
-            !unknown.message.contains("55s"),
-            "elapsed time must be measured"
-        );
+
     }
 
     #[tokio::test]

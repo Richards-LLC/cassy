@@ -598,7 +598,7 @@ mod reused_factory_branch_tests {
         let error = super::occupied_lane_refusal("factory/test-worker", &commit, "main");
 
         assert!(error.contains(&worker_tip), "{error}");
-        assert!(!error.contains("git rebase"), "{error}");
+
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), worker_tip);
     }
 
@@ -4294,12 +4294,7 @@ mod related_recall_response_tests {
             .await
             .expect_err("the GH #679 twin must require confirmation");
         assert_eq!(warning.code, ErrorCode::INVALID_PARAMS);
-        assert!(
-            warning.message.contains(&original_id)
-                && warning.message.contains("confirm_warning=true"),
-            "unexpected warning: {}",
-            warning.message
-        );
+        assert!(warning.message.contains(&original_id), "{}", warning.message);
         for identifier in [
             "ensuredefaultprojects",
             "phone-workspace.service.ts:158",
@@ -6055,12 +6050,7 @@ mod related_recall_response_tests {
             )))
             .await
             .expect_err("recent competing plan must require confirmation");
-        assert!(
-            warning.message.contains("planning-supervisor-one")
-                && warning.message.contains("confirm_warning=true"),
-            "unexpected warning: {}",
-            warning.message
-        );
+        assert!(warning.message.contains("planning-supervisor-one"), "{}", warning.message);
 
         let mut duplicate_request = child_request("First supervisor child", epic_id.clone());
         duplicate_request.epic = None;

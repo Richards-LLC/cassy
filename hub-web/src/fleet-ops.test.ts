@@ -175,7 +175,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     expect(trigger.getAttribute("aria-label")).toBeTruthy();
     const items = [...view.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    expect(items.map((item) => item.textContent)).toEqual(["Pause", "Restart…", "Stop…"]);
+    expect(items.map((item) => item.dataset.fleetFocus)).toEqual(["agent:swift-lark-3:item:pause:swift-lark-3", "agent:swift-lark-3:item:restart:swift-lark-3", "agent:swift-lark-3:item:stop:swift-lark-3"]);
     expect(items[0]!.hasAttribute("aria-disabled")).toBe(false);
     const stop = items[2]!;
     expect(stop.getAttribute("aria-disabled")).toBe("true");
@@ -190,7 +190,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const confirm = vi.fn();
     const view = agentControls(document, context([...CONTROL, "factory-manage"], state, { confirm }), lark);
     const buttons = [...view.querySelectorAll<HTMLButtonElement>(".fleet-ops-confirm button")];
-    expect(buttons.map((button) => button.textContent)).toEqual(["Cancel", "Stop"]);
+    expect(buttons.map((button) => button.dataset.fleetFocus)).toEqual(["agent:swift-lark-3:cancel", "agent:swift-lark-3:confirm"]);
     expect(buttons[1]!.classList.contains("danger")).toBe(true);
     expect(view.querySelector(".fleet-ops-question")?.textContent).toMatch(new RegExp("(?=[\\s\\S]*cas\\-1234)(?=[\\s\\S]*swift\\-lark\\-3)"));
     buttons[1]!.dispatchEvent(new MouseEvent("click", { detail: 2 }));
@@ -204,9 +204,9 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     state.preview = { rowKey: "task:cas-1999", task: parked };
     const view = taskControls(document, context(CONTROL, state), parked)!;
     expect(view.querySelector(".fleet-ops-preview-text")?.textContent).toBe(mergeRequestMessage(parked));
-    expect([...view.querySelectorAll(".fleet-ops-preview button")].map((button) => button.textContent)).toEqual(["Cancel", "Send"]);
+    expect([...view.querySelectorAll<HTMLElement>(".fleet-ops-preview button")].map((button) => button.dataset.fleetFocus)).toEqual(["task:cas-1999:preview-cancel", "task:cas-1999:send"]);
     const asked = taskControls(document, { ...context(CONTROL), asked: new Map([["cas-1999", 1]]) }, parked)!;
-    expect(asked.querySelector(".fleet-ops-asked")?.textContent).toBe("Asked 2m ago");
+    expect(asked.querySelector(".fleet-ops-asked")?.textContent).toContain("2m");
     expect(asked.querySelector(".fleet-ops-ask")?.textContent).toBeTruthy();
     // A close gate can keep an integrated delivery parked. Neither screen
     // size may offer another merge, even if its preview was already open.
@@ -343,7 +343,7 @@ describe("phone feedback dismissal (cas-c2e7)", () => {
     result.querySelector<HTMLButtonElement>('[aria-label="Dismiss; Undo stays in Tasks & progress"]')!.click();
     expect(undoBar(document, ctx)).toBeUndefined();
     expect(state.currentUndo(0)).toBeDefined();
-    expect(undoBar(document, { ...ctx, phone: false })!.querySelector("button")!.textContent).toBe("Undo");
+    expect(undoBar(document, { ...ctx, phone: false })!.querySelector<HTMLElement>("button")!.dataset.fleetFocus).toBe("undo");
     expect(state.takeUndo(0)?.request.op).toMatchObject({ hold: false });
   });
 });

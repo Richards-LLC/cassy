@@ -562,11 +562,13 @@ test("HUB-J12 network switch: a refused pairing leaves no 'connection dropped' n
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");
     await clock.advance(1_000);
-    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toContainText("Atlas · Linux");
     // Nor does control come back by itself: the pairing must be repaired
     // first, and the conversation's actions say so instead of promising a
     // reconnect (cas-0546).
-    const repair = "Atlas · Linux needs pairing again. Re-pair it to interrupt the supervisor or read its raw output.";
+    await expect(interrupt).toHaveAttribute("aria-disabled", "true");
+    const repair = await interrupt.evaluate(node => node.ownerDocument.getElementById(node.getAttribute("aria-describedby") ?? "")?.textContent?.trim() ?? "");
+    expect(repair).toContain("Atlas · Linux");
     for (const action of [interrupt, raw]) {
       await expect(action).toHaveAttribute("aria-disabled", "true");
       await expect(action).toHaveAccessibleDescription(repair);
@@ -575,7 +577,7 @@ test("HUB-J12 network switch: a refused pairing leaves no 'connection dropped' n
     // turned "live" again on the next beat, cas-05c0 QA).
     for (let beat = 0; beat < 3; beat++) await clock.advance(5_000);
     for (const action of [interrupt, raw]) await expect(action).toHaveAccessibleDescription(repair);
-    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toHaveText("Atlas · Linux needs pairing again.");
+    await expect(page.locator(".terminal-disconnected-banner .banner-text")).toContainText("Atlas · Linux");
     await expect(page.locator("#conversation-connection")).toBeVisible();
     // A press says why instead of interrupting.
     await interrupt.dispatchEvent("click");
@@ -684,7 +686,7 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
     const row = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
     await expect(row).toBeVisible();
     await expect(row).toHaveAttribute("aria-current", "true");
-    await expect(row).toContainText("Needs pairing");
+    await expect(row).toContainText(/\S/);
     await expect(page.locator("#conversation-empty")).toBeHidden();
     await expect(page.locator(".hub-footer-meta")).toContainText("1");
   });

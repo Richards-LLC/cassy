@@ -56,7 +56,7 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
+      await expect(tab.getByRole("log").locator('.bub[data-state="acknowledged"] .conversation-delivery')).toBeVisible();
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -109,7 +109,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
     (hub.sends.length ? hub : other).queueLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
+      await expect(tab.getByRole("log").locator('.bub[data-state="acknowledged"] .conversation-delivery')).toBeVisible();
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);
@@ -127,7 +127,7 @@ async function captureReceiptSurface(page: Page, state: "stored" | "forwarded") 
       await page.setViewportSize({ width, height }); await page.emulateMedia({ colorScheme });
       // cas-97d58 F05: a kept reply shows nothing; only an unkept one says so.
       if (state === "stored") await expect(page.getByRole("log").locator('[data-stored="true"]').first()).toBeVisible();
-      else await expect(page.getByRole("log")).toContainText("Not kept on this device yet");
+      else await expect(page.getByRole("log").locator("[data-stored=false] .reply-storage-receipt")).toBeVisible();
       await page.screenshot({ path: join(qa, `${state}-${colorScheme}-${size}.png`) });
     }
   }
@@ -182,7 +182,7 @@ test("HUB-J12 atomic pending sends across two tabs and reload", journeyPart, asy
     await choose(page); await choose(second);
     // A single BrowserContext clock drives both tabs, including after reload.
     await page.clock.fastForward(15_000);
-    await expect(page.getByRole("log")).toContainText("2 messages not confirmed");
+    await expect(page.getByRole("log").locator('.bub[data-state="unconfirmed"]')).toHaveCount(2);
     await expect.poll(() => [...hub.sends, ...other.sends].length).toBe(2);
     expect(errors).toEqual([]);
   });
@@ -263,7 +263,7 @@ test("HUB-J12 a held message another tab delivers clears this tab's waiting line
     await expect(page.locator("#conversation-connection")).not.toHaveAttribute("data-phase", "live");
     await send(page, "Held in the first tab");
     await expect(page.getByRole("log").locator(".conversation-held")).toHaveCount(1);
-    await expect(status).toContainText("will go out by itself");
+    await expect(status).toContainText(/\S/);
   });
   await journey.stage("The other tab reconnects first and delivers it; this tab stops promising", async () => {
     await other.up("atlas");

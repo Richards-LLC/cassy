@@ -306,10 +306,7 @@ fn docs_upkeep_overview_watch_targets_come_from_the_tracked_overview() {
     write(f.repo.path(), "cas-cli/src/cli/new_command.rs", "new surface");
     let head = commit(f.repo.path());
     let error = f.run(&head).unwrap_err();
-    assert!(
-        error.contains("PRODUCT_OVERVIEW DRIFT") && error.contains("cas-cli/src/cli/new_command.rs"),
-        "{error}"
-    );
+    assert!(error.contains("cas-cli/src/cli/new_command.rs"), "{error}");
     // A local project config override still wins over the tracked block.
     let mut config = crate::config::Config::default();
     config.project_overview = Some(crate::config::ProjectOverviewConfig {

@@ -24,7 +24,6 @@ describe('paired machine footer after authentication loss (cas-f698)', () => {
   it('explains an unknown runtime before connecting without promising a reconnect can update a live unknown runtime', () => {
     const container = document.createElement('div');
     renderPairedMachines(container, [{ ...atlas, latestRelease: '3.88.0' }], async () => undefined);
-    // pin: the existing machine-register copy tells when its version can arrive.
     expect(container.querySelector('.paired-machine-runtime')?.textContent).toBeTruthy();
     renderPairedMachines(container, [{ ...atlas, connected: true, runtime: 'unknown', latestRelease: '3.88.0' }], async () => undefined);
 
@@ -165,7 +164,6 @@ describe('fleet permissions on a paired machine (cas-d382)', () => {
     expect(manage.querySelector('.fleet-permission-state')?.textContent).toBeTruthy();
     const reason = manage.querySelector('.fleet-permission-reason')!;
     const also = manage.querySelector('.fleet-permission-also')!;
-    // pin: naming the required permission before the reason is the copy contract.
     expect(reason.textContent).toBeTruthy();
     expect(reason.compareDocumentPosition(also) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(manage.querySelector('.fleet-permission-control')).toBeNull();

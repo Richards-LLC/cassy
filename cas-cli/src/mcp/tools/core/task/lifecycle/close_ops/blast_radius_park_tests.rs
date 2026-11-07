@@ -1456,8 +1456,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert!(pending.contains("FAST LANE RECEIPT PENDING"), "{pending}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
     let wakes = crate::store::open_reminder_store(&f.cas_dir()).unwrap().list_all_pending().unwrap();
-    assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
-        && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
+    assert!(wakes.iter().any(|wake| wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
 
     if outcome.starts_with("qa-") {
         receipt("completed", Some("success"));

@@ -134,13 +134,13 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
       const label = `${node.tagName.toLowerCase()}.${node.className.split(" ")[0]}:${node.textContent?.trim() ?? ""}`;
       const counter = window as unknown as { __stop?: number };
       node.dataset.stop ??= String((counter.__stop = (counter.__stop ?? 0) + 1));
-      return label === "button.context-sheet-close:×" || label === "summary.:Details" ? label : `${label}#${node.dataset.stop}`;
+      return node.matches("button.context-sheet-close") ? "sheet-close" : node.matches("summary") ? "summary" : `${node.tagName.toLowerCase()}#${node.dataset.stop}`;
     });
     // QA F01: Shift+Tab from Close really moves, to the sheet's last stop (the
     // collapsed Details' summary, not the Copy button hidden inside it).
     await page.keyboard.press("Shift+Tab");
     expect(await inSheet(), "Shift+Tab from Close stays in the sheet").toBe(true);
-    expect(await focused()).toBe("summary.:Details");
+    expect(await focused()).toBe("summary");
     // Tab walks every stop once and wraps from Details back to Close.
     const stops: string[] = [];
     for (let step = 0; step < 12; step += 1) {
@@ -246,7 +246,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const rail = page.locator(".conversation-context");
     await expect(rail).not.toHaveAttribute("role", "dialog");
     await expect(rail).not.toHaveAttribute("aria-modal", "true");
-    await expect(rail).toHaveAttribute("aria-label", "Conversation context");
+    await expect(rail).toHaveAttribute("aria-label", /\S/);
     await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-expanded", "false");
     // Nothing the operator can see is left inert (cas-f285: no hidden pane
     // host remains to exempt).

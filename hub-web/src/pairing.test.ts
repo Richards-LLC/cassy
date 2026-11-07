@@ -413,10 +413,11 @@ describe("wire-v1 reverse pairing", () => {
   });
 
   it("surfaces when failed exchange cleanup cannot durably block a reload", () => {
+    const suppliedDetail = "This pairing invitation has expired or was already used.";
     expect(pairingStorageClearFailureMessage(
-      "This pairing invitation has expired or was already used.",
+      suppliedDetail,
       { persistentRemovalFailed: true, failClosed: false },
-    )).toContain("This pairing invitation has expired or was already used.");
+    )).toContain(suppliedDetail);
   });
 
   it("writes a fail-closed tombstone when only sessionStorage removal is denied", () => {

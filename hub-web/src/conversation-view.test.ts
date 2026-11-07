@@ -596,7 +596,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(document.activeElement).toBe(leasedBubble().querySelector(".conversation-retry"));
     expect(leasedBubble().querySelector(".conversation-take-control")).toBeNull();
     expect(leasedBubble().querySelector(".conversation-refused")?.textContent).toBeTruthy();
-    expect([...leasedBubble().querySelectorAll(".conversation-actions button")].map((button) => button.textContent)).toEqual(["Edit", "Retry"]);
+    expect([...leasedBubble().querySelectorAll(".conversation-actions button")].map((button) => button.className)).toEqual(["conversation-edit", "conversation-retry"]);
     held = false; leased.update();
     expect(leasedBubble().querySelector(".conversation-take-control")).not.toBeNull();
     // A control that survives the rebuild keeps focus.

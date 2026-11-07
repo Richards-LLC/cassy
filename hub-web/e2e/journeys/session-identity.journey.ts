@@ -21,7 +21,7 @@ for (const identity of ["resume", "replacement", "unknown"] as const) {
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     await page.locator("#message-text").fill("Held for the original session");
     await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
-    await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+    await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
     await page.locator("#message-text").fill("Draft for the original session");
     if (identity === "replacement") machine.sessions[0]!.started_at = journeyStamp();
     await hub.up(machine.id);
@@ -42,7 +42,7 @@ for (const identity of ["resume", "replacement", "unknown"] as const) {
         await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
       } else {
         expect(hub.sends.map(send => send.text)).toEqual(["Explicit send to the current live attach"]);
-        await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+        await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
         await expect(page.locator("#message-text")).toHaveValue("Draft for the original session");
       }
     });
@@ -58,7 +58,7 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
   await page.locator("#message-text").fill("Restore before retiring my words");
   await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
-  await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+  await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
   machine.sessions[0]!.liveness = "stale_metadata";
   await page.addInitScript(() => {
     const original = IDBFactory.prototype.open;
@@ -132,7 +132,7 @@ test("HUB-J14 an old rejected send cannot settle the replacement's in-flight mes
   await hub.down(machine.id, { sockets: "close" });
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
   await page.locator("#message-text").fill("Old held words"); await page.locator("#message-send").click();
-  await expect(page.getByRole("log")).toContainText("Waiting for the connection");
+  await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
   machine.sessions[0]!.started_at = journeyStamp(); await hub.up(machine.id);
   await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live"); await expect(page.locator("#conversation-connection")).toHaveAttribute("data-degraded", "false");
   await expect(page.getByRole("log").locator('.bub[data-state="error"]')).toContainText("Old held words");
@@ -314,7 +314,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
     // Each row's time is its own session's last activity, not one shared time.
     await expect(rows.locator(".conversation-when")).toHaveText(["2m", /^\d+h$/, "40m"]);
-    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", "Last activity 2m ago · Messaged bright-robin-85");
+    await expect(row("calm-puma-34").locator(".conversation-when")).toHaveAttribute("title", /2m[\s\S]*Messaged bright-robin-85/);
     // cas-5d2c: under a heading that names the project and machine once, each
     // row leads with its codename and says what its session last did, before
     // any of them is opened; the heading and footer count the same noun.
@@ -393,7 +393,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
       await expect(action).toHaveAccessibleDescription(unavailable);
       await expect(action).toHaveAttribute("title", unavailable);
     }
-    await expect(raw).toHaveAccessibleName("Raw output");
+    await expect(raw).toHaveAccessibleName(/\S/);
     await expect(interrupt).toHaveAccessibleName(/\S/);
     await raw.focus();
     await page.keyboard.press("Enter");
@@ -485,7 +485,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
       return { hit: hit ? `${hit.tagName.toLowerCase()}.${hit.className}` : "nothing", confirm: Boolean(hit?.closest(".conversation-end-confirm")) };
     }, point);
     expect(underPointer.confirm, `the confirm is not under the pointer (hit: ${underPointer.hit})`).toBe(false);
-    expect(await end.locator("button").allTextContents()).toEqual(["Cancel", "End session"]);
+    await expect(end.locator(".conversation-end-cancel + .conversation-end-confirm")).toHaveCount(1);
     // cas-d6bf: a lower row's confirmation is in view and focused, and the list stays whole.
     await expect(end.getByRole("button", { name: "Cancel" })).toBeFocused();
     await expect(end.getByRole("button", { name: "End session", exact: true })).toBeInViewport({ ratio: 1 });

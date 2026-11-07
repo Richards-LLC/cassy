@@ -1092,6 +1092,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.release_train_max_age_hours", "5", "5"),
         ("factory.supervisor_message_debounce_secs", "12", "12"),
         ("factory.supervisor_message_wakes_per_hour", "4", "4"),
+        ("factory.supervisor_wake_input_budget", "500000", "500000"),
         ("factory.message_max_chars", "3000", "3000"),
         ("factory.message_max_chars_escalation", "6000", "6000"),
         ("factory.note_max_chars", "1800", "1800"),

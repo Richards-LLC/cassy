@@ -57,6 +57,122 @@ def machine_id_receiver(expression):
     return re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
 
 
+def python_bindings(scope):
+    """Literal strings a name can hold in `scope`, with their lines: simple
+    assignments and loops over literal tuples or lists, including
+    tuple-unpacking loop targets."""
+    bound = {}
+    def bind(target, value):
+        if isinstance(target, ast.Name):
+            literal = python_literal_value(value)
+            if isinstance(literal, str):
+                bound.setdefault(target.id, []).append((literal, value.lineno))
+        elif isinstance(target, ast.Tuple) and isinstance(value, ast.Tuple) and len(target.elts) == len(value.elts):
+            for item, element in zip(target.elts, value.elts):
+                bind(item, element)
+    for node in ast.walk(scope):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            bind(node.targets[0], node.value)
+        elif isinstance(node, (ast.For, ast.comprehension)) and isinstance(node.iter, (ast.Tuple, ast.List)):
+            for element in node.iter.elts:
+                bind(node.target, element)
+    return bound
+
+
+def rust_bindings(ts, ps, begin, end):
+    """Literal strings a local can hold between token indexes `begin` and `end`:
+    `let name = "..."` and `for name in [..]`, including `(a, b)` patterns.
+    Each value carries the token index of its literal."""
+    bound = {}
+    def literal_of(index):
+        item = ts[index]
+        if not item.string or item.value.startswith(("'", "b'")):
+            return None
+        try:
+            return ast.literal_eval(item.value) if item.value.startswith('"') else None
+        except (ValueError, SyntaxError):
+            return None
+    def pattern_names(index):
+        if ts[index].value == '(' and index in ps:
+            return [t.value for t in ts[index + 1:ps[index]] if not t.string and re.fullmatch(r'[A-Za-z_]\w*', t.value)], ps[index] + 1
+        if re.fullmatch(r'[A-Za-z_]\w*', ts[index].value):
+            return [ts[index].value], index + 1
+        return [], index + 1
+    i = begin
+    while i < end:
+        word = ts[i].value
+        if not ts[i].string and word == 'let':
+            j = i + 1
+            if ts[j].value == 'mut':
+                j += 1
+            name = ts[j].value
+            k = j + 1
+            while k < end and ts[k].value not in ('=', ';'):
+                k += 1
+            if k + 2 < len(ts) and ts[k].value == '=' and ts[k + 2].value == ';':
+                value = literal_of(k + 1)
+                if value is not None:
+                    bound.setdefault(name, []).append((value, k + 1))
+        elif not ts[i].string and word == 'for':
+            names, j = pattern_names(i + 1)
+            if names and j < end and ts[j].value == 'in':
+                j += 1
+                while j < end and ts[j].value == '&':
+                    j += 1
+                if ts[j].value == '[' and j in ps:
+                    k = j + 1
+                    while k < ps[j]:
+                        if ts[k].value == '(' and k in ps:
+                            elements = [x for x in range(k + 1, ps[k]) if ts[x].value != ',']
+                            if len(elements) == len(names):
+                                for name, element in zip(names, elements):
+                                    value = literal_of(element)
+                                    if value is not None:
+                                        bound.setdefault(name, []).append((value, element))
+                            k = ps[k] + 1
+                            continue
+                        if len(names) == 1 and literal_of(k) is not None:
+                            bound.setdefault(names[0], []).append((literal_of(k), k))
+                        k += 1
+        i += 1
+    return bound
+
+
+def rust_caller_data(ts, ps, body, name):
+    """Whether local `name` is used outside assertions in the body at `body`,
+    so it is input the test supplies, not an expected phrase."""
+    asserted, patterns = set(), set()
+    for i in range(body + 1, ps[body]):
+        if (not ts[i].string and ts[i].value in ('assert', 'assert_eq', 'assert_ne')
+                and ts[i + 1].value == '!' and i + 2 in ps):
+            asserted.update(range(i, ps[i + 2] + 1))
+        if not ts[i].string and ts[i].value == 'for':
+            # Only a loop pattern (`for x in`, `for (a, b) in`), never `impl T for U`.
+            j = ps[i + 1] + 1 if ts[i + 1].value == '(' and i + 1 in ps else i + 2
+            if j < ps[body] and ts[j].value == 'in':
+                patterns.update(range(i + 1, j))
+    return any(not ts[k].string and ts[k].value == name and k not in asserted and k not in patterns
+               and ts[k - 1].value not in ('let', 'mut')
+               for k in range(body + 1, ps[body]))
+
+
+JS_LITERAL = r'(?:"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|`(?:\\.|[^`\\$])*`)'
+
+
+def javascript_bindings(source):
+    """Literal strings a JS/TS name can hold: `const name = "..."` and
+    `for (const name of [..])` over literal arrays, with each literal's offset."""
+    bound = {}
+    def text(literal):
+        return re.sub(r'\\(.)', r'\1', literal[1:-1])
+    for match in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*(' + JS_LITERAL + r')\s*[;\n]', source):
+        bound.setdefault(match[1], []).append((text(match[2]), match.start(2)))
+    for match in re.finditer(r'\bfor\s*\(\s*(?:const|let|var)\s+(\w+)\s+of\s+\[([^\]]*)\]\s*\)', source):
+        for literal in re.finditer(JS_LITERAL, match[2]):
+            bound.setdefault(match[1], []).append((text(literal[0]), match.start(2) + literal.start()))
+    return bound
+
+
 def message_assertions(source, path, changed_lines=None):
     """Reject prose operands on error channels, never diagnostic arguments."""
     if changed_lines is not None:
@@ -70,15 +186,41 @@ def message_assertions(source, path, changed_lines=None):
             tree = ast.parse(source)
         except SyntaxError:
             return []
+        scopes = {}
+        for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
+            bindings = python_bindings(scope)
+            for child in ast.walk(scope):
+                scopes[child] = bindings
+        asserted = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assert) or (
+                    isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr.startswith('assert')):
+                asserted.update(id(child) for child in ast.walk(node))
+        supplied = {(id(scopes.get(node)), node.id) for node in ast.walk(tree)
+                    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and id(node) not in asserted}
+        def substring_values(literal):
+            """A substring operand's literal value(s): its own, or what a bound name
+            holds unless the test also passes that name in (payload preservation)."""
+            if isinstance(literal, ast.Name):
+                if (id(scopes.get(literal)), literal.id) in supplied:
+                    return []
+                return scopes.get(literal, {}).get(literal.id, [])
+            return [(python_literal_value(literal), literal.lineno)]
         for node in ast.walk(tree):
             if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
                 operands = [node.test.left, *node.test.comparators]
+                substring = any(isinstance(op, (ast.In, ast.NotIn)) for op in node.test.ops)
                 for literal in operands:
-                    if not human_message_literal(python_literal_value(literal)):
-                        continue
-                    actual = ' '.join(ast.get_source_segment(source, item) or '' for item in operands if item is not literal)
-                    if re.search(channels, actual) and not machine_id_receiver(actual) and (changed_lines is None or literal.lineno in changed_lines):
-                        hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
+                    candidates = (substring_values(literal) if substring and literal is node.test.left
+                                  else [(python_literal_value(literal), literal.lineno)])
+                    for value, line in candidates:
+                        if not human_message_literal(value):
+                            continue
+                        actual = ' '.join(ast.get_source_segment(source, item) or '' for item in operands if item is not literal)
+                        if re.search(channels, actual) and not machine_id_receiver(actual) and (
+                                changed_lines is None or line in changed_lines or literal.lineno in changed_lines):
+                            hits.append((line, 'TEST_ASSERTION_PROSE'))
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             name = node.func.attr
@@ -92,16 +234,18 @@ def message_assertions(source, path, changed_lines=None):
                 receiver = ast.get_source_segment(source, actual) or ''
             else:
                 continue
-            value = python_literal_value(literal)
-            if isinstance(value, str) and 'Regex' in name:
-                grammar = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
-                if not re.search(r'[A-Za-z]', grammar):
-                    continue  # Shape/encoding checks do not prescribe words.
-            if (human_message_literal(value)
-                    and re.search(channels, receiver) and not machine_id_receiver(receiver)
-                    and (changed_lines is None or literal.lineno in changed_lines)):
-                hits.append((literal.lineno, 'TEST_ASSERTION_PROSE'))
-        return hits
+            candidates = (substring_values(literal) if name != 'assertEqual'
+                          else [(python_literal_value(literal), literal.lineno)])
+            for value, line in candidates:
+                if isinstance(value, str) and 'Regex' in name:
+                    grammar = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
+                    if not re.search(r'[A-Za-z]', grammar):
+                        continue  # Shape/encoding checks do not prescribe words.
+                if (human_message_literal(value)
+                        and re.search(channels, receiver) and not machine_id_receiver(receiver)
+                        and (changed_lines is None or line in changed_lines or literal.lineno in changed_lines)):
+                    hits.append((line, 'TEST_ASSERTION_PROSE'))
+        return sorted(set(hits))
     if Path(path).suffix == '.rs':
         ts = tokens(source)
         ps = pairs(ts)
@@ -158,9 +302,66 @@ def message_assertions(source, path, changed_lines=None):
                 line = source.count('\n', 0, literal.start) + 1
                 if human_message_literal(value) and (changed_lines is None or line in changed_lines):
                     hits.append((line, 'TEST_ASSERTION_PROSE'))
+            # A substring operand naming a local resolves to the literals it holds.
+            for operand in range(i + 3, close):
+                item = ts[operand]
+                if item.string or item.start >= end or not re.fullmatch(r'[A-Za-z_]\w*', item.value):
+                    continue
+                prefix = source[token.start:item.start]
+                if machine_id_receiver(prefix) or not re.search(r'\.(?:contains|starts_with|ends_with)\(\s*&?\s*$', prefix):
+                    continue
+                body = None
+                for owner in range(i - 1, -1, -1):
+                    if ts[owner].value != 'fn' or ts[owner].string:
+                        continue
+                    brace = next((b for b in range(owner, i) if not ts[b].string and ts[b].value in ('{', ';')), None)
+                    if brace is not None and ts[brace].value == '{' and ps.get(brace, -1) > i:
+                        body = brace
+                        break
+                if body is None:
+                    continue
+                if rust_caller_data(ts, ps, body, item.value):
+                    continue  # The test passes it in; asserting it back is payload preservation.
+                use_line = source.count('\n', 0, item.start) + 1
+                for value, index in rust_bindings(ts, ps, body + 1, i).get(item.value, []):
+                    line = source.count('\n', 0, ts[index].start) + 1
+                    if human_message_literal(value) and (changed_lines is None or line in changed_lines or use_line in changed_lines):
+                        hits.append((line, 'TEST_ASSERTION_PROSE'))
         return sorted(set(hits))
     if not is_test_file(path):
         return []
+    def assertion_context(start):
+        node_calls = list(re.finditer(r'\bassert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match|throws|rejects)\(', source[:start]))
+        beginning = max(source.rfind('expect(', 0, start), node_calls[-1].start() if node_calls else -1)
+        if beginning < source.rfind(';', 0, start) or beginning < 0:
+            return None
+        return source[beginning:start]
+    def message_operand(context):
+        return not machine_id_receiver(context) and bool(
+            re.search(r'\.toThrow(?:Error)?\(\s*(?:new\s+[\w.]+\(\s*)?$', context)
+            or (re.match(r'assert\.(?:throws|rejects)\(', context)
+                and context.count('(') - context.count(')') == 1 and re.search(r',\s*$', context))
+            or (re.search(channels, context) and re.match(r'assert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match)\(', context)
+                and re.search(r'(?:,|\.includes\()\s*$', context))
+            or (re.search(r'\.to(?:MatchObject|Equal|StrictEqual)\(', context)
+                and re.search(r'\b(?:message|reason|remediation|warning)\s*:\s*$', context))
+            or (re.search(r'\bexpect\(', context) and re.search(channels, context)
+                and re.search(r'\.to(?:Be|Equal|Contain|Match)\(\s*$', context)))
+    # A substring operand naming a local resolves to the literals it holds.
+    for name, values in javascript_bindings(source).items():
+        occurrences = len(re.findall(r'(?<![\w.$])' + re.escape(name) + r'(?![\w$])', source))
+        uses = re.findall(r'(?:\.includes|\.toContain|\.toMatch|\.toThrow)\(\s*' + re.escape(name) + r'\s*\)', source)
+        if occurrences > len(uses) + 1:
+            continue  # The test passes it in; asserting it back is payload preservation.
+        for use in re.finditer(r'(?:\.includes|\.toContain|\.toMatch|\.toThrow)\(\s*(' + re.escape(name) + r')\s*\)', source):
+            context = assertion_context(use.start(1))
+            if context is None or not message_operand(context):
+                continue
+            use_line = source.count('\n', 0, use.start(1)) + 1
+            for value, offset in values:
+                line = source.count('\n', 0, offset) + 1
+                if human_message_literal(value) and (changed_lines is None or line in changed_lines or use_line in changed_lines):
+                    hits.append((line, 'TEST_ASSERTION_PROSE'))
     for start, end, value in text_literals(source, path):
         line = source.count('\n', 0, start) + 1
         if source[start:start + 1] == '/':
@@ -170,24 +371,10 @@ def message_assertions(source, path, changed_lines=None):
             value = value.removeprefix('^').removesuffix('$')
         if not human_message_literal(value) or (changed_lines is not None and line not in changed_lines):
             continue
-        node_calls = list(re.finditer(r'\bassert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match|throws|rejects)\(', source[:start]))
-        beginning = max(source.rfind('expect(', 0, start), node_calls[-1].start() if node_calls else -1)
-        if beginning < source.rfind(';', 0, start) or beginning < 0:
-            continue
-        context = source[beginning:start]
-        if machine_id_receiver(context):
-            continue
-        if (re.search(r'\.toThrow(?:Error)?\(\s*(?:new\s+[\w.]+\(\s*)?$', context)
-                or (re.match(r'assert\.(?:throws|rejects)\(', context)
-                    and context.count('(') - context.count(')') == 1 and re.search(r',\s*$', context))
-                or (re.search(channels, context) and re.match(r'assert\.(?:ok|equal|strictEqual|deepEqual|deepStrictEqual|match)\(', context)
-                    and re.search(r'(?:,|\.includes\()\s*$', context))
-                or (re.search(r'\.to(?:MatchObject|Equal|StrictEqual)\(', context)
-                    and re.search(r'\b(?:message|reason|remediation|warning)\s*:\s*$', context))
-                or (re.search(r'\bexpect\(', context) and re.search(channels, context)
-                    and re.search(r'\.to(?:Be|Equal|Contain|Match)\(\s*$', context))):
+        context = assertion_context(start)
+        if context is not None and message_operand(context):
             hits.append((line, 'TEST_ASSERTION_PROSE'))
-    return hits
+    return sorted(set(hits))
 
 
 def is_test_file(path):

@@ -605,7 +605,7 @@ class FastRows(unittest.TestCase):
         _, path = self.receipt()
         # pin: receipts name the actual comparison commit, while the hook log names its target ref.
         self.assertIn(f"base={fork} ", path.read_text())
-        self.assertIn("base origin/epic/", pushed.stderr)
+        self.assertIn("(base origin/epic/train)", pushed.stderr)
         self.write("scripts/example.py", "# this branch now changes the script\n")
         self.commit()
         pushed = self.push()
@@ -790,7 +790,7 @@ class FastRows(unittest.TestCase):
                       (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
-                             "dev-top-level top-level punch exceeds 25 words")
+                             "[rule: punch_length]")
 
     def test_harness_diary_draft_uses_the_thread_rubric_at_park(self):
         path = "docs/release-notes/2026-10-14-harness-diary-sweep-slack.md"

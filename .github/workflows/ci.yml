@@ -1160,9 +1160,7 @@ jobs:
         env:
           CHECK_COMMITTED_DIST: ${{ needs.ci-diff.outputs.web-dist-check-needed }}
         run: |
-          # A build, not a test: it writes tracked dist, so the queue step's
-          # clean-tree receipt cannot wrap it. The equality check below is the test.
-          npm run build
+          python3 ../scripts/ci-queue-flakes.py step --id web-build -- npm run build
           # Only source-only lanes defer committed output to release.sh prepare.
           # Missing policy retains equality, including unknown comparison bases.
           if [[ "$CHECK_COMMITTED_DIST" != false ]]; then

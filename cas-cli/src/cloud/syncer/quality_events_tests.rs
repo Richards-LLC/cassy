@@ -22,6 +22,7 @@ struct CloudState {
     /// Any POST over this many events answers 413.
     max_batch: Option<usize>,
     reject_turns: bool,
+    reject_estimates: bool,
     turn_error: Option<(u16, serde_json::Value)>,
 }
 
@@ -71,6 +72,9 @@ impl Respond for MockCloud {
             return ResponseTemplate::new(413);
         }
         state.posts.push(events.len());
+        if state.reject_estimates && events.iter().any(|event| event["kind"]=="estimate" || event["kind"]=="estimate_outcome") {
+            return ResponseTemplate::new(422).set_body_json(serde_json::json!({"error":"unsupported event kind: estimate"}));
+        }
         if events.iter().any(|event| event["kind"] == "turn") {
             if let Some((status, body)) = &state.turn_error {
                 return ResponseTemplate::new(*status).set_body_json(body);
@@ -285,7 +289,7 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
                 });
             }
             emit(&root, "before turn");
-            // cas-87a2: Friction is local-only until Cloud knows the kind.
+            // Friction now has its own rollout lane with estimate kinds.
             let friction = NewQualityEvent::new(
                 "friction|task|cas-87a2",
                 QualityPayload::Friction {
@@ -319,11 +323,11 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
                 !summary.capability_absent,
                 "the ordinary route is available"
             );
-            assert_eq!(summary.pushed, 2, "both non-Turn rows must push");
-            assert_eq!(cloud.0.lock().unwrap().rows.len(), 3);
+            assert_eq!(summary.pushed, 3, "ordinary and Friction rows must push");
+            assert_eq!(cloud.0.lock().unwrap().rows.len(), 4);
             assert!(
-                cloud.0.lock().unwrap().rows.iter().all(|row| row["kind"] != "friction"),
-                "Friction never reaches an endpoint that may not know it"
+                cloud.0.lock().unwrap().rows.iter().any(|row| row["kind"] == "friction"),
+                "Friction is synced independently of unsupported Turns"
             );
             let pending = cas_store::quality_events_after(&root, 0, 10).unwrap();
             assert_eq!(pending.len(), 4, "the local outbox loses no events");
@@ -364,7 +368,7 @@ async fn rejected_turns_do_not_block_other_quality_events_or_pull() {
                 recovered.pushed, 1,
                 "the held Turn retries after support arrives"
             );
-            assert_eq!(cloud.0.lock().unwrap().rows.len(), 5);
+            assert_eq!(cloud.0.lock().unwrap().rows.len(), 6);
             assert_eq!(syncer.sync_quality_events(true).unwrap().pushed, 0);
         })
         .await
@@ -427,4 +431,32 @@ async fn unrelated_turn_batch_errors_surface_after_pull() {
         .await
         .unwrap();
     }
+}
+
+#[tokio::test(flavor="multi_thread")]
+async fn unsupported_estimates_hold_their_cursor_without_blocking_other_events() {
+    let server=MockServer::start().await;
+    let cloud=MockCloud::default();
+    Mock::given(TeamRoute).respond_with(cloud.clone()).mount(&server).await;
+    let dir=tempfile::tempdir().unwrap(); let root=dir.path().to_path_buf(); let endpoint=server.uri();
+    tokio::task::spawn_blocking(move || {
+        let syncer=machine(&root,&endpoint,"acme/estimates");
+        let event=NewQualityEvent::new("estimate",QualityPayload::Estimate {
+            subject_kind:"pipeline".into(),subject:"merge_queue:abc1234".into(),typical_minutes:16.0,bad_day_minutes:31.0,
+            evidence_count:1,references:vec![cas_store::EstimateReference { id:"run:1".into(),minutes:16.0 }],recipient:"client".into() });
+        cas_store::record_quality_event(&root,&event).unwrap();
+        cloud.0.lock().unwrap().reject_estimates=true;
+        emit(&root,"ordinary");
+        let first=syncer.sync_quality_events(true).unwrap();
+        assert_eq!(first.pushed,1); assert_eq!(first.refused,1);
+        assert_eq!(cloud.0.lock().unwrap().gets,1,"pull still runs");
+        assert!(syncer.queue().get_metadata(super::EXTENDED_PUSH_CURSOR_KEY).unwrap().is_none());
+        emit(&root,"later");
+        syncer.queue().delete_metadata(super::LAST_ROUND_KEY).unwrap();
+        assert_eq!(syncer.sync_quality_events(false).unwrap().pushed,1);
+        cloud.0.lock().unwrap().reject_estimates=false;
+        assert_eq!(syncer.sync_quality_events(true).unwrap().pushed,1);
+        assert_eq!(syncer.sync_quality_events(true).unwrap().pushed,0);
+        assert_eq!(cloud.0.lock().unwrap().rows.len(),3);
+    }).await.unwrap();
 }

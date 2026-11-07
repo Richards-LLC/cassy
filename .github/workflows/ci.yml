@@ -1172,6 +1172,8 @@ jobs:
         if: "${{ steps.job-receipt.outputs.reused != 'true' && (!cancelled() && steps.build.outcome == 'success') }}"
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
+          # The default report dir is tracked docs; the queue step needs a clean tree.
+          VISUAL_QA_ARTIFACT_DIR: ${{ runner.temp }}/visual-qa
         run: |
           if sudo -n true 2>/dev/null; then
             npx playwright install --with-deps --no-shell chromium
@@ -2121,7 +2123,8 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/checkout@v4
-        if: inputs.full-set
+        # A red lane still records its FAIL full-set receipt below.
+        if: inputs.full-set && !cancelled()
         with:
           fetch-depth: 0
           ref: ${{ github.sha }}

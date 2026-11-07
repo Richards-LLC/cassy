@@ -1180,7 +1180,7 @@ async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
     assert_eq!(receipts[0].task_heads["cas-pr"], merged);
     // The receipt must also close it: consumers resolve the same identity.
     let closed = tasks.get("cas-pr").unwrap();
-    assert_eq!(closed.status, TaskStatus::Closed, "{:?}", closed.pending_close_note());
+    assert_eq!(closed.status, TaskStatus::Closed, "{:?}", closed.notes);
     assert!(closed.deliverables.factory_branch_anchor.is_none());
 }
 

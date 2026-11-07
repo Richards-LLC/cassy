@@ -149,9 +149,12 @@ pub(crate) fn idle_blockers(
     }
     match crate::store::open_task_store(root).and_then(|store| Ok(store.list(None)?)) {
         Ok(tasks) => {
-            for task in tasks {
-                if release_freeze::freeze_of(&task).is_some()
-                    && release_freeze::active(root, &task).is_some()
+            for task in &tasks {
+                if crate::train_guardrails::repair_cycle_open(task, &tasks) {
+                    blockers.push(format!("release train {} has a repair cycle open", task.id));
+                }
+                if release_freeze::freeze_of(task).is_some()
+                    && release_freeze::active(root, task).is_some()
                 {
                     blockers.push(format!("release train {} is frozen for a cut", task.id));
                 }

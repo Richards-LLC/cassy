@@ -29,6 +29,20 @@ pub(crate) fn train_lane(epic: &Task) -> Option<&str> {
         .flatten()
 }
 
+/// cas-5f67: a drop re-enqueued this open train and a dropped child has not
+/// closed again, so its one repair cycle is still under way.
+pub(crate) fn repair_cycle_open(train: &Task, tasks: &[Task]) -> bool {
+    train_lane(train).is_some()
+        && !train.is_terminal()
+        && train.notes.lines().any(|line| {
+            let Some(rest) = line.split_once(DROP_NOTE).map(|(_, rest)| rest) else { return false };
+            line.contains(REENQUEUED)
+                && rest.split(" reverted up to").next().unwrap_or_default().split(',').any(|id| {
+                    tasks.iter().any(|task| task.id == id.trim() && !task.is_terminal())
+                })
+        })
+}
+
 /// The train's pull request in the merge queue.
 pub(crate) trait TrainQueue {
     fn open_pr(&self, branch: &str) -> Result<Option<u64>>;

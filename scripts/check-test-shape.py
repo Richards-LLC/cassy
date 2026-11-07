@@ -44,6 +44,7 @@ def human_message_literal(value):
                or (not re.search(r'\s', value) and ('/' in value or value.startswith('--'))))
     return not machine
 
+
 def python_literal_value(node):
     if isinstance(node, ast.Constant):
         return node.value
@@ -51,8 +52,10 @@ def python_literal_value(node):
         return ''.join(part.value for part in node.values if isinstance(part, ast.Constant) and isinstance(part.value, str))
     return None
 
+
 def machine_id_receiver(expression):
     return re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+
 
 def message_assertions(source, path, changed_lines=None):
     """Reject prose operands on error channels, never diagnostic arguments."""
@@ -185,6 +188,7 @@ def message_assertions(source, path, changed_lines=None):
                     and re.search(r'\.to(?:Be|Equal|Contain|Match)\(\s*$', context))):
             hits.append((line, 'TEST_ASSERTION_PROSE'))
     return hits
+
 
 def is_test_file(path):
     """Recognize conventional test directories and filenames across languages."""
@@ -377,6 +381,7 @@ def js_assertion_diagnostics(source, path):
                     break
             elif char == ',' and len(stack) == 1 and comma is None:
                 comma = index
+
 
 def python_runtime_inputs(source):
     """Path literals consumed by file reads are inputs, not returned-text pins."""

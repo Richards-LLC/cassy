@@ -460,7 +460,8 @@ mod tests {
         let root = temp.path().to_path_buf();
         let bare = TempDir::new().unwrap();
         git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
-        git(&root, &["remote", "set-url", "origin", &bare.path().to_string_lossy()]);
+        // Keep the GitHub-shaped origin the repo resolves by; git rewrites it to the bare repo.
+        git(&root, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
         git(&root, &["push", "-q", "origin", "main"]);
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\nepic_base_branch = \"main\"\n").unwrap();

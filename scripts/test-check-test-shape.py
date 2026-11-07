@@ -171,6 +171,18 @@ def test_workflow_command():
             with self.subTest(code=code):
                 self.assertEqual(bool(self.hits(code, 'tests/probe.rs')), rejected)
 
+    def test_python_file_read_inputs_leave_output_pins_in_scope_cas_c49b(self):
+        cases = [
+            ("self.assertEqual(json.loads((self.repo/'receipts/receipt.json').read_text())['outcome'], 'FLAKY')", 0),
+            ("""label = 'é'; self.assertEqual(json.loads((self.repo / 'receipts/receipt.json').read_text())['outcome'],
+    'FLAKY')""", 0),
+            ("self.assertEqual((self.repo/'receipts/receipt.json').read_text(), 'When a test fails, name the responsible boundary and preserve its first result.')", 1),
+            ("self.assertIn('uses: actions/checkout@v4', (self.repo/'.github/workflows/ci.yml').read_text())", 1),
+        ]
+        for code, expected in cases:
+            with self.subTest(code=code):
+                self.assertEqual(len(self.hits(code, 'tests/test_receipt.py')), expected)
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',

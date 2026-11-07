@@ -436,14 +436,12 @@ impl CasService {
         };
         let redirect = redirect.map(|note| format!(" {note}")).unwrap_or_default();
         Ok(Some(Self::success(format!(
-            "Message sent to peer supervisor {}@{} via Cassy Cloud (peer message {}, {}): delivered to {}@{} mailbox.{redirect}{staleness} \
+            "Message queued for peer supervisor {}@{} via Cassy Cloud (peer message {}, {}).{redirect}{staleness} \
              Check delivery with coordination action=message_status id={}.",
             peer.name,
             peer.machine,
             receipt.id,
             receipt.status,
-            peer.name,
-            peer.machine,
             receipt.id
         ))))
     }
@@ -647,15 +645,22 @@ impl CasService {
             let status = peer_mailbox::http_mailbox(&cas_root)
                 .ok_or_else(|| "not logged in to Cassy Cloud".to_string())?
                 .status(&id)?;
+            // Cloud acknowledges admission to the machine's queue, before a
+            // local hook or supervisor inbox necessarily surfaces the body.
+            let (stage, caveat) = match status.status.as_str() {
+                "delivered" => ("accepted by recipient machine", "; supervisor surfacing not confirmed"),
+                other => (other, ""),
+            };
             Ok(format!(
-                "Peer message {}: {}{} (delivery attempts: {})",
+                "Peer message {}: {}{}{} (delivery attempts: {})",
                 status.id,
-                status.status,
+                stage,
                 status
                     .delivered_at
                     .as_deref()
                     .map(|at| format!(" at {at}"))
                     .unwrap_or_default(),
+                caveat,
                 status.attempts
             ))
         })

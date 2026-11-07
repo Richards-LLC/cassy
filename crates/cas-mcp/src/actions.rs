@@ -107,6 +107,7 @@ pub const COORDINATION_ACTIONS: &[&str] = &[
     "my_context",
     // cas-e477: live supervisors of this repo on any machine.
     "peers",
+    "peer_transcript",
 ];
 
 /// Actions of the supervisor `factory` tool (D2 split, cas-8563b): fleet,
@@ -153,6 +154,7 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "worktree_cleanup",
     "worktree_merge",
     "train_merge",
+    "train_freeze",
     "worktree_status",
     // Loops and queues
     "loop_start",
@@ -215,6 +217,7 @@ pub const SEARCH_ACTIONS: &[&str] = &[
 ];
 
 pub const SYSTEM_ACTIONS: &[&str] = &[
+    "estimate",
     "version",
     "preflight",
     "doctor",

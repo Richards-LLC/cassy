@@ -2181,7 +2181,7 @@ fn serve_foreground_logged(
             // Service Auto begins serving immediately, even if a CLI command
             // hangs. Its publication work runs beside both listeners below.
             let ensure_result = if service_startup && transport_mode == HubTransportMode::Auto {
-                Err(anyhow::anyhow!("Tailscale Serve publication pending; retrying in background"))
+                Err(anyhow::anyhow!(PUBLICATION_PENDING))
             } else if service_startup {
                 tailscale_manager.ensure_for_service(proxy_port, tailscale_port, prior_serve_target.clone()).await
             } else {
@@ -3516,8 +3516,20 @@ fn verify_updated_hub(
             remedy: None,
         });
     }
+    // GH #1643: a service restart records the pending placeholder and
+    // publishes in the background. Let that attempt settle, so a route that
+    // is published is probed below instead of reported inactive.
+    let record = settle_pending_publication(paths, record, PUBLICATION_SETTLE);
     if let Some(warning) = record.transport_warning.as_deref() {
         spec.transport_mode.require_publication(false).with_context(|| warning.to_owned())?;
+        if warning == PUBLICATION_PENDING {
+            return Ok(HubUpdateVerification {
+                public_url: None,
+                transport_verified: None,
+                transport_warning: Some("Tailscale Serve publication re-check pending; retrying in background".to_owned()),
+                remedy: Some("Publication retries automatically; check `cas hub status` shortly.".to_owned()),
+            });
+        }
         return Ok(unavailable_update_transport(warning));
     }
     let manager = TailscaleServeManager::new(paths.root());
@@ -3555,6 +3567,29 @@ fn verify_updated_hub(
         transport_warning: public_failure.map(|failure| format!("{health_url}: {failure}")),
         remedy,
     })
+}
+
+/// Service Auto startup's placeholder until background publication settles.
+const PUBLICATION_PENDING: &str = "Tailscale Serve publication pending; retrying in background";
+/// How long `cas update` waits for that background attempt.
+const PUBLICATION_SETTLE: Duration = Duration::from_secs(20);
+
+/// Re-read the same hub's record until the background publication replaces
+/// the pending placeholder (published, or a real failure) or `timeout` ends.
+fn settle_pending_publication(
+    paths: &HubRuntimePaths,
+    mut record: HubProcessRecord,
+    timeout: Duration,
+) -> HubProcessRecord {
+    let deadline = Instant::now() + timeout;
+    while record.transport_warning.as_deref() == Some(PUBLICATION_PENDING) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(250));
+        match paths.read_process_record() {
+            Ok(next) if next.pid == record.pid => record = next,
+            _ => break,
+        }
+    }
+    record
 }
 
 fn unavailable_update_transport(warning: &str) -> HubUpdateVerification {
@@ -4909,6 +4944,36 @@ mod tests {
         // Existing host opt-outs remain effective until a mode is explicitly set.
         let legacy: Config = toml::from_str("[hub]\ntailscale_serve = false\n").unwrap();
         assert_eq!(legacy.get("hub.transport_mode").as_deref(), Some("loopback"));
+    }
+
+    /// GH #1643: soundwave's Nov 7 update warned "inactive ... loopback-only"
+    /// while background publication was about to succeed. The update waits
+    /// for the attempt to settle; a real failure is not waited on and warns.
+    #[test]
+    fn update_waits_for_pending_publication_before_warning_gh_1643() {
+        let dir = crate::test_support::private_hub_tempdir();
+        let paths = HubRuntimePaths::new(dir.path());
+        let mut pending = record("9.99.0", 42047, None);
+        pending.transport_warning = Some(PUBLICATION_PENDING.to_owned());
+        paths.write_process_record(&pending).unwrap();
+        let publisher = {
+            let paths = paths.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                paths.write_process_record(&record("9.99.0", 42047, Some(443))).unwrap();
+            })
+        };
+        let settled = settle_pending_publication(&paths, pending, Duration::from_secs(10));
+        publisher.join().unwrap();
+        assert_eq!(settled.transport_warning, None);
+        assert!(settled.public_url.is_some(), "the published URL is probed next");
+
+        let mut inactive = record("9.99.0", 42047, None);
+        inactive.transport_warning = Some("tailscale CLI is unavailable".to_owned());
+        let started = Instant::now();
+        let settled = settle_pending_publication(&paths, inactive, Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(1), "a real failure is not waited on");
+        assert_eq!(unavailable_update_transport(settled.transport_warning.as_deref().unwrap()).transport_verified, Some(false));
     }
 
     #[test]

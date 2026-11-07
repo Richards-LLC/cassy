@@ -16,6 +16,15 @@ pub struct PeersArgs {
     /// or machine (never another user's)
     #[arg(long, conflicts_with_all = ["detail", "peer"])]
     pub all: bool,
+    /// Queue a bounded, redacted transcript regex query to an own-account peer
+    #[arg(long, requires = "peer", conflicts_with_all = ["all", "detail"])]
+    pub transcript: Option<String>,
+    /// Current or registered supervisor session for --transcript
+    #[arg(long, requires = "transcript")]
+    pub session_id: Option<String>,
+    /// Lines around transcript matches (0..10)
+    #[arg(long, requires = "transcript")]
+    pub context: Option<usize>,
 }
 
 pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()> {
@@ -23,6 +32,16 @@ pub fn execute(args: &PeersArgs, cli: &super::Cli, cas_root: &Path) -> Result<()
     // Read-only identity resolution: never register the CLI as an agent.
     let self_id = crate::cloud::peers::cli_self_id(cas_root)
         .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
+    if let Some(pattern) = &args.transcript {
+        let output = crate::cloud::peer_mailbox::transcript::request(
+            cas_root, self_id.as_deref().ok_or_else(|| anyhow::anyhow!("registered supervisor required"))?,
+            args.peer.as_deref().ok_or_else(|| anyhow::anyhow!("--peer is required"))?,
+            args.session_id.as_deref().unwrap_or("current"), pattern, args.context.unwrap_or(2),
+        ).map_err(anyhow::Error::msg)?;
+        if cli.json { println!("{}", serde_json::json!({"status":"queued", "message":output})); }
+        else { println!("{output}"); }
+        return Ok(());
+    }
     if args.all {
         // cas-2a5a: the account-wide directory. A failed lookup exits 1 in
         // text and JSON alike, as plain `cas peers` does.

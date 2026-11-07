@@ -5,12 +5,12 @@ use crate::ui::factory::{
     ClientMessage, DaemonMessage, FRAME_HEADER_SIZE, MAX_MESSAGE_SIZE, decode_length,
     encode_message,
 };
-use crate::ui::factory::{SessionManager, gui_socket_path};
+use crate::ui::factory::{SessionInfo, SessionManager, gui_socket_path};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, thiserror::Error)]
@@ -32,7 +32,13 @@ fn read_exact_before(
     deadline: Instant,
 ) -> Result<()> {
     while !data.is_empty() {
-        stream.set_read_timeout(Some(time_left(deadline)?))?;
+        // After the swap the new image writes the receipt and closes. macOS
+        // then refuses socket options with EINVAL while the receipt is still
+        // buffered; a read of a closed socket cannot block, so read it anyway.
+        match stream.set_read_timeout(Some(time_left(deadline)?)) {
+            Err(error) if error.raw_os_error() == Some(libc::EINVAL) => {}
+            result => result?,
+        }
         match stream.read(data) {
             Ok(0) => bail!("Daemon disconnected before completing its response"),
             Ok(n) => data = &mut data[n..],
@@ -168,70 +174,100 @@ pub(crate) struct UpdateOutcome {
     pub error: Option<String>,
 }
 
-pub(crate) fn update_live_daemons() -> Vec<UpdateOutcome> {
-    update_live_daemons_with_timeout(Duration::from_secs(60))
+/// cas-e1e9: `cas update` re-execs each running factory session right after
+/// its own project's store is refreshed, so one slow project never delays
+/// another session. Sessions not handled per project re-exec in [`finish`].
+///
+/// [`finish`]: LiveDaemonUpdate::finish
+pub(crate) struct LiveDaemonUpdate {
+    timeout: Duration,
+    handled: std::collections::BTreeSet<String>,
+    outcomes: Vec<UpdateOutcome>,
 }
 
-fn update_live_daemons_with_timeout(timeout: Duration) -> Vec<UpdateOutcome> {
-    let sessions = match SessionManager::new().list_sessions_read_only() {
-        Ok(sessions) => sessions,
-        Err(error) => {
-            return vec![UpdateOutcome {
-                session: "discovery".into(),
-                status: "failed",
-                receipt: None,
-                error: Some(error.to_string()),
-            }];
+impl LiveDaemonUpdate {
+    pub(crate) fn new() -> Self {
+        Self::with_timeout(Duration::from_secs(60))
+    }
+
+    fn with_timeout(timeout: Duration) -> Self {
+        Self { timeout, handled: Default::default(), outcomes: Vec::new() }
+    }
+
+    /// Re-exec the running sessions whose store is `cas_root`. Call only
+    /// after that store refreshed; a listing failure is reported by `finish`.
+    pub(crate) fn after_project(&mut self, cas_root: &Path) {
+        let root = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+        let _ = self.run(|session| {
+            let store = session.metadata.cas_root.as_ref().map(PathBuf::from).or_else(|| {
+                session.metadata.project_dir.as_ref().map(|dir| Path::new(dir).join(".cas"))
+            });
+            store.is_some_and(|store| store.canonicalize().unwrap_or(store) == root)
+        });
+    }
+
+    /// Re-exec every remaining running session, including those whose project
+    /// failed to refresh, and return one outcome per session.
+    pub(crate) fn finish(mut self) -> Vec<UpdateOutcome> {
+        if let Err(outcome) = self.run(|_| true) {
+            self.outcomes.push(outcome);
         }
-    };
-    let binary = match std::env::current_exe() {
-        Ok(binary) => binary,
-        Err(error) => {
-            return vec![UpdateOutcome {
-                session: "binary".into(),
-                status: "failed",
-                receipt: None,
-                error: Some(error.to_string()),
-            }];
+        self.outcomes
+    }
+
+    fn run(&mut self, select: impl Fn(&SessionInfo) -> bool) -> Result<(), UpdateOutcome> {
+        let failed = |session: &str, error: String| UpdateOutcome {
+            session: session.into(),
+            status: "failed",
+            receipt: None,
+            error: Some(error),
+        };
+        let sessions = SessionManager::new()
+            .list_sessions_read_only()
+            .map_err(|error| failed("discovery", error.to_string()))?;
+        let binary = std::env::current_exe().map_err(|error| failed("binary", error.to_string()))?;
+        for session in sessions {
+            if session.is_running && !self.handled.contains(&session.name) && select(&session) {
+                self.handled.insert(session.name.clone());
+                self.outcomes.push(update_one(session, &binary, self.timeout));
+            }
         }
-    };
-    sessions
-        .into_iter()
-        .filter(|session| session.is_running)
-        .map(|session| {
-            let build = option_env!("CAS_GIT_HASH").unwrap_or("unknown");
-            if build != "unknown" && session.metadata.daemon_build_hash.as_deref() == Some(build) {
-                return UpdateOutcome {
-                    session: session.name,
-                    status: "current",
-                    receipt: None,
-                    error: None,
-                };
-            }
-            match request_with_timeout(&session.name, &binary, timeout) {
-                Ok(receipt) => UpdateOutcome {
-                    session: session.name,
-                    status: if receipt.fallback {
-                        "restored_previous"
-                    } else {
-                        "updated"
-                    },
-                    error: receipt.error.clone(),
-                    receipt: Some(receipt),
-                },
-                Err(error) => UpdateOutcome {
-                    session: session.name,
-                    status: if error.is::<RelaunchRequired>() {
-                        "relaunch_required"
-                    } else {
-                        "failed"
-                    },
-                    receipt: None,
-                    error: Some(format!("{error:#}")),
-                },
-            }
-        })
-        .collect()
+        Ok(())
+    }
+}
+
+fn update_one(session: SessionInfo, binary: &Path, timeout: Duration) -> UpdateOutcome {
+    let build = option_env!("CAS_GIT_HASH").unwrap_or("unknown");
+    if build != "unknown" && session.metadata.daemon_build_hash.as_deref() == Some(build) {
+        return UpdateOutcome {
+            session: session.name,
+            status: "current",
+            receipt: None,
+            error: None,
+        };
+    }
+    match request_with_timeout(&session.name, binary, timeout) {
+        Ok(receipt) => UpdateOutcome {
+            session: session.name,
+            status: if receipt.fallback {
+                "restored_previous"
+            } else {
+                "updated"
+            },
+            error: receipt.error.clone(),
+            receipt: Some(receipt),
+        },
+        Err(error) => UpdateOutcome {
+            session: session.name,
+            status: if error.is::<RelaunchRequired>() {
+                "relaunch_required"
+            } else {
+                "failed"
+            },
+            receipt: None,
+            error: Some(format!("{error:#}")),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -240,6 +276,69 @@ mod tests {
     use crate::ui::factory::{SessionState, create_metadata, socket_path};
     use std::os::unix::net::UnixListener;
     use std::time::Instant;
+
+    /// cas-e1e9: prowl's sessions waited ~5 min behind 31 project refreshes.
+    /// A fast project's session re-execs while a slow project is still
+    /// refreshing, the slow one's right after its own, and each exactly once.
+    #[test]
+    fn each_session_reexecs_right_after_its_own_project_refresh() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let short = tempfile::tempdir_in("/tmp").unwrap();
+        let home = short.path().join("h");
+        std::os::unix::fs::symlink(env.home(), &home).unwrap();
+        env.set("HOME", &home);
+        let manager = SessionManager::new();
+        manager.ensure_dir().unwrap();
+        let mut roots = Vec::new();
+        for name in ["fast", "slow"] {
+            let project = env.home().join(name);
+            std::fs::create_dir_all(&project).unwrap();
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            let mut metadata = create_metadata(
+                name, std::process::id(), "lead", &[], None, Some(project.to_str().unwrap()), None,
+            );
+            metadata.daemon_build_hash = Some("previous-build".into());
+            manager.save_daemon_metadata(metadata, &root).unwrap();
+            roots.push(root);
+        }
+        let sessions = |outcomes: &[UpdateOutcome]| {
+            outcomes.iter().map(|outcome| outcome.session.clone()).collect::<Vec<_>>()
+        };
+        let mut live = LiveDaemonUpdate::with_timeout(Duration::from_millis(50));
+        live.after_project(&roots[0]);
+        // The slow project's refresh is still running here.
+        assert_eq!(sessions(&live.outcomes), ["fast"]);
+        live.after_project(&roots[1]);
+        assert_eq!(sessions(&live.outcomes), ["fast", "slow"]);
+        assert_eq!(sessions(&live.finish()), ["fast", "slow"]);
+    }
+
+    #[test]
+    fn swapped_daemon_receipt_is_read_after_the_new_image_closes_cas_60a0() {
+        let (mut client, mut daemon) = UnixStream::pair().unwrap();
+        let receipt = ReexecReceipt {
+            session: "s".into(),
+            nonce: "n".into(),
+            pid: 7,
+            old_version: "9.99.0".into(),
+            version: "9.99.1".into(),
+            build: "b".into(),
+            panes_adopted: 2,
+            fallback: false,
+            error: None,
+            at: chrono::Utc::now(),
+        };
+        let frame = encode_message(&DaemonMessage::ReexecResult { receipt }).unwrap();
+        daemon.write_all(&frame).unwrap();
+        drop(daemon);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        match read_frame(&mut client, deadline).unwrap() {
+            DaemonMessage::ReexecResult { receipt } => {
+                assert_eq!((receipt.pid, receipt.panes_adopted), (7, 2))
+            }
+            other => panic!("expected the receipt, got {other:?}"),
+        }
+    }
 
     #[test]
     fn update_returns_relaunch_required_for_a_chatty_old_daemon() {
@@ -313,7 +412,7 @@ mod tests {
             }
             frames
         });
-        let outcomes = update_live_daemons_with_timeout(Duration::from_millis(50));
+        let outcomes = LiveDaemonUpdate::with_timeout(Duration::from_millis(50)).finish();
         let frames = server.join().unwrap();
         assert!(
             frames > 0,

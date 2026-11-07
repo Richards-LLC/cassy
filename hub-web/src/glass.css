@@ -555,8 +555,8 @@ html[data-scheme="dark"] {
 :root .status-timeline:hover { background: var(--bg-hover); }
 :root .status-timeline::after { content: ""; position: absolute; inset: calc((var(--pill-action-height) - var(--rail-item-min)) / 2) 0; }
 
-/* Machine chip: a pill — dot, name, quiet mono runtime. */
-:root .project-machine-chip { border-radius: var(--radius-pill); border-color: var(--line-subtle); background: var(--bg-raised); color: var(--ink); padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2); }
+/* Machine dot: a quiet dot and name in the card head; a version appears only on skew (cas-da546). */
+:root .project-machine-chip { border-radius: var(--radius-pill); }
 
 /* Avatar: the provider's mark on a disc, or two letters; the dot rides its edge. */
 :root .provider-avatar { position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center; width: var(--avatar-size); height: var(--avatar-size); border-radius: var(--radius-pill); }
@@ -570,7 +570,7 @@ html[data-scheme="dark"] {
   :root .conversation-identity .provider-avatar { width: 36px; height: 36px; }
 }
 @media (prefers-contrast: more), (forced-colors: active) {
-  :root .status-row, :root .team-lane, :root .conversation-group.project-card, :root .project-machine-chip { border-color: var(--line-strong); }
+  :root .status-row, :root .team-lane, :root .conversation-group.project-card { border-color: var(--line-strong); }
 }
 /* Conversation header line 2: the harness (model, once cas-2dcc reports it) leads in UI type. */
 :root .conversation-identity .conversation-model { flex: none; margin-inline-end: var(--space-2); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1.25 var(--font-ui); }

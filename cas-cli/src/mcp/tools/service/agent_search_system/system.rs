@@ -327,6 +327,18 @@ use crate::config::operator_policy::{
 };
 
 impl CasService {
+    pub(in crate::mcp::tools::service) async fn system_estimate(&self, req: SystemRequest) -> Result<CallToolResult,McpError> {
+        let query=req.query.as_deref().unwrap_or("");
+        let parts:Vec<_>=query.splitn(3,':').collect();
+        if parts.len()<2 || (parts[0]=="pipeline" && parts.len()<3) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,"query: pipeline:<stage>:<sha>, task:<id>, epic:<id> or release:<version>"));
+        }
+        let result=crate::quality_ledger::estimates::estimate(&self.inner.cas_root,parts[0],parts[1],parts.get(2).copied(),
+            req.recipient.as_deref().unwrap_or("operator"),20,true)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,error.to_string()))?;
+        Ok(Self::success(serde_json::to_string_pretty(&result).map_err(|error|Self::error(ErrorCode::INTERNAL_ERROR,error.to_string()))?))
+    }
+
     pub(in crate::mcp::tools::service) async fn system_version(
         &self,
     ) -> Result<CallToolResult, McpError> {

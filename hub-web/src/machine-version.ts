@@ -49,6 +49,14 @@ export function machineVersionMarkup(runtime: string | undefined, latest?: strin
   return `<span class="machine-version"><span class="machine-version-installed${known ? "" : " unknown"}">${label}</span>${restart}${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
 }
 
+/** cas-da546: a machine's version is shown only when it is out of step: its
+ * hub runs an older binary than the one installed, or a newer release is out. */
+export function machineVersionSkew(runtime: string | undefined, latest?: string, installed?: string): boolean {
+  if (typeof runtime !== "string" || !runtime || runtime === "unknown") return false;
+  const stale = isNewerRelease(runtime, installed);
+  return stale || isNewerRelease(stale ? installed : runtime, latest);
+}
+
 /** Persist attempts as well as successes: offline reloads never hammer GitHub.
  * A failed check keeps the last known release. Web Locks serialize tab checks.
  */

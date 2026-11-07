@@ -38,6 +38,17 @@ const PROJECT_ID_MAX_CHARS: usize = 200;
 const PUSH_CURSOR_KEY: &str = "quality_events_push_seq";
 const TURN_PUSH_CURSOR_KEY: &str = "quality_events_turn_push_seq";
 const TURN_ABSENT_UNTIL_KEY: &str = "quality_events_turn_absent_until";
+const EXTENDED_PUSH_CURSOR_KEY: &str = "quality_events_extended_push_seq";
+const EXTENDED_ABSENT_UNTIL_KEY: &str = "quality_events_extended_absent_until";
+
+#[derive(Clone,Copy,PartialEq)]
+enum PushLane { Ordinary, Turn, Extended }
+impl PushLane {
+    fn cursor(self)->&'static str { match self { Self::Ordinary=>PUSH_CURSOR_KEY,Self::Turn=>TURN_PUSH_CURSOR_KEY,Self::Extended=>EXTENDED_PUSH_CURSOR_KEY } }
+    fn cooldown(self)->Option<&'static str> { match self { Self::Ordinary=>None,Self::Turn=>Some(TURN_ABSENT_UNTIL_KEY),Self::Extended=>Some(EXTENDED_ABSENT_UNTIL_KEY) } }
+    fn accepts(self,kind:&str)->bool { match kind { "turn"=>self==Self::Turn,"friction"|"estimate"|"estimate_outcome"=>self==Self::Extended,_=>self==Self::Ordinary } }
+    fn unsupported(self,body:&str)->bool { match self { Self::Ordinary=>false,Self::Turn=>kind_unsupported(body,&["turn"]),Self::Extended=>kind_unsupported(body,&["friction","estimate","estimate_outcome"]) } }
+}
 const PULL_CURSOR_KEY: &str = "quality_events_pull_cursor";
 const LAST_ROUND_KEY: &str = "quality_events_last_round_at";
 const ABSENT_UNTIL_KEY: &str = "quality_events_absent_until";
@@ -164,17 +175,11 @@ impl CloudSyncer {
         force: bool,
         summary: &mut QualitySyncSummary,
     ) -> Result<bool, CasError> {
-        if self.push_quality_event_kind(token, project_id, team_id, false, summary)? {
-            return Ok(true);
+        for lane in [PushLane::Ordinary,PushLane::Turn,PushLane::Extended] {
+            if !force && lane.cooldown().and_then(|key|self.quality_metadata_time(key)).is_some_and(|until|Utc::now()<until) { continue; }
+            if self.push_quality_event_kind(token,project_id,team_id,lane,summary)? { return Ok(true); }
         }
-        if !force
-            && self
-                .quality_metadata_time(TURN_ABSENT_UNTIL_KEY)
-                .is_some_and(|until| Utc::now() < until)
-        {
-            return Ok(false);
-        }
-        self.push_quality_event_kind(token, project_id, team_id, true, summary)
+        Ok(false)
     }
 
     /// Separate cursors keep unsupported Turns retryable without blocking other
@@ -185,14 +190,10 @@ impl CloudSyncer {
         token: &str,
         project_id: &str,
         team_id: &str,
-        turns: bool,
+        lane: PushLane,
         summary: &mut QualitySyncSummary,
     ) -> Result<bool, CasError> {
-        let cursor_key = if turns {
-            TURN_PUSH_CURSOR_KEY
-        } else {
-            PUSH_CURSOR_KEY
-        };
+        let cursor_key = lane.cursor();
         let cas_dir = self.queue.cas_dir().to_path_buf();
         let url = format!(
             "{}/api/teams/{}/quality-events",
@@ -208,22 +209,14 @@ impl CloudSyncer {
             let events = quality_events_after(&cas_dir, cursor, limit)
                 .map_err(|error| CasError::Other(error.to_string()))?;
             let Some(last_seq) = events.last().map(|event| event.seq) else {
-                if turns {
-                    self.queue().delete_metadata(TURN_ABSENT_UNTIL_KEY)?;
-                }
+                if let Some(key)=lane.cooldown() { self.queue().delete_metadata(key)?; }
                 return Ok(false);
             };
             let wire: Vec<QualityEventWire> = events
                 .iter()
-                // cas-87a2: Cloud has no Friction kind yet. An older endpoint
-                // may refuse a whole batch for an unknown kind, so Friction
-                // stays local rather than stall the ordinary cursor. A future
-                // lane can start its own cursor at zero; ids are idempotent.
-                .filter(|event| match event.payload.kind() {
-                    "friction" => false,
-                    "turn" => turns,
-                    _ => !turns,
-                })
+                // New kinds replay from their own zero cursor without starving
+                // older clients or losing telemetry during Cloud rollout.
+                .filter(|event| lane.accepts(event.payload.kind()))
                 .map(|event| {
                     let mut wire = event.to_wire();
                     wire.project_id = Some(project_id.to_string());
@@ -255,11 +248,11 @@ impl CloudSyncer {
             // A status alone says nothing about kind support. Preserve and
             // report unrelated validation errors rather than hiding them.
             let response = match response {
-                Err(ureq::Error::Status(code @ (400 | 422), response)) if turns => {
+                Err(ureq::Error::Status(code @ (400 | 422), response)) if lane != PushLane::Ordinary => {
                     let body = response.into_string().unwrap_or_default();
-                    if turn_kind_unsupported(&body) {
+                    if lane.unsupported(&body) {
                         summary.refused += wire.len();
-                        self.defer_turn_push()?;
+                        self.defer_quality_lane(lane)?;
                         return Ok(false);
                     }
                     return Err(CasError::Other(format!(
@@ -287,8 +280,8 @@ impl CloudSyncer {
             // Any refused Turn stays behind its own cursor. Ordinary kinds
             // have already advanced, and pull still gets its own attempt.
             let rejected_turn = events.iter().find(|event| {
-                turns
-                    && event.payload.kind() == "turn"
+                lane != PushLane::Ordinary
+                    && lane.accepts(event.payload.kind())
                     && answer.rejected.iter().any(|row| {
                         row.get("id").and_then(serde_json::Value::as_str) == Some(event.id.as_str())
                     })
@@ -309,12 +302,10 @@ impl CloudSyncer {
             self.queue()
                 .set_metadata(cursor_key, &accepted_through.to_string())?;
             if rejected_turn.is_some() {
-                self.defer_turn_push()?;
+                self.defer_quality_lane(lane)?;
                 return Ok(false);
             }
-            if turns {
-                self.queue().delete_metadata(TURN_ABSENT_UNTIL_KEY)?;
-            }
+            if let Some(key)=lane.cooldown() { self.queue().delete_metadata(key)?; }
             if events.len() < limit {
                 return Ok(false);
             }
@@ -322,10 +313,10 @@ impl CloudSyncer {
         Ok(false)
     }
 
-    fn defer_turn_push(&self) -> Result<(), CasError> {
+    fn defer_quality_lane(&self,lane:PushLane) -> Result<(), CasError> {
         let until = Utc::now() + Duration::hours(ABSENT_RETRY);
-        self.queue()
-            .set_metadata(TURN_ABSENT_UNTIL_KEY, &until.to_rfc3339())
+        if let Some(key)=lane.cooldown() { self.queue().set_metadata(key, &until.to_rfc3339())?; }
+        Ok(())
     }
 
     /// Returns true when the route is not live.
@@ -387,7 +378,7 @@ impl CloudSyncer {
 
 /// Only an explicit kind diagnosis in the error message is a capability miss;
 /// incidental mentions of Turn in the rejected payload are not evidence.
-fn turn_kind_unsupported(body: &str) -> bool {
+fn kind_unsupported(body: &str,kinds:&[&str]) -> bool {
     let value = serde_json::from_str::<serde_json::Value>(body)
         .unwrap_or_else(|_| serde_json::Value::String(body.to_string()));
     let messages = [
@@ -405,13 +396,15 @@ fn turn_kind_unsupported(body: &str) -> bool {
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|word| !word.is_empty())
             .collect();
-        words.windows(4).any(|w| {
-            w == ["unsupported", "event", "kind", "turn"]
-                || w == ["unknown", "event", "kind", "turn"]
-                || w == ["kind", "turn", "is", "unsupported"]
-        }) || words
-            .windows(3)
-            .any(|w| w == ["unsupported", "kind", "turn"] || w == ["unknown", "kind", "turn"])
+        kinds.iter().any(|kind| {
+            let suffix:Vec<_>=kind.split('_').collect();
+            let mut patterns=Vec::new();
+            for prefix in [vec!["unsupported","event","kind"],vec!["unknown","event","kind"],vec!["unsupported","kind"],vec!["unknown","kind"]] {
+                patterns.push([prefix,suffix.clone()].concat());
+            }
+            patterns.push([vec!["kind"],suffix,vec!["is","unsupported"]].concat());
+            patterns.iter().any(|pattern| words.windows(pattern.len()).any(|w|w==pattern.as_slice()))
+        })
     })
 }
 

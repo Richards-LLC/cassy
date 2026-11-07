@@ -262,14 +262,14 @@ pub struct SystemRequest {
 
     /// Regenerate embeddings (deprecated - semantic search via cloud only)
     #[schemars(
-        description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
+        description = "Deprecated; ignored (cloud-only)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub embeddings: Option<bool>,
 
     /// Only generate for entries missing embeddings (deprecated)
     #[schemars(
-        description = "Deprecated: embeddings are now cloud-only. This parameter is ignored."
+        description = "Deprecated; ignored (cloud-only)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub missing_only: Option<bool>,
@@ -281,22 +281,27 @@ pub struct SystemRequest {
 
     /// Search query for config_search action
     #[schemars(
-        description = "Search query for config_search (searches keys, descriptions, keywords, use cases)"
+        description = "Config search; estimate: pipeline:<stage>:<sha>, task:<id>, epic:<id> or release:<version>"
     )]
     #[serde(default)]
     pub query: Option<String>,
 
+    /// Audience receiving an estimate.
+    #[schemars(description = "Estimate recipient: operator (default) or client")]
+    #[serde(default)]
+    pub recipient: Option<String>,
+
     // ========== Bug Reporting Fields (report_cas_bug) ==========
     /// Bug title (for report_cas_bug)
     #[schemars(
-        description = "Brief title describing the bug (anonymize any project-specific info)"
+        description = "Anonymized bug title"
     )]
     #[serde(default)]
     pub title: Option<String>,
 
     /// Bug description (for report_cas_bug)
     #[schemars(
-        description = "Detailed description including steps to reproduce. Anonymize paths, remove credentials and leave out proprietary code."
+        description = "Reproduction steps. Anonymize paths; omit credentials and proprietary code."
     )]
     #[serde(default)]
     pub description: Option<String>,
@@ -1028,7 +1033,7 @@ pub struct CoordinationRequest {
     pub detail: Option<bool>,
 
     /// Select one peer supervisor; implies detail.
-    #[schemars(description = "peers only: supervisor name or name@machine; implies detail")]
+    #[schemars(description = "peers: supervisor name or name@machine; peer_transcript: own-account supervisor selector")]
     #[serde(default)]
     pub peer: Option<String>,
 
@@ -1210,7 +1215,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never trunk (allow_trunk). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: stop a mid-task, dirty or unpushed worker (check its worktree). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never trunk (allow_trunk). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even forced."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,

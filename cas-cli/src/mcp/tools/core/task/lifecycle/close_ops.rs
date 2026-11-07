@@ -20339,7 +20339,7 @@ fn fast_forward_local_epic_ref(
 /// Find a commit already on the target whose complete tree equals the
 /// submitted branch tip. This is the exact shape produced by a squash merge:
 /// the original commit is not an ancestor, but the resulting snapshot is.
-fn find_squash_tree_match(
+pub(crate) fn find_squash_tree_match(
     repo_path: &std::path::Path,
     source_commit: &str,
     parent_branch: &str,

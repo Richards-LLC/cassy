@@ -16,12 +16,6 @@ def git(repo, *args):
     return subprocess.check_output(['git', '-C', str(repo), *args], text=True)
 
 
-
-
-
-
-
-
 def verified(script, cargo, args, count):
     env = os.environ.copy()
     env.update(CARGO=cargo, VERIFIED_TEST_COUNT_FILE=str(count))

@@ -60,7 +60,9 @@ export type OperationKind =
   | "set_worker_hold"
   | "recycle_worker"
   | "shutdown_workers"
-  | "assign_task";
+  | "assign_task"
+  | "freeze_train"
+  | "lift_train_freeze";
 
 export interface OperationRequest {
   readonly op: { readonly kind: OperationKind } & Readonly<Record<string, unknown>>;
@@ -197,6 +199,32 @@ export function focusEpicAction(epicId: string, current: string | null): FleetAc
     done: `Focused on ${epicId}.`,
     // Undo restores the previous focus, or clears it when there was none.
     inverse: () => (current ? focusEpicAction(current, epicId) : clearFocusAction(epicId)),
+  };
+}
+
+/** cas-2f4d: freeze the release train at its tip. One tap; only the release publishing or Lift ends it. */
+export function freezeTrainAction(epicId: string): FleetAction {
+  return {
+    id: `freeze:${epicId}`,
+    operation: "freeze-train",
+    label: "Freeze for release",
+    destructive: false,
+    request: { op: { kind: "freeze_train", epic_id: epicId }, expected: {} },
+    progress: "Freezing the train…",
+    done: "Train frozen for release.",
+  };
+}
+
+/** cas-2f4d: the operator's one-tap lift; no supervisor action lifts a freeze. */
+export function liftFreezeAction(epicId: string): FleetAction {
+  return {
+    id: `lift-freeze:${epicId}`,
+    operation: "lift-freeze",
+    label: "Lift freeze",
+    destructive: false,
+    request: { op: { kind: "lift_train_freeze", epic_id: epicId }, expected: {} },
+    progress: "Lifting the freeze…",
+    done: "Freeze lifted; merges resume.",
   };
 }
 

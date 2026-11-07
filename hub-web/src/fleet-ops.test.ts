@@ -15,7 +15,8 @@ import {
   type FleetAgent,
   type FleetTask,
 } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
+import { releaseHeader } from "./progress-view";
 import type { Scope } from "./types";
 import type { WriteAccessContext } from "./write-grant-view";
 import { WriteGrantState } from "./write-grant";
@@ -166,6 +167,19 @@ function context(scopes: Scope[], state = new FleetOpsState(), on: Partial<Fleet
 }
 
 describe("the rail's controls draw that state (cas-a474)", () => {
+  it("shows a frozen train's measured ETA and offers the operator one-tap Lift, Freeze otherwise (cas-2f4d)", () => {
+    const choose = vi.fn();
+    const frozen = { id: "cas-tr", title: "Release train vNEXT", freeze: { frozen_at: "2026-11-07T19:05:00Z", eta: "2026-11-07T19:50:00Z", summary: "Frozen 2:05 PM ET · ETA 2:50 PM ET" } };
+    expect(releaseHeader(document, frozen).querySelector(".release-freeze")?.textContent).toBe("Frozen 2:05 PM ET · ETA 2:50 PM ET");
+    const lift = trainControls(document, context([...CONTROL, "factory-operate", "factory-manage"], new FleetOpsState(), { choose }), frozen).querySelector("button")!;
+    expect(lift.textContent).toBe("Lift freeze");
+    lift.click();
+    expect(choose.mock.calls[0]![1].request.op).toEqual({ kind: "lift_train_freeze", epic_id: "cas-tr" });
+    const freeze = trainControls(document, context([...CONTROL, "factory-operate"], new FleetOpsState(), { choose }), { id: "cas-tr" }).querySelector("button")!;
+    freeze.click();
+    expect(choose.mock.calls[1]![1].request.op).toEqual({ kind: "freeze_train", epic_id: "cas-tr" });
+  });
+
   it("gates each menu item: a control pairing can pause but sees Stop disabled with the command that adds factory:manage", () => {
     const state = new FleetOpsState();
     state.menuFor = "agent:swift-lark-3";

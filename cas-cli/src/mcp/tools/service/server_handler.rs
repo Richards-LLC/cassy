@@ -379,7 +379,15 @@ fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> St
                 })
                 .unwrap_or_default();
             if result.is_error == Some(true) {
-                format!("refused: {text}")
+                // The refusal body (offending claim and remedy) is what the
+                // caller needs; the first line is only its heading.
+                let body = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut cap = 600.min(body.len());
+                while !body.is_char_boundary(cap) {
+                    cap -= 1;
+                }
+                let ellipsis = if cap < body.len() { "…" } else { "" };
+                return format!("refused: {}{ellipsis}", &body[..cap]);
             } else {
                 text
             }
@@ -1769,7 +1777,9 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(tasks.get("cas-late").unwrap().status, crate::types::TaskStatus::Open);
-        assert!(notes.contains(refusal_payload.lines().next().unwrap()), "{notes}");
+        // The whole refusal body survives, whitespace-joined, not only its heading.
+        let body = refusal_payload.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(notes.contains(&body), "{notes}");
         assert_eq!(notes.matches("CLOSE_OUTCOME").count(), 1, "{notes}");
     }
 

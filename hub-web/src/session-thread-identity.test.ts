@@ -173,19 +173,18 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(active(minute + 4_000, minute + 61_000)).toBe("wild-shark-68");
   });
 
-  it("tells grouped rows apart before any is opened: what each session last did, in plain words (cas-5d2c)", () => {
+  it("tells one-line rows apart by codename, and shows a second line only for a state that needs seeing (cas-da546)", () => {
     const rows = groupConversationRows([
       row("calm-puma-34", 300, { activityLine: "Messaged bright-robin-85" }),
-      row("wild-shark-68", 200, { activityLine: "You wrote to it", preview: "Stem export is at 60%." }),
-      row("noble-cheetah-84", 100),
+      row("wild-shark-68", 200, { preview: "Stem export is at 60%." }),
     ]);
-    const preview = (index: number) => new DOMParser().parseFromString(conversationRowMarkup(rows[index]!), "text/html").querySelector(".conversation-preview")?.textContent;
-    // The catalog's activity until the thread has a turn; the turn once it has; the state when neither.
-    expect([preview(0), preview(1), preview(2)]).toEqual(["Messaged bright-robin-85", "Stem export is at 60%.", "Live"]);
+    const parse = (item: ConversationRow) => new DOMParser().parseFromString(conversationRowMarkup(item), "text/html");
+    expect(rows.map(item => parse(item).querySelector(".conversation-supervisor-name")?.textContent)).toEqual(["calm-puma-34", "wild-shark-68"]);
+    expect(rows.map(item => parse(item).querySelector(".conversation-preview"))).toEqual([null, null]);
     const ended = row("watchful-heron-16", 50, { ended: { at: "2026-10-29T10:00:00Z", reason: "prompt_input_exit", workers_stopped: [], orphans: [] } });
-    expect(new DOMParser().parseFromString(conversationRowMarkup(ended), "text/html").querySelector(".conversation-preview")?.textContent).toBeTruthy();
-    // An ungrouped row keeps its connection words.
-    expect(new DOMParser().parseFromString(conversationRowMarkup({ ...row("solo", 1), activityLine: "Wrote to you" }), "text/html").querySelector(".conversation-preview")?.textContent).toBeTruthy();
+    expect(parse(ended).querySelector(".conversation-preview")?.textContent).toBeTruthy();
+    // A lone session on its machine needs no codename: its card names the project.
+    expect(parse(row("solo", 1)).querySelector(".conversation-supervisor-name")).toBeNull();
   });
 
 
@@ -207,7 +206,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     expect(group?.getAttribute("aria-label")).toContain("gabber-studio");
     expect([...group.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
     expect(container.children).toHaveLength(2);
-    expect(container.lastElementChild?.textContent).toContain("solo");
+    expect((container.lastElementChild as HTMLElement).dataset.threadKey).toBe("atlas:solo");
     const focused = group.querySelector<HTMLButtonElement>(".conversation-row")!;
     focused.focus();
     list.render(container, rows, vi.fn(), end);

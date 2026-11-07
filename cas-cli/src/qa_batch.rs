@@ -38,6 +38,68 @@ pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
         .and_then(|head| commit(repo, head))
 }
 
+/// GH #1641: a task merged through a GitHub PR has no recorded anchor. Resolve
+/// it as close's `commit_receipt` does: its recorded branch tip once integrated
+/// on `target`, else the commit on `target` whose tree equals that tip (squash).
+fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String> {
+    use crate::mcp::tools::core::task::lifecycle::close_ops::find_squash_tree_match;
+    let d = &task.deliverables;
+    let branches = d
+        .parked_branch
+        .iter()
+        .chain(d.factory_branch_start.iter().map(|s| &s.branch))
+        .chain(d.handoff_branches.iter());
+    for branch in branches {
+        let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Some(tip) = [format!("origin/{branch}"), branch.to_string()]
+            .iter()
+            .find_map(|r| commit(repo, r))
+        else {
+            continue;
+        };
+        // A reused lane is not task identity: skip a tip that is another task's.
+        if !crate::mcp::tools::core::task::lifecycle::merge_close::delivery_tip_belongs_to_task(repo, task, branch, &tip) {
+            continue;
+        }
+        // A lane that moved on for other work still ends at someone else's tip:
+        // the task must own at least one commit between its start and the tip.
+        if let Some(start) = d.factory_branch_start.as_ref().filter(|start| start.branch == branch) {
+            use crate::mcp::tools::core::task::lifecycle::close_ops::{commit_is_task_attributable, task_commit_identity};
+            let identity = task_commit_identity(task, None);
+            let range = Command::new("git")
+                .args(["rev-list", &format!("{}..{tip}", start.base_sha)])
+                .current_dir(repo)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+                .unwrap_or_default();
+            if !range.lines().any(|c| commit_is_task_attributable(repo, c, &identity)) {
+                continue;
+            }
+        }
+        if integration_state(repo, &tip, target) == Some(true) {
+            return Some(tip);
+        }
+        if let Some(squash) = find_squash_tree_match(repo, &tip, target) {
+            return Some(squash);
+        }
+    }
+    None
+}
+
+/// The delivery identity every receipt consumer shares: the recorded anchor, or,
+/// when none was ever recorded (PR merge), the merged branch tip. Invalid
+/// recorded anchors never fall back.
+pub(crate) fn resolved_delivery_anchor(repo: &Path, task: &Task, target: &str) -> Option<String> {
+    delivery_anchor(repo, task).or_else(|| {
+        let d = &task.deliverables;
+        (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
+            .then(|| merged_branch_anchor(repo, task, target))
+            .flatten()
+    })
+}
+
 pub(crate) fn ancestor(repo: &Path, from: &str, to: &str) -> Option<bool> {
     let code = Command::new("git")
         .args(["merge-base", "--is-ancestor", from, to])
@@ -333,7 +395,7 @@ pub(crate) fn prepare_receipt(
                 None => return Err(author_refusal(id, &author_id)),
             }
         }
-        let anchor = delivery_anchor(&repo, &task)
+        let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
@@ -488,7 +550,7 @@ fn covering_receipt(
     if !crate::mcp::tools::core::task::task_owned_by_project(task, root, Some(&project)) {
         return Ok(None);
     }
-    let Some(anchor) = delivery_anchor(repo, task) else {
+    let Some(anchor) = resolved_delivery_anchor(repo, task, target) else {
         return Ok(None);
     };
     // Retired history can recover only reviewed delivery. Without an active

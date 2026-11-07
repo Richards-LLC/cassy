@@ -3910,8 +3910,13 @@ impl CasCore {
             ));
         }
         let agents = self.open_agent_store()?;
-        let assignee =
-            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), &start.assignee)
+        let worker =
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), &start.assignee);
+        let peer_machine = worker.as_ref().and_then(|agent| agent.machine_id.clone()).filter(|machine| {
+            !machine.trim().is_empty() && *machine != cas_types::Agent::get_or_generate_machine_id()
+        });
+        let worker_known = worker.is_some();
+        let assignee = worker
                 .map(|agent| agent.name)
                 .unwrap_or_else(|| {
                     start
@@ -3927,10 +3932,28 @@ impl CasCore {
                 "requested source {id} conflicts with the approved branch"
             )));
         }
+        // cas-6b42: this store still shows the task active, so a delivery the
+        // worker parked on another machine has not synced here. Never merge
+        // it; name the next action instead.
+        let not_parked_here = |next: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "DELIVERY NOT PARKED HERE: task {} is {:?} in this store; {next}. No merge was attempted.",
+                task.id, task.status,
+            )),
+            data: None,
+        };
+        if let Some(machine) = peer_machine {
+            return Err(not_parked_here(format!("merge on {machine} (peer {assignee})")));
+        }
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
-        let tip = git
-            .resolve_commit(&format!("refs/heads/{}", start.branch))
-            .ok_or_else(|| refuse("the approved local branch is missing".into()))?;
+        let Some(tip) = git.resolve_commit(&format!("refs/heads/{}", start.branch)) else {
+            return Err(if !worker_known {
+                not_parked_here("not parked here yet; retry after sync".into())
+            } else {
+                refuse("the approved local branch is missing".into())
+            });
+        };
         if !git.is_ancestor(&start.base_sha, &tip) {
             return Err(refuse("the recorded base is no longer an ancestor".into()));
         }
@@ -4771,7 +4794,7 @@ impl CasCore {
         super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         // Both stored and inferred worktrees pass here. An explicit trunk
@@ -4992,7 +5015,7 @@ impl CasCore {
         super::train_merge::admit(&cas_root, &cwd, &worktree.parent_branch, task_id, train_queue)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
         crate::mcp::tools::core::task::release_train::check_cut_merge(
-            &cas_root, &worktree.parent_branch,
+            &cas_root, &worktree.parent_branch, task_id,
         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
 
         let pending_observation_recovery = if transactional_delivery.is_none() {
@@ -8972,5 +8995,100 @@ mod cas_7ce6_parked_merge_source_tests {
             .expect_err("per-task source lacks the anchor");
         assert!(per_task.contains("id=factory/w-cas-park task_id=cas-park"), "{per_task}");
         assert!(!per_task.contains("factory/w-cas-park-cas-park"), "{per_task}");
+    }
+}
+
+#[cfg(test)]
+mod cas_6b42_peer_delivery_tests {
+    use crate::mcp::CasCore;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Cassy Test")
+            .env("GIT_AUTHOR_EMAIL", "cas-test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Cassy Test")
+            .env("GIT_COMMITTER_EMAIL", "cas-test@example.invalid")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// cas-6b42 (GH #1634), replaying cas-aa10: prowl's worker parked a
+    /// delivery that soundwave's store still showed in progress. That merge
+    /// names the peer instead of "branch missing"; once the park syncs, the
+    /// pushed branch resolves at the recorded tip without a local worktree.
+    #[test]
+    fn a_peer_machine_delivery_merges_from_origin_at_its_recorded_tip_cas_6b42() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("work"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-qm", "seed"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        let branch = "factory/lively-eagle-82";
+        git(&repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("startup.rs"), "submit\n").unwrap();
+        git(&repo, &["add", "startup.rs"]);
+        git(&repo, &["commit", "-qm", "fix(cas-aa10): submit the startup brief"]);
+        let anchor = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["push", "-q", "origin", branch]);
+        // The delivery lives on prowl: no local branch, no local worktree.
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["branch", "-D", branch]);
+
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut peer = cas_types::Agent::new_with_role(
+            "peer-worker".into(), "lively-eagle-82".into(), cas_types::AgentRole::Worker,
+        );
+        peer.machine_id = Some("prowl-machine-cas-6b42".into());
+        agents.register(&peer).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("sup-soundwave".into());
+
+        let work_target = cas_types::WorkTarget {
+            repo_selector: "project:cas-src".into(),
+            target_branch: "main".into(),
+        };
+        let mut task = cas_types::Task::new("cas-aa10".into(), "Startup brief submits".into());
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("lively-eagle-82".into());
+        task.deliverables.work_target = Some(work_target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target, assignee: "lively-eagle-82".into(), branch: branch.into(), base_sha: base,
+        });
+        let refused = core.started_task_merge_source(&repo, Some(&task), "lively-eagle-82")
+            .err().expect("a locally in-progress peer delivery is never merged here");
+        assert!(refused.message.contains("merge on prowl-machine-cas-6b42 (peer lively-eagle-82)"), "{refused:?}");
+
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some(branch.into());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        crate::store::open_task_store(&cas_dir).unwrap().add(&task).unwrap();
+        let source = core.task_merge_source(&repo, Some(&task), "lively-eagle-82").unwrap();
+        let manager = crate::worktree::WorktreeManager::new(&repo, Default::default()).unwrap();
+        let remote = core
+            .prepare_remote_merge_source(&manager, Some(&task), "lively-eagle-82", Some(false), source.as_ref())
+            .unwrap()
+            .expect("the synced peer delivery resolves from origin");
+        assert_eq!((remote.branch.as_str(), remote.anchor.as_str()), (branch, anchor.as_str()));
+        assert_eq!(git(&repo, &["rev-parse", branch]), anchor, "bound at the recorded tip");
     }
 }

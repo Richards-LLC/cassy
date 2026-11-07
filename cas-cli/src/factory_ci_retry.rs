@@ -37,6 +37,8 @@ fn directory(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn arm(root: &Path, request: &Retry) -> Result<()> {
+    crate::mcp::tools::core::workflow::release_freeze::check_merge(root, &request.target, Some(&request.task))
+        .map_err(anyhow::Error::msg)?;
     anyhow::ensure!(
         request
             .task

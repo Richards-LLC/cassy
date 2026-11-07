@@ -1147,6 +1147,75 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
 }
 
 #[tokio::test]
+async fn batch_receipt_resolves_pr_merged_task_without_anchor_gh1641() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    // Two anchorless tasks on PR branches; only cas-pr is squash-merged to main.
+    for (id, file) in [("cas-pr", "pr.css"), ("cas-open", "open.css")] {
+        git(&fx.repo, &["checkout", "-qb", &format!("pr/{id}"), &fx.staging]);
+        std::fs::write(fx.repo.join(file), "a{gap:4px}\n").unwrap();
+        git(&fx.repo, &["add", file]);
+        git(&fx.repo, &["commit", "-qm", id]);
+        let mut task = Task::new(id.into(), "PR merged".into());
+        task.assignee = Some("test-agent".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some(format!("pr/{id}"));
+        tasks.add(&task).unwrap();
+    }
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "--squash", "pr/cas-pr"]);
+    git(&fx.repo, &["commit", "-qm", "PR #1 (squash)"]);
+    let merged = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let request = |id: &str| -> VerificationRequest {
+        let mut r = serde_json::to_value(fx.request()).unwrap();
+        r["task_ids"] = serde_json::json!([id]);
+        r["staging_sha"] = merged.clone().into();
+        serde_json::from_value(r).unwrap()
+    };
+    let err = fx.supervisor.verification(Parameters(request("cas-open"))).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    // A reused lane's tip equal to its start commit is another task's merge, not this one's.
+    git(&fx.repo, &["branch", "pr/cas-start", &fx.staging]);
+    let target = cas::types::WorkTarget { repo_selector: "project:batch-project".into(), target_branch: "main".into() };
+    let mut reused = Task::new("cas-start".into(), "Reused lane".into());
+    reused.assignee = Some("test-agent".into());
+    reused.status = TaskStatus::AwaitingMerge;
+    reused.deliverables.work_target = Some(target.clone());
+    reused.deliverables.parked_branch = Some("pr/cas-start".into());
+    reused.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target, assignee: "test-agent".into(), branch: "pr/cas-start".into(), base_sha: fx.staging.clone(),
+    });
+    tasks.add(&reused).unwrap();
+    let err = fx.supervisor.verification(Parameters(request("cas-start"))).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    // A reused lane that moved on for other work is not this task's delivery either.
+    git(&fx.repo, &["checkout", "-qb", "pr/cas-moved", &fx.staging]);
+    std::fs::write(fx.repo.join("other.css"), "b{gap:2px}\n").unwrap();
+    git(&fx.repo, &["add", "other.css"]);
+    git(&fx.repo, &["commit", "-qm", "unrelated work for another task"]);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge unrelated lane", "pr/cas-moved"]);
+    let moved_staging = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let mut moved = reused.clone();
+    moved.id = "cas-moved".into();
+    moved.deliverables.parked_branch = Some("pr/cas-moved".into());
+    moved.deliverables.factory_branch_start.as_mut().unwrap().branch = "pr/cas-moved".into();
+    tasks.add(&moved).unwrap();
+    let mut moved_request = serde_json::to_value(request("cas-moved")).unwrap();
+    moved_request["staging_sha"] = moved_staging.into();
+    let err = fx.supervisor.verification(Parameters(serde_json::from_value(moved_request).unwrap())).await.unwrap_err();
+    assert!(err.message.contains("no resolvable delivery anchor"), "{err:?}");
+    fx.supervisor.verification(Parameters(request("cas-pr"))).await.unwrap();
+    let receipts = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
+    assert_eq!(receipts[0].task_heads["cas-pr"], merged);
+    // The receipt must also close it: consumers resolve the same identity.
+    let closed = tasks.get("cas-pr").unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{:?}", closed.notes);
+    assert!(closed.deliverables.factory_branch_anchor.is_none());
+}
+
+#[tokio::test]
 async fn batch_qa_authority_and_no_self_review_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
     let fx = fixture(&mut env);

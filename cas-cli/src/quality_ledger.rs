@@ -4,6 +4,8 @@
 //! Emission fails open. A ledger write must never fail or delay the action it
 //! measures, so every error stops at a warning.
 
+pub(crate) mod estimates;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -137,6 +139,10 @@ pub(crate) fn check_run(cas_root: &Path, check: Check<'_>) {
     event.link = check.link.map(str::to_string);
     event.actor = check.actor.map(str::to_string);
     emit(cas_root, &event);
+    if check.outcome == CheckOutcome::Pass && let Some(sha) = check.sha
+        && estimates::PIPELINES.contains(&check.check_id) {
+        estimates::complete(cas_root, "pipeline", &format!("{}:{sha}", check.check_id), Utc::now(), None, None);
+    }
 }
 
 /// `reason` is free text: it stays on this machine as `local_note`.
@@ -171,6 +177,9 @@ pub(crate) fn task_closed(
     supervisor_override: bool,
     reason: Option<&str>,
 ) {
+    if let Err(error) = estimates::task_landed(cas_root, task_id) {
+        tracing::warn!(%error, "cannot record task estimate outcome");
+    }
     let closed_at = Utc::now().timestamp();
     if supervisor_override {
         intervention(
@@ -700,6 +709,7 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
         event.title = title;
         inserted += usize::from(emit(cas_root, &event));
     }
+    inserted += estimates::backfill_tasks(cas_root, since)?;
     Ok(inserted)
 }
 

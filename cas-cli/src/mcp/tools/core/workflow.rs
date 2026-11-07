@@ -3,6 +3,7 @@ pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
 pub(crate) mod train_merge;
+pub(crate) mod release_freeze;
 mod protected_pr;
 pub(crate) mod premerge_verification;
 pub(crate) use worktree_ops::check_runs_still_running;

@@ -400,6 +400,8 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
       "assign-task": "factory-operate", "restart-worker": "factory-manage", "stop-worker": "factory-manage", "end-session": "factory-manage",
       // cas-ab04: widening an agent's write access is a management action.
       "write-access": "factory-manage",
+      // cas-2f4d: freezing is operating the train; lifting a freeze is the operator's management call.
+      "freeze-train": "factory-operate", "lift-freeze": "factory-manage",
     };
     for (const [operation, scope] of Object.entries(expected) as [FleetOperation, Scope][]) expect(fleetOperationScope(operation), operation).toBe(scope);
   });

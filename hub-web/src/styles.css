@@ -3659,6 +3659,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .release-progress .split-bar { height: var(--space-2); }
 .release-split, .release-activity { margin: var(--space-2) 0 0; font-size: var(--fs-meta); color: var(--ink-mid); font-variant-numeric: tabular-nums; }
 .team-panel .release-split, .team-panel .release-activity, .team-panel .release-progress .split-bar { grid-column: 1 / -1; }
+/* cas-2f4d: a frozen train's measured line and its one-tap Freeze/Lift. */
+.release-freeze { margin: var(--space-2) 0 0; font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); color: var(--warn-text); font-variant-numeric: tabular-nums; }
+.release-freeze-controls { margin-top: var(--space-2); }
+.team-panel .release-freeze { grid-column: 1 / -1; }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .live-epic-merged > summary { min-height: var(--rail-item-min); padding-block: 0; }
   .live-epic-chip { margin-left: 0; }

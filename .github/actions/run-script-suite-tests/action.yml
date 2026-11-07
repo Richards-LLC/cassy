@@ -1,6 +1,9 @@
 name: Run selected script suites
 description: Provision only changed-input script suites inside an existing CI job.
 inputs:
+  full-set:
+    description: Run every registered script suite for a cumulative full gate.
+    default: "false"
   base-sha:
     description: Shared classifier comparison base; an unknown base selects all suites.
     required: false
@@ -17,9 +20,11 @@ runs:
       shell: bash
       env:
         BASE_SHA: ${{ inputs.base-sha }}
+        FULL_SET: ${{ inputs.full-set }}
         FULL_TIER: ${{ inputs.full-tier }}
       run: |
         comparison=(--all)
+        if [[ "${FULL_SET:-false}" == true ]]; then BASE_SHA=''; fi
         cohort=()
         if [[ "$FULL_TIER" != true ]]; then
           cohort=(--provisioned)
@@ -71,7 +76,9 @@ runs:
       shell: bash
       env:
         BASE_SHA: ${{ inputs.base-sha }}
+        FULL_SET: ${{ inputs.full-set }}
       run: |
         comparison=(--all)
+        if [[ "${FULL_SET:-false}" == true ]]; then BASE_SHA=''; fi
         if [[ -n "$BASE_SHA" ]]; then comparison=(--base "$BASE_SHA"); fi
         python3 scripts/ci-script-tests-for-diff.py "${comparison[@]}" --provisioned

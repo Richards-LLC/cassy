@@ -2,6 +2,7 @@
 """Exercise train receipts through their CLI, with real Git and native reports."""
 import json
 import os
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,9 +20,11 @@ if args[:2]==['repo','view']: print('fixture/repo')
 elif args[:2]==['run','download']:
  shutil.copytree(root/data['artifact'],pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
 elif args[0]=='api':
- endpoint=next(a for a in args if a.startswith('repos/'))
- if endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
- elif endpoint.endswith('/jobs'): print(json.dumps({'jobs':[{'name':'Fast Validation — full suite','conclusion':data['fanin']}]}))
+ endpoint=next(a.lstrip('/') for a in args if a.lstrip('/').startswith('repos/'))
+ if '/pulls/' in endpoint: print(json.dumps(data['pr']))
+ elif '/statuses?' in endpoint: print(json.dumps(data['statuses']))
+ elif endpoint.endswith('/logs'): sys.stdout.buffer.write((root/'logs.zip').read_bytes())
+ elif endpoint.endswith('/jobs'): print(json.dumps({'jobs':[{'name':'Shared train and queue graph / Full-set gate','conclusion':data['fanin']}]}))
  else: print(json.dumps({'workflow_runs':data['runs']}))
 else: sys.exit(2)
 '''
@@ -39,6 +42,7 @@ class TrainReceipts(unittest.TestCase):
         self.git('config', 'user.name', 'Train fixture')
         self.commit('base')
         self.commit('green')
+        self.git('update-ref', 'refs/remotes/origin/main', self.git('rev-parse', 'HEAD^'))
         self.env = {**os.environ, 'GITHUB_SHA': self.git('rev-parse', 'HEAD'),
                     'GITHUB_REF_NAME': 'epic/release-train-fixture', 'GITHUB_RUN_ID': '101',
                     'GITHUB_REPOSITORY': 'fixture/repo', 'GITHUB_RUN_ATTEMPT': '1', 'FORGE': str(self.root)}
@@ -59,7 +63,7 @@ class TrainReceipts(unittest.TestCase):
     def run_cli(self, *args, expected=0):
         result = subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], env=self.env, capture_output=True, text=True)
         self.assertEqual(result.returncode, expected, result.stdout+result.stderr)
-        return json.loads(result.stdout) if result.stdout else None
+        return json.loads(result.stdout) if result.stdout and args[0] != 'reuse' else None
 
     def evidence(self, name, failed=False):
         out = self.root/name
@@ -71,8 +75,20 @@ class TrainReceipts(unittest.TestCase):
                              ('<failure>deterministic red</failure>' if bad else '')+'</testcase></testsuite></testsuites>')
             self.run_cli('shard', '--log', log, '--junit', junit, '--status', int(bad), '--shard', f'{slot}/3', '--out', out/str(slot))
             self.assertEqual((out/str(slot)/'native.log').read_bytes(), log.read_bytes())
-        return self.run_cli('collect', '--repo', self.repo, '--evidence', out,
-                            '--build-status', 'success', '--shards-status', 'failure' if failed else 'success')
+        self.run_cli('collect', '--repo', self.repo, '--evidence', out,
+                     '--build-status', 'success', '--shards-status', 'failure' if failed else 'success')
+        jobs = {name: {'result': 'success'} for name in (
+            'fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
+            'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')}
+        jobs['ci-diff'] = {'outputs': {'journeys-check-needed': 'false', 'bridge-check-needed': 'false'}}
+        if failed: jobs['fast-validation-suite']['result'] = 'failure'
+        full = subprocess.run([sys.executable, str(SCRIPT), 'full-collect', '--repo', str(self.repo),
+                               '--evidence', str(out), '--jobs-json', json.dumps(jobs),
+                               '--main-baseline', self.git('rev-parse', 'origin/main'),
+                               '--started-at', '2026-01-01T00:00:00Z'], env=self.env, capture_output=True, text=True)
+        self.assertEqual(full.returncode, int(failed), full.stdout+full.stderr)
+        return json.loads(full.stdout)
+
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
@@ -93,7 +109,7 @@ class TrainReceipts(unittest.TestCase):
         self.git('checkout', '-q', self.env['GITHUB_REF_NAME'])
         self.git('merge', '--no-ff', '-qm', 'Merge reviewed delivery\n\nTask: cas-b222', 'factory/cas-b222')
         self.env.update(GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='102')
-        self.assertEqual(self.evidence('red', failed=True)['failures'], ['fixture::lib::regression'])
+        self.assertEqual(self.evidence('red', failed=True)['failures'], ['fast-validation-suite'])
         self.forge('red', conclusion='failure', fanin='failure')
         red = self.observe()
         self.assertEqual(red['introducing_merge'], self.env['GITHUB_SHA'])
@@ -132,6 +148,120 @@ class TrainReceipts(unittest.TestCase):
         row.write_text(json.dumps(data))
         self.run_cli('collect', '--repo', self.repo, '--evidence', out,
                      '--build-status', 'success', '--shards-status', 'success', expected=1)
+
+    def test_full_receipt_refuses_partial_legacy_and_wrong_tree(self):
+        self.evidence('full')
+        self.forge('full')
+        receipt = self.root/'full/receipt.json'
+        original = json.loads(receipt.read_text())
+        for mutation in ('legacy', 'tree', 'partial', 'omitted'):
+            with self.subTest(mutation=mutation):
+                row = json.loads(json.dumps(original))
+                if mutation == 'legacy': row['schema'] = 1
+                if mutation == 'tree': row['tree'] = '0'*40
+                if mutation == 'partial': row['jobs']['fast-validation-ci-tiers'] = 'skipped'
+                if mutation == 'omitted': row['required_jobs'].remove('fast-validation-web')
+                receipt.write_text(json.dumps(row))
+                shutil.rmtree(self.root/'cache', ignore_errors=True)
+                self.observe(check=True, expected=1)
+        receipt.write_text(json.dumps(original))
+        shutil.rmtree(self.root/'cache', ignore_errors=True)
+        self.observe(check=True)
+
+    def test_queue_reuses_plumbing_only_with_unchanged_main(self):
+        manifest = self.repo/'cas-cli/Cargo.toml'
+        manifest.parent.mkdir()
+        manifest.write_text('[package]\nname="cas"\nversion="1.0.0"\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'manifest baseline')
+        source = self.git('rev-parse', 'HEAD')
+        self.env['GITHUB_SHA'] = source
+        self.evidence('full')
+        self.forge('full')
+        manifest.write_text('[package]\nname="cas"\nversion="1.1.0"\n')
+        (self.repo/'CHANGELOG.md').write_text('Release notes')
+        self.git('add', '.')
+        self.git('commit', '-qm', f'release: v1.1.0\n\nRelease-Version: 1.1.0\nTrain-CI-Head: {source}')
+        release_head = self.git('rev-parse', 'HEAD')
+        data_path = self.root/'forge.json'
+        data = json.loads(data_path.read_text())
+        main = self.git('rev-parse', 'origin/main')
+        data['pr'] = {'head': {'sha': release_head, 'ref': self.env['GITHUB_REF_NAME']}, 'base': {'sha': main}}
+        data['statuses'] = [{'context': 'cas/full-gate', 'state': 'success',
+                             'description': 'PASS tree='+self.git('rev-parse', source+'^{tree}') }]
+        data_path.write_text(json.dumps(data))
+        self.env.update(GITHUB_EVENT_NAME='merge_group', GITHUB_REF='refs/heads/gh-readonly-queue/main/pr-1-'+'a'*40,
+                        QUEUE_BASE_SHA=main)
+        output = self.root/'queue-output'
+        def attempt(expected=0):
+            output.write_text('run-fast-validation=true\n')
+            self.run_cli('reuse', '--repo', self.repo, '--gh', self.gh,
+                         '--out', self.root/'reuse-cache', '--github-output', output, expected=expected)
+            return 'run-fast-validation=false' in output.read_text()
+        self.assertTrue(attempt())
+        # Explicit hotfixes cannot borrow a train's result, and a status alone
+        # cannot substitute for a complete artifact.
+        data['pr']['head']['ref'] = 'hotfix-fixture'
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+        data['pr']['head']['ref'] = self.env['GITHUB_REF_NAME']
+        saved_statuses = data['statuses']
+        data['statuses'] = []
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+        data['statuses'] = saved_statuses
+        data['artifact'] = 'absent'
+        data_path.write_text(json.dumps(data))
+        shutil.rmtree(self.root/'reuse-cache')
+        self.assertFalse(attempt(expected=1))
+        data['artifact'] = 'full'
+        data_path.write_text(json.dumps(data))
+        (self.repo/'.claude').mkdir()
+        (self.repo/'.claude/CODEMAP.md').write_text('Release navigation')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'release plumbing continuation')
+        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
+        data_path.write_text(json.dumps(data))
+        self.assertTrue(attempt())
+        self.env['QUEUE_BASE_SHA'] = 'f'*40
+        self.assertFalse(attempt())
+        self.env['QUEUE_BASE_SHA'] = main
+        # Renaming product input into an allowed directory still deletes source.
+        plumbing_head = self.git('rev-parse', 'HEAD')
+        (self.repo/'changelog.d').mkdir()
+        self.git('mv', 'value', 'changelog.d/moved-value.md')
+        self.git('commit', '-qm', 'move product input into release plumbing')
+        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+        self.git('reset', '--hard', plumbing_head)
+        self.commit('product change')
+        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+
+    def test_queue_wall_clock_requires_the_completed_matching_tree(self):
+        queue_timing = runpy.run_path(str(SCRIPT))['queue_timing']
+        head, tree = self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'HEAD^{tree}')
+        committed = {'tree': {'sha': tree}}
+        def api(endpoint, *fields):
+            if endpoint.startswith('pulls?'): return []
+            if endpoint.startswith('actions/artifacts?'):
+                return {'artifacts': [{'id': 1, 'expired': False, 'workflow_run': {'id': 123}}]}
+            if endpoint == 'actions/runs/123':
+                return {'event': 'merge_group', 'status': 'completed', 'conclusion': 'success',
+                        'head_sha': head, 'run_started_at': '2026-01-01T00:00:00Z',
+                        'html_url': 'https://github.com/fixture/repo/actions/runs/123'}
+            if endpoint == 'git/commits/'+head: return committed
+            if endpoint == 'actions/runs/123/jobs':
+                return {'jobs': [{'name': 'Shared / Full-set gate', 'conclusion': 'success',
+                                  'completed_at': '2026-01-01T00:02:00Z'}]}
+            self.fail(endpoint)
+        observed = queue_timing(api, self.repo, self.env['GITHUB_REF_NAME'], head)
+        self.assertEqual(observed['queue_seconds'], 120)
+        self.assertEqual(observed['queue_run_id'], '123')
+        committed['tree']['sha'] = '0'*40
+        self.assertEqual(queue_timing(api, self.repo, self.env['GITHUB_REF_NAME'], head), {})
 
     def test_preparation_reuses_only_its_immediate_starting_tip(self):
         manifest = self.repo/'cas-cli/Cargo.toml'

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Receipts for the existing Rust suite, and read-only consumption of those receipts.
+"""Whole-set CI receipts, release admission and checked queue reuse.
 
 This never launches tests. CI owns execution; the daemon and release command
 consume its exact-head artifact instead of running another local suite.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -18,7 +19,10 @@ import tomllib
 import xml.etree.ElementTree as ET
 import zipfile
 
-ARTIFACT = 'train-rust-suite'
+ARTIFACT = 'train-full-gate'
+WORKFLOW = 'full-validation.yml'
+REQUIRED_JOBS = ('fast-validation-preflight', 'fast-validation-ci-tiers', 'fast-validation-web',
+                 'fast-validation-suite', 'fast-validation-docs', 'queue-flake-publication')
 PREFIX = 'epic/release-train-'
 MANIFESTS = {'cas-cli/Cargo.toml': 'cas', **{f'crates/{name}/Cargo.toml': name for name in
              ('cas-types', 'cas-search', 'cas-store', 'cas-core', 'cas-mcp')}}
@@ -50,7 +54,7 @@ def prepared(repo, head):
 
     The general diff classifier deliberately allows only manifest/lock bumps;
     real release preparation also writes notes, changelog and generated dist.
-    Keep this exception local to train receipt reuse, never queue validation.
+    The queue additionally validates the complete source-to-release plumbing diff.
     """
     body = git(repo, 'log', '-1', '--format=%B', head)
     source = re.search(r'^Train-CI-Head: ([0-9a-f]{40})$', body, re.M)
@@ -60,7 +64,7 @@ def prepared(repo, head):
     parent = git(repo, 'rev-parse', f'{head}^1')
     if source[1] != parent:
         return None
-    paths = git(repo, 'diff', '--name-only', parent, head).splitlines()
+    paths = git(repo, 'diff', '--no-renames', '--name-only', parent, head).splitlines()
     if 'cas-cli/Cargo.toml' not in paths:
         return None
     for path in paths:
@@ -80,7 +84,7 @@ def prepared(repo, head):
                     package['version'] = version[1]
             if before != after:
                 return None
-        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md') and not path.startswith(
+        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(
                 ('changelog.d/', 'docs/release-notes/', 'hub-web/dist/')):
             return None
     return source[1]
@@ -118,7 +122,7 @@ def collect(args):
     receipt = {**identity(), 'parent': git(args.repo, 'rev-parse', 'HEAD^1'),
                'before': os.environ.get('GITHUB_EVENT_BEFORE', ''),
                'run_url': f'https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
-               'artifact': ARTIFACT, 'outcome': 'PASS', 'failures': [], 'tests': 0}
+               'artifact': 'train-rust-suite', 'outcome': 'PASS', 'failures': [], 'tests': 0}
     slots = set()
     for path in sorted(args.evidence.rglob('shard.json')):
         row = json.loads(path.read_text())
@@ -141,11 +145,162 @@ def collect(args):
     print(json.dumps(receipt))
 
 
+def elapsed(started, ended=None):
+    start = datetime.fromisoformat(started.replace('Z', '+00:00'))
+    stop = datetime.fromisoformat(ended.replace('Z', '+00:00')) if ended else datetime.now(timezone.utc)
+    seconds = (stop - start).total_seconds()
+    if seconds < 0:
+        raise ValueError('workflow completion predates its start')
+    return seconds
+
+
+def full_collect(args):
+    jobs = json.loads(args.jobs_json)
+    required = list(REQUIRED_JOBS)
+    outputs = jobs.get('ci-diff', {}).get('outputs', {})
+    if outputs.get('journeys-check-needed') == 'true':
+        required.append('fast-validation-journeys')
+    if outputs.get('bridge-check-needed') == 'true':
+        required.append('fast-validation-slack-bridge')
+    failures = [name for name in required if jobs.get(name, {}).get('result') != 'success']
+    main = git(args.repo, 'rev-parse', args.main_baseline + '^{commit}')
+    head = git(args.repo, 'rev-parse', 'HEAD')
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', main, head], cwd=args.repo).returncode:
+        failures.append('main baseline is not included in the tested tree')
+    receipt = {**identity(), 'schema': 2, 'scope': 'full-set',
+               'tree': git(args.repo, 'rev-parse', 'HEAD^{tree}'), 'main_baseline': main,
+               'parent': git(args.repo, 'rev-parse', 'HEAD^1'),
+               'artifact': ARTIFACT, 'run_url': f'https://github.com/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+               'outcome': 'FAIL' if failures else 'PASS', 'failures': failures,
+               'journeys_required': outputs.get('journeys-check-needed') == 'true',
+               'bridge_required': outputs.get('bridge-check-needed') == 'true',
+               'required_jobs': required, 'jobs': {name: job.get('result') for name, job in jobs.items()},
+               'elapsed_seconds': elapsed(args.started_at)}
+    write(args.evidence/'receipt.json', receipt)
+    print(json.dumps(receipt))
+    if failures:
+        raise ValueError('full-set jobs did not all pass: ' + ', '.join(failures))
+
+
+def validate_full(receipt, tree):
+    required = receipt.get('required_jobs', [])
+    complete = set(REQUIRED_JOBS)
+    if receipt.get('journeys_required'): complete.add('fast-validation-journeys')
+    if receipt.get('bridge_required'): complete.add('fast-validation-slack-bridge')
+    if (receipt.get('schema') != 2 or receipt.get('scope') != 'full-set'
+            or receipt.get('tree') != tree or set(required) != complete
+            or not isinstance(receipt.get('journeys_required'), bool)
+            or not isinstance(receipt.get('bridge_required'), bool)
+            or (receipt.get('outcome') == 'PASS' and any(receipt.get('jobs', {}).get(name) != 'success' for name in required))
+            or not isinstance(receipt.get('elapsed_seconds'), (int, float))
+            or receipt['elapsed_seconds'] < 0
+            or not re.fullmatch(r'[0-9a-f]{40,64}', receipt.get('main_baseline', ''))):
+        raise ValueError('missing, partial, legacy or wrong-tree full-set receipt')
+
+
+def plumbing_only(repo, source, head):
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', source, head], cwd=repo,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        return False
+    paths = git(repo, 'diff', '--no-renames', '--name-only', source, head).splitlines()
+    version_changed = False
+    for path in paths:
+        if path in MANIFESTS:
+            before = tomllib.loads(git(repo, 'show', f'{source}:{path}'))
+            after = tomllib.loads(git(repo, 'show', f'{head}:{path}'))
+            version = after['package']['version']
+            if not re.fullmatch(r'\d+\.\d+\.\d+', version): return False
+            version_changed |= before['package']['version'] != version
+            before['package']['version'] = version
+            if before != after: return False
+        elif path == 'Cargo.lock':
+            before = tomllib.loads(git(repo, 'show', f'{source}:{path}'))
+            after = tomllib.loads(git(repo, 'show', f'{head}:{path}'))
+            for package in before['package']:
+                if package['name'] in MANIFESTS.values():
+                    manifest = next(key for key, name in MANIFESTS.items() if name == package['name'])
+                    package['version'] = tomllib.loads(git(repo, 'show', f'{head}:{manifest}'))['package']['version']
+            if before != after: return False
+        elif path.startswith('hub-web/dist/'):
+            # Only version-generated bundles can join release plumbing. The
+            # reuse compile job rebuilds them and checks their committed bytes.
+            continue
+        elif path not in ('CHANGELOG.md', '.claude/CODEMAP.md', 'cas-cli/src/builtins/reference-history.json') and not path.startswith(('changelog.d/', 'docs/release-notes/')):
+            return False
+    return version_changed or not any(path.startswith('hub-web/dist/') for path in paths)
+
+
+def reuse(args):
+    """Consume the same verified artifact as release admission, never a bare status."""
+    ref = os.environ.get('GITHUB_REF', '')
+    match = re.fullmatch(r'refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]{40}', ref)
+    if not match: return
+    gh, slug = args.gh, os.environ['GITHUB_REPOSITORY']
+    def api(endpoint):
+        return json.loads(command([gh, 'api', f'/repos/{slug}/{endpoint}'], args.repo))
+    pr = api('pulls/'+match[1])
+    head = pr['head']['sha']
+    queue_main = os.environ.get('QUEUE_BASE_SHA') or pr['base']['sha']
+    queue_tree = git(args.repo, 'rev-parse', 'HEAD^{tree}')
+    if git(args.repo, 'rev-parse', head + '^{tree}') != queue_tree: return
+    branch = pr['head']['ref']
+    if not branch.startswith(PREFIX): return
+    runs = api(f'actions/workflows/{WORKFLOW}/runs?branch={branch}&event=push&per_page=100')['workflow_runs']
+    candidates = sorted((run for run in runs if run['status'] == 'completed' and run['conclusion'] == 'success'),
+                        key=lambda run: (run['id'], run.get('run_attempt', 1)), reverse=True)
+    for candidate in candidates:
+        source = candidate['head_sha']
+        if not plumbing_only(args.repo, source, head): continue
+        latest = next((row for row in api(f'commits/{source}/statuses?per_page=100')
+                       if row.get('context') == 'cas/full-gate'), {})
+        source_tree = git(args.repo, 'rev-parse', source + '^{tree}')
+        if latest.get('state') != 'success' or latest.get('description') != 'PASS tree=' + source_tree:
+            continue
+        probe = argparse.Namespace(repo=args.repo, branch=branch, head=source, gh=gh, out=args.out, command='observe', exact=True)
+        state = observe(probe)
+        if state.get('outcome') != 'PASS' or state.get('main_baseline') != queue_main: continue
+        with args.github_output.open('a') as output:
+            output.write('run-fast-validation=false\nreuse-source=full-gate\njourneys-reuse=true\n')
+            output.write(f'validating-run-id={state["run_id"]}\nprior-run-url={state["run_url"]}\n')
+            output.write(f'journeys-prior-url={state["run_url"]}\nreceipt-head={source}\nreceipt-tree={source_tree}\n')
+        print(f'Full-set receipt {state["run_id"]} covers queue tree {queue_tree} after release plumbing from {source_tree}; main is unchanged.')
+        return
+
+
+def queue_timing(api, repo, branch, head):
+    """Read the completed queue run bound to this release's validated tree."""
+    trees = [git(repo, 'rev-parse', head+'^{tree}')]
+    # A moved main can make the queue's final tree differ from the train head.
+    # GitHub's recorded release PR merge supplies that authoritative final tree.
+    pulls = api('pulls?state=all&per_page=100')
+    for pr in pulls:
+        if pr.get('head', {}).get('ref') == branch and pr.get('head', {}).get('sha') == head and pr.get('merged_at'):
+            merge = api('git/commits/'+pr['merge_commit_sha'])
+            trees.append(merge['tree']['sha'])
+    for tree in dict.fromkeys(trees):
+        artifacts = api('actions/artifacts?name=merge-queue-validated-tree-'+tree+'&per_page=100')
+        for artifact in sorted(artifacts.get('artifacts', []), key=lambda item: item['id'], reverse=True):
+            if artifact.get('expired'): continue
+            run_id = artifact['workflow_run']['id']
+            run = api(f'actions/runs/{run_id}')
+            if run.get('event') != 'merge_group' or run.get('status') != 'completed' or run.get('conclusion') != 'success':
+                continue
+            committed = api('git/commits/'+run['head_sha'])
+            if committed['tree']['sha'] != tree: continue
+            jobs = api(f'actions/runs/{run_id}/jobs', '-f', 'filter=latest', '-f', 'per_page=100')['jobs']
+            gates = [job for job in jobs if job['name'].split(' / ')[-1] == 'Full-set gate' and job['conclusion'] == 'success']
+            if len(gates) == 1:
+                return {'queue_seconds': elapsed(run['run_started_at'], gates[0]['completed_at']),
+                        'queue_run_id': str(run_id), 'queue_run_attempt': run.get('run_attempt', 1), 'queue_head': run['head_sha'], 'queue_run_url': run['html_url']}
+    return {}
+
+
 def observe(args):
     branch = args.branch or git(args.repo, 'branch', '--show-current')
     if not branch.startswith(PREFIX):
         raise ValueError('train CI receipts apply only to release-train branches')
-    head = args.head or git(args.repo, 'rev-parse', branch)
+    requested_head = args.head or git(args.repo, 'rev-parse', branch)
+    head = requested_head if getattr(args, 'exact', False) else prepared(args.repo, requested_head) or requested_head
     out = args.out or Path(git(args.repo, 'rev-parse', '--git-path', 'cas/train-ci'))/hashlib.sha256(branch.encode()).hexdigest()
     if not out.is_absolute():
         out = args.repo/out
@@ -158,7 +313,7 @@ def observe(args):
     def api(endpoint, *fields):
         return json.loads(command([gh, 'api', '-X', 'GET', f'repos/{slug}/{endpoint}', *fields], args.repo))
 
-    runs = api('actions/workflows/ci.yml/runs', '-f', f'branch={branch}', '-f', 'event=push', '-f', 'per_page=100')['workflow_runs']
+    runs = api(f'actions/workflows/{WORKFLOW}/runs', '-f', f'branch={branch}', '-f', 'event=push', '-f', 'per_page=100')['workflow_runs']
     candidates = [run for run in runs if run['head_sha'] == head and run['head_branch'] == branch and run['event'] == 'push']
     run = max(candidates, key=lambda item: (item['id'], item.get('run_attempt', 1)), default=None)
     state = {**previous, 'branch': branch, 'head': head, 'outcome': 'PENDING'}
@@ -184,15 +339,16 @@ def observe(args):
         if not logs.namelist() or logs.testzip() is not None:
             raise ValueError('complete workflow log archive is empty or corrupt')
     receipt = json.loads(receipt_path.read_text())
-    expected = {'schema': 1, 'head': head, 'branch': branch, 'run_id': run_id, 'run_attempt': attempt}
+    expected = {'schema': 2, 'head': head, 'branch': branch, 'run_id': run_id, 'run_attempt': attempt}
     if any(receipt.get(key) != value for key, value in expected.items()):
         raise ValueError('suite artifact does not match the evaluated GitHub run and head')
+    validate_full(receipt, git(args.repo, 'rev-parse', head + '^{tree}'))
     if receipt.get('outcome') not in ('PASS', 'FAIL'):
         raise ValueError('suite receipt has no conclusive result')
     jobs = api(f'actions/runs/{run_id}/jobs', '-f', 'filter=latest', '-f', 'per_page=100')['jobs']
-    fanin = [job for job in jobs if job['name'] == 'Fast Validation — full suite']
-    if len(fanin) != 1 or (receipt['outcome'] == 'PASS' and fanin[0]['conclusion'] != 'success'):
-        raise ValueError('suite artifact lacks its successful GitHub fan-in job')
+    fanin = [job for job in jobs if job['name'].split(' / ')[-1] == 'Full-set gate']
+    if len(fanin) != 1 or (receipt['outcome'] == 'PASS' and (fanin[0]['conclusion'] != 'success' or run['conclusion'] != 'success')):
+        raise ValueError('full-set artifact lacks its successful completed GitHub fan-in/run')
     state = {**state, **receipt, 'receipt': str(receipt_path),
              'complete_log': str(destination/'complete-workflow-logs.zip')}
     if receipt['outcome'] == 'PASS':
@@ -214,6 +370,16 @@ def observe(args):
                 state['merge_range'].append({'sha': sha, 'title': title,
                                              'tasks': sorted(set(re.findall(r'cas-[a-z0-9]+', body)))})
         state['last_green'] = green
+    if run.get('run_started_at') and fanin[0].get('completed_at'):
+        state['elapsed_seconds'] = elapsed(run['run_started_at'], fanin[0]['completed_at'])
+    if requested_head != head:
+        state['release_head'] = requested_head
+        if previous.get('release_head') != requested_head or 'queue_seconds' not in previous:
+            try:
+                state.update(queue_timing(api, args.repo, branch, requested_head))
+            except (ValueError, KeyError, OSError, subprocess.SubprocessError):
+                # Timing can retry; it cannot invent a duration or invalidate the train proof.
+                pass
     write(state_path, state)
     return state
 
@@ -235,6 +401,17 @@ def main():
     fanin.add_argument('--evidence', type=Path, required=True)
     fanin.add_argument('--build-status', required=True)
     fanin.add_argument('--shards-status', required=True)
+    full = sub.add_parser('full-collect')
+    full.add_argument('--repo', type=Path, default=Path.cwd())
+    full.add_argument('--evidence', type=Path, required=True)
+    full.add_argument('--jobs-json', required=True)
+    full.add_argument('--main-baseline', required=True)
+    full.add_argument('--started-at', required=True)
+    reuse_parser = sub.add_parser('reuse')
+    reuse_parser.add_argument('--repo', type=Path, default=Path.cwd())
+    reuse_parser.add_argument('--gh', default=os.environ.get('GH_BIN', 'gh'))
+    reuse_parser.add_argument('--out', type=Path)
+    reuse_parser.add_argument('--github-output', type=Path, required=True)
     for name in ('observe', 'check'):
         read = sub.add_parser(name)
         read.add_argument('--repo', type=Path, default=Path.cwd())
@@ -252,11 +429,17 @@ def main():
         shard(args)
     elif args.command == 'collect':
         collect(args)
+    elif args.command == 'full-collect':
+        full_collect(args)
+    elif args.command == 'reuse':
+        reuse(args)
     else:
         state = observe(args)
         print(json.dumps(state))
+        if args.command == 'check' and state.get('main_baseline') != git(args.repo, 'rev-parse', 'origin/' + os.environ.get('GITHUB_DEFAULT_BRANCH', 'main')):
+            raise ValueError('train full-set receipt predates the current main baseline')
         if args.command == 'check' and state['outcome'] != 'PASS':
-            raise ValueError(f'train tip {state["head"]} has no green full-suite receipt ({state["outcome"]}); wait for CI or repair the train')
+            raise ValueError(f'train tip {state["head"]} has no green full-set receipt ({state["outcome"]}); wait for CI or repair the train')
 
 
 if __name__ == '__main__':

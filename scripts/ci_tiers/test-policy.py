@@ -24,7 +24,7 @@ class PolicyTests(unittest.TestCase):
         for entry in cls.entries + prose:
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
-        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/actions/run-script-suite-tests/action.yml'])
+        cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/workflows/full-validation.yml', '.github/actions/run-script-suite-tests/action.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -46,6 +46,7 @@ class PolicyTests(unittest.TestCase):
         jobs = self.ci()['jobs']
         common = {'needs.ci-diff.outputs.class':'rust-touched',
                   'needs.ci-diff.outputs.web-check-needed':'true',
+                  'needs.ci-diff.outputs.journeys-check-needed':'true',
                   'needs.ci-diff.outputs.bridge-check-needed':'true',
                   'needs.ci-diff.outputs.script-tests-needed':'true',
                   'needs.ci-diff.result':'success',
@@ -73,19 +74,35 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(values['web-check-needed'],'true')
         self.assertEqual(values['bridge-check-needed'],'true')
 
-    def test_train_push_reuses_full_suite_even_with_slim_lanes(self):
+    def test_train_and_queue_call_one_full_graph(self):
+        caller = policy.load(self.root/'.github/workflows/full-validation.yml')
+        self.assertIn('merge_group', caller['on'])
+        self.assertEqual(caller['on']['push']['branches'], ['epic/release-train-**'])
+        self.assertEqual(caller['jobs']['validation']['uses'], './.github/workflows/ci.yml')
+        self.assertIs(caller['jobs']['validation']['with']['full-set'], True)
         jobs = self.ci()['jobs']
-        context = {'github.event_name': 'push', 'github.ref': 'refs/heads/epic/release-train-fixture',
-                   'vars.CAS_LANE_SLIM': 'true', 'needs.ci-diff.outputs.class': 'rust-touched',
-                   'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'true',
-                   'needs.fast-validation-runner-route.outputs.mode': 'hosted'}
-        for name in ['fast-validation-runner-route', 'fast-validation-main-push-dedupe',
-                     'fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
-            self.assertTrue(self.gh_expr(jobs[name]['if'], context), name)
-        self.assertFalse(self.gh_expr(jobs['scoped-validation']['if'], context))
-        version_only = {**context, 'needs.ci-diff.outputs.class': 'version-bump'}
-        for name in ['fast-validation-suite-build', 'fast-validation-suite-shards', 'fast-validation-suite']:
-            self.assertFalse(self.gh_expr(jobs[name]['if'], version_only), name)
+        common = {'inputs.full-set': True, 'vars.CAS_LANE_SLIM': 'true',
+                  'needs.ci-diff.outputs.class': 'rust-touched',
+                  'needs.ci-diff.outputs.rust-unaffected': 'false',
+                  'needs.ci-diff.outputs.web-check-needed': 'true',
+                  'needs.ci-diff.outputs.journeys-check-needed': 'true',
+                  'needs.ci-diff.outputs.bridge-check-needed': 'true',
+                  'needs.ci-diff.outputs.script-tests-needed': 'true',
+                  'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'true',
+                  'needs.fast-validation-runner-route.outputs.mode': 'hosted',
+                  'needs.fast-validation-suite-shards.result': 'success'}
+        def selected(event, ref):
+            context = {**common, 'github.event_name': event, 'github.ref': ref}
+            return {name for name, job in jobs.items() if self.gh_expr(job.get('if', 'true'), context)}
+        train = selected('push', 'refs/heads/epic/release-train-fixture')
+        queue = selected('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1')
+        self.assertEqual(train, queue)
+        self.assertTrue({'fast-validation-preflight', 'fast-validation-ci-tiers',
+                         'fast-validation-web', 'fast-validation-journeys',
+                         'fast-validation-suite-build', 'fast-validation-suite-shards',
+                         'fast-validation-suite', 'fast-validation-docs',
+                         'queue-flake-publication', 'fast-validation'}.issubset(train))
+        self.assertNotIn('scoped-validation-fast', train)
 
     def test_current_policy_and_all_registered_prose_pass(self):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
@@ -104,9 +121,9 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(policy.validate(self.root, verbose=False), [])
 
     def test_public_required_context_rename_is_rejected(self):
-        data = self.ci()
+        data = copy.deepcopy(policy.load(self.root/'.github/workflows/full-validation.yml'))
         data['jobs']['fast-validation']['name'] = 'A different public check'
-        self.write('.github/workflows/ci.yml', data)
+        self.write('.github/workflows/full-validation.yml', data)
         self.assertTrue(policy.validate(self.root, verbose=False))
 
     def test_required_context_in_a_note_cannot_replace_a_real_context(self):
@@ -242,7 +259,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 self.assertEqual(selected(preflight, check), expected_check)
                 self.assertEqual(selected(archive, build), expected_archive)
                 self.assertEqual(selected(preflight, portable), expected_portable)
-                self.assertEqual(selected(preflight, consumer), expected_portable)
+                self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
 
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         def valid(workflow):

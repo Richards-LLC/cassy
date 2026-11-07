@@ -176,7 +176,8 @@ pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> R
 /// train. Work already under way may resume; repairs may always start.
 pub(crate) fn check_staffing(root: &Path, task_id: &str) -> Result<()> {
     let store = crate::store::open_task_store(root)?;
-    let task = store.get(task_id)?;
+    // An unknown id is the caller's own error to report, not a freeze refusal.
+    let Ok(task) = store.get(task_id) else { return Ok(()) };
     let (train, subject) = if is_release_train(&task) {
         (task, "no new workers join it".to_string())
     } else if task.status == crate::types::TaskStatus::Open && !is_repair(&task) {

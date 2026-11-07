@@ -529,8 +529,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
             // cas-f2dc: a late verifier error on a settled dispatch stays silent.
-            assert_eq!(resolved(&core, &claimed), status == "approved", "{status}");
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(resolved(&core, &claimed), verdict.is_some(), "{status}");
             if matches!(status, "malformed" | "harness_failed") {
                 assert!(verdict.is_none(), "failed transport cannot approve");
             } else {

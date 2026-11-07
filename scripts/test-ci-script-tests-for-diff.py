@@ -185,6 +185,29 @@ class Selection(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('PASS python3 scripts/test-probe.py', result.stdout)
 
+    def test_a_failing_suite_repeats_its_last_lines_after_later_suites_cas_5365(self):
+        # Run 42415112049: test-release-scratch.py failed, a later suite's
+        # output followed, and the gate's row tail showed only "failed:".
+        with tempfile.TemporaryDirectory(prefix='script-failure-tail-') as directory:
+            repo = Path(directory)
+            (repo / 'cas-cli').mkdir()
+            (repo / 'scripts').mkdir()
+            (repo / 'cas-cli/Makefile').write_text(
+                'test-ci-tiers:\n\tcd .. && python3 scripts/test-broken.py\n\tcd .. && python3 scripts/test-later.py\n')
+            (repo / 'scripts/test-broken.py').write_text(
+                "import sys\nfor n in range(80):\n    print(f'broken line {n}')\nsys.exit('FAIL: test_named_failure')\n")
+            (repo / 'scripts/test-later.py').write_text("for n in range(40):\n    print('later ok')\n")
+            env = {key: value for key, value in os.environ.items()
+                   if key not in {'GITHUB_EVENT_NAME', 'GITHUB_REF', 'CAS_QUEUE_STEP'}}
+            result = subprocess.run([sys.executable, SPEC.origin, '--repo', str(repo), '--all'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            excerpt = result.stdout.split('failed: scripts/test-broken.py\n', 1)[1]
+            self.assertIn('FAIL: test_named_failure', excerpt)
+            self.assertIn('broken line 79', excerpt)
+            self.assertNotIn('broken line 20', excerpt)
+            self.assertNotIn('later ok', excerpt)
+
 
 if __name__ == "__main__":
     unittest.main()

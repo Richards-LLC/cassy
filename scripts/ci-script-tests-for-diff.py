@@ -28,6 +28,7 @@ list or the diff cannot be read.
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -38,6 +39,8 @@ import sys
 import time
 
 MAKEFILE = "cas-cli/Makefile"
+# Lines of a failing suite's output repeated after the summary (cas-5365).
+FAILURE_TAIL_LINES = 60
 TARGET = "test-ci-tiers:"
 # Measured on the factory host (2026-10-10, idle): each takes over 20 s alone,
 # more than lane admission can spend on one row. PROVISIONED_INPUTS below
@@ -254,20 +257,38 @@ def main() -> int:
             (os.environ.get('GITHUB_EVENT_NAME') == 'push' and
              os.environ.get('GITHUB_REF', '').startswith('refs/heads/epic/release-train-')))
         if recovering:
-            result = subprocess.run([sys.executable, str(repo/'scripts/ci-queue-flakes.py'),
+            returncode, tail = run_streaming([sys.executable, str(repo/'scripts/ci-queue-flakes.py'),
                 'step', '--repo', str(repo), '--id', test, '--',
-                'bash', '-e', '-o', 'pipefail', '-c', command], cwd=repo, env=env)
+                'bash', '-e', '-o', 'pipefail', '-c', command], repo, env)
         else:
-            result = subprocess.run(command, shell=True, cwd=repo, env=env)
+            returncode, tail = run_streaming(command, repo, env, shell=True)
         took = time.monotonic() - started
-        status = "PASS" if result.returncode == 0 else f"FAIL (exit {result.returncode})"
+        status = "PASS" if returncode == 0 else f"FAIL (exit {returncode})"
         print(f"ci-script-tests-changed: {status} {command} ({took:.1f}s)", flush=True)
-        if result.returncode:
-            failed.append(test)
+        if returncode:
+            failed.append((test, tail))
     if failed:
-        print(f"ci-script-tests-changed: failed: {', '.join(failed)}")
+        # cas-5365: later suites push a failure's output out of the gate's row
+        # tail, so repeat each failing suite's last lines after the summary.
+        print(f"ci-script-tests-changed: failed: {', '.join(test for test, _ in failed)}")
+        for test, tail in failed:
+            print(f"ci-script-tests-changed: last {len(tail)} output lines of {test}:")
+            sys.stdout.writelines(tail)
+        sys.stdout.flush()
         return 1
     return 0
+
+
+def run_streaming(command, cwd, env, shell=False):
+    """Run a suite with its output passed through live; keep its last lines."""
+    tail = collections.deque(maxlen=FAILURE_TAIL_LINES)
+    with subprocess.Popen(command, shell=shell, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, errors='replace') as child:
+        for line in child.stdout:
+            sys.stdout.write(line)
+            tail.append(line if line.endswith('\n') else line + '\n')
+        sys.stdout.flush()
+    return child.returncode, list(tail)
 
 
 if __name__ == "__main__":

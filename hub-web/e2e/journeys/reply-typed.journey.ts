@@ -32,6 +32,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   await installDraftDiagnostic(page);
   const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  // cas-da546: a row speaks its last turn rather than showing it.
+  const sessionRow = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
 
@@ -132,7 +134,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // cas-3433: the control the refusal names is on the message itself.
     await expect(bubble.getByRole("button", { name: "Take control of the session", exact: true })).toBeVisible();
     await expect(bubble.getByRole("status")).not.toContainText("forbidden");
-    await expect(list.getByText("Not sent: Ship it without the gate.")).toBeVisible();
+    await expect(sessionRow).toHaveAccessibleName(/Not sent: Ship it without the gate\./);
     // The reason is said once, on the message; the composer only points at it (cas-4d92).
     await expect(page.locator("#message-status")).toHaveText("Not sent — see the message above.");
     await expect(page.getByText("This device isn't the one in control of the session.")).toHaveCount(1);
@@ -262,7 +264,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await expect(unsent).toContainText("1 unsent message");
     await expect(unsent).toBeFocused();
     await expect(page.locator("#message-status")).toBeHidden();
-    await expect(list.getByText(/Not sent: /)).toHaveCount(0);
+    await expect(sessionRow).not.toHaveAccessibleName(/Not sent: /);
     await page.keyboard.press("Enter");
     await expect(bubble).toHaveCount(1);
     await expect(unsent).toBeHidden();
@@ -303,8 +305,8 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     const retired = page.locator('.conversation-turn[data-state="error"]');
     await expect(retired.getByRole("status")).toHaveText("Not sent · replaced by your edit");
     await expect(page.getByRole("button", { name: "Retry sending" })).toHaveCount(0);
-    await expect(list.getByText("You: Ship it after the gate passes.")).toBeVisible();
-    await expect(list.getByText(/Not sent: /)).toHaveCount(0);
+    await expect(sessionRow).toHaveAccessibleName(/You: Ship it after the gate passes\./);
+    await expect(sessionRow).not.toHaveAccessibleName(/Not sent: /);
   });
 
   await journey.stage("A late receipt after the supervisor talks on never offers Retry", async () => {

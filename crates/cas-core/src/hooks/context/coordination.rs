@@ -356,5 +356,29 @@ mod tests {
     use super::*;
     use crate::hooks::config::DefaultHooksConfig;
 
-
+    /// The Codex worker note reaches supervisors only, and only when
+    /// CAS_FACTORY_WORKER_CLI names Codex in any letter case.
+    #[test]
+    fn codex_worker_note_is_supervisor_only_and_case_insensitive() {
+        let config = DefaultHooksConfig::default();
+        for worker_cli in ["codex", "CoDeX", "claude"] {
+            let env = std::sync::Arc::new(
+                crate::env_overlay::HookEnvironment::new()
+                    .with_var("CAS_FACTORY_WORKER_CLI", worker_cli),
+            );
+            let _scope = env.scope();
+            for role in [AgentRole::Supervisor, AgentRole::Worker] {
+                let mut parts = Vec::new();
+                let mut tokens = 0;
+                inject_role_guidance(&mut parts, &mut tokens, role, &config);
+                let expects_note = role == AgentRole::Supervisor && worker_cli != "claude";
+                assert_eq!(
+                    parts.join("\n").contains(CODEX_WORKER_COORDINATION_NOTE),
+                    expects_note,
+                    "worker_cli={worker_cli} role={role:?}"
+                );
+                assert!(tokens > 0);
+            }
+        }
+    }
 }

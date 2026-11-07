@@ -5910,6 +5910,25 @@ fn pull_id_collision_check_for(ids: &[String]) -> Option<Check> {
     ))
 }
 
+/// The doctor notice for migratable personal rows a team-linked sync holds;
+/// `None` once nothing is held.
+fn held_personal_notice(cas_root: &Path) -> Option<String> {
+    crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+        .ok()
+        .filter(|config| config.active_team_id().is_some())
+        .and_then(|config| {
+            crate::cli::cloud::team_only_held_personal_rows(cas_root)
+                .filter(|count| *count > 0)
+                .map(|count| {
+                    format!(
+                        "{count} migratable personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}",
+                        if config.team_only { "on" } else { "off" },
+                        crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)
+                    )
+                })
+        })
+}
+
 /// Surface the content backlog and cloud rejections independently of purge
 /// safety. Reset terminal rows, push them, then preview the purge. The preview
 /// reports unrelated queued rows as information because they survive cleanup.
@@ -5929,20 +5948,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         }
     };
 
-    let held_notice = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
-        .ok()
-        .filter(|config| config.active_team_id().is_some())
-        .and_then(|config| {
-            crate::cli::cloud::team_only_held_personal_rows(cas_root)
-                .filter(|count| *count > 0)
-                .map(|count| {
-                    format!(
-                        "{count} migratable personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}",
-                        if config.team_only { "on" } else { "off" },
-                        crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)
-                    )
-                })
-        });
+    let held_notice = held_personal_notice(cas_root);
 
     let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
         Ok(pending) => pending,
@@ -6420,14 +6426,13 @@ mod tests {
 
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
-
+        let held = held_personal_notice(&root).expect("one personal row is held");
+        assert!(check.message.contains(&held), "{}", check.message);
+        assert_eq!(crate::cli::cloud::team_only_held_personal_rows(&root), Some(1));
 
         queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
-        let after_migration = cloud_queue_check(&root);
-
+        assert_eq!(held_personal_notice(&root), None);
+        assert!(!cloud_queue_check(&root).message.contains(&held));
     }
 
     #[test]
@@ -6478,7 +6483,6 @@ mod tests {
 
         let check = cloud_team_only_check(&root);
         assert!(matches!(check.status, CheckStatus::Error));
-
     }
 
     #[test]
@@ -6507,12 +6511,8 @@ mod tests {
         let idle = cloud_pull_freshness_check_at(temp.path(), now, false).unwrap();
         assert!(matches!(idle.status, CheckStatus::Warning), "{}", idle.message);
 
-
-
-
         let live = cloud_pull_freshness_check_at(temp.path(), now, true).unwrap();
         assert!(matches!(live.status, CheckStatus::Warning), "{}", live.message);
-
 
         queue
             .set_metadata("last_team_pull_at_team-1_p", "2026-10-16T11:30:00Z")
@@ -6552,8 +6552,6 @@ mod tests {
             "{}",
             check.message
         );
-
-
     }
 
     #[test]
@@ -6707,7 +6705,6 @@ mod tests {
                 schema.message
             );
         }
-
 
         for check in [supervisor_relay_check(&root), delivery_retries_check(&root)] {
             assert!(
@@ -6971,7 +6968,6 @@ mod tests {
         let retry_check = delivery_retries_check(temp.path());
         assert!(matches!(retry_check.status, CheckStatus::Warning));
 
-
         assert_eq!(queue.list_most_retried_pending(3, 10).unwrap().len(), 1);
     }
 
@@ -7040,7 +7036,6 @@ mod tests {
         let unavailable = github_origin_check(temp.path()).unwrap();
         assert!(matches!(unavailable.status, CheckStatus::Warning));
 
-
         let empty = TempDir::new().unwrap();
         assert!(github_origin_check(empty.path()).is_none());
     }
@@ -7072,7 +7067,6 @@ mod tests {
             assert_eq!(matches!(check.status, CheckStatus::Warning), warning, "{}", check.message);
 
             if warning {
-
                 let rendered = serialize_checks(&[check], &[]);
                 assert!(rendered[0]["remediation"].as_str().unwrap().contains("gh api -X PUT repos/acme/repo/rulesets/42"));
             }
@@ -7128,7 +7122,6 @@ mod tests {
         let check = unauthored_pull_check(temp.path()).expect("counted");
         assert_eq!(check.name, "pulled rows not authored here");
         assert!(matches!(check.status, CheckStatus::Info));
-
     }
 
     #[test]
@@ -7165,7 +7158,6 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Warning));
 
         assert!(!check.message.contains("0001-01-01"));
-
     }
 
     /// cas-7a63: a parked id collision is reported once per id, and a clean
@@ -7261,7 +7253,6 @@ mod tests {
 
         let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
 
-
         struct DefaultUnavailable;
         impl crate::issue_reconcile::IssueStates for DefaultUnavailable {
             fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
@@ -7285,7 +7276,6 @@ mod tests {
             check.message
         );
         assert!(check.message.contains("Richards-LLC/cassy#1158"));
-
 
         let mut mixed = tasks.clone();
         mixed.push(crate::types::Task::new(
@@ -7315,8 +7305,6 @@ mod tests {
             "{}",
             check.message
         );
-
-
 
         let check = shipped_issues_check(&mixed, repo, &States(Ok([].into())), &tags);
         assert!(
@@ -7364,7 +7352,6 @@ mod tests {
         assert_eq!(check.name, "issue repositories");
         assert!(matches!(check.status, CheckStatus::Warning));
 
-
         assert!(check.message.contains("cassy=Richards-LLC/cassy"));
         assert!(check.message.contains("violet=Richards-LLC/violet_ps"));
         assert!(
@@ -7382,7 +7369,6 @@ mod tests {
         let check = issue_repositories_check(&config, temp.path());
         assert!(matches!(check.status, CheckStatus::Ok));
         assert!(check.message.contains("project=example/explicit"));
-
     }
 
     #[test]
@@ -7803,8 +7789,6 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("GH_TOKEN") && check.message.contains("GITHUB_TOKEN"));
 
-
-
         let changelog_only = history_index_check(HistoryIndexHealth {
             failing_sources: vec![("changelog".to_string(), "no CHANGELOG.md".to_string())],
             ..healthy_history()
@@ -7901,7 +7885,6 @@ mod tests {
             check.message
         );
 
-
         // Release the lock BEFORE inspecting: `inspect_legacy_index` opens an
         // `IndexReader`, which acquires META_LOCK itself, so inspecting while
         // still holding it deadlocks the test against itself — the same trap
@@ -7937,8 +7920,6 @@ mod tests {
         let before = legacy_search_index_check(&cas_root);
         assert!(matches!(before.status, CheckStatus::Warning));
 
-
-
         assert!(matches!(
             crate::hybrid_search::repair_legacy_index(
                 &cas_root,
@@ -7950,7 +7931,6 @@ mod tests {
         ));
         let after = legacy_search_index_check(&cas_root);
         assert!(matches!(after.status, CheckStatus::Ok));
-
     }
 
     #[test]
@@ -8035,7 +8015,6 @@ mod tests {
         assert!(matches!(checks[0].status, CheckStatus::Warning));
 
         assert!(matches!(checks[1].status, CheckStatus::Warning));
-
     }
 
     #[test]
@@ -8057,7 +8036,6 @@ mod tests {
         let checks = factory_supervisor_checks(&[current, predecessor]);
         assert_eq!(checks.len(), 1);
         assert!(matches!(checks[0].status, CheckStatus::Ok));
-
     }
 
     /// GH #699: this is the reported shape — every per-session check is green
@@ -8179,8 +8157,6 @@ mod tests {
 
         let listed = check.message.matches("cas-r").count();
         assert_eq!(listed, 6, "fixture must list six ids: {}", check.message);
-
-
     }
 
     /// GH #701 (cas-4342): the check has to say how many rows are
@@ -8220,15 +8196,11 @@ mod tests {
 
         let check = foreign_rows_check(Ok(&report), None, 1);
 
-
-
         assert!(
             check.message.contains("--release-cloud-rows"),
             "the reversal must be named too: {}",
             check.message
         );
-
-
     }
 
     #[test]
@@ -8265,9 +8237,6 @@ mod tests {
         let check = foreign_rows_check(Ok(&report), Some(&analysis), 1);
         assert!(matches!(check.status, CheckStatus::Warning));
 
-
-
-
         let action_available = foreign_rows_check(Ok(&report), Some(&analysis), 0);
         assert!(matches!(action_available.status, CheckStatus::Warning));
     }
@@ -8284,7 +8253,6 @@ mod tests {
             ..Default::default()
         };
         let check = foreign_rows_check(Ok(&report), None, 0);
-
     }
 
     /// Only open unattributed rows are candidates: a closed one is not in
@@ -8363,7 +8331,6 @@ mod tests {
         assert!(warning.contains("/home/pippenz/Petrastella/gabber-studio"));
         assert!(warning.contains("gabber-gentle-hawk-71/noble-koala-5"));
         assert!(warning.contains("gabber-witty-panda-98/gentle-falcon-66"));
-
     }
 
     #[test]
@@ -8433,7 +8400,6 @@ mod tests {
         // AC1: a remediation path is named.
 
         // AC2: the identity constraint is stated where a human would act on it.
-
     }
 
     #[test]
@@ -8449,11 +8415,6 @@ mod tests {
         };
         let check = foreign_rows_check(Ok(&report), None, 0);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
-
-
     }
 
     #[test]
@@ -8508,10 +8469,6 @@ mod tests {
         };
 
         let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
-
-
-
-
 
     }
 
@@ -8618,7 +8575,6 @@ mod tests {
         };
         let check = foreign_rows_check(Ok(&report), Some(&analysis), 0);
 
-
         let mut collision_report = report;
         collision_report.collisions = vec![IdCollision {
             id: "foreign-2".to_string(),
@@ -8659,10 +8615,6 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok));
         // An Ok row that just said "clean" would be indistinguishable from a
         // scan that compared nothing at all.
-
-
-
-
     }
 
     #[test]
@@ -8674,7 +8626,6 @@ mod tests {
 
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("SKIPPED"), "{}", check.message);
-
     }
 
     #[test]
@@ -8712,10 +8663,6 @@ mod tests {
 
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
-
 
         let retry = check.message.find("cas cloud queue --retry").unwrap();
         let push = check.message.find("cas cloud push").unwrap();
@@ -8771,7 +8718,6 @@ mod tests {
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
 
-
         assert!(
             !check.message.contains("×3"),
             "a row with no cloud verdict is not a rejection: {}",
@@ -8789,7 +8735,6 @@ mod tests {
             assert!(matches!(check.status, CheckStatus::Warning));
 
             assert!(check.message.contains(crate::cloud::push_reason_hint(reason)), "{}", check.message);
-
         }
     }
 
@@ -8829,9 +8774,6 @@ mod tests {
 
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
     }
 
     #[test]
@@ -8870,7 +8812,6 @@ mod tests {
 
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
-
     }
 
     #[test]
@@ -8917,8 +8858,6 @@ mod tests {
             check.message
         );
         assert!(check.message.contains("parked-with-reason"), "{}", check.message);
-
-
     }
 
     #[test]
@@ -8949,7 +8888,6 @@ mod tests {
 
         let check = cloud_queue_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -9015,7 +8953,6 @@ mod tests {
                 "{}",
                 check.message
             );
-
         });
     }
 
@@ -9043,8 +8980,6 @@ mod tests {
 
         let check = proxy_stdio_commands_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -9083,8 +9018,6 @@ mod tests {
 
         let check = proxy_stdio_commands_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -9125,8 +9058,6 @@ mod tests {
 
         let check = proxy_upstream_reachability_check(&cas_root);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
     }
 
     #[test]
@@ -9367,7 +9298,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             check.message
         );
 
-
         assert!(
             check.message.contains(&user_path.display().to_string()),
             "the shadowed machine registration is named: {}",
@@ -9411,7 +9341,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         // clean bill of health.
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains(&report.peers_unreadable[0].project), "{}", check.message);
-
     }
 
     /// cas-647c: a registry root that is not a project store at all is
@@ -9443,9 +9372,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             check.message
         );
         assert!(check.message.contains("fresh-proxy"), "{}", check.message);
-
-
-
     }
 
     fn messages(checks: &[Check], name: &str) -> Vec<String> {
@@ -9468,14 +9394,8 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             let check = host_known_repos_check();
             assert!(matches!(check.status, CheckStatus::Warning));
 
-
-
-
-
             let fix = host_autofix().expect("doctor --fix should explain the manual remedy");
             assert!(matches!(fix.status, CheckStatus::Info));
-
-
         });
     }
 
@@ -9490,8 +9410,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
             let check = host_known_repos_check();
             assert!(matches!(check.status, CheckStatus::Warning));
-
-
 
             let fix = host_autofix().expect("doctor --fix should prune the gone root");
             assert!(matches!(fix.status, CheckStatus::Ok));
@@ -9547,7 +9465,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             let current_only = registered_project_root_checks(&current);
             assert_eq!(current_only.len(), 1);
             assert!(matches!(current_only[0].status, CheckStatus::Ok));
-
 
             std::fs::create_dir_all(other.join(".cas")).unwrap();
             std::fs::write(other.join(".cas/config.toml"), "[project]\ncanonical_id = \"other\"\n").unwrap();
@@ -9614,8 +9531,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert!(row.message.contains("last_team_pull_at_team_project-two"));
         assert!(row.message.contains("team_project_registered_team_project-two"));
         assert!(row.message.contains(pushed_project_key) && row.message.contains(foreign_project));
-
-
 
         assert!(!row.message.contains(current_scope_key));
     }
@@ -9744,9 +9659,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert!(check
             .message
             .contains("aliases = [\"github.com/richards-llc/cassy\", \"old\"]"));
-
-
-
     }
 
     #[test]
@@ -9800,8 +9712,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let dry_run = canonical_alias_fix(&cas_root, &doctor_fix_args(false), &cli).unwrap();
         assert!(matches!(dry_run.status, CheckStatus::Info));
 
-
-
         assert_eq!(crate::cloud::project_aliases_from_config_toml(&cas_root), vec!["old"]);
 
         let applied = canonical_alias_fix(&cas_root, &doctor_fix_args(true), &cli).unwrap();
@@ -9841,7 +9751,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             .find(|c| c.name == "canonical id collision")
             .expect("shared explicit pins still require identity review");
         assert!(matches!(collision.status, CheckStatus::Warning));
-
 
         assert_eq!(checks.len(), 1);
         assert!(matches!(collision.group(), CheckGroup::Host));
@@ -9966,7 +9875,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             rows[0].severity,
             crate::cli::integrate::doctor::DoctorSeverity::Ok
         ));
-
     }
 
     // -----------------------------------------------------------------
@@ -10008,7 +9916,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert!(matches!(check.status, CheckStatus::Warning));
         assert!(check.message.contains("exa-search"), "{}", check.message);
         assert!(check.message.contains(alt_profile), "{}", check.message);
-
 
         let identical = find_divergent_user_skills(&[claude.clone(), codex], &claude);
         assert!(identical.is_empty(), "identical copies are not findings");
@@ -10054,8 +9961,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             ("~/.codex".to_string(), edited.clone()),
         ]);
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-
-
 
         let drifted = InstallParity {
             checked: 10,
@@ -10161,9 +10066,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert_eq!(divergent[0].others, vec![drifted]);
         let check = divergent_user_skills_check(&divergent);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
     }
 
     #[test]
@@ -10281,8 +10183,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let strays = scan_user_skill_dirs(&[(skills, claude_names())]);
         assert_eq!(strays.len(), 1, "{strays:?}");
         assert_eq!(strays[0].reason, StrayReason::OrphanedManagedCopy);
-
-
     }
 
     #[cfg(unix)]
@@ -10453,12 +10353,8 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         );
         assert!(matches!(factory.status, CheckStatus::Info));
 
-
-
-
         let missing = scratchpad_policy_check_for(true, None, None);
         assert!(matches!(missing.status, CheckStatus::Warning));
-
     }
 
     /// Codex ships skills Claude does not. Comparing a `~/.codex/skills`
@@ -10567,8 +10463,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             github_row.severity,
             crate::cli::integrate::doctor::DoctorSeverity::Warning
         ));
-
-
     }
 
     /// `cas-3efe`: recorded Neon IDs without an MCP server produce a Warning
@@ -10613,7 +10507,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             neon_row.severity,
             crate::cli::integrate::doctor::DoctorSeverity::Warning
         ));
-
     }
 
     // ===== cas-499c: symbol index lag =====
@@ -10642,10 +10535,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
-
-
     }
 
     #[test]
@@ -10733,7 +10622,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-
     }
 
     /// cas-8a03: every clause has to name a command that actually clears it.
@@ -10858,7 +10746,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let check = code_index_copies_check(&[("cassy".to_string(), 314)], &canonical);
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
 
-
         let empty = code_index_copies_check(&[], &canonical);
         assert!(matches!(empty.status, CheckStatus::Ok), "{}", empty.message);
         assert!(!empty.message.is_empty());
@@ -10881,8 +10768,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "message: {}",
             check.message
         );
-
-
     }
 
     /// Empty index and missing BM25 directory are the "never ran" case, not a silent pass.
@@ -10898,7 +10783,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Ok));
-
     }
 
     #[test]
@@ -10906,8 +10790,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let state = SymbolIndexState { files: 0, eligible_files: 0, indexed_files: 0, searchable: false, ..healthy_state() };
         let check = symbol_index_check(state, chrono::Utc::now());
         assert!(matches!(check.status, CheckStatus::Ok));
-
-
     }
 
     /// An explicit opt-out must be reported honestly rather than as a healthy index.
@@ -10921,7 +10803,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-
     }
 
     /// A store that cannot be read is a warning that says so — never a silent skip.
@@ -10935,7 +10816,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = symbol_index_check(state, now);
         assert!(matches!(check.status, CheckStatus::Warning));
-
     }
 
     /// A drain failure must reach the operator here (EPIC cas-6212 / cas-db6e).
@@ -10989,10 +10869,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         });
         assert!(matches!(check.status, CheckStatus::Warning));
 
-
-
-
-
         // Drained to zero, but part of the corpus has no vector and never will
         // until someone acts: that is a warning, not "nothing pending".
         let drained = embedding_drain_check(EmbeddingDrainState {
@@ -11003,8 +10879,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         });
         assert!(matches!(drained.status, CheckStatus::Warning));
 
-
-
         // No refusals: the line stays exactly as it was.
         let clean = embedding_drain_check(EmbeddingDrainState {
             capability: true,
@@ -11012,7 +10886,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             ..Default::default()
         });
         assert!(matches!(clean.status, CheckStatus::Ok));
-
     }
 
     #[test]
@@ -11023,7 +10896,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             ..Default::default()
         });
         assert!(matches!(stranded.status, CheckStatus::Warning));
-
 
         // Logged out with nothing queued is an ordinary, fully-supported state.
         let idle = embedding_drain_check(EmbeddingDrainState {
@@ -11053,8 +10925,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         let writer = crate::daemon::canonical_code_index::CodeIndexRole::Writer;
         let warning = code_index_autofix_as(&fixture.cas_root, &writer).expect("doctor offered the retry");
         assert!(matches!(warning.status, CheckStatus::Warning), "{}", warning.message);
-
-
 
         let store = crate::store::open_code_store(&fixture.cas_root).unwrap();
         assert_eq!(store.list_files("repo", None).unwrap().len(), 2, "retry manifest was lost");
@@ -11095,8 +10965,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert_eq!((changed.eligible_files, changed.indexed_files, changed.skipped_files), (3, 2, 1));
         let check = symbol_index_check(changed, chrono::Utc::now());
         assert!(matches!(check.status, CheckStatus::Warning));
-
-
     }
 
     /// End-to-end over a real code store: a seeded stale `code_files.updated` row is what the
@@ -11179,8 +11047,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
     fn history_index_check_reports_lag_in_commits_and_seconds() {
         let check = history_index_check(healthy_history());
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
-
-
     }
 
     /// AC1, the load-bearing one: a stale index must be LOUD. Seeded two days
@@ -11199,9 +11065,7 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             check.message
         );
 
-
         // The remedy is named, not implied.
-
     }
 
     /// The other half of that threshold: lag younger than one tick is the
@@ -11283,7 +11147,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
         assert_eq!(unknown.lag_seconds, None);
         let check = history_index_check(unknown);
         assert!(matches!(check.status, CheckStatus::Warning));
-
     }
 
     /// §10.2 row 3, surfaced. `lag_commits: None` means the watermark left
@@ -11301,8 +11164,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "{}",
             check.message
         );
-
-
     }
 
     /// §10.2 row 2: a source-level failure outranks staleness, because it is
@@ -11349,7 +11210,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "{}",
             check.message
         );
-
     }
 
     #[test]
@@ -11366,7 +11226,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "{}",
             check.message
         );
-
     }
 
     #[test]
@@ -11381,8 +11240,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "{}",
             check.message
         );
-
-
     }
 
     /// §10.1's actual demand: BOTH coverage figures, on every arm. Reporting
@@ -11392,15 +11249,12 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
     fn history_index_check_publishes_both_coverage_figures() {
         let ok = history_index_check(healthy_history());
 
-
-
         // ...and on a warning arm too, where it would be easiest to drop.
         let stale = history_index_check(HistoryIndexHealth {
             lag_commits: Some(41),
             lag_seconds: Some(2 * 24 * 60 * 60),
             ..healthy_history()
         });
-
     }
 
     /// Unmeasurable is not 0%. A store that cannot read the edges must say so
@@ -11413,9 +11267,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             provenance_unmeasurable_reason: Some("no tasks table".to_string()),
             ..healthy_history()
         });
-
-
-
     }
 
     /// A partial measurement keeps its figures but must be labelled — the
@@ -11426,8 +11277,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             provenance_unmeasurable_reason: Some("commit_links unreadable".to_string()),
             ..healthy_history()
         });
-
-
     }
 
     /// The table guard must actually warn, not merely contain the right names
@@ -11550,8 +11399,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "quarantine is not a fault: {}",
             check.message
         );
-
-
     }
 
     /// A row whose endpoint is gone from the `tasks` table entirely is still a
@@ -11640,7 +11487,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
 
         let check = check_for(store.as_ref());
         assert!(matches!(check.status, CheckStatus::Ok));
-
     }
 
     /// Delete only the task row, leaving its dependency edges behind. The store
@@ -11852,9 +11698,6 @@ fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
             "{}",
             check.message
         );
-
-
-
 
         // The prune is skipped whole — including the row it could classify.
         let outcome = prune_dangling_dependencies(failing.as_ref()).unwrap();
@@ -12527,10 +12370,8 @@ mod prompt_hook_tests {
         let at_floor = session_start_budget_check_for(hard_ceiling - minimum);
         assert!(matches!(at_floor.status, CheckStatus::Ok));
 
-
         let below_floor = session_start_budget_check_for(hard_ceiling - minimum + 1);
         assert!(matches!(below_floor.status, CheckStatus::Warning));
-
     }
 
     #[test]
@@ -12545,7 +12386,6 @@ mod prompt_hook_tests {
         }
         let check = prompt_hook_check(temp.path());
         assert!(matches!(check.status, CheckStatus::Warning));
-
     }
 }
 

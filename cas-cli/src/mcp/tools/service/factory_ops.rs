@@ -2269,6 +2269,12 @@ fn select_launched_shutdown_targets(
     }
 }
 
+/// A spawn request still short of a terminal state after
+/// `SPAWN_UNCONFIRMED_SECS` never registered a worker.
+fn spawn_unconfirmed(row: &cas_store::SpawnLifecycle, now: chrono::DateTime<chrono::Utc>) -> bool {
+    !row.state.is_terminal() && (now - row.created_at).num_seconds() >= SPAWN_UNCONFIRMED_SECS
+}
+
 fn format_spawn_lifecycle_section(
     rows: &[cas_store::SpawnLifecycle],
     now: chrono::DateTime<chrono::Utc>,
@@ -2289,7 +2295,7 @@ fn format_spawn_lifecycle_section(
 
     for row in recent {
         let age = (now - row.created_at).num_seconds().max(0);
-        let stale = !row.state.is_terminal() && age >= SPAWN_UNCONFIRMED_SECS;
+        let stale = spawn_unconfirmed(row, now);
         let who = row
             .worker_name
             .as_deref()
@@ -9037,7 +9043,6 @@ mod gc_report_render_tests {
         assert!(summary.contains("Cargo target cache pressure"));
         assert!(summary.contains("Note: these are not auto-deleted."));
 
-
         assert_eq!(
             render_gc_report_response(&report, GcReportView::Full),
             report
@@ -13769,7 +13774,6 @@ mod spawn_lifecycle_tests {
         }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
         assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
-
     }
 
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
@@ -13879,7 +13883,6 @@ mod spawn_lifecycle_tests {
             .expect("authenticated default account remains usable without an explicit selector");
         preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect("consecutive calls resolve the same authenticated default");
-
     }
 
     #[test]
@@ -13893,9 +13896,6 @@ mod spawn_lifecycle_tests {
         }, || None)
         .expect_err("a logged-out account must refuse the spawn");
         assert!(error.contains("~/.codex-alt"), "{error}");
-
-
-
     }
 
     #[test]
@@ -14024,8 +14024,6 @@ mod spawn_lifecycle_tests {
 
         assert!(out.contains("abandoned") && out.contains("task closed before delivery"));
         assert!(out.contains("3386"), "{out}");
-
-
     }
 
     /// cas-5871: relays older than a day are counted with a cleanup hint,
@@ -14141,21 +14139,28 @@ mod spawn_lifecycle_tests {
         assert!(out.contains("quiet-lynx-3"), "{out}");
 
         assert!(out.contains("did not register"), "{out}");
-
     }
 
     /// A request still sitting in a non-terminal state past the threshold is
     /// UNCONFIRMED. This is the 2026-07-27 incident shape: success-shaped
     /// receipt, nothing consuming the queue, both daemon logs zero bytes.
-
-
-    /// A spawn still provisioning inside the normal window is NOT flagged —
-    /// the signal has to stay quiet during ordinary git worktree setup or
-    /// supervisors will learn to ignore it.
-
-
-    /// A registered spawn is never flagged, however old it is.
-
+    /// A spawn still provisioning inside the normal window is NOT flagged, so
+    /// the signal stays quiet during ordinary git worktree setup, and a
+    /// registered spawn is never flagged, however old it is.
+    #[test]
+    fn only_non_terminal_requests_past_the_window_are_unconfirmed() {
+        let now = chrono::Utc::now();
+        let at = |state, age_secs| {
+            let mut r = row(43, None, state, 0, None);
+            r.created_at = now - chrono::Duration::seconds(age_secs);
+            spawn_unconfirmed(&r, now)
+        };
+        assert!(at(SpawnLifecycleState::Queued, SPAWN_UNCONFIRMED_SECS));
+        assert!(at(SpawnLifecycleState::Queued, 600));
+        assert!(!at(SpawnLifecycleState::Queued, SPAWN_UNCONFIRMED_SECS - 1));
+        assert!(!at(SpawnLifecycleState::Provisioning, 5));
+        assert!(!at(SpawnLifecycleState::Registered, 1500));
+    }
 
     /// Each request renders its OWN worker. The live defect this fixes:
     /// four spawn-verified receipts attributed requests 414-417 to the wrong
@@ -14277,10 +14282,7 @@ mod spawn_lifecycle_tests {
         );
         assert!(out.contains("cas-4242"), "{out}");
 
-
     }
-
-
 
     /// In-progress wins when a worker somehow holds both — the started task is
     /// the one it is actually working.
@@ -14299,7 +14301,6 @@ mod spawn_lifecycle_tests {
 
     /// A worker with nothing assigned says so explicitly. An absent line reads
     /// as missing data; "none assigned" is an answer.
-
 
     /// Long titles are capped so one verbose task cannot wreck the roster.
     #[test]
@@ -14359,7 +14360,6 @@ mod spawn_lifecycle_tests {
             .factory_spawn_workers(orphan)
             .await
             .expect_err("a brief needs a task to ride on");
-
 
         let request: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "spawn_workers",
@@ -14678,7 +14678,6 @@ mod tests {
                 .await;
         let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
-
         assert_eq!(queue.len(), 1, "an unknown daemon build must not refuse spawn");
     }
 
@@ -14687,7 +14686,6 @@ mod tests {
         let (receipt, queue) =
             spawn_build_check_case("unprobeable-1174", Some("known-daemon"), None, None).await;
         let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
-
 
         assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
     }
@@ -15234,7 +15232,6 @@ mod tests {
             .unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].worker_names, vec![own.name]);
-
     }
 
     #[test]
@@ -15610,7 +15607,6 @@ mod tests {
                 .await
                 .expect_err("policy refusal");
             if target == "dead-guard-id" {
-
             }
             assert_eq!(
                 queue
@@ -15724,7 +15720,6 @@ mod tests {
         assert!(snapshot.requires_force());
         let rendered = snapshot.render();
         assert!(rendered.contains(&error), "{rendered}");
-
     }
 
     /// cas-2879 (QA cas-881f): a worker holding an unpushed commit is
@@ -15951,7 +15946,6 @@ mod tests {
     }
 
 
-
     #[test]
     fn config_dir_preflight_names_each_missing_requirement() {
         let temp = tempfile::tempdir().unwrap();
@@ -16044,7 +16038,6 @@ mod tests {
                 "Keychain present={keychain_present}, file={file_state}: {result:?}"
             );
             if let Err(error) = result {
-
             }
             assert!(
                 probed.get(),
@@ -16632,7 +16625,6 @@ mod tests {
         assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
-
     }
 
     #[test]
@@ -16701,8 +16693,6 @@ mod tests {
             assert_eq!(specs[offset + 1].config_dir.as_deref(), Some("/explicit/account"));
             assert_eq!(specs[offset + 2].requester_config_dir.as_deref(), Some("/requester/account"));
             assert_eq!(specs[offset + 2].config_dir, specs[offset].config_dir);
-
-
         }
 
         assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
@@ -16716,7 +16706,6 @@ mod tests {
             Ok(vec![row])
         });
         assert!(specs[0].config_dir.is_none());
-
 
         // Registry -> persisted disabled flag -> selection -> spawn. Capacity is
         // fixture data; discovery and the policy write use their real paths.
@@ -16809,7 +16798,6 @@ mod tests {
             None,
         )
         .expect_err("excess worker entries must not be silently ignored");
-
     }
 
     #[test]
@@ -16891,12 +16879,10 @@ mod tests {
             let error =
                 build_spawn_spec_json(Some(cli), Some("claude-fable-5-1"), Some("medium"))
                     .unwrap_err();
-
         }
         let error =
             build_spawn_spec_json(Some("claude"), Some("claude-fable-5-1"), Some("ultra"))
                 .unwrap_err();
-
     }
 
     #[test]
@@ -16952,9 +16938,6 @@ mod tests {
         )
         .expect_err("lane must not accept a partial explicit recipe");
 
-
-
-
     }
 
     #[test]
@@ -16962,7 +16945,6 @@ mod tests {
         let snapshot = cas_factory::CapabilitySnapshot::default();
         let error = build_lane_spawn_specs(0, "light", None, None, &snapshot)
             .expect_err("lane must name a real worker slot");
-
     }
 
     // -----------------------------------------------------------------------
@@ -16979,8 +16961,6 @@ mod tests {
             .expect_err("codex + claude slug must be rejected at enqueue");
 
         assert!(err.contains("claude-opus-4-5"), "{err}");
-
-
     }
 
     #[test]
@@ -16990,7 +16970,6 @@ mod tests {
             .expect_err("claude + codex slug must be rejected at enqueue");
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
-
     }
 
     #[test]
@@ -17014,7 +16993,6 @@ mod tests {
 
         assert!(err.contains("gpt-5.6-terra"), "{err}");
 
-
         assert!(err.contains("gpt-5.6-luna"), "{err}");
 
         assert!(err.contains("codex_luna"), "{err}");
@@ -17027,7 +17005,6 @@ mod tests {
             .expect_err("Luna must not be spawned below xhigh");
 
         assert!(err.contains("gpt-5.6-luna"), "{err}");
-
 
         assert!(err.contains("codex_luna"), "{err}");
     }
@@ -17103,9 +17080,6 @@ mod tests {
             .expect_err("unsupported local endpoint effort must fail before spawn");
 
         assert!(err.contains("local/qwen3.8"), "{err}");
-
-
-
     }
 
     #[test]
@@ -17159,9 +17133,6 @@ mod tests {
         )
         .expect_err("the registered Token Plan recipe must reject high before route preflight");
 
-
-
-
     }
 
     #[test]
@@ -17176,7 +17147,6 @@ mod tests {
             let error = preflight_hosted_opencode_specs(&[spec])
                 .expect_err("unreceipted route must fail before queue insertion");
             assert!(error.contains("pending-conformance"), "{error}");
-
         }
     }
 
@@ -17188,8 +17158,6 @@ mod tests {
             let error =
                 build_spawn_spec_json(Some("opencode"), Some("alibaba/qwen3.8-max"), Some(effort))
                     .expect_err("hosted Qwen must reject OpenAI compatibility remaps");
-
-
         }
     }
 
@@ -17200,7 +17168,6 @@ mod tests {
         for selector in ["qwen3.8-max", "cloud/qwen3.8-max", "alibaba/other-model"] {
             let error = build_spawn_spec_json(Some("opencode"), Some(selector), None)
                 .expect_err("unsupported OpenCode route must fail before spawn");
-
         }
     }
 
@@ -17567,7 +17534,6 @@ model = "local/qwen3.8"
         assert_eq!(specs[0].cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(specs[0].model.as_deref(), Some("opus"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
-
     }
 
 
@@ -17631,7 +17597,6 @@ effort = "high"
         assert_eq!(spec.cli, cas_mux::SupervisorCli::Claude);
         assert_eq!(spec.model.as_deref(), Some("sonnet"));
         assert_eq!(spec.effort, Some(cas_mux::Effort::High));
-
     }
 
     #[test]
@@ -17741,8 +17706,6 @@ effort = "high"
             );
             assert_eq!(spec.model.as_deref(), Some(claude_default_model));
             assert_eq!(notices.len(), 1);
-
-
         }
     }
 
@@ -17871,7 +17834,6 @@ effort = "high"
     }
 
 
-
     // --- cas-8240: liveness_label_for branch matrix -------------------------
 
     #[test]
@@ -17962,7 +17924,6 @@ effort = "high"
             "an in-flight tool call is direct evidence that the worker is busy"
         );
     }
-
 
 
     #[test]
@@ -18113,7 +18074,6 @@ effort = "high"
     }
 
 
-
     /// cas-e728 review follow-up: Blocked is neither in progress nor
     /// parked-for-the-supervisor, but it must still be named — otherwise a
     /// blocked worker renders as idle-with-nothing-to-do, the same hole this
@@ -18151,7 +18111,6 @@ effort = "high"
             assert!(out.contains(dispatch), "{out}");
         }
     }
-
 
 
     /// The genuine stall survives: a worker whose HEARTBEAT lapsed really has
@@ -22275,7 +22234,6 @@ mod sync_safety_tests {
         let SyncGate::Refuse(reason) = gate else {
             panic!("a dirty worktree must not be rebased without consent");
         };
-
     }
 
     #[test]
@@ -22312,7 +22270,6 @@ mod sync_safety_tests {
             else {
                 panic!("sync must never rebase on top of an unfinished rebase (force={force})");
             };
-
         }
     }
 

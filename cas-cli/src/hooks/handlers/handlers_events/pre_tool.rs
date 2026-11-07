@@ -5806,6 +5806,9 @@ fn factory_write_decision(
     }
 }
 
+/// Heading of every agent-config write refusal; tests name the guard by it.
+const CASSY_CONFIG_DENIAL: &str = "🚫 CASSY CONFIG";
+
 /// cas-0d4f0: refusal for an agent tool call that writes, edits, moves over
 /// or deletes a Cassy config file (`.cas/config.toml` or `config.yaml`, or
 /// the global `~/.config/cas/` one) directly. Agents change ordinary keys with
@@ -5873,7 +5876,7 @@ fn cas_config_file_write_denial(input: &HookInput) -> Option<String> {
         ));
     }
     Some(format!(
-        "🚫 CASSY CONFIG (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
+        "{CASSY_CONFIG_DENIAL} (cas-0d4f0): agents do not write {target} directly. Change an ordinary key with `cas config set <key> <value>`; keys that relax a Cassy guard (slack.transport, verification.force_bypass_allowed, factory.supervisor_only_mcp, the qa gates, …) are operator-only, so ask the supervisor to request the operator's approval."
     ))
 }
 
@@ -6103,6 +6106,10 @@ fn collect_heredoc_substitutions(body: &str, depth: usize, found: &mut ShellInvo
         index = end + 1;
     }
 }
+
+/// Heading of every factory workspace contract refusal; tests name the
+/// guard by it.
+const WORKSPACE_CONTRACT_DENIAL: &str = "🚫 FACTORY WORKSPACE CONTRACT";
 
 /// The refusal for an agent shell command that would change write roots or
 /// grants (cas-3147, GH #1182).
@@ -7605,7 +7612,7 @@ fn factory_workspace_contract_denial(
 ) -> String {
     if violation.matched_rule == "Codex hook input omits workdir" {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve relative redirection `{}` because the Codex hook input omits workdir. Use an absolute in-worktree path.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve relative redirection `{}` because the Codex hook input omits workdir. Use an absolute in-worktree path.",
             violation.evaluated_path,
         );
     }
@@ -7621,7 +7628,7 @@ fn factory_workspace_contract_denial(
         .unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
     if violation.matched_rule == "an unresolved shell payload" {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects (an unresolved shell payload). For gh issue or PR text, save a literal body file under your configured scratch root or assigned worktree and pass `--body-file <path>`. Assigned worktree: `{}`.",
             worktree.display(),
         );
     }
@@ -7636,7 +7643,7 @@ fn factory_workspace_contract_denial(
         | "a shell payload beyond the resolution limit"
         | "an unmatched shell scope") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot resolve shell filesystem effects ({}). Use literal directory operands and a literal, bounded shell payload so every write can be checked against its effective directory. Assigned worktree: `{}`.",
             violation.matched_rule, worktree.display(),
         );
     }
@@ -7650,13 +7657,13 @@ fn factory_workspace_contract_denial(
             format!("${name}")
         };
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: cannot establish the write root because of unexpanded shell variable `{variable}` in `{}`. Use a literal sanctioned root before the variable suffix, or bind the variable with a simple earlier assignment. Assigned worktree: `{}`.",
             violation.evaluated_path, worktree.display(),
         );
     }
     if violation.matched_rule.starts_with("link") || violation.matched_rule.starts_with("a path through") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
+            "{WORKSPACE_CONTRACT_DENIAL}: {} (`{}` resolves to `{}`). A write is judged where it lands: a link may not point at, into or above a Cassy policy path (`.cas/config.toml`, `.cas/config.yaml`, `.cas/operator/`), a hard link is a write to the file it shares, and a write through a link the same command creates must land in your worktree, under `{}/<task-id>/`{} or in an operator write root. Use literal link operands. Assigned worktree: `{}`.",
             violation.matched_rule,
             violation.evaluated_path,
             violation.resolved_path.display(),
@@ -7667,7 +7674,7 @@ fn factory_workspace_contract_denial(
     }
     if violation.matched_rule.starts_with("deletion") {
         return format!(
-            "🚫 FACTORY WORKSPACE CONTRACT: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
+            "{WORKSPACE_CONTRACT_DENIAL}: deletion refused ({}): {}. Assigned worktree: `{}`. Deleting is allowed inside your worktree, under `{}/<task-id>/`{}, and for stale Cassy runtime files (sockets, locks, pid and session files) under ~/.cas. $HOME, /, /tmp, the repository and your worktree root are never deleted.",
             violation.matched_rule,
             violation.resolved_path.display(),
             worktree.display(),
@@ -7676,7 +7683,7 @@ fn factory_workspace_contract_denial(
         );
     }
     format!(
-        "🚫 FACTORY WORKSPACE CONTRACT: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
         worktree.display(),
         artifacts,
@@ -8427,7 +8434,8 @@ mod workspace_contract_tests {
             "echo $(cat $(ls src)) tee ../../config.toml",
         ] {
             let (decision, reason) = decide(command);
-            assert_ne!(decision, "deny");
+            assert_ne!(decision, "deny", "read-only `{command}` must be allowed: {reason}");
+            assert!(!reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
         for command in [
             "touch ../../config.toml",
@@ -8441,7 +8449,7 @@ mod workspace_contract_tests {
         ] {
             let (decision, reason) = decide(command);
             assert_eq!(decision, "deny", "`{command}` writes the config and stays refused: {reason}");
-
+            assert!(reason.contains(CASSY_CONFIG_DENIAL), "`{command}`: {reason}");
         }
     }
 
@@ -9113,7 +9121,7 @@ EOF
             let response = serde_json::to_value(response).unwrap();
             let decision = &response["hookSpecificOutput"]["permissionDecision"];
             let reason = response["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-            if (decision == "deny") != denied || (denied && !reason.contains("FACTORY WORKSPACE CONTRACT")) {
+            if (decision == "deny") != denied || (denied && !reason.contains(WORKSPACE_CONTRACT_DENIAL)) {
                 failures.push(format!("{case}: {decision}: {reason}"));
             }
         }
@@ -9152,7 +9160,7 @@ EOF
                 let decision = &response["hookSpecificOutput"]["permissionDecision"];
                 let reason = response["hookSpecificOutput"]["permissionDecisionReason"]
                     .as_str().unwrap_or("");
-                if decision != "deny" || !reason.contains("FACTORY WORKSPACE CONTRACT") {
+                if decision != "deny" || !reason.contains(WORKSPACE_CONTRACT_DENIAL) {
                     failures.push(format!("{source}/{context}: {decision}: {reason}"));
                 }
             }
@@ -9343,7 +9351,7 @@ EOF
         ] {
             let (status, reason) = decision(command);
             assert_eq!(status, "deny", "{command}: {reason}");
-
+            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
         }
         // cas-d6f2: these operands recursively evaluate subscript text.
         let indirect = "x='a[$(touch /outside/cas-d6f2-must-not-execute)]'; ";
@@ -9372,7 +9380,7 @@ EOF
             let command = format!("{indirect}{expression}");
             let (status, reason) = decision(&command);
             assert_eq!(status, "deny", "{command}: {reason}");
-
+            assert!(reason.contains(WORKSPACE_CONTRACT_DENIAL), "{reason}");
         }
         for allowed in [
             "[[ 1 -eq 1 ]]",
@@ -9469,7 +9477,7 @@ EOF
                     status, "deny",
                     "execution stays closed: {invocation}: {reason}"
                 );
-
+                assert!(reason.contains(OPERATOR_POLICY_COMMAND_DENIAL), "{invocation}: {reason}");
             }
         }
     }
@@ -10710,14 +10718,14 @@ EOF
             assert_eq!(decide(path), None, "{case}: a stale leftover is deletable");
         }
         for (case, path, reason) in [
-            ("socket with a live listener", &live_sock, "listener"),
-            ("lock held by another handle", &held_lock, "held"),
-            ("lock recording a live pid", &pid_lock_live, "alive"),
-            ("pid file of a live pid", &live_pidfile, "alive"),
-            ("session record of a live daemon", &live_session, "alive"),
+            ("socket with a live listener", &live_sock, "the socket has a listener"),
+            ("lock held by another handle", &held_lock, "the lock is held"),
+            ("lock recording a live pid", &pid_lock_live, "the lock's recorded pid is alive"),
+            ("pid file of a live pid", &live_pidfile, "its recorded pid is alive"),
+            ("session record of a live daemon", &live_session, "its recorded pid is alive"),
         ] {
             let violation = decide(path).unwrap_or_else(|| panic!("{case} must be refused"));
-
+            assert_eq!(violation.matched_rule, live_runtime_rule(reason), "{case}: {violation:?}");
         }
         drop(holder);
     }
@@ -13336,7 +13344,18 @@ mod worker_commit_guard_tests {
             concurrent_json["hookSpecificOutput"]["permissionDecision"],
             "deny"
         );
-        assert_eq!(concurrent_json["hookSpecificOutput"]["permissionDecision"], "deny");
+        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::{
+            VerifierSpawnDenial, verifier_spawn_denial,
+        };
+        assert_eq!(
+            concurrent_json["hookSpecificOutput"]["permissionDecisionReason"],
+            verifier_spawn_denial(
+                VerifierSpawnDenial::SpawnAlreadyPending,
+                Some("cas-hook-capability"),
+                crate::harness_policy::own_tool_prefix(),
+            ),
+            "the concurrent spawn is refused as already pending: {concurrent_json}"
+        );
         assert!(!concurrent_json.to_string().contains(sentinel_text));
 
         let conn = rusqlite::Connection::open(cas_root.join("cas.db")).expect("db");

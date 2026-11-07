@@ -355,6 +355,15 @@ impl FileLines {
 
 /// Added and removed lines of `base...head`, split into test, source and docs.
 fn line_delta(repo: &Path, base: &str, head: &str) -> Result<String> {
+    let [test, source, docs] =
+        line_counts(repo, base, head)?.map(|[added, removed]| format!("+{added} -{removed}"));
+    Ok(format!(
+        "**Lines:** test {test} · source {source} · docs {docs}"
+    ))
+}
+
+/// `[added, removed]` line counts of `base...head`, indexed Test, Source, Docs.
+fn line_counts(repo: &Path, base: &str, head: &str) -> Result<[[usize; 2]; 3]> {
     let (base_sha, head_sha) = resolve_pair(repo, base, head)?;
     let old_rev = git(repo, &["merge-base", &base_sha, &head_sha])?;
     let range = format!("{old_rev}..{head_sha}");
@@ -403,10 +412,7 @@ fn line_delta(repo: &Path, base: &str, head: &str) -> Result<String> {
             old_line += 1;
         }
     }
-    let [test, source, docs] = counts.map(|[added, removed]| format!("+{added} -{removed}"));
-    Ok(format!(
-        "**Lines:** test {test} · source {source} · docs {docs}"
-    ))
+    Ok(counts)
 }
 
 /// Resolve both refs to immutable commits before diffing; no shell interpolation.
@@ -505,9 +511,7 @@ mod tests {
         assert!(body.contains("/review/qa/bundle.json"));
         assert!(body.contains("**Risk:** blast-radius"));
         assert!(body.contains("**Door:** one-way"));
-        let legacy = delivery_body(repo, None, &base, "HEAD", None, None, None).unwrap();
-
-
+        assert!(delivery_body(repo, None, &base, "HEAD", None, None, None).is_ok());
         assert!(delivery_body(repo, None, "missing-ref", "HEAD", None, None, None).is_err());
     }
 
@@ -559,7 +563,6 @@ mod tests {
         assert!(review.contains("38827289892"));
         assert!(review.contains("226/226"));
 
-
         let mut recorded = task.clone();
         recorded.notes = "qa-bundle: /proof/qa/bundle.json".into();
         recorded.risk = vec![cas_types::TaskRisk::BlastRadius];
@@ -575,13 +578,46 @@ mod tests {
 
         let missing = merge_request_review(temp.path(), &task, "missing-ref", &head, "");
         assert!(missing.contains("missing-ref"), "{missing}");
-
-
     }
 
     /// cas-5a52: the merge request shows test and source line deltas,
     /// counting an inline `#[cfg(test)] mod` as test code.
+    #[test]
+    fn line_counts_split_test_source_and_docs() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        let write = |path: &str, text: &str| {
+            let path = repo.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        git(repo, &["init", "-q"]).unwrap();
+        git(repo, &["config", "user.email", "fixture@example.test"]).unwrap();
+        git(repo, &["config", "user.name", "Fixture"]).unwrap();
+        write(
+            "src/lib.rs",
+            "fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+        );
+        write("README.md", "x\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["commit", "-qm", "base"]).unwrap();
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        write(
+            "src/lib.rs",
+            "fn a() {}\nfn b() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn u() {}\n}\n",
+        );
+        write("tests/it.rs", "#[test]\nfn it() {}\n");
+        write("README.md", "y\n");
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["commit", "-qm", "change"]).unwrap();
 
+        // [added, removed] for test, source, docs: the inline test module's
+        // edited line counts as test, beside the new tests/it.rs.
+        assert_eq!(
+            line_counts(repo, &base, "HEAD").unwrap(),
+            [[3, 1], [1, 0], [1, 1]]
+        );
+    }
 
     /// cas-8b0e: only exact `proof:` and `ci:` keys count, in any case, and
     /// empty values are skipped.

@@ -2883,7 +2883,7 @@ mod status_transition_tests {
         core.set_agent_id_for_testing(sup.id);
 
         let mut task = Task::new("cas-finding-p".into(), "finding".into());
-        // Broken × secondary with no journey or repro derives P4.
+        // Without a repro, reach normalizes to theoretical: broken × theoretical is P4.
         task.priority = Priority(4);
         task.labels = vec!["from-finding".into(), "severity:broken".into(), "reach:secondary".into()];
         tasks.add(&task).unwrap();
@@ -2897,7 +2897,7 @@ mod status_transition_tests {
         assert!(stored.labels.iter().any(|l| l == "incident"));
         let updated = text.split("Updated task cas-finding-p: ").nth(1).and_then(|r| r.split("\\n").next()).unwrap_or("");
         assert!(!updated.contains("priority"), "priority is not reported as updated: {text}");
-        assert!(text.contains("severity:broken") && text.contains("reach:secondary"), "reply names the axes: {text}");
+        assert!(text.contains("severity:broken") && text.contains("reach:theoretical"), "reply names the axes: {text}");
     }
 
     #[tokio::test]

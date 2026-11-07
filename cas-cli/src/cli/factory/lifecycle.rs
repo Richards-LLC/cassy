@@ -691,7 +691,7 @@ mod tests {
         kill_group(worker_pgid);
         daemon.join().unwrap().unwrap();
         worker.join().unwrap().unwrap();
-        let error = outcome.unwrap_err().to_string();
+        assert!(outcome.is_err(), "an unreadable start time must refuse the kill");
         assert!(daemon_alive && worker_alive, "an alive daemon's worker was reaped");
         assert!(still_recorded, "an alive daemon's session record was removed");
 
@@ -882,9 +882,8 @@ mod tests {
         let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
         kill_group(pid);
         daemon.join().unwrap().unwrap();
-        let error = outcome.unwrap_err().to_string();
+        assert!(outcome.is_err(), "a withheld SIGKILL must refuse the kill");
         assert!(alive, "SIGKILL must not be sent without a start-time match");
-
         assert!(daemon_log("unverified").contains("\"kill_withheld\""));
     }
 

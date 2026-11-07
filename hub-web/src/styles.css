@@ -925,6 +925,16 @@ main {
   text-wrap: pretty;
 }
 
+/* cas-93d1: opens the parked delivery's candidate build in its read-only preview. */
+.status-preview-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--rail-item-min);
+  color: var(--ink);
+  font-size: var(--fs-meta);
+  text-decoration: underline;
+}
+
 .status-empty {
   margin: var(--space-2) 0;
   color: var(--text-mid);

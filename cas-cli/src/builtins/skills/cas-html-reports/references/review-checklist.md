@@ -26,6 +26,7 @@ markdown says exactly what the HTML says.**
       reason. Only the small `visual-qa.md` is ever committed beside the report.
 - [ ] The tokens in `:root` are the target project's `DESIGN.md`, by name; the task's `design:`
       line names that file.
+- [ ] System fonts only; nothing loads from the network, web fonts included.
 
 ## 1. Content fidelity
 
@@ -38,8 +39,11 @@ markdown says exactly what the HTML says.**
 
 ## 2. Information architecture
 
-- [ ] The hero figure is the first thing on the page, followed by the selected type's lead (conclusion
-      for evaluative reports; capability or system takeaway for explanatory reports).
+- [ ] The `data-verdict` headline states the selected type's lead in at most 40 words (conclusion for
+      evaluative reports; capability or system takeaway for explanatory reports), and the hero
+      figure follows it before any other section.
+- [ ] The page fits its height budget at 1280 px: 4,000 px for an executive or external reader,
+      8,000 px for a practitioner. Case-by-case rows are aggregated or collapsed.
 - [ ] The required sections for this report type are present, in the prescribed order.
 - [ ] An overview table appears before the detail when the selected type requires one.
 - [ ] The depth order matches the audience (executive: detail relegated, methodology last).

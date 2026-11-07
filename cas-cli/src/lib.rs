@@ -72,6 +72,7 @@ pub(crate) mod factory_binary_skew;
 pub mod factory_session_scope;
 pub mod factory_supervisor_overlap;
 pub(crate) mod supervisor_notices;
+pub(crate) mod supervisor_auto_clear;
 pub(crate) mod supervisor_continuity;
 pub(crate) mod supervisor_branch_recovery;
 pub(crate) mod train_guardrails;

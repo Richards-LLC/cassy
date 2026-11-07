@@ -196,8 +196,12 @@ pub fn parse(body: &str, min_rows: usize) -> Report {
             if let Some(labels) = line.strip_prefix("labels:") {
                 label_header = Some((n, labels.into()));
             }
-            metadata.push_str(line);
-            metadata.push('\n');
+            // cas-f0c5: scope, surface and the title copy free text (often a
+            // task title quoting "FAIL: 0"); only the other fields hold counts.
+            if !["#", "scope:", "surface:"].iter().any(|prefix| line.starts_with(prefix)) {
+                metadata.push_str(line);
+                metadata.push('\n');
+            }
         }
         if !line.contains('|') {
             if matrix && line.starts_with('#') {
@@ -635,6 +639,11 @@ mod tests {
         std::fs::write(dir.path().join("capture.txt"), "usage").unwrap();
         std::fs::write(&path, &base).unwrap();
         assert!(check(&path, 1).ok);
+        // cas-f0c5: init copies the task title into scope; quoted verdict text is not a count.
+        let quoted = "# QA evidence: cas-c6e3\nscope: CI flake gate prints 'FAIL: 0 flaky test(s)' on a real failure\nsurface: PASS: 3 rows\n";
+        std::fs::write(&path, format!("{quoted}{base}")).unwrap();
+        let report = check(&path, 1);
+        assert!(report.ok, "scope text is not a headline count: {}", report.refusal());
         std::fs::write(
             &path,
             base.replace(

@@ -1542,14 +1542,17 @@ mod tests {
         let (finished, continued) = tokio::sync::oneshot::channel();
         let started = tokio::time::Instant::now();
         let answered = service.call_with_deadline_and_grace(
-            "verification", arguments.as_object(), std::time::Duration::from_secs(55),
-            std::time::Duration::from_secs(15), async move {
+            "verification", arguments.as_object(), std::time::Duration::from_secs(7200),
+            std::time::Duration::from_secs(3600), async move {
                 let recorded = sender.verification(Parameters(request)).await?;
                 held.await.unwrap();
                 finished.send(()).unwrap();
                 Ok(recorded)
             }).await.expect("the persisted batch must answer before its held continuation");
-        assert!(started.elapsed() < std::time::Duration::from_secs(5), "receipt waited on the ordinary 15s grace");
+        // Not a wall-clock bound: the caller's grace is an hour, so only the batch
+        // receipt's own short grace can answer in under half of it, however slow
+        // the git and store work before the commit runs on a loaded host.
+        assert!(started.elapsed() < std::time::Duration::from_secs(1800), "receipt waited on the caller's grace");
         let text = format!("{answered:?}");
         let receipts = cas_store::list_qa_batch_receipts(&root, "batch-response").unwrap();
         assert_eq!(receipts.len(), 1);

@@ -550,6 +550,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
+        path: "skills/cas-html-reports/references/supervisor-brief.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/supervisor-brief.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
         content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
@@ -1301,6 +1305,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
+        path: "skills/cas-html-reports/references/supervisor-brief.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/supervisor-brief.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",
         content: include_str!("builtins/skills/cas-html-reports/references/sources.md"),
     },
@@ -2042,6 +2050,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/supervisor-brief.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/supervisor-brief.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/sources.md",

@@ -113,6 +113,7 @@ pub use trace_archive::{
 // Agent store for multi-agent coordination
 pub use agent_store::{
     AGENT_SCHEMA, AGENT_SESSION_END_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore,
+    continuity::SessionEnd as SupervisorLaneSnapshot,
 };
 
 // Event store for activity tracking (sidecar)

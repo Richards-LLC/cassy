@@ -29,16 +29,53 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     ))
 }
 
+/// The account spawn_workers would launch (cas-c386). With no eligible Codex
+/// home, refuse with each home's state rather than blame the default home.
+fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<String>, String> {
+    let provider = match cli {
+        cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
+        cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
+        _ => return Ok(None),
+    };
+    let Some(accounts) = dirs::home_dir()
+        .and_then(|home| crate::account_registry::collect_for(provider, &home, false).ok())
+    else {
+        return Ok(None);
+    };
+    let policy = crate::account_selection::load_policy(Some(root));
+    let selection =
+        crate::account_selection::launch_choice(&accounts, provider, chrono::Utc::now(), &policy);
+    if let Some(choice) = selection.recommended {
+        return Ok(Some(choice.account.name.clone()));
+    }
+    if provider != crate::accounts::Provider::Codex {
+        return Ok(None);
+    }
+    let homes = selection
+        .excluded
+        .iter()
+        .map(|(account, why)| format!("{}: {why}", account.folder.display()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "no eligible Codex account ({}); launch the task-verifier yourself",
+        if homes.is_empty() { "no accounts found" } else { &homes }
+    ))
+}
+
 fn command(root: &Path, output: &Path) -> Result<Command, String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
     let model = route.spec.model.ok_or("verifier route has no model")?;
     let effort = route.spec.effort.ok_or("verifier route has no effort")?;
     // A daemon may have no provider account selector, even when the host has
-    // authenticated named accounts. Use the same checked launch environment
-    // as supervisor launches, rather than inheriting the daemon's default home.
-    let environment = crate::hub::launch_env::resolve_for_project(route.spec.cli, None, Some(root))
-        .map_err(|e| e.to_string())?;
+    // authenticated named accounts. Choose the account spawn_workers would
+    // (cas-c386), then use the checked launch environment supervisors use,
+    // rather than inheriting the daemon's default home.
+    let account = launch_account(route.spec.cli, root)?;
+    let environment =
+        crate::hub::launch_env::resolve_for_project(route.spec.cli, account.as_deref(), Some(root))
+            .map_err(|e| e.to_string())?;
     let mut command = Command::new(environment.executable);
     for key in environment.remove {
         command.env_remove(key);
@@ -339,20 +376,12 @@ mod tests {
         std::fs::create_dir_all(&bin).unwrap();
         env.set("CAS_TEST_HUB_PATH", &bin);
         env.remove("CODEX_HOME");
+        // cas-c386: the default home is logged out and the logged-in account
+        // has no usage yet, so no account is recommended on capacity alone.
+        std::fs::create_dir_all(env.home().join(".codex")).unwrap();
         let account = env.home().join(".codex-review");
         std::fs::create_dir_all(account.join("sessions")).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
-        std::fs::write(
-            account.join("sessions/usage.jsonl"),
-            serde_json::json!({
-                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
-                    "primary": {"used_percent": 20.0, "window_minutes": 10080,
-                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
-                }}
-            })
-            .to_string(),
-        )
-        .unwrap();
         use std::os::unix::fs::PermissionsExt;
         let script = bin.join("codex");
         std::fs::write(
@@ -637,6 +666,23 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 "AUTOMATIC_VERIFIER row={status} hand_launches=0 dispatch={} candidate={}",
                 dispatch.id, candidate.proof.head_commit
             );
+        }
+        // With no eligible home left, the refusal names each home's state
+        // instead of blaming only the logged-out default home.
+        std::fs::write(
+            account.join("sessions/usage.jsonl"),
+            serde_json::json!({
+                "timestamp": chrono::Utc::now(), "payload": {"rate_limits": {
+                    "primary": {"used_percent": 100.0, "window_minutes": 10080,
+                        "resets_at": (chrono::Utc::now() + chrono::Duration::days(2)).timestamp()}
+                }}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let refused = command(env.home(), &env.home().join("verdict.json")).unwrap_err();
+        for needle in [".codex-review", "100%", " ET", "not logged in", "launch the task-verifier yourself"] {
+            assert!(refused.contains(needle), "{needle}: {refused}");
         }
     }
 }

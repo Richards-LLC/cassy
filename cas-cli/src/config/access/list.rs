@@ -226,6 +226,10 @@ impl Config {
                 factory.supervisor_message_wakes_per_hour.to_string(),
             ),
             (
+                "factory.supervisor_wake_input_budget".to_string(),
+                factory.supervisor_wake_input_budget.to_string(),
+            ),
+            (
                 "factory.message_max_chars".to_string(),
                 factory.message_max_chars.to_string(),
             ),

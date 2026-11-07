@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
+import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -5676,7 +5676,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   const train = status ? releaseProgress(statusEpics, typeof status.focused_epic === "string" ? status.focused_epic : null, statusTasks,
     [session?.supervisor, ...statusAgents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))) : undefined;
   const liveEpics = liveEpicsModel(train?.id);
-  const signature = JSON.stringify([liveEpics, phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
+  const signature = JSON.stringify([liveEpics, phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature(), selectedMachineId ? machineInfo.get(selectedMachineId)?.previews ?? null : null]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5885,6 +5885,12 @@ function renderStatus(status?: Record<string, unknown>): void {
       line.append(identifier(task.id), taskChip);
       const title = document.createElement("p"); title.className = "status-task-title"; title.textContent = String(task.title ?? "");
       row.append(line, title);
+      const previewUrl = deliveryPreview(task, selectedMachineId ? machineInfo.get(selectedMachineId)?.previews : undefined, Date.now(), location.origin);
+      if (previewUrl) {
+        const link = document.createElement("a"); link.className = "status-preview-link"; link.href = previewUrl;
+        link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = "Preview this delivery";
+        row.append(link);
+      }
       const controls = task.delivery_state === "merged" ? undefined : ops ? taskControls(document, ops, task) : undefined;
       if (controls) row.append(controls);
       container.append(row);

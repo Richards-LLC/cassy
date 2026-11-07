@@ -127,7 +127,7 @@ mod tests {
             operator_label: "Daniel".into(),
             controller_origin: "https://controller.example".into(),
             scopes: Default::default(),
-            request_id: "request".into(),
+            request_id: "request".into(), preview: false,
         };
         let (ticket, expires) = tickets.issue("factory-a", "art-page", &context, now);
         assert_eq!(expires, now + PAGE_TICKET_TTL);

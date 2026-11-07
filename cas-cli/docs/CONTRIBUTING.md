@@ -239,6 +239,18 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
+When one newly recorded supervisor turn reads more input than
+`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables), the
+turn scanner hands `supervisor_auto_clear` the turn. It acts only at an idle
+boundary: the turn has ended, no newer turn is running, no delivery-target
+lock is held, no release train is frozen, no `release-repair` task is open, and
+no operator ask or operator message is waiting. Otherwise it defers to a later
+turn end. It saves a role-supervisor handoff memory from the session-end lane
+snapshot (with a JSON receipt under `supervisor-handoffs/`). It gives the
+supervisor one turn to save judgement as a handoff, merges that under the
+facts, and queues the context-reset control to the supervisor pane. When the
+new transcript records the `/clear`, it queues the handoff to the new session.
+
 When the MCP daemon opens a pre-merge candidate dispatch, it launches the
 existing task verifier on the standard harness route. The registered child
 uses the same sealed capability and verification gate as a manually launched

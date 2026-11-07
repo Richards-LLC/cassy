@@ -116,6 +116,8 @@ pub enum HubCommands {
     Service(HubServiceArgs),
     /// Mint a ten-minute one-time browser pairing invitation
     Pair(HubPairArgs),
+    /// Serve a candidate Commander build (hub-web/dist) on a loopback preview origin that reads live data and cannot change anything
+    Preview(super::hub_preview::HubPreviewArgs),
     /// Approve a Commander page's short-code pairing request through Petra Stella Cloud
     Authorize(HubAuthorizeArgs),
     /// List or revoke paired Commander devices
@@ -1339,6 +1341,7 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
             args.tailscale_serve_port,
         ),
         HubCommands::Pair(pair) => pair_device(&pair, cli),
+        HubCommands::Preview(preview) => super::hub_preview::preview(&preview, cli),
         HubCommands::Authorize(authorize) => super::hub_reverse_pairing::authorize(&authorize, cli),
         HubCommands::Auth(auth) => manage_auth(&auth, cli),
         HubCommands::Operator(operator) => super::hub_operator::execute(&operator, cli),
@@ -2627,7 +2630,7 @@ async fn shutdown_requested(mut receiver: tokio::sync::watch::Receiver<bool>) {
     let _ = receiver.changed().await;
 }
 
-fn auth_store() -> Result<AuthStore> {
+pub(super) fn auth_store() -> Result<AuthStore> {
     let paths = HubRuntimePaths::default_for_user()?;
     let machine = MachineIdentityStore::new(paths.root()).load_or_create()?;
     AuthStore::open(paths.root(), machine.id)
@@ -2635,7 +2638,7 @@ fn auth_store() -> Result<AuthStore> {
 
 /// The account's home from the passwd database, never `$HOME` (which any
 /// process can point at a scratch directory).
-fn account_home() -> Option<std::path::PathBuf> {
+pub(super) fn account_home() -> Option<std::path::PathBuf> {
     nix::unistd::User::from_uid(nix::unistd::getuid())
         .ok()
         .flatten()

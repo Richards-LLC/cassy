@@ -508,7 +508,7 @@ impl CasService {
                 .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
             let (repo, target) = crate::qa_batch::task_context(&self.inner.cas_root, &task)
                 .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
-            let receipt = match crate::qa_batch::delivery_anchor(&repo, &task) {
+            let receipt = match crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target) {
                 Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, &task, &repo, &target, &head)
                     .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?,
                 None => None,

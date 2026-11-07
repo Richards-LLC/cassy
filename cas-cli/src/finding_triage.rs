@@ -60,8 +60,12 @@ pub(crate) fn normalize_labels(root: &Path, labels: &mut Vec<String>, notes: &st
     finding_labels(labels, &triage);
     labels.retain(|l| l != "triage-backlog");
     if priority.0 == 4 && triage.reach == FindingReach::Theoretical { labels.push("triage-backlog".into()); }
+    // An explicit supervisor priority (cas-9b91) outranks the derived one.
+    if labels.iter().any(|l| l == EXPLICIT_PRIORITY_LABEL) { return None; }
     Some(priority)
 }
+
+pub(crate) const EXPLICIT_PRIORITY_LABEL: &str = "priority:explicit";
 
 pub(crate) fn apply(root: &Path, task: &mut Task) {
     if let Some(priority) = normalize_labels(root, &mut task.labels, &task.notes) { task.priority = priority; }

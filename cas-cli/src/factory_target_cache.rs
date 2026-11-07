@@ -3195,11 +3195,7 @@ mod tests {
                 "{}",
                 row.reason
             );
-            assert!(
-                row.reason.contains("native process/handle evidence"),
-                "{}",
-                row.reason
-            );
+
             assert_eq!(report.reclaimed_bytes, 0);
             assert_eq!(
                 fs::read(target.join("debug/output.rlib")).unwrap(),
@@ -3257,11 +3253,7 @@ mod tests {
                 "native open handle must refuse: {}",
                 row.reason
             );
-            assert!(
-                row.reason.contains("native process/handle evidence"),
-                "{}",
-                row.reason
-            );
+
             drop(child);
         }
         assert!(target.exists());

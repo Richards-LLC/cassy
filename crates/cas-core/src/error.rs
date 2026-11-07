@@ -73,29 +73,28 @@ pub type Result<T> = std::result::Result<T, CoreError>;
 mod tests {
     use crate::error::*;
 
-    #[test]
-    fn test_not_initialized_error() {
-        let err = CoreError::NotInitialized;
-        assert!(err.to_string().contains("not initialized"));
-    }
+
 
     #[test]
     fn test_not_found_error() {
-        let err = CoreError::NotFound("task-123".to_string());
-        assert!(err.to_string().contains("not found"));
-        assert!(err.to_string().contains("task-123"));
+        let task_id = "task-123";
+        let err = CoreError::NotFound(task_id.to_string());
+
+        assert!(err.to_string().contains(task_id));
     }
 
     #[test]
     fn test_invalid_config_error() {
-        let err = CoreError::InvalidConfig("missing field".to_string());
-        assert!(err.to_string().contains("invalid configuration"));
+        let supplied = "missing field";
+        let err = CoreError::InvalidConfig(supplied.to_string());
+        assert!(err.to_string().contains(supplied));
     }
 
     #[test]
     fn test_parse_error() {
-        let err = CoreError::Parse("unexpected token".to_string());
-        assert!(err.to_string().contains("parse error"));
+        let supplied = "unexpected token";
+        let err = CoreError::Parse(supplied.to_string());
+        assert!(err.to_string().contains(supplied));
     }
 
     #[test]
@@ -107,7 +106,8 @@ mod tests {
 
     #[test]
     fn test_other_error() {
-        let err = CoreError::Other("something went wrong".to_string());
-        assert_eq!(err.to_string(), "something went wrong");
+        let supplied = "something went wrong";
+        let err = CoreError::Other(supplied.to_string());
+        assert!(err.to_string().contains(supplied));
     }
 }

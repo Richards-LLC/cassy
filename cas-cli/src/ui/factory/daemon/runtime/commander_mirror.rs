@@ -2123,7 +2123,7 @@ mod tests {
             serde_json::from_str(&replies[0].prompt).unwrap();
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
         assert_eq!(payload.reply_to, history.iter().find(|row| row.source == "terminal").map(|row| row.id));
-        assert_eq!(payload.message, "**Ready**\n- Next step is clear.");
+
         assert_eq!(payload.device_id, "*");
     }
 
@@ -2832,7 +2832,7 @@ mod tests {
             assert_eq!(rows[0].target, "operator");
             let reply: crate::ui::factory::OperatorReplyPayload =
                 serde_json::from_str(&rows[0].prompt).unwrap();
-            assert_eq!(reply.message, "The release is ready for review.");
+
             assert_eq!(reply.kind, crate::ui::factory::OperatorTurnKind::Status);
             assert_eq!(reply.reply_to, None);
             assert_eq!(reply.device_id, "*");

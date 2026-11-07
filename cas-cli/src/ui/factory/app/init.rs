@@ -880,12 +880,7 @@ mod tests {
 
         // An intentionally rootless pane still refuses before launch.
         let rootless = worker(&fleet(None));
-        assert!(
-            env_value(&rootless, "CAS_FACTORY_WORKER_LAUNCH_ERROR")
-                .is_some_and(|error| error.contains("requires a Cassy project root")),
-            "{:?}",
-            rootless.env
-        );
+        assert!(env_value(&rootless, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_some());
     }
 
     fn env_value<'a>(config: &'a cas_mux::PtyConfig, key: &str) -> Option<&'a str> {

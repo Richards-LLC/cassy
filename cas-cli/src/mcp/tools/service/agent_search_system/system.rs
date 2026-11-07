@@ -1239,8 +1239,8 @@ mod tests {
         assert!(path.starts_with(temp.path().join("cas-a178")));
         let report = std::fs::read_to_string(&path).expect("staged report");
         assert!(report.contains("worker cannot file bug"));
-        assert!(report.contains("GitHub credential missing, rejected, or unauthorized"));
-        assert!(report.contains("Required GitHub credential: `GH_TOKEN` or `GITHUB_TOKEN`"));
+
+        assert!(report.contains("GH_TOKEN") && report.contains("GITHUB_TOKEN"));
         assert!(!report.contains("ghp_private-token-value"));
         assert!(!report.contains("private-token-value"));
     }

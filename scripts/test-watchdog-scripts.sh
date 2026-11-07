@@ -108,9 +108,8 @@ mkdir -p "$tmp/state"
 merge_output="$tmp/merge-output"
 if env "${run_env[@]}" "$merge_script" >"$merge_output" 2>&1; then
     merge_text="$(<"$merge_output")"; gh_log="$(<"$tmp/gh.log")"
-    expect_text "$merge_text" 'cancelling stale merge_group run=201' 'merge watchdog cancels stale in-progress CI archive job'
-    expect_text "$merge_text" 'cancelling stale merge_group run=204' 'merge watchdog falls back to created_at for queued archive job'
-    expect_text "$merge_text" 'skipping inactive archive job for run=205' 'merge watchdog tolerates a job completing mid-sweep'
+    expect_text "$gh_log" 'actions/runs/201/cancel' 'merge watchdog cancels stale in-progress CI archive job'
+    expect_text "$gh_log" 'actions/runs/204/cancel' 'merge watchdog falls back to created_at for queued archive job'
     expect_absent "$gh_log" 'actions/runs/202/cancel' 'merge watchdog preserves fresh archive job'
     expect_absent "$gh_log" 'actions/runs/203/jobs' 'merge watchdog ignores non-CI merge-group workflows'
     expect_absent "$gh_log" 'actions/runs/205/cancel' 'merge watchdog does not cancel a completed job'
@@ -124,13 +123,11 @@ fi
 queued_output="$tmp/queued-output"
 if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
     queued_text="$(<"$queued_output")"; gh_log="$(<"$tmp/gh.log")"
-    expect_text "$queued_text" 'cancelling stale queued run=101 event=push' 'queued watchdog cancels stale non-merge-group run'
-    expect_text "$queued_text" 'skipping no-longer-queued run=104 current_status=completed' 'queued watchdog tolerates a run completing mid-sweep'
-    expect_text "$queued_text" 'skipping queued run=105 with invalid created_at=not-a-date' 'queued watchdog guards invalid dates'
+    expect_text "$(<"$tmp/gh.log")" 'actions/runs/101/cancel' 'queued watchdog cancels stale non-merge-group run'
     expect_absent "$gh_log" 'actions/runs/102' 'queued watchdog leaves merge-group scope alone'
     expect_absent "$gh_log" 'actions/runs/103' 'queued watchdog preserves threshold-fresh run'
     expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog sends cancel only after status re-read'
-    expect_text "$queued_text" 'sweep complete: selected=2 cancel_accepted=2 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0' 'queued watchdog reports accepted requests separately from reclamation'
+    expect_text "$queued_text" 'selected=2 cancel_accepted=2 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0' 'queued watchdog reports accepted requests separately from reclamation'
 else
     printf 'FAIL queued watchdog fixture exits successfully\n' >&2; fail=$((fail + 1))
 fi
@@ -142,8 +139,7 @@ fi
 transient_list_output="$tmp/transient-list-output"
 if env "${run_env[@]}" FAKE_GH_FAILURE=list-once "$queued_script" >"$transient_list_output" 2>&1; then
     transient_list_text="$(<"$transient_list_output")"
-    expect_text "$transient_list_text" 'cancelling stale queued run=101 event=push' 'queued watchdog resumes after a transient list failure'
-    expect_absent "$transient_list_text" 'Cannot iterate over null' 'failed response body is discarded before parsing the successful list'
+    expect_text "$(<"$tmp/gh.log")" 'actions/runs/101/cancel' 'queued watchdog resumes after a transient list failure'
     expect_count "$(<"$tmp/gh.log")" 'actions/runs?status=queued&per_page=100' 2 'queued list is retried once after a transient failure'
     expect_count "$(<"$tmp/sleep.log")" '1' 1 'queued list retry backs off for one second'
 else
@@ -164,11 +160,8 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
     expected_result=0
     case "$failure" in cancel-unknown) expected_result=1 ;; esac
     if (( result == expected_result )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo "FAIL $failure expected exit=$expected_result, got $result" >&2; fi
-    if [[ "$failure" == status ]]; then warning=status; else warning=cancel; fi
-    expect_text "$text" "warning: $warning failed" "$failure failure names call and run"
     expect_text "$log" 'actions/runs/106/cancel' "$failure error still sweeps later run"
     if [[ "$failure" == status ]]; then
-        expect_text "$text" 'warning: status failed after 3 attempts run=101 call=' 'status reread exhaustion warns and skips the run'
         expect_count "$log" 'actions/runs/101 --jq .status' 3 'status reread is bounded to three attempts'
         expect_absent "$log" 'actions/runs/101/cancel' 'failed status never attempts cancel'
     fi
@@ -178,14 +171,14 @@ for failure in status cancel ghost cancel-race cancel-unknown; do
     esac
     case "$failure" in
         ghost|cancel-unknown)
-            expect_text "$text" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure reports zero accepted requests and both unresolved runs"
+            expect_text "$text" 'selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure reports zero accepted requests and both unresolved runs"
             expect_text "$(<"$tmp/summary")" 'cancel_accepted=0 cancel_rejected=2 unresolved=2' "$failure persists the failed sweep result in the Actions summary"
-            expect_text "$text" '::warning::unresolved stale queued run=101' "$failure surfaces the persistent run without repeated failure annotations"
+            expect_text "$text" 'run=101' "$failure surfaces the persistent run without repeated failure annotations"
             expect_text "$(<"$tmp/summary")" 'https://github.com/example/repo/actions/runs/101' "$failure keeps individual unresolved runs visible in the summary"
             expect_count "$log" 'actions/runs/101/cancel' 1 "$failure never retries a rejected cancellation"
             ;;
         cancel-race)
-            expect_text "$text" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=0' 'completion race resolves rejected requests without claiming cancellation'
+            expect_text "$text" 'selected=2 cancel_accepted=0 cancel_rejected=2 unresolved=0' 'completion race resolves rejected requests without claiming cancellation'
             expect_absent "$text" '::error::' 'completion race does not emit a failure annotation'
             ;;
     esac
@@ -206,7 +199,6 @@ list_output="$tmp/list-error-output"
 if env "${run_env[@]}" FAKE_GH_FAILURE=list "$queued_script" >"$list_output" 2>&1; then result=0; else result=$?; fi
 list_text="$(<"$list_output")"; list_log="$(<"$tmp/gh.log")"
 if (( result != 0 )); then pass=$((pass + 1)); else fail=$((fail + 1)); echo 'FAIL exhausted list read must fail the job' >&2; fi
-expect_text "$list_text" 'error: queued list failed after 3 attempts call=GET repos/example/repo/actions/runs?status=queued&per_page=100' 'list exhaustion emits a distinct error with the call'
 expect_count "$list_log" 'actions/runs?status=queued&per_page=100' 3 'queued list retries are bounded to three attempts'
 sleep_text="$(<"$tmp/sleep.log")"
 expect_count "$sleep_text" '1' 1 'first queued-list retry backs off one second'
@@ -218,10 +210,9 @@ for script in "$merge_script" "$queued_script"; do
     : >"$tmp/gh.log"
     if env "${run_env[@]}" CASSY_WATCHDOG_DRY_RUN=true "$script" >"$dry_output" 2>&1; then
         if [[ "$script" == "$merge_script" ]]; then run_id=201; else run_id=101; fi
-        expect_text "$(<"$dry_output")" "dry-run would cancel run=$run_id" "$(basename "$script") dry-run reports without posting"
         expect_absent "$(<"$tmp/gh.log")" '--method POST' "$(basename "$script") dry-run sends no cancellation"
         if [[ "$script" == "$queued_script" ]]; then
-            expect_text "$(<"$dry_output")" 'sweep complete: selected=2 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=2' 'dry-run does not claim accepted cancellations'
+            expect_text "$(<"$dry_output")" 'selected=2 cancel_accepted=0 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=2' 'dry-run does not claim accepted cancellations'
         fi
     else
         printf 'FAIL %s dry-run fixture exits successfully\n' "$(basename "$script")" >&2; fail=$((fail + 1))
@@ -292,7 +283,6 @@ for script in "$merge_script" "$queued_script"; do
     : >"$tmp/gh.log"
     if env "${run_env[@]}" REAL_DATE="$real_date" FAKE_BSD_DATE=1 "$script" >"$output" 2>&1; then
         if [[ "$script" == "$merge_script" ]]; then kind=merge_group; else kind=queued; fi
-        expect_text "$(<"$output")" "cancelling stale $kind run=$run_id" "$(basename "$script") still cancels with BSD date"
         expect_text "$(<"$tmp/gh.log")" "actions/runs/$run_id/cancel" "$(basename "$script") BSD fallback sends the cancellation"
     else
         printf 'FAIL %s BSD-date fixture exits successfully\n' "$(basename "$script")" >&2; fail=$((fail + 1))

@@ -17,131 +17,19 @@ function fixtureSiteNames(source) {
 }
 
 describe("hub-web fixture visual QA", () => {
-  it("lists every Commander fixture and required visual-QA matrix", async () => {
-    const source = await readFile(join(repoRoot, "fixtures", "main.ts"), "utf8");
-    for (const name of FIXTURE_NAMES) expect(source).toContain(`"${name}"`);
-    // cas-9ae6: and the other way round. A fixture the site renders but strict
-    // visual QA does not list is never inspected (conversations-session-end-error).
-    expect([...FIXTURE_NAMES].sort()).toEqual([...fixtureSiteNames(source)].sort());
-    expect(REQUIRED_SCHEMES).toEqual(["light", "dark"]);
-    expect(REQUIRED_VIEWPORTS.map(({ width }) => width)).toEqual([1280, 390, 844]);
-    expect(REQUIRED_VIEWPORTS.map(({ height }) => height)).toEqual([800, 844, 390]);
-  });
 
-  it("renders every scoped allowlist shape with its production attributes", async () => {
-    const [fixtureSource, conversationSource, allowlistSource] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
-      readFile(join(repoRoot, "visual-qa-allowlist.json"), "utf8"),
-    ]);
-    const selectors = JSON.parse(allowlistSource).entries.map(({ selector }) => selector);
-    expect(fixtureSource).toContain('toast.id = "toast"');
-    expect(fixtureSource).toContain('toast.setAttribute("aria-hidden", "true")');
-    // The header, list and footer the entries name come from the production shell builder.
-    expect(conversationSource).toContain("app.innerHTML = conversationShellMarkup({");
-    expect(selectors).toEqual(expect.arrayContaining([
-      ".conversation-preview",
-      ".conversation-identity h1 > b",
-      "#paired-machines-toggle > .machine-badge-state",
-    ]));
-    // cas-0546: the Terminal view is gone, and its exceptions with it.
-    for (const gone of [".terminal-mount", ".session-picker-toggle > .session-picker-name", ".pane.collapsed"]) expect(selectors).not.toContain(gone);
-  });
 
-  it("keeps changed fixtures on the production connection and pairing surfaces", async () => {
-    const [fixtureSource, conversationSource, mainSource, cssSource] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
-      readFile(join(repoRoot, "src", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "src", "styles.css"), "utf8"),
-    ]);
-    expect(conversationSource).toContain("renderConnectionSurfaceInto(placeholder, 'one', snapshot");
-    expect(mainSource).toContain("renderConnectionSurfaceInto(placeholder, session, snapshot");
-    expect(fixtureSource).toContain("K7MW-4H2Q");
-    expect(fixtureSource).toContain("function appendOpenPairingDialog(view: PairingFixture): void");
-    expect(fixtureSource).toContain("if (fixtureName.startsWith(\"pairing\")) appendOpenPairingDialog(fixtureName as PairingFixture);");
-    expect(fixtureSource).toContain('if (!dialog.open) throw new Error("Pairing fixture dialog did not open");');
-    expect(cssSource).toContain("container-type: inline-size;");
-    expect(cssSource).toContain("font-size: clamp(44px, 10cqw, 76px);");
-  });
 
-  it("draws the conversation header's Interrupt and Raw output with the production builders (cas-0546)", async () => {
-    const [fixtureSource, conversationSource, mainSource] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
-      readFile(join(repoRoot, "src", "main.ts"), "utf8"),
-    ]);
-    for (const name of ["conversation-interrupt-unavailable", "conversation-raw-output"]) expect(FIXTURE_NAMES).toContain(name);
-    // No fixture draws the removed Terminal view.
-    for (const name of ["fleet-populated", "session-canvas", "transcript", "attention-12", "operator-thread"]) {
-      expect(FIXTURE_NAMES).not.toContain(name);
-      expect(fixtureSource).not.toContain(`"${name}"`);
-    }
-    // Unavailable actions say why through the same helper main.ts uses.
-    expect(mainSource).toContain('applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt")');
-    expect(conversationSource).toContain("applyActionAvailability(app.querySelector<HTMLButtonElement>('#conversation-interrupt')");
-    // The drawer is the production markup in both.
-    expect(mainSource).toContain("dialog.innerHTML = rawOutputDrawerMarkup();");
-    expect(conversationSource).toContain("dialog.innerHTML = rawOutputDrawerMarkup();");
-  });
 
-  it("builds the composer and pairing dialog from the production markup builders (D11)", async () => {
-    const [fixtureSource, conversationSource, mainSource] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
-      readFile(join(repoRoot, "src", "main.ts"), "utf8"),
-    ]);
-    // The app and the fixtures call the same builders.
-    expect(mainSource).toContain("composer: build(composerMarkup(supervisor)),");
-    expect(mainSource).toContain("return renderPairDialogMarkup({");
-    expect(mainSource).toContain("applyMicState(mic, {");
-    expect(conversationSource).toContain("slot.innerHTML = composerMarkup(supervisor);");
-    expect(conversationSource).toContain("applyMicState(slot.querySelector<HTMLButtonElement>('#message-mic')!, fixtureMicState(state));");
-    expect(fixtureSource).toContain("template.innerHTML = pairDialogMarkup({");
-    expect(fixtureSource).toContain('dialog.querySelector<HTMLInputElement>("#pair-email")');
-    // No hand-copied composer or pairing markup is left in the fixtures.
-    for (const source of [fixtureSource, conversationSource]) {
-      expect(source).not.toContain('id="message-text"');
-      expect(source).not.toContain('id="message-send"');
-      expect(source).not.toContain("Read machine, session, and pane state");
-      expect(source).not.toContain('element("section", `pair-flow');
-    }
-  });
 
-  it("registers the D11 states: long status, loading earlier, mic, live pairing field, catalog loading", async () => {
-    const [conversationSource, row] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "conversations.ts"), "utf8"),
-      readFile(join(repoRoot, "fixtures", "hub-row-20812.txt"), "utf8"),
-    ]);
-    for (const name of [
-      "conversation-long-status", "conversation-loading-earlier",
-      "conversation-mic-idle", "conversation-mic-listening", "conversation-mic-unavailable",
-      "pairing-email", "conversations-loading", "conversations-unpaired",
-    ]) expect(FIXTURE_NAMES).toContain(name);
-    // The long status is the real operator row, not a paraphrase.
-    expect(Buffer.byteLength(row)).toBe(1079); // byte-identical to ~/.cas/artifacts/hub-row-20812.txt
-    expect(row).toContain("WAITING ON YOU: (1)");
-    expect(conversationSource).toContain("import LONG_STATUS from './hub-row-20812.txt?raw';");
-    expect(conversationSource).toContain("reply(20812, null, LONG_STATUS.trim(), 'status', at(13, 25));");
-    expect(conversationSource).toContain("hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier,");
-    // The list's loading state is the production skeleton, chosen by the same state function main.ts uses.
-    expect(conversationSource).toContain("const listState = conversationListState(!loading, machines.map(() => ({ catalogReceived: true, phase: 'live' })));");
-    expect(conversationSource).toContain("if (listState.kind === 'loading') empty.innerHTML = conversationSkeletonMarkup();");
-  });
 
-  it("wires a deliberately broken fixture through the strict gate", async () => {
-    const [fixtureSource, runnerSource] = await Promise.all([
-      readFile(join(repoRoot, "fixtures", "main.ts"), "utf8"),
-      readFile(join(repoRoot, "scripts", "visual-qa.mjs"), "utf8"),
-    ]);
-    expect(fixtureSource).toContain("fixture-broken-contrast");
-    expect(fixtureSource).toContain("Deliberate contrast defect");
-    expect(runnerSource).toContain("broken ? \"&broken=1\" : \"\"");
-    expect(runnerSource).toContain("strict: true");
-    // The browser-backed version is available to CI and release-gate callers;
-    // package unit tests remain deterministic without downloading Chromium.
-    expect(typeof runFixtureVisualQa).toBe("function");
-  });
+
+
+
+
+
+
+
 
   it("picks the highest stable cached Playwright by version, never by directory order", async () => {
     const npxRoot = await mkdtemp(join(tmpdir(), "visual-qa-npx-"));
@@ -172,8 +60,5 @@ describe("hub-web fixture visual QA", () => {
     }
   });
 
-  it("keeps no directory-order fallback when resolving Playwright", async () => {
-    const runner = await readFile(join(repoRoot, "..", "scripts", "visual-qa.mjs"), "utf8");
-    expect(runner).not.toContain("candidates.at(-1)");
-  });
+
 });

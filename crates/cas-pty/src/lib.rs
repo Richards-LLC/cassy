@@ -86,7 +86,7 @@ pub use pty::{
 };
 pub use pty::{
     ContractRole, PROTECTED_OPERATOR_ENV, claude_supervisor_contract, claude_worker_contract,
-    missing_contract_elements, rendered_contract_surface,
+    rendered_contract_surface,
 };
 pub use pty::{
     CODEX_WORKER_STARTUP_PREFIX, Pty, PtyConfig, PtyEvent, TOOL_CACHE_ENV, TeamsSpawnConfig,

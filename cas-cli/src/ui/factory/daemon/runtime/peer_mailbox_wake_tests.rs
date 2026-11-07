@@ -441,7 +441,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
     };
     let daemon = decide(&WakeSender::Daemon, &prompt);
     assert!(daemon.allowed, "{}", daemon.reason);
-    assert!(daemon.reason.contains("peer mailbox"), "{}", daemon.reason);
+
     for sender in [
         WakeSender::Unstamped,
         WakeSender::Unattributed,

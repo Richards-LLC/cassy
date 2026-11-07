@@ -2133,10 +2133,7 @@ fn source_scan_classifies_test_modules_by_relative_boundary() {
         1,
         "the unstamped production site is caught"
     );
-    assert_eq!(
-        violations[0],
-        "mcp/tools/service/worker_liveness.rs:2 — `agent.pid = Some(` without `stamp_pid_fingerprint` within 10 lines below"
-    );
+    assert!(violations[0].starts_with("mcp/tools/service/worker_liveness.rs:2"));
 }
 
 #[test]

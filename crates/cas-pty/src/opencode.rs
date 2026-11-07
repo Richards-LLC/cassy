@@ -174,7 +174,7 @@ mod tests {
         std::fs::write(&file, b"sentinel").unwrap();
         let error =
             resolve_account_root_from(file.to_str().unwrap(), Some(home.path())).unwrap_err();
-        assert!(error.contains("not a directory"), "{error}");
+
         assert_eq!(std::fs::read(file).unwrap(), b"sentinel");
     }
 }

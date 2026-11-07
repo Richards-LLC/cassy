@@ -138,7 +138,7 @@ explicit go. Client messages carry commitments the operator owns.
    `cas deliverable finalize <draft.html> --audience customer --out <final.html> --pdf a4,letter --author <report_author> --check-dir <artifacts_dir>/pdf`.
    It brands the page from the project's `DESIGN.md`, inlines every shot
    within the customer budget (it names any pair it had to leave out), checks
-   the visible text for internal vocabulary, then prints A4 and Letter and
+   the visible text for private data and internal references, then prints A4 and Letter and
    checks both. Exit 1 names each finding; fix the source, not the output.
    Done when it exits 0.
 9. **Critique and view every page.** Run the strict visual QA from the

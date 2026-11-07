@@ -7,6 +7,8 @@ metadata:
 
 # Factory Supervisor
 
+Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient.
+
 Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, `memory`, `search`, `verification`). Call them with your harness's prefix: `mcp__cas__` in Claude Code, `mcp__cs__` in Codex, `cas__` in Grok, `cas_` in OpenCode.
 
 ## Hard Rules

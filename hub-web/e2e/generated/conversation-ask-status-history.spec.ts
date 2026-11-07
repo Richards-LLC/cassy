@@ -9,7 +9,7 @@ test.describe("Conversation question", () => {
     const showLess = page.getByRole("button", { name: "Show less" });
     const pendingAsk = page.getByRole("region", { name: "Waiting on you: question from patient-pelican-9" });
     const blocker = page.getByRole("group", { name: "Blocker from patient-pelican-9" });
-    const condensedProgress = page.getByText("1 more update · gate 11 of 14 targets green");
+    const condensedProgress = page.locator('.coalesce[data-count="2"][data-expanded="false"]').filter({ hasText: "gate 11 of 14 targets green" });
 
     // 1. From a fresh page, navigate to /?fixture=conversation-ask.
     await page.goto("/?fixture=conversation-ask");

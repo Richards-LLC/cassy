@@ -1460,7 +1460,7 @@ fn run_hermetic_recycle_child(test_name: &str) -> bool {
         output.status.success(),
         "hermetic {test_name}:\n{stdout}\n{stderr}"
     );
-    assert!(stdout.contains("test result: ok. 1 passed;"), "{stdout}");
+    crate::test_child::assert_passed(&stdout, &format!("ui::factory::daemon::runtime::shutdown_tests::{test_name}"));
     true
 }
 
@@ -1951,7 +1951,7 @@ async fn long_transcript_recycle(register_replacement: bool, cli: cas_mux::Super
             "{detail:?}"
         );
         let detail = detail.expect("timeout has a persisted reason");
-        assert!(detail.contains("did not register"), "{detail}");
+
         assert!(
             detail.contains(NEW),
             "timeout names the replacement's startup line: {detail}"

@@ -3923,9 +3923,9 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("entry deserialize error"), "{error}");
+
         assert!(error.contains("id=p-malformed-created"), "{error}");
-        assert!(error.contains("invalid type"), "{error}");
+
     }
 
     #[test]

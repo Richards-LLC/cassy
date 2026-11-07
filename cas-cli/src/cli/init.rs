@@ -1975,7 +1975,7 @@ mod non_project_guard_tests {
         let warning = NonProjectDir::Home.warning(Path::new("/Users/ben"));
 
         assert!(warning.contains("/Users/ben"), "names the directory");
-        assert!(warning.contains("home directory"), "names what it is");
+
         assert!(warning.contains("CLAUDE.md"), "names what would be created");
         assert!(warning.contains(".cas/"));
     }

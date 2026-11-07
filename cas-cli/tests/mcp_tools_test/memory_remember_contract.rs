@@ -214,7 +214,7 @@ async fn mode_unknown_value_errors() {
         .cas_remember(Parameters(req))
         .await
         .expect_err("unknown mode should error");
-    assert!(err.message.to_string().contains("unknown mode"));
+
 }
 
 // ---------------------------------------------------------------------------

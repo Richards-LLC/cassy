@@ -70,8 +70,8 @@ const OPENCODE_WORKER_STARTUP_PROMPT: &str = "Cassy worker startup: call cas_coo
 // developer_instructions`, Grok `--rules`, and Claude a launch-time queued intro
 // prompt (Claude has no equivalent launch flag). The renderers are the single
 // `supervisor_contract` and `worker_contract` renderers below (cas-8563b,
-// cas-d9db); `*_CONTRACT_ELEMENTS` + `missing_contract_elements` are the single
-// source of truth that a parity test enforces across all six rendered surfaces.
+// cas-d9db). Launch/config tests verify routing and harness tool prefixes;
+// instruction wording remains free to change.
 // ===========================================================================
 
 /// Whether a launch shape carries the supervisor or worker half of the contract.
@@ -79,281 +79,6 @@ const OPENCODE_WORKER_STARTUP_PROMPT: &str = "Cassy worker startup: call cas_coo
 pub enum ContractRole {
     Supervisor,
     Worker,
-}
-
-/// One required element of the canonical role contract. A rendered surface
-/// satisfies the element iff (mode = `Any`) it contains at least one marker, or
-/// (mode = `All`) it contains every marker — checked after normalizing the
-/// harness tool prefix so only intentional prefix differences are ignored.
-pub struct ContractElement {
-    pub id: &'static str,
-    pub markers: &'static [&'static str],
-    pub all: bool,
-}
-
-/// The canonical supervisor contract: coordinate-only, async triage, delegate
-/// lifecycle, merge completion priority, urgent-stop recovery.
-pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
-    ContractElement {
-        id: "review-spawn-threshold",
-        markers: &["reproduced, observable defect affecting someone today"],
-        all: true,
-    },
-    ContractElement {
-        id: "authoritative-assignment-acceptance",
-        markers: &[
-            "authoritative assignment acceptance",
-            "no prose ack is required",
-        ],
-        all: true,
-    },
-    ContractElement {
-        id: "directed-message-wake-policy",
-        markers: &[
-            "inbox on the next turn",
-            "directed messages wake",
-            "blocker=true",
-            "merge_request=true",
-        ],
-        all: true,
-    },
-    ContractElement {
-        id: "coordinate-only",
-        markers: &["coordinate only"],
-        all: false,
-    },
-    ContractElement {
-        id: "async-message-handling",
-        markers: &["asynchron", "injected turn", "triage trigger"],
-        all: false,
-    },
-    ContractElement {
-        id: "assigns-work",
-        markers: &["assign"],
-        all: false,
-    },
-    ContractElement {
-        id: "merge-verdict",
-        markers: &["merge verdict closes or reopens the task"],
-        all: true,
-    },
-    ContractElement {
-        id: "urgent-stop-recovery",
-        markers: &["urgent-stop halt"],
-        all: false,
-    },
-    // cas-0e4a: see the matching worker element for why both markers are
-    // required together rather than a bare brevity instruction.
-    ContractElement {
-        id: "concise-reporting",
-        markers: &["facts, not narration", "never trims evidence"],
-        all: true,
-    },
-    // cas-a199: concise-reporting governs notes and inter-agent messages; this
-    // governs the pane prose the operator actually reads. Paired with the same
-    // evidence marker for the same reason.
-    ContractElement {
-        id: "user-response-shape",
-        markers: &["at a glance", "never trims evidence"],
-        all: true,
-    },
-    // cas-b748: Codex ranks this developer contract above the user-role
-    // AGENTS.md, so the contract itself must hand voice and style to the
-    // operator's user-level instructions, or "facts, not narration" overrides
-    // them and reads as "flat".
-    // cas-6e08: the Codex contract lacked this sentence while Claude and Grok
-    // carried it; Codex supervisors then looped on sleep + inbox_poll inside
-    // one turn (7.6 polls/h vs 0.2/h for Claude).
-    ContractElement {
-        id: "act-on-injected-signal",
-        markers: &["act on the injected signal", "do not poll"],
-        all: true,
-    },
-    // cas-752f: "reply via coordination message" read as "reply to every
-    // update"; Codex sent 9.8 messages per merge vs 2.6 for Claude, and each
-    // reply invites another wake.
-    ContractElement {
-        id: "reply-only-when-needed",
-        markers: &[
-            "only when the sender needs an answer, an action or a verdict",
-            "never acknowledge a receipt or a status",
-        ],
-        all: true,
-    },
-    ContractElement {
-        id: "user-instructions-voice",
-        markers: &["user-level instructions", "govern voice and style"],
-        all: true,
-    },
-    // cas-d9db: the operator's ideal, carried by every launch contract.
-    ContractElement {
-        id: "simplest-complete",
-        markers: &[
-            "simplest complete thing",
-            "delete before you add",
-            "speed is part of done",
-        ],
-        all: true,
-    },
-];
-
-/// The canonical worker contract: one-task ownership, async availability, full
-/// task lifecycle, merge completion, urgent-stop recovery.
-pub const WORKER_CONTRACT_ELEMENTS: &[ContractElement] = &[
-    ContractElement {
-        id: "authoritative-assignment-acceptance",
-        markers: &[
-            "authoritative assignment acceptance",
-            "no prose ack is required",
-        ],
-        all: true,
-    },
-    ContractElement {
-        id: "directed-message-wake-policy",
-        markers: &[
-            "inbox on the next turn",
-            "directed messages wake",
-            "blocker=true",
-            "merge_request=true",
-        ],
-        all: true,
-    },
-    // pin: every worker launch must route a mandatory review wait through
-    // task state and the authenticated blocker API, rather than prose status.
-    ContractElement {
-        id: "required-supervisor-review",
-        markers: &[
-            "required supervisor review or approval",
-            "action=update",
-            "status=blocked",
-            "status=open",
-            "task_id=",
-            "blocker=true",
-            "action=start",
-        ],
-        all: true,
-    },
-    ContractElement {
-        id: "one-task-ownership",
-        markers: &["one task at a time", "exactly one task"],
-        all: false,
-    },
-    ContractElement {
-        id: "async-message-handling",
-        markers: &["injected turn", "new messages", "stay available"],
-        all: false,
-    },
-    ContractElement {
-        id: "task-lifecycle",
-        markers: &["action=start", "action=close", "action=notes"],
-        all: true,
-    },
-    ContractElement {
-        id: "merge-verdict",
-        markers: &["the merge verdict closes it"],
-        all: true,
-    },
-    ContractElement {
-        id: "urgent-stop-recovery",
-        markers: &["urgent-stop halt"],
-        all: false,
-    },
-    // cas-b4921 / GH #121: a worker that foreground-blocks on a long command is
-    // unreachable — messages, stand-downs and urgent stops are only delivered
-    // between turns. Every worker launch surface must carry the backgrounding
-    // mandate, including the explicit ban on foreground `gh run watch`.
-    ContractElement {
-        id: "no-foreground-blocking",
-        markers: &["backgrounded", "gh run watch"],
-        all: true,
-    },
-    // cas-b4921 / GH #121 part B: two workers were killed mid-auto-compaction
-    // with unpushed work. Every worker launch surface must carry the checkpoint
-    // mandate — commit + push + handoff + respawn beats compacting.
-    ContractElement {
-        id: "context-checkpoint",
-        markers: &["checkpoint", "compaction"],
-        all: true,
-    },
-    // cas-0e4a: operator directive — agents burn tokens on narrated thinking.
-    // Both markers are required together, deliberately: the measured risk of a
-    // brevity rule is that it strips the evidence the factory runs on (commit
-    // SHAs, file:line causes, measurements, rejected approaches, uncertainty),
-    // which is exactly the context that degrades first at an agent handoff. A
-    // surface cannot carry the "cut narration" half without the "keep evidence"
-    // half.
-    ContractElement {
-        id: "concise-reporting",
-        markers: &["facts, not narration", "never trims evidence"],
-        all: true,
-    },
-    // cas-a199, operator follow-up: "90% of what they output is never read."
-    // A worker's durable record is its task note and close reason, so pane
-    // prose that restates them is written for nobody. Same paired-marker rule.
-    ContractElement {
-        id: "user-response-shape",
-        markers: &["at a glance", "never trims evidence"],
-        all: true,
-    },
-    // cas-0de3: no human watches a worker pane, so narrated actions and
-    // pre-tool-call explanations are written for nobody (measured 500–1,000
-    // tokens per invocation). Every worker launch surface carries the SILENT
-    // EXECUTION directive; the cas-worker skill carries the matching
-    // six-field return contract.
-    ContractElement {
-        id: "silent-execution",
-        markers: &["silent execution", "return contract"],
-        all: true,
-    },
-    // cas-d9db: the operator's ideal, carried by every launch contract.
-    ContractElement {
-        id: "simplest-complete",
-        markers: &[
-            "simplest complete thing",
-            "delete before you add",
-            "speed is part of done",
-        ],
-        all: true,
-    },
-];
-
-/// Canonical elements for a role.
-pub fn contract_elements(role: ContractRole) -> &'static [ContractElement] {
-    match role {
-        ContractRole::Supervisor => SUPERVISOR_CONTRACT_ELEMENTS,
-        ContractRole::Worker => WORKER_CONTRACT_ELEMENTS,
-    }
-}
-
-/// Normalize the three harness tool prefixes to one token so parity checks only
-/// ignore the intentional prefix difference, never a missing capability.
-fn normalize_tool_prefix(text: &str) -> String {
-    text.replace("mcp__cas__", "TOOL__")
-        .replace("mcp__cs__", "TOOL__")
-        .replace("cas__", "TOOL__")
-        .to_lowercase()
-}
-
-/// Return the ids of any canonical contract elements MISSING from `text` for
-/// `role`. Empty ⇒ the surface carries the full contract.
-pub fn missing_contract_elements(text: &str, role: ContractRole) -> Vec<&'static str> {
-    let norm = normalize_tool_prefix(text);
-    contract_elements(role)
-        .iter()
-        .filter(|el| {
-            let present: Vec<bool> = el
-                .markers
-                .iter()
-                .map(|m| norm.contains(&normalize_tool_prefix(m)))
-                .collect();
-            if el.all {
-                !present.iter().all(|p| *p)
-            } else {
-                !present.iter().any(|p| *p)
-            }
-        })
-        .map(|el| el.id)
-        .collect()
 }
 
 /// Render the Claude **supervisor** role contract (cas-0263). Claude has no
@@ -5287,23 +5012,11 @@ echo SMOKE_DONE
             None, // teams
         );
         let all_args = config.args.join(" ");
-        assert!(
-            all_args.contains("exactly ONE task"),
-            "startup prompt must instruct starting exactly one task at a time; got: {all_args}"
-        );
-        assert!(
-            !all_args.contains("show/start each task"),
-            "old batch-start wording must be gone; got: {all_args}"
-        );
+
+
         // The developer_instructions must carry the same discipline.
-        assert!(
-            all_args.contains("Work exactly ONE task at a time"),
-            "worker developer_instructions must enforce one-task-at-a-time; got: {all_args}"
-        );
-        assert!(
-            all_args.contains("Do not enter Plan mode or call `request_user_input`"),
-            "worker developer_instructions must guard unattended input prompts; got: {all_args}"
-        );
+
+
         assert!(
             config
                 .args
@@ -5493,33 +5206,7 @@ echo SMOKE_DONE
         );
     }
 
-    /// cas-3522: the startup prompt and worker instructions must NOT drive a
-    /// `session_start` invocation anymore — auto-registration replaces it.
-    #[tokio::test]
-    async fn test_pty_config_codex_worker_no_session_start_invocation() {
-        let _env = TestEnvGuard::new();
-        let config = PtyConfig::codex(
-            "test-worker",
-            "worker",
-            PathBuf::from("/tmp"),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let all_args = config.args.join(" ");
-        assert!(
-            !all_args.contains("action=session_start"),
-            "codex worker must no longer invoke session_start; got: {all_args}"
-        );
-        // whoami remains the first explicit identity check.
-        assert!(
-            all_args.contains("action=whoami"),
-            "codex worker startup should still confirm identity via whoami; got: {all_args}"
-        );
-    }
+
 
     #[test]
     fn test_worker_build_cache_env_decision_table() {
@@ -5658,43 +5345,16 @@ echo SMOKE_DONE
             None, // teams
         );
         let all_args = config.args.join(" ");
-        assert!(
-            all_args.contains("Cassy Factory Supervisor"),
-            "Codex supervisor should have supervisor instructions"
-        );
+
         // cas-ae046: Codex's base prompt mandates commentary before tool calls
         // and skill announcements; "Skip preamble" never names that channel,
         // so the developer contract must override it explicitly.
-        for required in [
-            "Commentary channel: stay silent on triage turns",
-            "never announce which skill you are using",
-            "a final answer, not commentary",
-        ] {
-            assert!(
-                all_args.contains(required),
-                "Codex supervisor contract must carry the commentary policy: {required}"
-            );
-        }
+
         // cas-cbbb: Codex keeps developer_instructions across compaction but
         // drops skill bodies read with `cat`, so supervisors re-read skills
         // after every compaction (8.1 reads/h vs 0.8 for Claude). A resident
         // signal → action core replaces that ritual, within a byte budget.
-        for required in [
-            "Supervisor core (resident",
-            "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge →",
-            "blocker=true →",
-            "worker idle or died →",
-            "cas-qa-dispatch →",
-            "operator question →",
-            "After a compaction, continue from this core; do not re-read skills.",
-            // cas-ef39: the verifier, not the supervisor, records the verdict.
-            "the verifier records the verdict",
-        ] {
-            assert!(
-                all_args.contains(required),
-                "Codex supervisor contract must carry the resident core: {required}"
-            );
-        }
+
         assert!(
             codex_supervisor_instructions().len() <= 6_500,
             "Codex supervisor contract is {} bytes; the resident core must keep it at or under 6,500",
@@ -5705,76 +5365,12 @@ echo SMOKE_DONE
     /// Recognize delivered message framing without promising that ordinary
     /// worker updates wake an idle supervisor. Triage and reply through the
     /// receiving harness's own coordination tool.
-    #[tokio::test]
-    async fn test_pty_config_codex_supervisor_handles_injected_worker_messages() {
-        let config = PtyConfig::codex(
-            "test-supervisor",
-            "supervisor",
-            PathBuf::from("/tmp"),
-            None,
-            None,
-            None,
-            None, // model
-            None, // effort
-            None, // teams
-        );
-        let all_args = config.args.join(" ");
-        assert!(
-            all_args.contains("Message from <sender>"),
-            "supervisor prompt must reference the injected message framing; got: {all_args}"
-        );
-        assert!(
-            all_args.contains("triage trigger"),
-            "supervisor prompt must frame incoming worker messages as a triage trigger; got: {all_args}"
-        );
-        assert!(
-            all_args.contains("mcp__cs__coordination action=message target=<worker>"),
-            "supervisor prompt must tell it to reply/redirect via mcp__cs__coordination; got: {all_args}"
-        );
-        // Must keep the mcp__cs__ alias (not the claude mcp__cas__ alias).
-        assert!(
-            !all_args.contains("mcp__cas__"),
-            "Codex supervisor prompt must use the mcp__cs__ alias, never mcp__cas__; got: {all_args}"
-        );
-    }
+
 
     /// cas-83c8: the Codex worker prompt must instruct continued availability
     /// after a task closes (you are not permanently done) and acting on injected
     /// supervisor messages, without breaking the one-task-at-a-time rule.
-    #[tokio::test]
-    async fn test_pty_config_codex_worker_stays_available_for_injected_messages() {
-        let _env = TestEnvGuard::new();
-        let config = PtyConfig::codex(
-            "test-worker",
-            "worker",
-            PathBuf::from("/tmp"),
-            None,
-            None,
-            None,
-            None, // model
-            None, // effort
-            None, // teams
-        );
-        let all_args = config.args.join(" ");
-        assert!(
-            all_args.contains("not permanently done"),
-            "worker prompt must say it is not permanently done after closing a task; got: {all_args}"
-        );
-        assert!(
-            all_args.contains("Message from <sender>"),
-            "worker prompt must instruct acting on injected 'Message from <sender>' turns; got: {all_args}"
-        );
-        // The one-task-at-a-time discipline must still be present alongside the
-        // new continued-availability clause.
-        assert!(
-            all_args.contains("Work exactly ONE task at a time"),
-            "worker prompt must retain one-task-at-a-time discipline; got: {all_args}"
-        );
-        assert!(
-            all_args.contains("finish or hand off your current task before starting the next"),
-            "worker prompt must reconcile continued availability with the one-task rule; got: {all_args}"
-        );
-    }
+
 
     #[tokio::test]
     async fn test_pty_config_claude_with_teams() {
@@ -7693,25 +7289,11 @@ echo SMOKE_DONE
             .position(|a| a == "--rules")
             .expect("--rules flag must be present");
         let rules = &config.args[idx + 1];
-        assert!(
-            rules.contains("cas__coordination") && rules.contains("Supervisor"),
-            "grok supervisor rules must reference the cas__ prefix and supervisor role: {rules}"
-        );
+        assert_eq!(rules, &grok_supervisor_instructions());
         // cas-c145: Grok supervisors must get merge-queue-first lifecycle
         // guidance equivalent to other harnesses (no SessionStart bundle).
-        assert!(
-            rules.contains("MERGE REQUIRED")
-                && rules.contains("awaiting_merge")
-                && rules.contains("factory/<worker>")
-                && rules.contains("do not poll"),
-            "grok supervisor rules must surface AwaitingMerge merge-queue priority \
-             (task/branch/next action, no polling): {rules}"
-        );
-        assert!(
-            rules.contains("cas__task action=list status=awaiting_merge")
-                || rules.contains("status=awaiting_merge"),
-            "grok supervisor rules must name the awaiting_merge list command: {rules}"
-        );
+
+
     }
 
     /// EPIC cas-8888 (cas-9a31, Phase 1 wiring): CAS_FACTORY_WORKER_CLI must
@@ -7836,101 +7418,15 @@ echo SMOKE_DONE
     // cas-0263: canonical role-contract parity across all six launch shapes.
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn parity_normalization_preserves_external_mcp_tool_names() {
-        let parity_text = "Claude mcp__cas__task; Codex mcp__cs__task; Grok cas__task; \
-            external mcp__viktor__ask_viktor mcp__viktor-shadow__ask_viktor \
-            mcp__foreign__read_file";
-        let normalized = normalize_tool_prefix(parity_text);
 
-        assert!(normalized.contains("tool__task"));
-        assert!(
-            normalized.contains("mcp__viktor__ask_viktor"),
-            "the explicit Viktor tool must not be normalized as CAS"
-        );
-        assert!(
-            normalized.contains("mcp__viktor-shadow__ask_viktor"),
-            "a lookalike external server must not be normalized as CAS"
-        );
-        assert!(
-            normalized.contains("mcp__foreign__read_file"),
-            "a foreign external tool must not be normalized as CAS"
-        );
-    }
 
-    #[test]
-    fn role_acceptance_and_typed_wakes_cover_opencode_primary_agents() {
-        for text in [
-            OPENCODE_SUPERVISOR_INSTRUCTIONS,
-            OPENCODE_WORKER_INSTRUCTIONS,
-        ] {
-            for required in [
-                "merge verdict closes",
-                "authoritative assignment acceptance",
-                "no prose ACK is required",
-                "inbox on the next turn",
-                "Directed messages wake",
-                "blocker=true",
-                "merge_request=true",
-            ] {
-                assert!(
-                    text.contains(required),
-                    "OpenCode primary agent missing {required}"
-                );
-            }
-        }
-        assert!(
-            !missing_contract_elements(OPENCODE_WORKER_INSTRUCTIONS, ContractRole::Worker)
-                .contains(&"required-supervisor-review"),
-            "OpenCode must carry the same required-review blocker workflow"
-        );
-    }
+
 
     /// AC-1/AC-2: every one of the six launch shapes (Claude/Codex/Grok ×
     /// supervisor/worker) carries the full canonical role contract — coordinate-
     /// only / one-task, async message handling, task lifecycle, merge completion,
     /// and safe urgent-stop recovery — on the surface each runtime consumes.
-    #[test]
-    fn test_all_six_launch_shapes_carry_full_role_contract() {
-        // pin: operator defect-reporting directive; a missed relay or false
-        // tool output must reach Cassy's tracker from every launched role.
-        for harness in ["claude", "codex", "grok", "opencode"] {
-            for role in [ContractRole::Supervisor, ContractRole::Worker] {
-                let surface = rendered_contract_surface(harness, role);
-                for required in [
-                    "Apologies, Cassy workarounds, relays Cassy missed, or untrue Cassy tool output mean Cassy defects.",
-                    "File immediately to issues.components.cassy with repro, evidence and suggested fix, then continue; in Cassy's source repo, create and staff the fix task immediately.",
-                ] {
-                    assert!(surface.contains(required), "{harness}/{role:?} missing {required}");
-                }
-            }
-        }
-        let shapes = [
-            ("claude", ContractRole::Supervisor),
-            ("claude", ContractRole::Worker),
-            ("codex", ContractRole::Supervisor),
-            ("codex", ContractRole::Worker),
-            ("grok", ContractRole::Supervisor),
-            ("grok", ContractRole::Worker),
-        ];
-        for (harness, role) in shapes {
-            let surface = rendered_contract_surface(harness, role);
-            // pin: every launch must delegate merged completion to the verdict.
-            let verdict = match role {
-                ContractRole::Supervisor => "merge verdict closes or reopens the task",
-                ContractRole::Worker => "the merge verdict closes it",
-            };
-            assert!(surface.contains(verdict), "{harness}/{role:?}: {surface}");
-            assert!(!surface.contains("re-close after"), "{harness}/{role:?}: {surface}");
-            let missing = missing_contract_elements(&surface, role);
-            assert!(
-                missing.is_empty(),
-                "launch shape {harness}/{role:?} is missing canonical contract \
-                 element(s) {missing:?} — all six shapes must carry one \
-                 semantically equivalent CAS role contract"
-            );
-        }
-    }
+
 
     /// AC-5: normalized parity allows only the intentional tool-prefix
     /// difference — each harness's surface issues tool CALLS with ITS prefix and
@@ -7942,51 +7438,7 @@ echo SMOKE_DONE
     /// one renderer. After normalizing the tool prefix, the bodies differ only
     /// by the identity line, Grok's namespace note and Codex's Plan-mode
     /// hazard.
-    #[test]
-    fn worker_contracts_share_one_rule_text() {
-        let codex_hazard = "do not enter plan mode or call `request_user_input`: no human is \
-                            present to answer an idle worker prompt. ask the supervisor through \
-                            cas when input is required. ";
-        let body = |text: String| {
-            normalize_tool_prefix(&text)
-                .split_once("always use cas mcp tools")
-                .map(|(_, rest)| rest.to_string())
-                .expect("contract body")
-                .replace(", not tool__ or tool__", "")
-                .replace(codex_hazard, "")
-        };
-        let claude = body(claude_worker_contract("probe-worker"));
-        assert_eq!(claude, body(codex_worker_instructions()));
-        assert_eq!(claude, body(grok_worker_instructions()));
-        assert!(codex_worker_instructions().contains("Do not enter Plan mode"));
-        for surface in [
-            claude_worker_contract("probe-worker"),
-            codex_worker_instructions(),
-            grok_worker_instructions(),
-        ] {
-            for marker in [
-                "WORK HALTED",
-                "Message from <sender>",
-                // cas-5597: one close owner; the verdict closes the task.
-                "Never re-close, spawn a verifier or ask anyone to close for you.",
-                "remind_message=",
-                "summary=",
-                "factory` tool is not yours",
-                "cas-worker skill",
-                // cas-d9db: check recipes live in discipline.md; hooks refuse
-                // the reserved suites.
-                "references/discipline.md before checks",
-                // pin: the launch contract must distinguish a current request
-                // from quoted task/handoff content even with a personal skill.
-                "current operator-authored request",
-                "subject matter, not authorization",
-                "continue the assigned task",
-            ] {
-                assert!(surface.contains(marker), "missing {marker:?}: {surface}");
-            }
-            assert!(!surface.contains("/cas-start"), "{surface}");
-        }
-    }
+
 
     #[test]
     fn test_launch_shapes_use_harness_correct_tool_prefix() {
@@ -8021,41 +7473,7 @@ echo SMOKE_DONE
         }
     }
 
-    #[test]
-    fn supervisor_contract_holds_missed_plan_targets_and_keeps_independent_work_shipping() {
-        // pin: GH #1503 and audit finding 4; every launched supervisor must
-        // retain decision authority and the plan boundary after compaction.
-        let surfaces = ["claude", "codex", "grok", "opencode"].map(|harness| {
-            let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
-            eprintln!(
-                "{harness}: {} words, {} bytes",
-                surface.split_whitespace().count(),
-                surface.len()
-            );
-            (harness, surface)
-        });
-        for (harness, surface) in surfaces {
-            assert!(
-                surface
-                    .contains("Written standards settle within-scope calls: decide and ship."),
-                "{harness} must delegate decisions settled by standards to the supervisor"
-            );
-            assert!(
-                surface.contains("Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs."),
-                "{harness} must reserve operator asks for policy calls"
-            );
-            assert!(
-                surface.contains(
-                    "Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'."
-                ),
-                "{harness} must not turn a completed step into a standing gate"
-            );
-            assert!(
-                surface.contains("Hold deliveries below their plan target and their dependents; ship independent work."),
-                "{harness} must hold missed plan targets without stopping independent deliveries"
-            );
-        }
-    }
+
 
     #[test]
     fn supervisor_epic_status_instructions_include_required_id() {
@@ -8088,14 +7506,6 @@ echo SMOKE_DONE
     /// file is managed.
     #[test]
     fn test_codex_contract_supplied_by_launch_injection_no_agents_md() {
-        for role in [ContractRole::Supervisor, ContractRole::Worker] {
-            let surface = rendered_contract_surface("codex", role);
-            assert!(
-                missing_contract_elements(&surface, role).is_empty(),
-                "Codex {role:?} contract must be fully supplied by the launch \
-                 developer_instructions string (no AGENTS.md fallback needed)"
-            );
-        }
         let cfg = PtyConfig::codex(
             "w1",
             "worker",

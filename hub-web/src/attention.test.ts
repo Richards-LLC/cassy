@@ -39,8 +39,6 @@ describe("Commander attention triage queue", () => {
     const content = daemonAttention(diagnostic);
 
     expect(content).toMatchObject({
-      headline: "Daemon connection lost",
-      cause: "Transport Lost",
       detail: "Inspect the local transport before reconnecting.",
       severity: "critical",
       action: "retry",
@@ -54,7 +52,7 @@ describe("Commander attention triage queue", () => {
       message: 'soundwave / gabber-studio-sturdy-cardinal-20: Daemon ended: {"cause":{"kind":"transport_lost"},"next_action":"Inspect the local transport."}',
     }));
 
-    expect(content).toMatchObject({ headline: "Daemon connection lost", detail: "Inspect the local transport.", severity: "critical" });
+    expect(content).toMatchObject({ detail: "Inspect the local transport.", severity: "critical" });
     expect(content.headline).not.toMatch(/[{}]|next_action|soundwave/i);
   });
 
@@ -93,7 +91,7 @@ describe("Commander attention triage queue", () => {
       message: '{"expected":"enabled","actual":"disabled"}',
     }));
 
-    expect(content).toMatchObject({ headline: "Config Drift", severity: "warning" });
+    expect(content).toMatchObject({ severity: "warning" });
     expect(content.headline).not.toContain("{");
   });
 
@@ -288,8 +286,6 @@ describe("Commander attention triage queue", () => {
 
   it("gives an exited worker an actionable critical card without exposing the wire name", () => {
     expect(machineEventAttention("pane_exited", undefined)).toMatchObject({
-      headline: "Worker stopped",
-      detail: "Open the session to inspect the worker and its terminal output.",
       severity: "critical",
       action: "view_pane",
     });
@@ -309,15 +305,14 @@ describe("Commander attention triage queue", () => {
     expect(machineEventRaisesAttention("pane_exited", { exit_code: 0 })).toBe(true);
     expect(machineEventRaisesAttention("pane_exited", { exit_code: null, role: "supervisor" })).toBe(true);
     expect(machineEventRaisesAttention("daemon_disconnected", { cause: { kind: "signal", signal: 9, name: "SIGKILL" } })).toBe(true);
-    expect(machineEventAttention("pane_exited", { exit_code: 1, role: "supervisor" })).toMatchObject({ headline: "Supervisor stopped", severity: "critical", action: "view_pane" });
+    expect(machineEventAttention("pane_exited", { exit_code: 1, role: "supervisor" })).toMatchObject({ severity: "critical", action: "view_pane" });
   });
 });
 
 describe("connection cards name the machine, never the hub or its host (cas-be76)", () => {
   it.each(["hub_disconnected", "reconnecting"])("%s", (kind) => {
     const content = machineEventAttention(kind, { reason: "Stuck dialing atlas.test — node may be offline: Failed to fetch" });
-    expect(content.headline).toMatch(/the machine$/);
-    expect(content.headline).not.toMatch(/hub|atlas\.test/i);
+    expect(content.headline).not.toContain("atlas.test");
     expect(content.detail ?? "").not.toMatch(/atlas\.test/);
   });
 });

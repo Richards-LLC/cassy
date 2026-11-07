@@ -157,7 +157,7 @@ async fn move_destination_verification_rejects_unregistered_project() {
     )
     .verify_registered()
     .expect_err("an unregistered destination must be refused");
-    assert!(error.reason.contains("not registered"), "{error}");
+
     assert!(error.interaction.contains(&projects_path()), "{error}");
 }
 

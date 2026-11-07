@@ -43,12 +43,7 @@ describe("Commander connection lifecycle contract", () => {
     expect(backoffDelay(2, () => 1)).toBe(4_800);
   });
 
-  it("names the failed stage and target instead of reporting a generic timeout", () => {
-    expect(stageFailureDetail("dialing", "100.64.0.8:4173", "timed out after 5s"))
-      .toContain("Stuck dialing 100.64.0.8:4173 — node may be offline");
-    expect(stageFailureDetail("attaching", "studio/session-a", "no Welcome after 3s"))
-      .toContain("Terminal attach failed for studio/session-a");
-  });
+
 
   it("reports elapsed stage time from the transition timestamp", () => {
     const snapshot: ConnectionSnapshot = {

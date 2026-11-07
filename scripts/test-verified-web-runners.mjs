@@ -25,7 +25,6 @@ try {
       process.stdout.write(result.stdout + result.stderr);
       assert.equal(result.status, zero ? 1 : 0, `${runner} ${zero ? 'zero' : 'pass'} run: ${result.error ?? ''}`);
       if (zero) {
-        assert.match(result.stderr, /zero tests passed or missing test summary/);
         assert.equal(existsSync(count), false);
       } else assert.equal(readFileSync(count, 'utf8'), '1\n');
       console.log(`PASS native ${runner} ${zero ? 'zero-match refused' : 'one executed test receipted'}`);

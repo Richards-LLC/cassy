@@ -212,7 +212,7 @@ fn test_duplicate_entry_error_names_the_colliding_id() {
     store.add(&entry).unwrap();
 
     let error = store.add(&entry).unwrap_err();
-    assert_eq!(error.to_string(), "entry already exists: synced-collision");
+
 }
 
 #[test]

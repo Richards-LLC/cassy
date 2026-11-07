@@ -86,7 +86,7 @@ class Selection(unittest.TestCase):
                         actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
                                   for line in output.splitlines() if 'would run ' in line}
                         self.assertEqual(actual, expected, output)
-            self.assertIn('no script test covers', selected(['docs/unrelated.md']))
+            self.assertFalse(any(line.startswith('would run ') for line in selected(['docs/unrelated.md']).splitlines()))
             output = selected([transition])
             actual = {SELECTOR.test_script(line.split('would run ', 1)[1])
                       for line in output.splitlines() if 'would run ' in line}

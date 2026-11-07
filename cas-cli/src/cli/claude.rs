@@ -821,9 +821,9 @@ mod tests {
                 .args(["--exact", "cli::claude::tests::set_profile_env_subprocess_isolates_both_selectors_and_overrides_cas_fa64", "--nocapture"])
                 .env("FA64_PROFILE_PROBE", profile)
                 .output().unwrap();
-            assert!(
-                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
-                "subprocess did not run its exact test"
+            crate::test_child::assert_passed(
+                &String::from_utf8_lossy(&output.stdout),
+                "cli::claude::tests::set_profile_env_subprocess_isolates_both_selectors_and_overrides_cas_fa64",
             );
             assert!(
                 output.status.success(),

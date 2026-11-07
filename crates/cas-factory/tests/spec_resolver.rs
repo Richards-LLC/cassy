@@ -464,10 +464,7 @@ fn invalid_json_worker_spec_returns_clear_error() {
 
     assert!(result.is_err(), "invalid JSON should produce an error");
     let msg = result.unwrap_err().to_string();
-    assert!(
-        msg.contains("--worker-spec"),
-        "error message should mention --worker-spec; got: {msg}"
-    );
+
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1072,7 +1072,7 @@ no browsers or Cargo: `python3 scripts/test-worker-memory.py`.
 
 ### cas-src close surfaces
 
-Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation pins + `doctor_snapshot` (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
+Before claiming a change done, workers must add one pre-close task-note line for every applicable surface (and state `not applicable` for the rest): builtin skill/agent → Claude + Codex + Grok mirrors (`cas-8921`); MCP tool → CLI parity, docs, dispatch; hook/gate → `config_gen` + `.codex/hooks.json`; migration → bootstrap/reconciliation and typed doctor status checks (`cas-96f9`/m232); behavior contract → grep sibling old-contract tests (`cas-2327`/`cas-bc13`); state transition → reverse states; user-visible behavior → release-notes impact. This compact walk prevents a tested path from silently missing its sibling surfaces.
 
 ### Portable proof artifacts
 
@@ -2782,14 +2782,11 @@ runs its required fast-row job on the final tree:
   still matches a `test.step` title in its journey spec.
 - `builtin-skill-limits`: skill description, size and line limits checked on
   the exact `include_str!` catalog bytes, mirroring the Rust tests.
-- `doctor-snapshot`: every doctor snapshot row sits in the group
-  `CheckGroup::for_name` assigns, and a lane that adds a
-  `recorder.mark(..)` phase also updates the snapshot.
 - `migration-registry`: every migration file is declared, registered and
   listed in id order.
 
-Contract phrases were already part of `builtin-doc-hygiene`. On this host a
-lane spanning that release's three epics ran every fast row in about 25 seconds.
+`builtin-doc-hygiene` checks private operator-data leakage. Vocabulary and
+contract-phrase requirements do not gate delivery or releases.
 
 `scripts/test-fast-release-rows.py` holds a fixture for each fast-row failure:
 
@@ -4083,6 +4080,12 @@ the release fast rows and Scoped Validation run this form. Intentional external
 wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
+
+Tests assert behavior or stable error/rule IDs, never human-message wording.
+The source guard checks newly changed error assertions at park with
+`--messages-only --changed-since <target>`; `pin:` comments do not waive it.
+Rust assertion diagnostics and exact caller-supplied payload preservation remain
+valid. Release writing advice does not create vocabulary gates.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

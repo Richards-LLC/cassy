@@ -83,9 +83,10 @@ describe("a never-live conversation's first retry (cas-28df)", () => {
     expect(machineConnection(live, [{ attach: attach("backoff", { attempt: 1 }), wasLive: false }])).toBe(live);
   });
   it("reads as connecting in the header and the row, not reconnecting", () => {
-    const state = sessionConnection(live, attach("backoff", { attempt: 1, stage: "attaching", reason: "no session state within 3s" }), false);
+    const retry = attach("backoff", { attempt: 1, stage: "attaching", reason: "no session state within 3s" });
+    const state = sessionConnection(live, retry, false);
     expect(state?.phase).toBe("attaching");
-    expect(state?.reason).toBe("no session state within 3s");
+    expect(state?.reason).toBe(retry.reason);
     expect(sessionConnection(live, attach("backoff", { attempt: 2 }), false)?.phase).toBe("backoff");
   });
 });

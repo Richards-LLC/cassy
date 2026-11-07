@@ -437,7 +437,7 @@ async fn knowledge_write_refuses_page_naming_another_registered_project_cas_caae
         .await
         .expect_err("a page naming another registered project is refused");
     assert!(refusal.message.contains("yonder-marmot"), "{}", refusal.message);
-    assert!(refusal.message.contains("`sources`"), "{}", refusal.message);
+
 
     core.knowledge_write(Parameters(KnowledgeRequest {
         sources: Some("project:yonder-marmot".to_string()),

@@ -73,24 +73,6 @@ JOURNEY_CATALOG = """# Journeys
 - An empty list.
 """
 JOURNEY_SPEC = "test('HUB-J1 open a conversation', async () => {\n  await test.step('Tap the row', async () => {});\n});\n"
-DOCTOR_RS = """impl CheckGroup {
-    fn for_name(name: &str) -> Self {
-        match name.to_ascii_lowercase().as_str() {
-            "symbol index" => Self::Indexes,
-            _ => Self::Store,
-        }
-    }
-}
-fn run(recorder: &mut Recorder) {
-    recorder.mark("store open", &checks);
-}
-"""
-DOCTOR_SNAPSHOT = """---
-source: cas-cli/tests/component_output_test.rs
----
-Store         [OK] database
-Indexes       [OK] symbol index
-"""
 MIGRATIONS_RS = "mod m001_first;\n\npub static MIGRATIONS: &[Migration] = &[\n    m001_first::MIGRATION,\n];\n"
 
 
@@ -110,8 +92,8 @@ class FastRows(unittest.TestCase):
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
                        "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
-                       "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
-                       "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
+                       "check-test-env.py", "rust_test_source.py",
+                       "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
                        "release-diary-thread.py"):
@@ -121,15 +103,12 @@ class FastRows(unittest.TestCase):
                 self.write(source_dir + "/" + source.name, source.read_text())
         (self.repo / "scripts/fast-rows-pre-push.sh").chmod(0o755)
         self.write("scripts/test-env-baseline.json", '{"version":1,"violations":[],"exceptions":[]}\n')
-        self.write("scripts/builtin-contract-phrases.json", '{"version":2,"documents":{"skills/example/SKILL.md":{"source":"cas-cli/src/builtins/skills/example/SKILL.md","catalogs":["claude","codex","grok"],"contains":[{"text":"fixture contract","reason":"Named fixture contract."}],"absent":[],"any_of":[]}},"alternatives":[]}\n')
         self.write("cas-cli/src/builtins/skills/example/SKILL.md", EXAMPLE_SKILL)
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
-        self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
-        self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
         self.write("cas-cli/src/migration/migrations/mod.rs", MIGRATIONS_RS)
         self.write(".markdownlint-cli2.jsonc", (ROOT / ".markdownlint-cli2.jsonc").read_text())
@@ -195,7 +174,7 @@ class FastRows(unittest.TestCase):
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
                     "release-notes-shell-injection", "procedure-guardrails", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
-                    "journey-catalog", "builtin-skill-limits", "doctor-snapshot", "migration-registry",
+                    "journey-catalog", "builtin-skill-limits", "migration-registry",
                     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
                     "call-shapes", "release-notes-draft"):
             if row == "test-shape":
@@ -216,7 +195,6 @@ class FastRows(unittest.TestCase):
         missing_title = self.fast()
         self.assertNotEqual(missing_title.returncode, 0, missing_title.stdout + missing_title.stderr)
         self.assertIn("FAIL changelog-and-versions", missing_title.stdout)
-        self.assertIn("titled category and area format", missing_title.stdout)
 
         self.write("CHANGELOG.md", (
             "## [Unreleased]\n\n### Fixed — Fixture\n\n"
@@ -280,7 +258,6 @@ class FastRows(unittest.TestCase):
         dirty = self.fast()
         self.assertEqual(dirty.returncode, 0, dirty.stdout + dirty.stderr)
         self.assertFalse(self.receipt()[1].exists(), dirty.stdout)
-        self.assertIn("no receipt", dirty.stdout)
 
 
     def test_fast_test_env_skips_unchanged_crate_paths_and_fixture_suite(self):
@@ -308,7 +285,6 @@ class FastRows(unittest.TestCase):
             ("changelog-and-versions", "crates/cas-core/Cargo.toml", '[package]\nversion = "9.99.8"\n'),
             ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
-            ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "removed contract\n"),
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
@@ -316,11 +292,6 @@ class FastRows(unittest.TestCase):
              VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",
              "---\nname: example\ndescription: " + "y" * 251 + "\n---\nfixture contract\n"),
-            ("doctor-snapshot", "cas-cli/src/cli/doctor.rs",
-             DOCTOR_RS.replace('recorder.mark("store open", &checks);',
-                               'recorder.mark("store open", &checks);\n    recorder.mark("code index copies", &checks);')),
-            ("doctor-snapshot", "cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap",
-             DOCTOR_SNAPSHOT.replace("[OK] database", "[OK] database  [OK] symbol index")),
             ("migration-registry", "cas-cli/src/migration/migrations/m002_second.rs",
              "pub const MIGRATION: Migration = Migration {\n    id: 2,\n};\n"),
             ("fixture-paths-src", "cas-cli/src/example_tests.rs",
@@ -415,7 +386,6 @@ class FastRows(unittest.TestCase):
         self.commit()
         result = self.fast_from("0" * 39 + "1", ZERO_BASE_REF="origin/no-such-branch")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("are unavailable; comparing against HEAD^", result.stdout)
         self.assertNotIn("FAIL ", result.stdout)
 
     def test_env_baseline_growth_and_staleness_fail_admission(self):
@@ -433,12 +403,10 @@ class FastRows(unittest.TestCase):
         grown = self.fast()
         self.assertEqual(grown.returncode, 1, grown.stdout + grown.stderr)
         self.assertIn('FAIL test-env', grown.stdout)
-        self.assertIn('baseline growth', grown.stdout)
         self.write('cas-cli/tests/sample.rs', '#[test] fn sample() {}')
         self.commit()
         stale = self.fast()
         self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
-        self.assertIn('stale baseline entry', stale.stdout)
 
     def test_env_checker_is_mandatory_and_receives_base(self):
         self.write('scripts/check-test-env.py', "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "', '--changed-paths']\nprint('bad process state fixture.rs:1')\nsys.exit(1)\n")
@@ -451,7 +419,6 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('FAIL test-env', result.stdout)
-        self.assertIn('scripts/check-test-env.py is missing', result.stdout)
 
     def test_optional_shape_checker_receives_the_lane_base_and_failure_is_named(self):
         self.write("scripts/check-test-shape.py", "import sys\nassert sys.argv[1:] == ['--changed-since', '" + self.base + "']\nprint('bad shape fixture.rs:1')\nsys.exit(1)\n")
@@ -529,7 +496,6 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("PASS version-literals", result.stdout)
         log = (self.repo / ".git/gate-rows/version-literals.log").read_text()
-        self.assertIn("NOTE pre-existing next-version literals", log)
         self.assertIn("crates/cas-core/src/lib.rs:1:", log)
         self.assertIn("cas-cli/tests/sample.rs:4:", log)
 
@@ -605,7 +571,6 @@ class FastRows(unittest.TestCase):
         _, path = self.receipt()
         # pin: receipts name the actual comparison commit, while the hook log names its target ref.
         self.assertIn(f"base={fork} ", path.read_text())
-        self.assertIn("(base origin/epic/train)", pushed.stderr)
         self.write("scripts/example.py", "# this branch now changes the script\n")
         self.commit()
         pushed = self.push()
@@ -643,21 +608,18 @@ class FastRows(unittest.TestCase):
         refused = self.push(ZERO_BASE_REF=base)
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
         # pin: push diagnostics name the full comparison ref and offending source line.
-        self.assertIn(f"(base {base})", refused.stderr)
+        self.assertIn(base, refused.stderr)
         self.assertIn("cas-cli/tests/sample.rs:40:", refused.stderr)
         self.assertLessEqual(len(re.findall(r"^  \| cas-cli/tests/sample.rs:\d+:", refused.stderr, re.M)), 20)
-        self.assertIn("FIX version-literals: ", refused.stderr)
         self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
-        self.assertIn("FAIL ci-script-tests-changed", refused.stderr)
         # The real hook must keep the detailed child output after the gate's
         # scratch guardian has exited, and tell the worker where it is.
-        retained = re.search(r"pre-push: fast-row logs: (.+)", refused.stderr)
-        self.assertIsNotNone(retained, refused.stderr)
-        logs = Path(retained.group(1))
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [logs] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(logs), refused.stderr)
         row_log = logs / "ci-script-tests-changed.log"
         original_log = row_log.read_text()
         self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
-        self.assertIn("fixture diagnostic: prebuild poll expired", refused.stderr)
         # pin: FAIL plus the row id is the gate's public diagnostic protocol.
         self.assertIn("FAIL ci-script-tests-changed", (logs / "gate.log").read_text())
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
@@ -676,7 +638,6 @@ class FastRows(unittest.TestCase):
         self.assertEqual(self.fast().returncode, 0)
         repeat = self.push()
         self.assertEqual(repeat.returncode, 0, repeat.stderr)
-        self.assertNotIn("running fast rows", repeat.stderr)
 
         # cas-eac2: lane CI no longer repeats these rows, so a missing tool
         # fails the push loudly instead of passing it.
@@ -684,10 +645,10 @@ class FastRows(unittest.TestCase):
         self.commit()
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
-        self.assertIn("FAIL markdown-lint", missing.stderr)
-        later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
-        self.assertIsNotNone(later, missing.stderr)
-        self.assertNotEqual(Path(later.group(1)), logs)
+        head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        [later] = (self.repo / ".git/cas/fast-rows").glob(f"{head}.logs.*")
+        self.assertIn(str(later), missing.stderr)
+        self.assertNotEqual(later, logs)
         # pin: retaining evidence means its bytes survive later attempts unchanged.
         self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
@@ -715,7 +676,6 @@ class FastRows(unittest.TestCase):
                           env={key: value for key, value in os.environ.items()
                                if not key.startswith(("CAS_", "GIT_"))})
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
-        self.assertIn("linked worktree", refused.stderr)
         self.assertEqual((self.repo / ".git/config").read_bytes(), config)
 
     def test_builtin_agent_projection_drift_is_refused_cas_7bce(self):
@@ -738,10 +698,11 @@ class FastRows(unittest.TestCase):
 
     def test_posted_release_drafts_skip_lint_but_unposted_drafts_do_not(self):
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
-        # This real historical body contains the now-forbidden "factory"
-        # wording. Only its posting status should change admission.
+        # A real draft receives invalid Slack markup; only its posting status
+        # should change admission, independent of its vocabulary.
         draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().partition(
             "\n## POSTED\n")[0]
+        draft = re.sub(r"(```(?:text)?\n[^\n]*\n)([^\n]*)", r"\1**\2**", draft, count=1)
         receipt = "message_id=1790000000.000001"
         permalink = "<https://example.slack.com/archives/C0123456789/p1790000000000001>"
         timestamp_receipt = "- User thread: #cas-internal root 1793326626.677139, reply 1793326628.503689"
@@ -763,11 +724,11 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 0 if posted else 1, result.stdout + result.stderr)
                 row_log = (self.repo / ".git/gate-rows/release-notes-draft.log").read_text()
                 if posted:
-                    self.assertIn(f"release-notes-draft: skipping posted draft {path}", row_log)
-                    self.assertNotIn("forbidden user wording", row_log)
+                    self.assertIn(path, row_log)
+                    self.assertNotIn("[rule: slack_bold]", row_log)
                 else:
                     self.assertIn("FAIL release-notes-draft", result.stdout)
-                    self.assertIn("forbidden user wording: factory", row_log)
+                    self.assertIn("[rule: slack_bold]", row_log)
 
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """A cut once stopped at preflight on a draft committed hours earlier."""
@@ -786,8 +747,6 @@ class FastRows(unittest.TestCase):
         self.commit()
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no release-notes draft change",
-                      (self.repo / ".git/gate-rows/release-notes-draft.log").read_text())
         self.refused_at_park("release-notes-draft",
                              {path: draft.replace(punch, punch + " Every operator shell launches again today.")},
                              "[rule: punch_length]")

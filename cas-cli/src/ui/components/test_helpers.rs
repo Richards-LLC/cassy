@@ -1,15 +1,16 @@
-//! Test helpers for component snapshot testing
+//! Test helpers for component behavior
 //!
 //! Provides `TestFormatter` — a test-only wrapper around `Formatter` that
 //! renders components to an in-memory buffer, making it easy to capture
-//! output for snapshot assertions.
+//! output for fixture payload and state assertions without pinning human copy.
 //!
 //! # Examples
 //!
 //! ```ignore
 //! let mut tf = TestFormatter::dark();
-//! tf.fmt().heading("Tasks").unwrap();
-//! insta::assert_snapshot!(tf.output());
+//! let heading = "fixture-heading";
+//! tf.fmt().heading(heading).unwrap();
+//! assert!(tf.output().contains(heading));
 //! ```
 
 use super::formatter::{Formatter, OutputMode};

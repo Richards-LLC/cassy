@@ -79,8 +79,5 @@ fn init_without_force_also_creates_the_store_in_a_config_only_cas() {
     let output = cas_init_in(&home, &project, &[]);
 
     assert_store_created_and_config_kept(&project, &output);
-    assert!(
-        !String::from_utf8_lossy(&output.stdout).contains("already initialized"),
-        "a .cas without its store is not initialized"
-    );
+
 }

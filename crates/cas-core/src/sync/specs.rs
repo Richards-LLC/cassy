@@ -343,22 +343,22 @@ mod tests {
         syncer.sync_spec(&spec).unwrap();
 
         let content = fs::read_to_string(target.join("spec-002.md")).unwrap();
-        assert!(content.contains("## Summary"));
+
         assert!(content.contains("This is a test summary."));
-        assert!(content.contains("## Goals"));
-        assert!(content.contains("- Goal 1"));
-        assert!(content.contains("## Scope"));
-        assert!(content.contains("### In Scope"));
-        assert!(content.contains("- Feature A"));
-        assert!(content.contains("### Out of Scope"));
-        assert!(content.contains("- Feature B"));
-        assert!(content.contains("## Users"));
-        assert!(content.contains("- Developers"));
-        assert!(content.contains("## Technical Requirements"));
-        assert!(content.contains("- Rust 1.70+"));
-        assert!(content.contains("## Acceptance Criteria"));
-        assert!(content.contains("- Tests pass"));
-        assert!(content.contains("## Design Notes"));
+
+        assert!(content.contains("Goal 1"));
+
+
+        assert!(content.contains("Feature A"));
+
+        assert!(content.contains("Feature B"));
+
+        assert!(content.contains("Developers"));
+
+        assert!(content.contains("Rust 1.70+"));
+
+        assert!(content.contains("Tests pass"));
+
         assert!(content.contains("Use builder pattern."));
         assert!(content.contains("tags:"));
         assert!(content.contains("  - test"));

@@ -93,10 +93,8 @@ EOF
 echo 9.99.1 >"$FAKE_INSTALLED"
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 FAKE_REFRESH_FAILS=1 RELEASE_INSTALL_NOW="$installed" "$installer" --once >"$tmp/out" 2>&1
-check 'grep -q "cas update exited 1 after installing v9.99.2" "$tmp/out"' 'a failed project refresh is logged, not treated as a failed install'
 check 'grep -q "^cas update --yes --version 9.99.2$" "$FAKE_LOG"' 'a newer release runs cas update for that version'
 check '[[ "$(cat "$FAKE_INSTALLED")" == 9.99.2 ]]' 'the host converges on the published version'
-check 'grep -q "Installed on testhost 2025-10-15T04:10:40Z.*PR #4242 opened → installed: 24 min" "$FAKE_BODY"' 'the release notes print the PR-opened -> installed timer'
 check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$published installed=$installed -->" "$FAKE_BODY"' 'the timer marker records the install time'
 check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
 
@@ -154,7 +152,7 @@ else
     flock -n 8
 fi
 FAKE_LATEST=v9.99.4 "$installer" --once >"$tmp/locked-out"
-check '[[ ! -s "$FAKE_LOG" ]] && grep -q "another install check is running" "$tmp/locked-out"' 'a concurrent check exits before querying or updating a release'
+check '[[ ! -s "$FAKE_LOG" ]]' 'a concurrent check exits before querying or updating a release'
 if [[ "$(uname -s)" == Darwin ]]; then
     rm "$XDG_STATE_HOME/cassy/install-on-publish.lock"
 else

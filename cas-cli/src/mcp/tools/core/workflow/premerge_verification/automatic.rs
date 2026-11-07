@@ -363,6 +363,11 @@ if [ "$1" = login ]; then
     echo 'Logged in using ChatGPT'
     exit 0
 fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
+    while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
+    echo 'Task is already Closed' >&2
+    exit 1
+fi
 if [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ]; then
     echo 'old diagnostic excluded from bounded tail' >&2
     i=0; while [ "$i" -lt 12 ]; do echo 'retrying transport' >&2; i=$((i+1)); done
@@ -403,6 +408,7 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             "rejected",
             "supervisor_call",
             "malformed",
+            "late_error",
         ] {
             let dir = tempfile::tempdir().unwrap();
             let repo = dir.path();
@@ -465,28 +471,6 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     lane,
                 ))
                 .unwrap();
-            let candidate = core
-                .build_verification_candidate(
-                    &task,
-                    repo,
-                    "factory/worker",
-                    "epic/train",
-                    context_digest(&root, &task).unwrap(),
-                )
-                .unwrap();
-            let dispatch = cas_store::create_verification_dispatch_bound(
-                &root,
-                &task.id,
-                &owner.id,
-                &owner.id,
-                &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
-                chrono::Utc::now() + chrono::Duration::minutes(10),
-                false,
-            )
-            .unwrap();
-            let directory = root.join("verification-runs").join(&dispatch.id);
-            std::fs::create_dir_all(&directory).unwrap();
-            let output = directory.join("verdict.json");
             let response = if status == "malformed" {
                 "not a verdict".into()
             } else {
@@ -495,37 +479,59 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     "task_id":"cas-other","dispatch_id":"vdispatch-other", "verifier_capability":"forged",
                     "verification_type":"epic", "duration_ms":0}).to_string()
             };
-            let response_path = directory.join("provider-response.json");
+            let response_path = root.join("provider-response.json");
             std::fs::write(&response_path, response).unwrap();
+            let gate = root.join("verifier-gate");
+            env.set("CAS_TEST_VERIFIER_GATE", &gate);
             env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
             env.set("CAS_TEST_VERIFIER_STATUS", status);
-            // Exercise the dispatch handler used by worktree_merge, replacing
-            // only the external provider executable in this isolated fixture.
-            let handle = core
-                .emit_premerge_review_handoff(&task, &dispatch)
+            // cas-f2dc: drive the real merge refusal with automatic review on.
+            // It must name the running verifier, never tell the supervisor to
+            // spawn a second one.
+            let refusal = match core.prepare_premerge_verification(&task, repo, &source, "epic/train") {
+                Err(error) => error.message.to_string(),
+                Ok(_) => panic!("{status}: an unreviewed delivery cannot merge"),
+            };
+            assert!(refusal.contains("Do not spawn another verifier"), "{status}: {refusal}");
+            assert!(!refusal.contains("Spawn task-verifier"), "{status}: {refusal}");
+            let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id)
                 .unwrap()
-                .unwrap_or_else(|| {
-                    panic!(
-                        "launch notice: {:?}",
-                        crate::store::open_prompt_queue_store(&root)
-                            .unwrap()
-                            .peek_all(10)
-                            .unwrap()
-                    )
-                });
+                .unwrap();
+            let candidate = candidate_for_dispatch(&root, &dispatch).unwrap().unwrap();
+            let directory = root.join("verification-runs").join(&dispatch.id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let output = directory.join("verdict.json");
             assert!(
                 core.emit_premerge_review_handoff(&task, &dispatch)
                     .unwrap()
                     .is_none(),
                 "a retried merge cannot launch a second reviewer"
             );
-            handle.join().unwrap();
+            if status == "late_error" {
+                // The dispatch settles while the verifier is still in flight.
+                let tasks = core.open_task_store().unwrap();
+                let mut settled = tasks.get(&task.id).unwrap();
+                settled.status = cas_types::TaskStatus::Closed;
+                tasks.update(&settled).unwrap();
+            }
+            std::fs::write(&gate, "go").unwrap();
+            let child_done = || {
+                !core.open_agent_store().unwrap().list(None).unwrap().iter().any(|agent| {
+                    agent.metadata.get(OWNER_KEY) == Some(&dispatch.id)
+                        && agent.status == cas_types::AgentStatus::Active
+                })
+            };
+            for _ in 0..600 {
+                if child_done() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(child_done(), "{status}: verifier never finished");
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
             assert!(owns(&root, &claimed));
-            // cas-f2dc: a late verifier error on a settled dispatch stays silent.
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
-            assert_eq!(resolved(&core, &claimed), verdict.is_some(), "{status}");
-            if matches!(status, "malformed" | "harness_failed") {
+            if matches!(status, "malformed" | "harness_failed" | "late_error") {
                 assert!(verdict.is_none(), "failed transport cannot approve");
             } else {
                 let verdict = verdict.unwrap_or_else(|| {
@@ -564,6 +570,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     prompts.is_empty(),
                     "approval must not wake the supervisor: {prompts:?}"
                 );
+            } else if status == "late_error" {
+                // A late verifier error on a settled dispatch stays silent.
+                assert!(prompts.is_empty(), "no recovery notice: {prompts:?}");
             } else {
                 assert_eq!(
                     prompts.len(),

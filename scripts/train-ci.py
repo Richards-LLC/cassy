@@ -64,7 +64,7 @@ def prepared(repo, head):
     parent = git(repo, 'rev-parse', f'{head}^1')
     if source[1] != parent:
         return None
-    paths = git(repo, 'diff', '--name-only', parent, head).splitlines()
+    paths = git(repo, 'diff', '--no-renames', '--name-only', parent, head).splitlines()
     if 'cas-cli/Cargo.toml' not in paths:
         return None
     for path in paths:
@@ -202,7 +202,7 @@ def plumbing_only(repo, source, head):
     if subprocess.run(['git', 'merge-base', '--is-ancestor', source, head], cwd=repo,
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         return False
-    paths = git(repo, 'diff', '--name-only', source, head).splitlines()
+    paths = git(repo, 'diff', '--no-renames', '--name-only', source, head).splitlines()
     version_changed = False
     for path in paths:
         if path in MANIFESTS:

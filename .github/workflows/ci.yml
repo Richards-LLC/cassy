@@ -930,7 +930,7 @@ jobs:
           "${CARGO_TARGET_DIR:-target}/debug/cas" --version
           npm ci --prefix hub-web --no-audit --no-fund
           npm run --prefix hub-web build
-          git diff --exit-code -- hub-web/dist
+          test -z "$(git status --porcelain --untracked-files=all -- hub-web/dist)"
 
       - name: Report sccache stats
         if: always() && steps.classify-diff.outputs.rust-unaffected != 'true'

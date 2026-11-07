@@ -4974,21 +4974,21 @@ mod tests {
         assert_eq!(legacy.get("hub.transport_mode").as_deref(), Some("loopback"));
     }
 
-    /// GH #1643: soundwave's v4.4.0 update warned "inactive ... loopback-only"
+    /// GH #1643: soundwave's Nov 7 update warned "inactive ... loopback-only"
     /// while background publication was about to succeed. The update waits
     /// for the attempt to settle; a real failure is not waited on and warns.
     #[test]
     fn update_waits_for_pending_publication_before_warning_gh_1643() {
         let dir = crate::test_support::private_hub_tempdir();
         let paths = HubRuntimePaths::new(dir.path());
-        let mut pending = record("4.4.0", 42047, None);
+        let mut pending = record("9.99.0", 42047, None);
         pending.transport_warning = Some(PUBLICATION_PENDING.to_owned());
         paths.write_process_record(&pending).unwrap();
         let publisher = {
             let paths = paths.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_millis(300));
-                paths.write_process_record(&record("4.4.0", 42047, Some(443))).unwrap();
+                paths.write_process_record(&record("9.99.0", 42047, Some(443))).unwrap();
             })
         };
         let settled = settle_pending_publication(&paths, pending, Duration::from_secs(10));
@@ -4996,7 +4996,7 @@ mod tests {
         assert_eq!(settled.transport_warning, None);
         assert!(settled.public_url.is_some(), "the published URL is probed next");
 
-        let mut inactive = record("4.4.0", 42047, None);
+        let mut inactive = record("9.99.0", 42047, None);
         inactive.transport_warning = Some("tailscale CLI is unavailable".to_owned());
         let started = Instant::now();
         let settled = settle_pending_publication(&paths, inactive, Duration::from_secs(10));

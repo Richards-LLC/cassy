@@ -29,18 +29,38 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     ))
 }
 
-fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Option<String> {
+/// The account spawn_workers would launch (cas-c386). With no eligible Codex
+/// home, refuse with each home's state rather than blame the default home.
+fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<String>, String> {
     let provider = match cli {
         cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
         cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
-        _ => return None,
+        _ => return Ok(None),
     };
-    let accounts =
-        crate::account_registry::collect_for(provider, &dirs::home_dir()?, false).ok()?;
+    let Some(accounts) = dirs::home_dir()
+        .and_then(|home| crate::account_registry::collect_for(provider, &home, false).ok())
+    else {
+        return Ok(None);
+    };
     let policy = crate::account_selection::load_policy(Some(root));
-    crate::account_selection::launch_choice(&accounts, provider, chrono::Utc::now(), &policy)
-        .recommended
-        .map(|choice| choice.account.name.clone())
+    let selection =
+        crate::account_selection::launch_choice(&accounts, provider, chrono::Utc::now(), &policy);
+    if let Some(choice) = selection.recommended {
+        return Ok(Some(choice.account.name.clone()));
+    }
+    if provider != crate::accounts::Provider::Codex {
+        return Ok(None);
+    }
+    let homes = selection
+        .excluded
+        .iter()
+        .map(|(account, why)| format!("{}: {why}", account.folder.display()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "no eligible Codex account ({}); launch the task-verifier yourself",
+        if homes.is_empty() { "no accounts found" } else { &homes }
+    ))
 }
 
 fn command(root: &Path, output: &Path) -> Result<Command, String> {
@@ -52,7 +72,7 @@ fn command(root: &Path, output: &Path) -> Result<Command, String> {
     // authenticated named accounts. Choose the account spawn_workers would
     // (cas-c386), then use the checked launch environment supervisors use,
     // rather than inheriting the daemon's default home.
-    let account = launch_account(route.spec.cli, root);
+    let account = launch_account(route.spec.cli, root)?;
     let environment =
         crate::hub::launch_env::resolve_for_project(route.spec.cli, account.as_deref(), Some(root))
             .map_err(|e| e.to_string())?;

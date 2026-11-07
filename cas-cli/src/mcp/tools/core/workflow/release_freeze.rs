@@ -64,12 +64,10 @@ fn repo_of(root: &Path, train: &Task) -> Option<PathBuf> {
 pub(crate) fn active(root: &Path, train: &Task) -> Option<Freeze> {
     let freeze = freeze_of(train)?;
     let published = repo_of(root, train).is_some_and(|repo| {
-        cas_store::quality_events_between(root, None, None)
-            .unwrap_or_default()
-            .iter()
-            .filter(|event| event.project_id.is_empty() && matches!(event.payload, cas_store::QualityPayload::Release { .. }))
-            .filter_map(|event| event.release_version.as_deref())
-            .any(|version| is_ancestor(&repo, &freeze.tip, &format!("refs/tags/v{version}")))
+        cas_store::quality_release_events(root).unwrap_or_default().iter().any(|event| {
+            // The ledger stores the version as its `vX.Y.Z` tag name.
+            event.release_version.as_deref().is_some_and(|tag| is_ancestor(&repo, &freeze.tip, &format!("refs/tags/{tag}")))
+        })
     });
     (!published).then_some(freeze)
 }

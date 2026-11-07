@@ -176,7 +176,14 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
     let Ok(Some(remote)) = operations.fetch_merge_target(target) else {
         return Ok(());
     };
-    let local = git(repo, &["rev-parse", target])?;
+    // cas-bfa8: a train created on another machine has no local branch until
+    // the merge creates it. Origin is then the only copy, so nothing diverges.
+    let Ok(local) = git(
+        repo,
+        &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{target}^{{commit}}")],
+    ) else {
+        return Ok(());
+    };
     let ordered = |older: &str, newer: &str| {
         git(repo, &["merge-base", "--is-ancestor", older, newer]).is_ok()
     };
@@ -1329,6 +1336,32 @@ mod tests {
         run(repo, &["add", "-A"]);
         run(repo, &["commit", "-q", "-m", message]);
         run(repo, &["rev-parse", "HEAD"])
+    }
+
+    /// cas-bfa8: a train created on another machine exists only on origin
+    /// until the first merge into it. Its first candidate must resolve.
+    #[test]
+    fn origin_only_train_resolves_on_the_first_candidate_cas_bfa8() {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        let seed = dir.path().join("seed");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&seed).unwrap();
+        run(&seed, &["init", "-q", "-b", "main"]);
+        commit_file(&seed, "README.md", "base\n", "base");
+        run(&seed, &["clone", "-q", "--bare", seed.to_str().unwrap(), origin.to_str().unwrap()]);
+        run(&seed, &["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()]);
+        // The other machine creates the train after this clone was made.
+        run(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        let train = commit_file(&seed, "train.md", "train\n", "train");
+        run(&seed, &["push", "-q", "origin", "HEAD:refs/heads/epic/train"]);
+        refresh_review_target(&repo, "epic/train").unwrap();
+        assert_eq!(review_target(&repo, "epic/train").unwrap(), train);
+        // A local train that diverged from origin is still refused.
+        run(&repo, &["switch", "-q", "-c", "epic/train", "main"]);
+        commit_file(&repo, "local.md", "local\n", "local");
+        let refused = refresh_review_target(&repo, "epic/train").unwrap_err();
+        assert!(refused.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{refused}");
     }
 
     #[tokio::test]

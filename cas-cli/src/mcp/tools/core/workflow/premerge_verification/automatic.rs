@@ -460,12 +460,21 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                     .into();
             task.deliverables.factory_branch_anchor = Some(source.clone());
             task.deliverables.parked_branch = Some("factory/worker".into());
-            task.deliverables.work_target = Some(cas_types::WorkTarget {
-                repo_selector: "project:test".into(),
-                target_branch: "epic/train".into(),
-            });
             task.deliverables.parked_close_reason = Some("PASS fixture".into());
-            core.open_task_store().unwrap().add(&task).unwrap();
+            // The delivery lane the approved merge lands on is the parent epic's.
+            let mut epic = Task::new("cas-381f-epic".into(), "Train".into());
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.branch = Some("epic/train".into());
+            let tasks = core.open_task_store().unwrap();
+            tasks.add(&epic).unwrap();
+            tasks.add(&task).unwrap();
+            tasks
+                .add_dependency(&cas_types::Dependency::new(
+                    task.id.clone(),
+                    epic.id.clone(),
+                    cas_types::DependencyType::ParentChild,
+                ))
+                .unwrap();
             core.open_worktree_store()
                 .unwrap()
                 .add(&cas_types::Worktree::new(

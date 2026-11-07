@@ -2424,8 +2424,8 @@ pub(super) fn lifecycle_redelivery_decision(
 /// a content-dedup no-op), or the pass only nudged (`nudge_only`), and no PTY
 /// wake fired, then nothing reached the recipient on this pass. Recording `ok`
 /// there made one message look delivered ~20 times on 2026-10-05. Such a pass
-/// is `reoffered`. `ok` still marks the pass that wrote the copy or typed into
-/// the pane, which is the row ack waiters look for.
+/// is `reoffered`. Claude startup overrides this transport status with
+/// `awaiting_turn` until native evidence confirms its first turn.
 ///
 /// cas-f7b0 (communication contract v2, P1.2): a first write whose wake the
 /// gate deferred (`wake_deferred`, the recipient is busy) put the copy in the
@@ -2450,9 +2450,10 @@ pub(super) fn injection_event_status(
 /// Whether a `supervisor_injected` status means the body reached the
 /// recipient's transport, the condition `--wait-ack` style waiters poll for.
 /// A gate-deferred first write counts (cas-f7b0): the copy is in the inbox,
-/// which is all `ok` ever meant for those waiters.
+/// which is all those waiters require. `awaiting_turn` also proves transport,
+/// while explicitly withholding startup's turn acceptance.
 pub(crate) fn injection_status_reached_transport(status: &str) -> bool {
-    matches!(status, "ok" | "deferred")
+    matches!(status, "ok" | "deferred" | "awaiting_turn")
 }
 
 /// GH #751: Claude's Agent-Teams inbox path must not redeliver a pending row
@@ -3309,6 +3310,9 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 /// cas-badb (GH #1302): a recipient should start its turn within 30 seconds.
 const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// A startup receipt is final after this bounded native-turn observation.
+pub(super) const CLAUDE_STARTUP_TURN_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// cas-badb (GH #1302): a recipient that still has not started a turn is
 /// nudged again every [`LIFECYCLE_RENUDGE_INTERVAL`] (60s), this many times in
 /// all, and then flagged. Five nudges from the 30s first check reach about
@@ -3341,6 +3345,32 @@ pub(crate) struct NormalDeliveryProbe {
     /// cas-ac97: when the probe is next due for an evidence read. `None`
     /// means one observe window after delivery.
     pub(crate) next_check_at: Option<std::time::Instant>,
+    /// Claude's launch brief needs native turn evidence, even before a
+    /// transcript exists. Fence its single submit retry to this pane lifetime.
+    pub(crate) startup_pane: Option<std::time::Instant>,
+}
+
+/// Recognize our unsent startup input inside Claude's ruled composer. A modal,
+/// busy footer, another queue row or an empty prompt never authorizes Enter.
+fn startup_composer_unsent(rows: &[String], row_id: i64) -> bool {
+    let Some(input) = rows.iter().rposition(|row| row.trim_start().starts_with('❯')) else {
+        return false;
+    };
+    if input == 0 || !rows[input - 1].trim_start().starts_with("───") {
+        return false;
+    }
+    let Some(end) = rows.iter().enumerate().skip(input + 1)
+        .find_map(|(i, row)| row.trim_start().starts_with("───").then_some(i)) else {
+        return false;
+    };
+    let composer = rows[input..end].join("\n");
+    let text = composer.trim_start().trim_start_matches('❯').trim_start();
+    (text.starts_with(&format!("[cas #{row_id} ")) || text.starts_with("[Pasted text #"))
+        && !rows[end + 1..].iter().any(|row| {
+            let footer = row.to_ascii_lowercase();
+            footer.contains("enter to confirm") || footer.contains("esc to cancel")
+                || footer.contains("esc to interrupt") || footer.contains("press enter to continue")
+        })
 }
 
 /// cas-ac97 (GH #1153): what the recipient's harness says happened after a
@@ -5152,6 +5182,60 @@ impl FactoryDaemon {
         self.queue_jobs.normal_probe_jobs.forget_row(row_id);
     }
 
+    /// Startup can outpace Claude's first paste/submit boundary. Observe the
+    /// native turn off-loop, then retry only Enter against our own unsent input.
+    /// Echo, dispatch and a successful CR write are never turn evidence.
+    async fn resolve_startup_delivery_probe(
+        &mut self,
+        row_id: i64,
+        probe: NormalDeliveryProbe,
+        evidence: NormalDeliveryTurnEvidence,
+        now: Instant,
+    ) {
+        let current = self.app.mux.get(&probe.pane).filter(|pane|
+            Some(pane.spawned_at()) == probe.startup_pane && !pane.has_exited());
+        if current.is_none() || evidence == NormalDeliveryTurnEvidence::TurnStarted {
+            self.record_injection_event(
+                row_id, SUPERVISOR_STARTUP_SOURCE, &probe.target, &probe.pane,
+                if current.is_some() { "ok" } else { "failed" },
+                current.is_none().then(|| "startup pane exited or was replaced before a native turn was observed".into()),
+            );
+            self.normal_delivery_probes.remove(&row_id);
+            self.queue_jobs.normal_probe_jobs.forget_row(row_id);
+            return;
+        }
+        let pane = current.unwrap();
+        if now.saturating_duration_since(probe.delivered_at) >= CLAUDE_STARTUP_TURN_TIMEOUT {
+            self.record_injection_event(row_id, SUPERVISOR_STARTUP_SOURCE, &probe.target, &probe.pane,
+                "unconfirmed", Some("startup submit has no observed native turn; observation ended without resending the body".into()));
+            self.normal_delivery_probes.remove(&row_id);
+            self.queue_jobs.normal_probe_jobs.forget_row(row_id);
+            return;
+        }
+        let rows: Vec<_> = (0..pane.rows()).map(|row| pane.dump_row(row).unwrap_or_default()).collect();
+        if probe.nudges == 0 && evidence != NormalDeliveryTurnEvidence::RecipientBusy
+            && !pane.is_composer_dirty() && !self.app.mux.pane_inject_busy(&probe.pane)
+            && startup_composer_unsent(&rows, row_id)
+        {
+            let result = pane.write(b"\r").await;
+            if let Some(current) = self.normal_delivery_probes.get_mut(&row_id) {
+                current.nudges = 1;
+                current.nudge_sent_at = Some(now);
+            }
+            self.queue_jobs.stamp(self.app.cas_dir(), row_id, &probe.target,
+                super::prompt_queue_jobs::QueueStamp::WakeAttempt {
+                    attempt: if result.is_ok() { cas_store::WakeAttempt::Fired } else { cas_store::WakeAttempt::Failed },
+                    detail: Some(match result {
+                        Ok(()) => "startup input still unsent; retried submit once, native turn unconfirmed".into(),
+                        Err(error) => format!("startup submit retry failed; native turn unconfirmed: {error}"),
+                    }),
+                });
+        }
+        if let Some(current) = self.normal_delivery_probes.get_mut(&row_id) {
+            current.next_check_at = Some(now + Duration::from_secs(1));
+        }
+    }
+
     /// Retry a normal message whose PTY write never yielded any pane output,
     /// then surface the residual failure to the supervisor.  The retry uses
     /// `Mux::inject`, never `interrupt_and_inject`: this watchdog is evidence
@@ -5216,6 +5300,10 @@ impl FactoryDaemon {
                 continue;
             }
             let probe = prepared.probe;
+            if probe.startup_pane.is_some() {
+                self.resolve_startup_delivery_probe(row_id, probe, prepared.evidence, now).await;
+                continue;
+            }
             match prepared.activity {
                 RecipientActivity::Found => {
                     self.normal_delivery_probes.remove(&row_id);
@@ -8128,6 +8216,9 @@ impl FactoryDaemon {
             },report);
         }
         let target = &queued.target;
+        let claude_startup = queued.source == SUPERVISOR_STARTUP_SOURCE
+            && pane_target == self.app.supervisor_name()
+            && self.app.harness_for(&pane_target) == cas_mux::SupervisorCli::Claude;
         let mut success = false;
         // cas-7a01 (GH #155): persist what the wake nudge actually did
         // BEFORE branching on transport, so the record survives every
@@ -8213,12 +8304,12 @@ impl FactoryDaemon {
                         &queued.source,
                         &queued.target,
                         &pane_target,
-                        injection_event_status(
+                        if claude_startup && !wake_deferred { "awaiting_turn" } else { injection_event_status(
                             prior_copy_unread,
                             nudge_only,
                             wake_deferred,
                             pass_wake,
-                        ),
+                        ) },
                         None,
                     );
                 }
@@ -8540,7 +8631,7 @@ impl FactoryDaemon {
             // proves transport.  Preserve its output baseline after
             // retiring prior row state so this fresh watchdog probe is not
             // immediately forgotten.
-            if !queued.urgent && queued.target != self.app.supervisor_name() {
+            if claude_startup || (!queued.urgent && queued.target != self.app.supervisor_name()) {
                 let normal_delivery_pane = if queued.target == "supervisor" {
                     self.app.supervisor_name().to_string()
                 } else {
@@ -8562,7 +8653,8 @@ impl FactoryDaemon {
                         prompt: queued.prompt.clone(),
                         nudge_sent_at: None,
                         nudges: 0,
-                        next_check_at: None,
+                        next_check_at: claude_startup.then(|| Instant::now() + Duration::from_secs(1)),
+                        startup_pane: claude_startup.then(|| self.app.mux.get(&pane_target).unwrap().spawned_at()),
                     },
                 );
             }
@@ -13664,6 +13756,24 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_startup_submit_owns_only_unsent_composer_cas_aa10() {
+        for (composer, footer, expected) in [
+            ("❯ [cas #42 agent-authored 5s first] startup", "", true),
+            ("❯ [Pasted text #1 +120 lines]", "", true),
+            ("❯ [cas #41 agent-authored 5s first] other input", "", false),
+            ("❯ operator draft", "", false),
+            ("❯", "", false),
+            ("❯ [cas #42 agent-authored 5s first] startup", "Enter to confirm · Esc to cancel", false),
+            ("❯ [cas #42 agent-authored 5s first] startup", "esc to interrupt", false),
+        ] {
+            let rows = vec!["────────────────────".into(), composer.into(), "────────────────────".into(), footer.into()];
+            assert_eq!(super::startup_composer_unsent(&rows, 42), expected, "{rows:?}");
+        }
+        assert!(!super::startup_composer_unsent(&["❯ [cas #42 first] shell echo".into()], 42));
+        assert!(super::injection_status_reached_transport("awaiting_turn"));
+    }
+
     #[test]
     fn cleanup_warns_supervisor_once_after_bound_cas_af63() {
         use crate::ui::factory::app::render_and_ops::epic_workers::{WorkerCleanupJob, CrashCleanupOutcome, WORKER_CLEANUP_WARN_AFTER};
@@ -21928,6 +22038,7 @@ mod gh_1153_idle_pty_delivery_tests {
                 nudge_sent_at: None,
                 nudges: 0,
                 next_check_at: None,
+                startup_pane: None,
             },
         );
         Fixture {

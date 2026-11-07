@@ -290,6 +290,7 @@ pub(crate) fn observe(root: &Path, task_id: &str) -> Result<()> {
 }
 
 pub(crate) fn ensure_staffing_allowed(root: &Path, task_id: &str) -> Result<()> {
+    crate::mcp::tools::core::workflow::release_freeze::check_staffing(root, task_id)?;
     if let Some((epic, pause)) = refresh_at(root, task_id, Utc::now())? {
         anyhow::bail!(pause.message(&epic));
     }

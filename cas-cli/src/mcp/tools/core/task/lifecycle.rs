@@ -1432,17 +1432,34 @@ impl CasCore {
         // target, the task joins the open release train rather than the
         // integration branch (cas-1896). An explicit target_branch is the
         // hotfix route.
-        let (release_train, release_train_receipt) = if task_type != TaskType::Epic
-            && epic_id.is_none()
-            && active_binding.is_none()
-            && target_repo.is_none()
-            && target_branch.is_none()
+        // A task aimed at a frozen train joins the next one (cas-2f4d);
+        // only a release repair stays on the frozen train.
+        let frozen_epic = epic_id.as_deref()
+            .filter(|_| task_type != TaskType::Epic
+                && !labels.iter().any(|label| label == crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL))
+            .and_then(|epic| task_store.get(epic).ok())
+            .filter(|epic| crate::mcp::tools::core::workflow::release_freeze::active(&self.cas_root, epic).is_some())
+            .map(|epic| epic.id);
+        let (release_train, mut release_train_receipt) = if frozen_epic.is_some()
+            || (task_type != TaskType::Epic
+                && epic_id.is_none()
+                && active_binding.is_none()
+                && target_repo.is_none()
+                && target_branch.is_none())
         {
             self.release_train_for_new_task(task_store.as_ref()).await
         } else {
             (None, String::new())
         };
-        let epic_id = epic_id.or_else(|| release_train.clone());
+        let epic_id = match (&frozen_epic, &release_train) {
+            (Some(frozen), Some(next)) => {
+                release_train_receipt.push_str(&format!(
+                    "\n\nTRAIN FROZEN: {frozen} is frozen for release, so this task joins the next train {next}."
+                ));
+                Some(next.clone())
+            }
+            _ => epic_id.or_else(|| release_train.clone()),
+        };
 
         // Set when the new task overlaps a sibling under its own epic; shown
         // in the create receipt, never a reason to refuse the write.

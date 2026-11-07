@@ -112,7 +112,8 @@ fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
 
 /// Checked at target resolution and again under the delivery-target lock.
 /// Release tracking takes that same lock before persisting the cut marker.
-pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), String> {
+/// A frozen train (cas-2f4d) admits only repairs of its red.
+pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {
         if !is_cut_train(&train) {
@@ -127,7 +128,12 @@ pub(crate) fn check_cut_merge(cas_root: &Path, target: &str) -> Result<(), Strin
             train.id
         ));
     }
-    Ok(())
+    crate::mcp::tools::core::workflow::release_freeze::check_merge(cas_root, target, task_id)
+}
+
+/// A frozen train keeps its own work but takes no new tasks (cas-2f4d).
+fn accepts_no_work(train: &Task) -> bool {
+    crate::mcp::tools::core::workflow::release_freeze::freeze_of(train).is_some()
 }
 
 /// Exclusive lock over train lookup, landing and opening (the
@@ -183,7 +189,7 @@ impl CasCore {
         let mut receipt = String::new();
         for train in active_trains(store, &integration) {
             if !landed(store, &repo, &train, &integration) {
-                if is_cut_train(&train) {
+                if is_cut_train(&train) || accepts_no_work(&train) {
                     continue;
                 }
                 return (
@@ -239,7 +245,7 @@ impl CasCore {
                 ),
             );
         }
-        match open_trains(store, &integration).into_iter().next() {
+        match open_trains(store, &integration).into_iter().find(|train| !accepts_no_work(train)) {
             Some(train) => (
                 Some(train.id.clone()),
                 format!(

@@ -89,7 +89,43 @@ pub(crate) fn guard(
     )
 }
 
-pub(crate) fn notify(root: &Path, epic: &cas_types::Task, state: &Value) -> Result<()> {
+/// A green full set at a new tip after a red (or with no earlier verdict) is
+/// the moment a release becomes cuttable: wake the supervisor once per tip,
+/// through the same `release_cut_ready` path `notify_train_cuts` uses.
+fn notify_green(root: &Path, epic: &cas_types::Task, previous: Option<&Value>, state: &Value) -> Result<()> {
+    let Some(head) = state["head"].as_str().filter(|_| state["outcome"] == "PASS") else {
+        return Ok(());
+    };
+    let after_red_or_nothing = previous.is_none_or(|previous| {
+        previous["last_green"].as_str() != Some(head)
+            && (previous["red_since"].is_string() || previous["last_green"].is_null())
+    });
+    if !after_red_or_nothing {
+        return Ok(());
+    }
+    crate::supervisor_notices::release_action(
+        root,
+        epic,
+        crate::supervisor_notices::ReleaseNoticePhase::CutReady,
+        head,
+        &format!(
+            "Train {} is green at {head}, run {}: cut it. Cassy never cuts on its own.",
+            epic.id,
+            state["run_id"].as_str().unwrap_or("unknown")
+        ),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn notify(
+    root: &Path,
+    epic: &cas_types::Task,
+    previous: Option<&Value>,
+    state: &Value,
+) -> Result<()> {
+    if state["outcome"] == "PASS" {
+        return notify_green(root, epic, previous, state);
+    }
     if state["outcome"] != "FAIL" {
         return Ok(());
     }
@@ -160,6 +196,9 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 .fetch_merge_target(branch)?
                 .or_else(|| git.resolve_commit(branch))
                 .context("train target missing")?;
+            let previous = std::fs::read(directory(root, &epic.id)?.join("state.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
             let timeout = Duration::from_secs(90);
             let mut command = Command::new("python3");
             command
@@ -181,30 +220,42 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
                 String::from_utf8_lossy(&output.stderr)
             );
             let mut state: Value = serde_json::from_slice(&output.stdout)?;
-            // Merge subjects are not guaranteed to carry task IDs. Use the
-            // same durable merge observations that release tracking consumes.
-            if let Some(range) = state["merge_range"].as_array_mut() {
-                let observed = cas_store::observed_delivery_merges_into(root, branch)?;
-                for merge in range {
-                    let sha = merge["sha"].as_str().unwrap_or_default().to_owned();
-                    if let Some(tasks) = merge["tasks"].as_array_mut() {
-                        for delivery in observed.iter().filter(|row| row.merge_commit_sha == sha) {
-                            let task = Value::String(delivery.task_id.clone());
-                            if !tasks.contains(&task) {
-                                tasks.push(task);
-                            }
-                        }
-                    }
-                }
-            }
-            record_timings(root, &epic.id, &state);
-            notify(root, &epic, &state)
+            scan_result(root, &epic, branch, previous.as_ref(), &mut state)
         })();
         if let Err(error) = result {
             tracing::warn!(train=%epic.id, %error, "train CI scan deferred");
         }
     }
     Ok(())
+}
+
+/// Everything after the CI script: tie merges to tasks, record timings, notify.
+/// `previous` is `state.json` as it stood before this scan.
+fn scan_result(
+    root: &Path,
+    epic: &cas_types::Task,
+    branch: &str,
+    previous: Option<&Value>,
+    state: &mut Value,
+) -> Result<()> {
+    // Merge subjects are not guaranteed to carry task IDs. Use the
+    // same durable merge observations that release tracking consumes.
+    if let Some(range) = state["merge_range"].as_array_mut() {
+        let observed = cas_store::observed_delivery_merges_into(root, branch)?;
+        for merge in range {
+            let sha = merge["sha"].as_str().unwrap_or_default().to_owned();
+            if let Some(tasks) = merge["tasks"].as_array_mut() {
+                for delivery in observed.iter().filter(|row| row.merge_commit_sha == sha) {
+                    let task = Value::String(delivery.task_id.clone());
+                    if !tasks.contains(&task) {
+                        tasks.push(task);
+                    }
+                }
+            }
+        }
+    }
+    record_timings(root, &epic.id, state);
+    notify(root, epic, previous, state)
 }
 
 /// Durations already measured by CI, recorded once per immutable run and train.
@@ -270,6 +321,44 @@ fn record_timings(root: &Path, train: &str, state: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nov 7: red at one tip, then the repair's green tip woke nobody.
+    #[test]
+    fn green_after_red_wakes_the_supervisor_once_per_tip() {
+        use cas_types::{Agent, AgentRole};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
+        owner.factory_session = Some("session".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let mut epic = cas_types::Task::new("cas-train".into(), "Train".into());
+        epic.epic_verification_owner = Some(owner.id.clone());
+        let receipt = |outcome: &str, head: &str, run: &str, previous: Option<&Value>| {
+            let mut state = serde_json::json!({"outcome": outcome, "head": head, "run_id": run, "run_attempt": 1,
+                "merge_range": [], "failures": [], "last_green": previous.and_then(|p| p["last_green"].clone().as_str().map(String::from))});
+            if outcome == "PASS" { state["last_green"] = head.into(); } else { state["red_since"] = head.into(); }
+            scan_result(&root, &epic, "factory/train", previous, &mut state).unwrap();
+            state
+        };
+        let wakes = || {
+            crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+                .into_iter().filter(|row| row.prompt.contains("release_cut_ready")).collect::<Vec<_>>()
+        };
+
+        let first_green = receipt("PASS", "aaaa", "10", None);
+        assert_eq!(wakes().len(), 1, "no earlier verdict: the first green wakes");
+        let red = receipt("FAIL", "bbbb", "11", Some(&first_green));
+        assert_eq!(wakes().len(), 1, "red is train_ci_red, not a cut notice");
+        let green = receipt("PASS", "cccc", "12", Some(&red));
+        assert_eq!(wakes().len(), 2);
+        assert!(wakes()[1].prompt.contains("cccc") && wakes()[1].prompt.contains("run 12"), "{}", wakes()[1].prompt);
+        receipt("PASS", "cccc", "12", Some(&green));
+        let next_green = receipt("PASS", "dddd", "13", Some(&green));
+        assert_eq!(wakes().len(), 2, "a repeat, or a green with no red before it, wakes nobody");
+        receipt("PASS", "eeee", "14", Some(&next_green));
+        assert_eq!(wakes().len(), 2);
+    }
 
     #[test]
     fn full_gate_timings_reach_the_friction_ledger_once_cas_8413() {

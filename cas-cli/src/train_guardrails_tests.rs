@@ -176,6 +176,14 @@ fn red_or_missing_train_tip_verdict_sends_no_cut_notice_gh_1635() {
     tip_receipt(repo, &cas_dir, "PASS");
     notify_train_cuts(&cas_dir, &none, late).unwrap();
     assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 1, "green at the current tip notifies");
+
+    // The max-age notice is per tip, not per train: a changed tip that goes green notifies again.
+    merge_child(repo, &cas_dir, "cas-d", &[]);
+    tip_receipt(repo, &cas_dir, "PASS");
+    for _ in 0..2 {
+        notify_train_cuts(&cas_dir, &none, late).unwrap();
+    }
+    assert_eq!(sq.peek("sup-id", 10).unwrap().len(), 2, "a new green tip notifies once more");
 }
 
 #[test]

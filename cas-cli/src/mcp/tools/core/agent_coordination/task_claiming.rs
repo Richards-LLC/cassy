@@ -468,6 +468,17 @@ impl CasCore {
         }
     }
 
+    /// Released work leaves its worker's queue (cas-526e). The release has
+    /// committed, so a queue failure is reported rather than returned.
+    async fn released_queue_notice(&self, id: &str, worker: Option<&str>) -> String {
+        let Some(worker) = worker else { return String::new() };
+        match self.drop_released_from_queue(id, worker).await {
+            Ok(Some(note)) => format!("\n{note}"),
+            Ok(None) => String::new(),
+            Err(e) => format!("\nTask queue not updated: {}", e.message),
+        }
+    }
+
     /// Release a claimed task
     /// Release a task lease, with auto-recovery for dead-session orphans.
     ///
@@ -573,8 +584,9 @@ impl CasCore {
                         )),
                         data: None,
                     })?;
+                    let queue = self.released_queue_notice(&req.task_id, prior_assignee.as_deref()).await;
                     Ok(Self::success(format!(
-                        "Released task: {} (status reset from InProgress to Open){qa_warning}",
+                        "Released task: {} (status reset from InProgress to Open){qa_warning}{queue}",
                         req.task_id
                     )))
                 } else {
@@ -636,8 +648,9 @@ impl CasCore {
                                 )),
                                 data: None,
                             })?;
+                            let queue = self.released_queue_notice(&req.task_id, prior_assignee.as_deref()).await;
                             return Ok(Self::success(format!(
-                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open){qa_warning}",
+                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open){qa_warning}{queue}",
                                 req.task_id, prior_status
                             )));
                         }

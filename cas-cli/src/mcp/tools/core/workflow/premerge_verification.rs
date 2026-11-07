@@ -1357,6 +1357,11 @@ mod tests {
         run(&seed, &["push", "-q", "origin", "HEAD:refs/heads/epic/train"]);
         refresh_review_target(&repo, "epic/train").unwrap();
         assert_eq!(review_target(&repo, "epic/train").unwrap(), train);
+        // A local train that diverged from origin is still refused.
+        run(&repo, &["switch", "-q", "-c", "epic/train", "main"]);
+        commit_file(&repo, "local.md", "local\n", "local");
+        let refused = refresh_review_target(&repo, "epic/train").unwrap_err();
+        assert!(refused.starts_with("TARGET_DIVERGED_FROM_ORIGIN"), "{refused}");
     }
 
     #[tokio::test]

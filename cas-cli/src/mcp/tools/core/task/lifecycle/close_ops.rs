@@ -10000,6 +10000,11 @@ impl CasCore {
 
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Some(repository) = dispatch.repository.as_ref()
+                    && !reviewed_delivery.as_ref().is_some_and(|reviewed| {
+                        reviewed.dispatch == dispatch.id && reviewed.landed_proof_is_covered(
+                            &self.cas_root, &close_project_root, &task, &resolved_parent_branch,
+                        )
+                    })
                     && crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(
                         repository,
                     )
@@ -29480,7 +29485,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "same-line-evolved", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29498,6 +29503,12 @@ mod merge_state_gate_tests {
             git(p, &["add", "seed.txt"]);
             std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
             std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
+            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+                let hook = p.join("cas-cli/src/hooks/probe.rs");
+                std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+                std::fs::write(hook, "// reviewed enforcement change\n").unwrap();
+                git(p, &["add", "cas-cli/src/hooks/probe.rs"]);
+            }
             git(p, &["add", ".gitignore", "second.rs"]);
             git(p, &["commit", "-q", "-m", "fix(cas-fee3): delivery before queue landing"]);
             let source = head_sha(p);
@@ -29528,6 +29539,18 @@ mod merge_state_gate_tests {
             task.deliverables.parked_branch = Some("factory/worker".into());
             task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
             tasks.add(&task).unwrap();
+            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+                task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                    work_target: task.deliverables.work_target.clone().unwrap(),
+                    assignee: "worker".into(), branch: "factory/worker".into(),
+                    base_sha: resolve_branch_sha(p, &format!("{source}^1")).unwrap(),
+                });
+                task.deliverables.parked_close_reason = Some("Reviewed delivery; scoped proof deferred to fixture assembly".into());
+                tasks.update(&task).unwrap();
+                assert_eq!(super::super::review_tier::tier_for_delivery(&task, p).unwrap().tier,
+                    super::super::review_tier::VerificationTier::Adversarial);
+                std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'cas-192b0-fixture'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n[qa]\nevidence_gate = false\nindependent_pass = false\n").unwrap();
+            }
             let core = CasCore::with_daemon(root.clone(), None, None);
             core.set_agent_id_for_testing("supervisor-id".into());
             let mut reviewed_task = task.clone();
@@ -29535,7 +29558,7 @@ mod merge_state_gate_tests {
                 reviewed_task.id = "cas-other".into(); tasks.add(&reviewed_task).unwrap();
             }
             let candidate = core.build_completion_candidate(&reviewed_task, p, "factory/worker", "main").unwrap();
-            let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
+            let mut dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
             let recorded = core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
                 task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed premerge candidate before queue publication".into(), confidence: Some(1.0),
                 issues: None, files_reviewed: Some("delivery.rs,second.rs".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
@@ -29562,7 +29585,15 @@ mod merge_state_gate_tests {
             let landed = head_sha(p);
             assert_ne!(landed, candidate.proof.head_commit);
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
-            if row == "same-line-evolved" {
+            if row == "batch-target-proof" {
+                let proof = super::super::repository_proof::capture_repository_proof_at_target(p, "main", vec![source.clone()]).unwrap();
+                dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(proof), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
+                core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
+                    task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed the landed target before later sibling work".into(), confidence: Some(1.0),
+                    issues: None, files_reviewed: Some("delivery.rs".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+                })).await.unwrap();
+            }
+            if matches!(row, "same-line-evolved" | "batch-target-proof") {
                 std::fs::write(p.join("delivery.rs"), "// later main work replaces the delivered line\n").unwrap();
                 git(p, &["add", "delivery.rs"]);
                 git(p, &["commit", "-q", "-m", "ordinary later evolution of the same delivered line"]);
@@ -29577,15 +29608,32 @@ mod merge_state_gate_tests {
                 Err(_) if row == "foreign-candidate" => {},
                 Ok(Some(reviewed)) => assert_eq!(
                     reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    matches!(row, "queue-landed" | "same-line-evolved"), "containment guard: {row}",
+                    matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
                 ),
                 _ => panic!("missing task-bound review: {row}"),
+            }
+            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+                let ledger = root.join("release-ledger.md");
+                std::fs::write(&ledger, "# Release review\ncas-fee3 PASS\n").unwrap();
+                let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+                let context = crate::artifacts::PublishContext {
+                    store: &artifacts,
+                    roots: crate::artifacts::paths::PublishRoots::new(&root, &p.join("artifacts"), &task.id),
+                    task_id: task.id.clone(), cloud: None,
+                };
+                let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+                let receipt = crate::qa_batch::prepare_receipt(&root, &agents.get("supervisor-id").unwrap(), "supervisor-id", &[task.id.clone()], &head_sha(p), &artifact.id, &ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
+                cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
+                let report = core.close_release_covered_deliveries(&receipt).await;
+                assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{row}: {report}");
+                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
+                continue;
             }
             let mut req = base_req(&task.id); req.commit_receipt = Some(landed);
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "same-line-evolved"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }

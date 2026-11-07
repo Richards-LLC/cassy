@@ -123,11 +123,44 @@ impl ReviewedDelivery {
                 first
             }
         };
+        // The verifier reviewed the merged candidate, including target edits
+        // beside source hunks. Its exact tree at the first landing is stronger
+        // evidence than reverse-applying the source's older patch context.
+        if resolve_branch_sha(repo, &format!("{landing}^{{tree}}")).as_deref()
+            == Some(candidate.tree.as_str())
+        {
+            return true;
+        }
         // Prove the complete reviewed patch at that immutable landing. Later
         // ordinary edits to the same lines do not undo a legitimate delivery.
         // A private index keeps HEAD, the worktree and the real index untouched.
         reverse_delivery_patch_applies_to_tree(repo, &base, &candidate.source_sha, &landing, None)
             .unwrap_or(false)
+    }
+
+    /// A batch receipt may cover later sibling edits after this exact
+    /// committed target proof landed. It cannot bless a dirty worktree proof,
+    /// an earlier anchor in place of a correction, or an unlanded review.
+    pub(super) fn landed_proof_is_covered(
+        &self,
+        root: &std::path::Path,
+        repo: &std::path::Path,
+        task: &Task,
+        target: &str,
+    ) -> bool {
+        let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() else {
+            return false;
+        };
+        self.repository.target_branch.is_some()
+            && self.repository.anchor_commits.iter().any(|bound| bound == anchor)
+            && super::super::repository_proof::capture_repository_proof_at_target(
+                repo, &self.repository.head_commit, self.repository.anchor_commits.clone(),
+            ).is_ok_and(|bound| bound.state_digest == self.repository.state_digest)
+            && self.merge_refusal(repo, task, target, None).is_none()
+            && (crate::qa_batch::satisfying_release_verdict(root, task, repo, target, anchor)
+                .is_ok_and(|receipt| receipt.is_some())
+                || crate::qa_batch::satisfying_receipt(root, task, repo, target, anchor)
+                    .is_ok_and(|receipt| receipt.is_some()))
     }
 
     pub(super) fn merge_refusal(

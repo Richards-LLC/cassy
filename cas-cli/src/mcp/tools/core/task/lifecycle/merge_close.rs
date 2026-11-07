@@ -595,7 +595,7 @@ impl CasCore {
     /// release review or a dedicated task review. Returns the report for the receipt's response.
     pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
         let recording_verdict = receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA;
-        let (mut closed, mut already, mut own_review_rows, mut held) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut closed, mut already, mut held) = (Vec::new(), Vec::new(), Vec::new());
         let Ok(store) = self.open_task_store() else {
             return "\nNo delivery was closed: the task store is unreadable; retry task close.".to_string();
         };
@@ -630,14 +630,9 @@ impl CasCore {
                 }
             };
             let own_review = super::review_tier::own_review(&self.cas_root, &task, &repo);
-            if let Some(review) = own_review.as_ref() && recording_verdict {
-                record(&format!("keeps its own review: {review}"));
-                own_review_rows.push(format!("- {task_id}: {review}"));
-                continue;
-            }
             // cas-bc15: after request_changes the retired anchor is the delivery.
             let anchor = crate::qa_batch::delivery_anchor(&repo, &task).unwrap_or_default();
-            let verdict = match if own_review.is_some() { Ok(None) } else { crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) } {
+            let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {
                 Ok(Some(verdict)) => Some(verdict),
                 Ok(None) if recording_verdict => {
                     hold("this verdict does not cover the delivery's current anchor; review it again");
@@ -649,14 +644,15 @@ impl CasCore {
                     continue;
                 }
             };
-            let outcome = if let Some(verdict) = verdict.as_ref() {
+            let outcome = if let Some(verdict) = verdict.as_ref().filter(|_| own_review.is_none()) {
                 self.close_after_batch_receipt(task_id, verdict, Some(&verdict.id)).await
             } else if task.status == TaskStatus::AwaitingMerge
                 && task.deliverables.effective_merge_ci_admission() != cas_types::MergeCiAdmission::Override
             {
                 // QA attests the walk, never the review. Ordinary close may
                 // finish a dedicated review or report the missing release verdict.
-                match crate::qa_batch::satisfying_receipt(&self.cas_root, &task, &repo, &target, &anchor) {
+                match crate::qa_batch::satisfying_receipt(&self.cas_root, &task, &repo, &target, &anchor)
+                    .map(|qa| qa.or(verdict)) {
                     Ok(Some(qa)) => self.close_after_batch_receipt(task_id, &qa, None).await,
                     Ok(None) => CassyMergeClose::Held("Batch QA receipt no longer covers the current delivery anchor; record current QA evidence before close.".into()),
                     Err(error) => CassyMergeClose::Held(error),
@@ -688,9 +684,6 @@ impl CasCore {
         }
         if !already.is_empty() {
             report.push_str(&format!("\nAlready closed: {}.", already.join(", ")));
-        }
-        if !own_review_rows.is_empty() {
-            report.push_str(&format!("\nKeeps its own review ({}):\n{}", own_review_rows.len(), own_review_rows.join("\n")));
         }
         if !held.is_empty() {
             report.push_str(&format!("\nStill held ({}):\n{}", held.len(), held.join("\n")));

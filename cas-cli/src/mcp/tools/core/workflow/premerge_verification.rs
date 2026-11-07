@@ -562,13 +562,8 @@ impl Approval {
             return Err("candidate promotion does not match the approved proof".into());
         }
         candidate.verify_landing(&record.landed_sha)?;
-        let mut published = repository_proof::capture_repository_proof_at_target(
-            &candidate.repository,
-            &record.landed_sha,
-            vec![candidate.source_sha.clone()],
-        )?;
-        published.target_branch = Some(candidate.target_branch.clone());
-        repository_proof::verify_repository_proof(&published).map_err(|error| error.to_string())?;
+        // The immutable landing was just checked against the approved tree.
+        // Later edits on the same target do not undo that published review.
         let reachable = [
             &candidate.target_branch,
             &format!("origin/{}", candidate.target_branch),

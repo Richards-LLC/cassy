@@ -159,7 +159,7 @@ pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> R
                 &format!("{} is marked {REPAIR_LABEL}, but no red is recorded at or after the frozen tip", task.id),
             ));
         };
-        let line = format!("FREEZE REPAIR: {} merged into frozen {} under {red}", task.id, train.id);
+        let line = format!("FREEZE REPAIR: {} admitted into frozen {} under {red}", task.id, train.id);
         if !train.notes.contains(&line) {
             store.append_note(&train.id, &line).map_err(|error| error.to_string())?;
         }
@@ -431,7 +431,7 @@ mod tests {
         assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "red admits repairs only");
         assert!(check_staffing(&root, "cas-feat").is_err());
         let notes = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
-        assert!(notes.contains("FREEZE REPAIR: cas-fix"), "{notes}");
+        assert!(notes.contains("FREEZE REPAIR: cas-fix admitted into frozen cas-tr"), "{notes}");
 
         git(repo, &["merge", "-q", "--no-ff", lane, "-m", "release"]);
         check_merge(&root, lane, Some("cas-feat")).unwrap();

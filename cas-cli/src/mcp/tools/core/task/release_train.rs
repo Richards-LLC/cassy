@@ -463,7 +463,7 @@ mod tests {
         git(&root, &["remote", "set-url", "origin", &bare.path().to_string_lossy()]);
         git(&root, &["push", "-q", "origin", "main"]);
         std::fs::create_dir_all(root.join(".cas")).unwrap();
-        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\nepic_base_branch = \"main\"\n").unwrap();
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();

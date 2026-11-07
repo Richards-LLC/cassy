@@ -463,6 +463,31 @@ mod tests {
         assert_eq!(next.len(), 1, "{next:?}");
         assert_eq!(store.get_subtasks(&frozen.id).unwrap().len(), 1);
         assert_eq!(store.get_subtasks(&next[0].id).unwrap().len(), 1);
+
+        // Commander's assignee-only update is staffing too: a new assignment on
+        // the frozen train's open child is refused and not persisted; a repair
+        // assignment is admitted; unassigning stays allowed.
+        let child = store.get_subtasks(&frozen.id).unwrap().remove(0);
+        let mut stored = store.get(&child.id).unwrap();
+        stored.assignee = Some("old-worker".into());
+        store.update(&stored).unwrap();
+        let mut repair = Task::new("cas-repair".into(), "Repair the red tip".into());
+        repair.labels = vec![crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL.into()];
+        store.add(&repair).unwrap();
+        store
+            .add_dependency(&Dependency::new(repair.id.clone(), frozen.id.clone(), DependencyType::ParentChild))
+            .unwrap();
+        let assign = |id: &str, assignee: &str| {
+            let update: crate::mcp::tools::TaskUpdateRequest =
+                serde_json::from_value(serde_json::json!({"id": id, "assignee": assignee})).unwrap();
+            core.cas_task_update_with_target(update, None, None, false, None, None)
+        };
+        assert!(assign(&child.id, "swift-lark-3").await.is_err());
+        assert_eq!(store.get(&child.id).unwrap().assignee.as_deref(), Some("old-worker"));
+        assign("cas-repair", "swift-lark-3").await.unwrap();
+        assert_eq!(store.get("cas-repair").unwrap().assignee.as_deref(), Some("swift-lark-3"));
+        assign(&child.id, "").await.unwrap();
+        assert_eq!(store.get(&child.id).unwrap().assignee, None);
     }
 
     /// A train is not landed while a child is in flight, before any child

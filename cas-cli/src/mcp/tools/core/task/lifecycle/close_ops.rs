@@ -29702,10 +29702,11 @@ mod merge_state_gate_tests {
         sibling.status = TaskStatus::Closed;
         tasks.update(&sibling).unwrap();
         let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let handoff = response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff)));
         let text = format!("{response:?}");
         let parked = tasks.get(&task.id).unwrap();
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
-        assert!(text.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff) && text.contains(&b), "{text}");
+        assert!(handoff && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
         assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));

@@ -823,6 +823,7 @@ pub fn operator_only_cas_invocation(args: &[String]) -> Option<&'static str> {
     match cli.command? {
         Commands::Hub(hub) => match hub.command? {
             HubCommands::Pair(_) => Some("Pairing a Commander device (`cas hub pair`)"),
+            HubCommands::Preview(_) => Some("Pairing a Commander preview (`cas hub preview`)"),
             HubCommands::Authorize(_) => {
                 Some("Authorizing a Commander pairing (`cas hub authorize`)")
             }

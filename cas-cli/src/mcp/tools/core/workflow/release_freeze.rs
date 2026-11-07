@@ -64,7 +64,7 @@ fn repo_of(root: &Path, train: &Task) -> Option<PathBuf> {
 pub(crate) fn active(root: &Path, train: &Task) -> Option<Freeze> {
     let freeze = freeze_of(train)?;
     let published = repo_of(root, train).is_some_and(|repo| {
-        cas_store::quality_events_between(root, Some(freeze.at), None)
+        cas_store::quality_events_between(root, None, None)
             .unwrap_or_default()
             .iter()
             .filter(|event| event.project_id.is_empty() && matches!(event.payload, cas_store::QualityPayload::Release { .. }))

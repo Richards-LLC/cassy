@@ -1331,6 +1331,27 @@ mod tests {
         run(repo, &["rev-parse", "HEAD"])
     }
 
+    /// cas-bfa8: a train created on another machine exists only on origin
+    /// until the first merge into it. Its first candidate must resolve.
+    #[test]
+    fn origin_only_train_resolves_on_the_first_candidate_cas_bfa8() {
+        let dir = tempfile::tempdir().unwrap();
+        let origin = dir.path().join("origin.git");
+        let seed = dir.path().join("seed");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&seed).unwrap();
+        run(&seed, &["init", "-q", "-b", "main"]);
+        commit_file(&seed, "README.md", "base\n", "base");
+        run(&seed, &["clone", "-q", "--bare", seed.to_str().unwrap(), origin.to_str().unwrap()]);
+        run(&seed, &["clone", "-q", origin.to_str().unwrap(), repo.to_str().unwrap()]);
+        // The other machine creates the train after this clone was made.
+        run(&seed, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        let train = commit_file(&seed, "train.md", "train\n", "train");
+        run(&seed, &["push", "-q", "origin", "HEAD:refs/heads/epic/train"]);
+        refresh_review_target(&repo, "epic/train").unwrap();
+        assert_eq!(review_target(&repo, "epic/train").unwrap(), train);
+    }
+
     #[tokio::test]
     async fn premerge_rejection_notice_carries_findings_cas_381f() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

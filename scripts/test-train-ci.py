@@ -315,6 +315,15 @@ class TrainReceipts(unittest.TestCase):
         self.env['QUEUE_BASE_SHA'] = 'f'*40
         self.assertFalse(attempt())
         self.env['QUEUE_BASE_SHA'] = main
+        # Renaming product input into an allowed directory still deletes source.
+        plumbing_head = self.git('rev-parse', 'HEAD')
+        (self.repo/'changelog.d').mkdir()
+        self.git('mv', 'value', 'changelog.d/moved-value.md')
+        self.git('commit', '-qm', 'move product input into release plumbing')
+        data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
+        data_path.write_text(json.dumps(data))
+        self.assertFalse(attempt())
+        self.git('reset', '--hard', plumbing_head)
         self.commit('product change')
         data['pr']['head']['sha'] = self.git('rev-parse', 'HEAD')
         data_path.write_text(json.dumps(data))

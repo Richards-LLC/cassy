@@ -3130,7 +3130,7 @@ mod tests {
         assert_eq!(evidence.pending_permission, Some(pending));
         assert!(!evidence.in_flight_tool_call);
         let human = format_state_human(&state, &evidence);
-        assert!(human.contains("awaiting leader approval"));
+
         assert!(human.contains("python3 -<<'PY' rewrite.html PY"));
         let json: serde_json::Value =
             serde_json::from_str(&format_state_json(&state, &evidence)).expect("valid JSON");

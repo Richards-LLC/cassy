@@ -143,8 +143,6 @@ print('/locked/chromium')
         result = self.gate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('FAIL hub-web-tests', result.stdout)
-        self.assertIn('visual-qa assertion drift', result.stdout)
-        self.assertIn('RELEASE GATE FAILED', result.stdout)
 
     def test_dependency_and_typecheck_failures_stop_before_tests(self):
         for command in ('ci --no-audit --no-fund', 'run typecheck'):

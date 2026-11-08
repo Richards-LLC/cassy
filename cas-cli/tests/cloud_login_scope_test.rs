@@ -108,10 +108,6 @@ fn token_login_outside_a_project_succeeds_and_serves_every_project() {
         login.status.success(),
         "`cas login --token` outside a project must succeed; stderr: {stderr}"
     );
-    assert!(
-        !stderr.contains("not initialized"),
-        "login must not demand `cas init` when credentials are user-level; stderr: {stderr}"
-    );
 
     let user_config: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(home.join(".cas").join("cloud.json")).unwrap(),

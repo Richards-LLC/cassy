@@ -629,7 +629,7 @@ mod tests {
             store.upsert(home).unwrap();
 
             let refusal = forget(home, false).unwrap_err().to_string();
-            assert!(refusal.contains("current project root"), "{refusal}");
+
             assert!(refusal.contains("--yes"), "{refusal}");
             assert_eq!(store.count().unwrap(), 1, "refusal must not mutate");
 

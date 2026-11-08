@@ -96,22 +96,16 @@ fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
         .args(["known-repos", "bind", "--repo", clone_b.to_str().unwrap()])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "Bound selector `remote:github.com/org/shared`",
-        ))
+        .stdout(predicate::str::contains("remote:github.com/org/shared"))
         .stdout(predicate::str::contains(clone_b.to_str().unwrap()))
-        .stdout(predicate::str::contains(
-            "Portable task and delivery records remain path-free",
-        ));
+        ;
 
     // A new process observes the persisted valid binding.
     cas(&home_path)
         .args(["known-repos", "status"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "[valid] remote:github.com/org/shared",
-        ))
+        .stdout(predicate::str::contains("remote:github.com/org/shared"))
         .stdout(predicate::str::contains(clone_b.to_str().unwrap()));
 
     for args in [
@@ -149,25 +143,16 @@ fn explicit_binding_cli_recovers_two_live_clones_across_restart() {
     cas(&home_path)
         .args(["known-repos", "bind", "--repo", clone_a.to_str().unwrap()])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "already bound to a different host repository",
-        ));
+        .failure();
 
     cas(&home_path)
         .args(["known-repos", "unbind", "remote:github.com/org/shared"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Repository registration and files were not changed",
-        ));
-    cas(&home_path)
-        .args(["known-repos", "status"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "No explicit host-local repository bindings",
-        ));
+        .success();
+    assert_eq!(
+        json_output(&home_path, &["known-repos", "status", "--json"]),
+        serde_json::json!({"bindings": []}),
+    );
     cas(&home_path)
         .args(["known-repos", "list"])
         .assert()

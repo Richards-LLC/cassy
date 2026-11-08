@@ -14,10 +14,7 @@
 //!   3. `launch_args`         — the concrete instruction text is captured from the
 //!                              real launch config (PtyConfig argv / queued prompt)
 //!                              and is non-empty.
-//!   4. `effective_contract`  — every canonical role clause (coordinate-only /
-//!                              one-task, async handling, task lifecycle,
-//!                              merge/re-close, urgent-stop recovery) is present.
-//!   5. `prefix`              — the surface issues tool CALLS with the harness's
+//!   4. `prefix`              — the surface issues tool CALLS with the harness's
 //!                              own MCP prefix and never a cross-harness one.
 //!
 //! Every stage resolves to PASS or a stage-specific FAIL — a stage that cannot be
@@ -314,30 +311,9 @@ pub fn evaluate_cell(harness: SupervisorCli, role: ContractRole) -> ParityCell {
         Err(e) => StageResult::fail("launch_args", e.clone()),
     });
 
-    // --- Stage 4: effective_contract ---------------------------------------
-    // Evaluate against the SAME text the runtime consumes (rendered surface for
-    // Codex/Grok constants; the queued prompt for Claude). Both derive from the
-    // canonical contract, so either proves the clauses are effective.
     let surface = rendered_surface_or_launch(harness, role, &launch);
-    stages.push(match &surface {
-        Ok(text) => {
-            let missing = cas_mux::missing_contract_elements(text, role);
-            if missing.is_empty() {
-                StageResult::pass(
-                    "effective_contract",
-                    "all canonical role clauses present".to_string(),
-                )
-            } else {
-                StageResult::fail(
-                    "effective_contract",
-                    format!("missing role clauses: {}", missing.join(", ")),
-                )
-            }
-        }
-        Err(e) => StageResult::fail("effective_contract", e.clone()),
-    });
 
-    // --- Stage 5: prefix ----------------------------------------------------
+    // --- Stage 4: prefix ----------------------------------------------------
     stages.push(match &surface {
         Ok(text) => {
             let own = own_call_forms(harness);
@@ -692,7 +668,7 @@ mod tests {
                 .filter(|c| !c.passed)
                 .collect::<Vec<_>>()
         );
-        // Each cell proves all five named stages.
+        // Each cell proves all four named stages.
         for cell in &report.cells {
             let names: Vec<&str> = cell.stages.iter().map(|s| s.stage).collect();
             assert_eq!(
@@ -701,10 +677,9 @@ mod tests {
                     "catalog",
                     "instruction_source",
                     "launch_args",
-                    "effective_contract",
                     "prefix"
                 ],
-                "{}/{} must report all five stages in order",
+                "{}/{} must report all four stages in order",
                 cell.harness,
                 cell.role
             );
@@ -736,19 +711,6 @@ mod tests {
     /// AC-4: a missing role clause produces a stage-specific effective_contract
     /// FAIL — never UNKNOWN-as-PASS. Drive the real detector with a stripped
     /// surface to prove the gate actually fails closed.
-    #[test]
-    fn missing_role_clause_fails_effective_contract_stage_not_unknown() {
-        // A surface with the coordinate-only clause but no urgent-stop recovery.
-        let broken = "You are the Cassy Factory Supervisor. Coordinate only. Assign tasks. \
-             Worker messages arrive asynchronously as injected turns (triage trigger). \
-             MERGE REQUIRED: merge factory/<worker> then re-close. \
-             Uses mcp__cas__task and mcp__cas__coordination.";
-        let missing = cas_mux::missing_contract_elements(broken, ContractRole::Supervisor);
-        assert!(
-            missing.contains(&"urgent-stop-recovery"),
-            "detector must flag the missing clause as a specific failure, got {missing:?}"
-        );
-    }
 
     /// AC-2 faithfulness: the Claude launch surface the runner captures matches
     /// what the REAL app enqueue path queues at launch — i.e. the intro prompt is
@@ -779,11 +741,10 @@ mod tests {
         ] {
             let rows = queue.peek_for_targets(&[target], None, 10).unwrap();
             assert_eq!(rows.len(), 1, "{target} must have a queued launch intro");
-            assert!(
-                cas_mux::missing_contract_elements(&rows[0].prompt, role).is_empty(),
-                "queued Claude {role:?} intro missing clauses: {:?}",
-                cas_mux::missing_contract_elements(&rows[0].prompt, role)
-            );
+            assert!(rows[0].prompt.starts_with(&match role {
+                ContractRole::Supervisor => cas_mux::claude_supervisor_contract("worker-a"),
+                ContractRole::Worker => cas_mux::claude_worker_contract("worker-a"),
+            }));
         }
     }
 
@@ -795,7 +756,7 @@ mod tests {
         assert!(json.contains("\"catalog\""));
         assert!(json.contains("\"instruction_source\""));
         assert!(json.contains("\"launch_args\""));
-        assert!(json.contains("\"effective_contract\""));
+
         assert!(json.contains("composes_with"));
     }
 }

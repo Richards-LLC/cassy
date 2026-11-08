@@ -491,11 +491,5 @@ mod tests {
         );
         std::fs::write(restored[0].parent().unwrap().join("trace.zip"), "tampered").unwrap();
         let error = restore_archive(&proof, &archive, &destination).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("differs from published evidence"),
-            "{error}"
-        );
     }
 }

@@ -12,6 +12,5 @@
   "legacy_token_prefix": "MECHA_SLACK_TOKEN",
   "legacy_bypass_env": "MECHA_VERCEL_BYPASS",
   "legacy_token_selector_env": "MECHA_SLACK_TOKEN_ENV",
-  "legacy_train_selector_env": "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV",
-  "retired_reference_pattern": "mecha[-_ ]?cassy|mechacassy|mecha_|MECHA_"
+  "legacy_train_selector_env": "CAS_RELEASE_TRAIN_MECHA_TOKEN_ENV"
 }

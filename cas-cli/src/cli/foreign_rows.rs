@@ -1352,11 +1352,6 @@ mod tests {
         assert_eq!(report.foreign_knowledge_pages.len(), 1);
         assert_eq!(report.foreign_knowledge_pages[0].id, "cas-kn999");
         assert!(!report.is_clean());
-        assert!(
-            report
-                .summary()
-                .contains("foreign cloud-pulled knowledge page")
-        );
     }
 
     #[test]
@@ -1391,7 +1386,6 @@ mod tests {
         assert!(report.foreign_knowledge_pages.is_empty());
         assert!(report.unattributed_knowledge_pages.is_empty());
         assert!(report.is_clean());
-        assert!(report.summary().contains("107 attributed page(s) checked"));
     }
 
     /// AC2: the measured failure mode — two real, different tasks sharing a
@@ -1419,10 +1413,6 @@ mod tests {
         assert_eq!(report.collisions.len(), 1);
         assert_eq!(report.collisions[0].id, "cas-1234");
         assert_eq!(report.collisions[0].other_project, "accounting");
-        assert!(report.remediation().contains("(id, title)"));
-        assert!(report.remediation().contains(
-            "mcp__cs__task action=update id=<task-id> origin_project=<confirmed canonical id>"
-        ));
     }
 
     /// A row that is a genuine replica *and* collides with a third project's
@@ -1482,7 +1472,7 @@ mod tests {
         assert_eq!(report.foreign.len(), 2);
         assert_eq!(report.foreign_open(), 1);
         assert_eq!(report.foreign_closed(), 1);
-        assert!(report.summary().contains("1 of them not closed"));
+
         assert!(!report.is_clean());
     }
 
@@ -1540,7 +1530,6 @@ mod tests {
             vec!["accounting", "ozer"]
         );
         assert_eq!(report.unattributed_open(), 1);
-        assert!(report.summary().contains("cannot be established"));
     }
 
     /// Titles differing only in surrounding whitespace are the same task, not

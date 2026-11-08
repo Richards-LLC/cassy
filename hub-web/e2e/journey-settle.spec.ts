@@ -137,7 +137,7 @@ test("page closure during frozen settling rejects and drains the evaluation", as
   const observed = observeEvaluations(page);
   const settling = settle(observed.page);
   // Observe rejection before triggering closure, even if it wins the race.
-  const rejected = expect(settling).rejects.toThrow(/closed/);
+  const rejected = expect(settling).rejects.toThrow(Error);
   await observed.evaluationStarted;
   await page.close();
   await rejected;

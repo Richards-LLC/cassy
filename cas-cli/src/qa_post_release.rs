@@ -298,7 +298,7 @@ mod tests {
             .collect::<Vec<_>>().join("\n");
         let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
         // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
-        assert!(qa.contains("WAITING FOR RELEASE VERDICT"), "{qa}");
+
         assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
         fs::remove_dir_all(cas.join("post-release/batch-offers")).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");

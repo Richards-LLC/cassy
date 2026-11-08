@@ -253,7 +253,7 @@ sys.exit(scope['main']())
                     self.assertEqual(len(loaded),1)
                     self.assertEqual(loaded[0]['name'],receipt['flaky'][0]['name'])
                 elif case in ('cleanup','native-cleanup','vitest-cleanup'):
-                    self.assertIn('warning',result.stdout.lower())
+                    self.assertEqual(receipt['attempts'][0]['status'],0)
                 elif case=='long-step':
                     self.assertGreater(receipt['attempts'][1]['seconds'],120)
 
@@ -390,9 +390,10 @@ sys.exit(scope['main']())
                     result = self.run_queue(engine,'always-fail')
                     self.assertEqual(result.returncode,1,result.stdout+result.stderr)
                     self.assertEqual(len(self.calls()),2)
-                    self.assertIn('quarantine',result.stderr.lower())
                     receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
                     self.assertEqual(receipt['outcome'],'FAIL')
+                    self.assertEqual([t['issue'] for t in receipt['quarantine']],
+                                     [] if unavailable else [self.issues[1]['html_url']])
 
 
 def live_acceptance(out):

@@ -78,6 +78,13 @@ PRE_PUBLICATION_TOKENS = frozenset({
 })
 
 
+def user_word_hits(line: str) -> list[tuple[str, str]]:
+    """Each whole-word (or plural) user-thread word in `line`, with its swap."""
+    return [(match.group(), USER_SWAPS[forbidden])
+            for forbidden in USER_FORBIDDEN
+            for match in re.finditer(r"\b" + re.escape(forbidden) + r"(?:e?s)?\b", line, re.IGNORECASE)]
+
+
 def body_errors(index: int, body: str, pre_publication: bool = False) -> list[str]:
     errors = []
 
@@ -105,10 +112,8 @@ def body_errors(index: int, body: str, pre_publication: bool = False) -> list[st
         if re.match(r"^-\s", line):
             report(line_number, "slack_bullet", "uses a hyphen bullet; use •")
         if index in (0, 1):
-            for forbidden in USER_FORBIDDEN:
-                for match in re.finditer(r"\b" + re.escape(forbidden) + r"(?:e?s)?\b", line, re.IGNORECASE):
-                    report(line_number, "user_word", f"contains forbidden user wording: {match.group()}; "
-                           f"try {USER_SWAPS[forbidden]}")
+            for word, swap in user_word_hits(line):
+                report(line_number, "user_word", f"contains forbidden user wording: {word}; try {swap}")
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
         # Check the eventual title shape without changing the reviewed text.

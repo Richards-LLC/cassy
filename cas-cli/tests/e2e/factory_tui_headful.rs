@@ -206,7 +206,6 @@ fn explicit_headful_missing_claude_fails_cas_7e12() {
         .output()
         .unwrap();
     assert!(!output.status.success(), "explicit live opt-in must not pass without Claude");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("headful dependency unavailable"));
 }
 
 #[test]

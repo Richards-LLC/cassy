@@ -1141,7 +1141,7 @@ mod large_artifact_staging_tests {
         env.set("CAS_FACTORY_SESSION", "factory-viktor-inbound");
         let input = session_input(tmp.path().to_str().unwrap());
         let first = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
-        assert!(first.contains("Viktor-originated message arrived"));
+
         assert!(first.contains("thread-provider-question"));
         assert!(first.contains("Can Cassy answer from SessionStart?"));
 

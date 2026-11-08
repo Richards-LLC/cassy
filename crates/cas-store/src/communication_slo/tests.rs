@@ -109,13 +109,7 @@ fn cas_7e24_operator_receipts_pass_and_breach() {
         ),
         (0, 0, Some(1))
     );
-    assert!(
-        m.lines()[1].starts_with("N/A operator relay receipts: not applicable"),
-        "{}",
-        m.lines()[1]
-    );
-    assert!(m.lines()[1].contains("cas hub operator bind"));
-    assert!(m.lines()[4].starts_with("BREACH gated-without-outcome: 1"));
+
     assert_eq!(m.breach_count(), 1);
     // Mixed: an enrolled turn still pending its receipt breaches; the
     // unenrolled snapshot stays out of the denominator.
@@ -135,12 +129,11 @@ fn cas_7e24_operator_receipts_pass_and_breach() {
         ),
         (0, 1, Some(1))
     );
-    assert!(m.lines()[1].starts_with("BREACH operator relay receipts: 0.0% (0/1"));
-    assert!(m.lines()[1].contains("1 unenrolled excluded"));
+
     assert_eq!(m.breach_count(), 2);
     conn.execute("DELETE FROM operator_delivery_outbox", [])
         .unwrap();
-    assert!(values(&conn).lines()[1].contains("100.0% (0/0"));
+    assert_eq!((values(&conn).operator_receipts, values(&conn).operator_events), (0, 0));
     // A summary saved before the split is shown as recorded, labelled.
     let mut legacy = serde_json::to_value(&m).unwrap();
     legacy
@@ -148,7 +141,7 @@ fn cas_7e24_operator_receipts_pass_and_breach() {
         .unwrap()
         .remove("operator_unenrolled");
     let legacy: CommunicationSlos = serde_json::from_value(legacy).unwrap();
-    assert!(legacy.lines()[1].contains("legacy denominator"));
+    assert!(legacy.operator_unenrolled.is_none());
 }
 
 #[test]

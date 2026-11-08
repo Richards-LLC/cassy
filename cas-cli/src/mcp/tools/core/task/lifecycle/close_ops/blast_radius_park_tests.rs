@@ -329,7 +329,7 @@ async fn parent_receipt_covers_mounted_tests_and_child_cas_ba56() {
     let parked = call(&f.worker, serde_json::json!({
         "action": "close", "id": ID, "reason": "parent tests cover delivery",
     })).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
     git(f.dir.path(), &["merge", "--no-ff", "-m", "merge delivery", LANE]);
     git(f.dir.path(), &["push", "-q", "origin", "main"]);
@@ -464,7 +464,7 @@ async fn builtin_docs_rebind_rust_receipts_at_park_cas_23b1() {
             assert!(reply.contains("FOCUSED PROOF REQUIRED"), "{reply}");
             assert_eq!(f.task().status, TaskStatus::InProgress, "{reply}");
         } else {
-            assert!(reply.contains("MERGE REQUIRED"), "{reply}");
+            assert!(reply.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{reply}");
             assert_eq!(f.task().status, TaskStatus::AwaitingMerge, "{reply}");
         }
     }
@@ -556,7 +556,7 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     // pin: supervisor-recorded distinguishes an attestation from a worker-executed run.
     assert!(receipt.contains("supervisor-recorded") && receipt.contains("br-supervisor-session"), "the gate must preserve execution provenance: {receipt}");
     let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.contains("MERGE REQUIRED"), "supervisor receipt must pass focused proof at park: {parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "supervisor receipt must pass focused proof at park: {parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
     assert!(f.task().notes.contains("br-supervisor-session"), "recording audits its registered issuer");
     let reopened = call(&f.supervisor, serde_json::json!({
@@ -753,7 +753,7 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let delivered_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
     assert_ne!(tested_tip, delivered_tip);
     let parked = call(&f.worker, close.clone()).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
 
     // The worker now starts another task whose Rust source names this brief.
@@ -826,7 +826,7 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
     );
     // The receipt covers widget, so the delivery parks without a widening.
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     let before = f.task();
     assert_eq!(before.status, TaskStatus::AwaitingMerge);
 
@@ -880,7 +880,7 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     );
     record();
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
 
     let repo = f.dir.path();
     git(repo, &["config", "user.name", "CAS Test"]);
@@ -967,7 +967,7 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
         &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
     );
     let parked = call(&f.worker, serde_json::json!({"action":"close", "id":ID, "reason":"gear turns"})).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
 
     let reviewer = tempfile::tempdir().unwrap();
     git(reviewer.path(), &["clone", "-q", f._origin.path().to_str().unwrap(), "."]);
@@ -1259,7 +1259,7 @@ async fn exact_receipt_parks_after_a_helper_branch_anchor_cas_3d70() {
         serde_json::json!({"action": "close", "id": ID, "reason": "gear turns", "commit_receipt": tip}),
     )
     .await;
-    assert!(parked.contains("MERGE REQUIRED"), "the requested receipt must park: {parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "the requested receipt must park: {parked}");
     let task = f.task();
     assert_eq!(task.status, TaskStatus::AwaitingMerge);
     assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
@@ -1374,7 +1374,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
         &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
     );
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert!(parked.lines().any(crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::is_merge_handoff), "{parked}");
     let notes = f.task().notes;
     if eligible {
         assert!(notes.contains("FAST LANE ELIGIBLE head="), "{notes}");
@@ -1456,8 +1456,7 @@ async fn a_missing_or_failed_fast_lane_receipt_holds_the_close_cas_5ea7() {
     assert!(pending.contains("FAST LANE RECEIPT PENDING"), "{pending}");
     assert_eq!(f.task().status, TaskStatus::AwaitingMerge);
     let wakes = crate::store::open_reminder_store(&f.cas_dir()).unwrap().list_all_pending().unwrap();
-    assert!(wakes.iter().any(|wake| wake.message.starts_with("FAST LANE RECEIPT")
-        && wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
+    assert!(wakes.iter().any(|wake| wake.trigger_event.as_deref() == Some("ci_completed")), "{wakes:?}");
 
     if outcome.starts_with("qa-") {
         receipt("completed", Some("success"));

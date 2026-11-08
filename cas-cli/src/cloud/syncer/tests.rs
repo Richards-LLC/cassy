@@ -1306,7 +1306,6 @@ fn push_response_rejects_incomplete_or_duplicate_per_row_outcomes() {
             ["entry-one".to_string(), "entry-two".to_string()].into_iter(),
         )
         .unwrap_err();
-    assert!(error.contains("missing row entry-two"));
 
     let duplicate: PushResponse = serde_json::from_str(
         r#"{"entries":{"rows":[
@@ -2442,7 +2441,6 @@ async fn team_pull_reports_peer_close_blocked_by_local_lifecycle_cas_33bc() {
         assert!(result.task_status_transitions.is_empty());
         assert!(result.errors.iter().any(|error| {
             error.contains(&local.id)
-                && error.contains("closed")
                 && error.contains("awaiting_merge")
                 && error.contains(reason)
                 && error.contains("cas cloud conflicts --json")

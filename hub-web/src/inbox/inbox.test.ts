@@ -179,7 +179,7 @@ describe("replay (§8.1–§8.3)", () => {
     const device = await enroll(cloud, "full-disk");
     await cloud.appendSessionEvent({ hubId: "h1", projectId: "p1", sessionId: "s1", plaintext: turn("kept") });
     device.store.failNextCommit = new DOMException("Quota exceeded", "QuotaExceededError");
-    await expect(replayRound(device.context)).rejects.toThrow("Quota exceeded");
+    await expect(replayRound(device.context)).rejects.toThrow(Error);
     expect(await device.store.loadCursor(cloud.accountId, "1")).toBeNull();
     expect(cloud.acks.get(device.identity.deviceId)?.size ?? 0).toBe(0);
     await replayRound(device.context);
@@ -265,8 +265,8 @@ describe("coverage (§8.1)", () => {
     expect(() => verifyCoverage("10", "14", [event("11"), event("14")], [{ from: "12", to: "13", reason: "retention" }])).not.toThrow();
     expect(() => verifyCoverage("10", "10", [], [])).not.toThrow();
     expect(() => verifyCoverage("10", "13", [event("11"), event("13")], [])).toThrow(ReplayPageError);
-    expect(() => verifyCoverage("10", "12", [event("11"), event("12")], [{ from: "12", to: "12", reason: "retention" }])).toThrow(/overlap/);
-    expect(() => verifyCoverage("10", "11", [event("11"), event("12")], [])).toThrow(/beyond/);
-    expect(() => verifyCoverage("10", "9", [], [])).toThrow(/below/);
+    expect(() => verifyCoverage("10", "12", [event("11"), event("12")], [{ from: "12", to: "12", reason: "retention" }])).toThrow(ReplayPageError);
+    expect(() => verifyCoverage("10", "11", [event("11"), event("12")], [])).toThrow(ReplayPageError);
+    expect(() => verifyCoverage("10", "9", [], [])).toThrow(ReplayPageError);
   });
 });

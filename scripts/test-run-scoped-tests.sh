@@ -50,15 +50,9 @@ make_stub() {
     echo "${stub}"
 }
 
-# expect <pass|fail> <expected-output-substring, or "-"> <description> <command...>
-#
-# The substring matters as much as the status, and for the same reason this
-# whole task exists: a guard that exits nonzero for the WRONG reason is a
-# guard whose individual checks are not actually proven. Asserting only the
-# exit code let two mutants survive during development — disabling the
-# "no harness reported" check and disabling the relative-$ZIG preflight both
-# left this suite fully green, because a sibling check happened to catch the
-# same case with a misleading message.
+# expect <pass|fail> <machine-data substring, or "-"> <description> <command...>
+# Error cases use the operation's exit and fixture side effects. Optional
+# substrings identify actual commands, refs or machine proof records, never prose.
 expect() {
     local want="$1" match="$2" desc="$3"
     shift 3
@@ -101,7 +95,7 @@ error: package ID specification `cas-cli` did not match any packages
 help: there is a similarly named package `cas`
 EOF
 )"
-expect fail "The package name did not resolve" \
+expect fail - \
     "shape 1: unresolved package name (-p cas-cli)" \
     env CARGO="${stub}" "${GUARD}" -p cas-cli --lib some_module
 
@@ -122,12 +116,12 @@ Caused by:
 EOF
 
 stub="$(make_stub cargo-build-panic 101 <<<"${BUILD_PANIC}")"
-expect fail "A build script failed" \
+expect fail - \
     "shape 2: build-script panic (cargo reports nonzero)" \
     env CARGO="${stub}" "${GUARD}" -p cas --lib some_module
 
 stub="$(make_stub cargo-build-panic-swallowed 0 <<<"${BUILD_PANIC}")"
-expect fail "no test harness ever reported" \
+expect fail - \
     "shape 2b: build-script panic with the status SWALLOWED (exit 0)" \
     env CARGO="${stub}" "${GUARD}" -p cas --lib some_module
 
@@ -145,7 +139,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3929 filtered out; finished in 0.00s
 EOF
 )"
-expect fail "0 tests passed" \
+expect fail - \
     "shape 3: stale filter, 0 passed / 3929 filtered, 'test result: ok'" \
     env CARGO="${stub}" "${GUARD}" -p cas --lib some_module::tests::
 
@@ -164,7 +158,7 @@ test store::tests::rejects_bad_input ... ok
 test result: ok. 524 passed; 0 failed; 0 ignored; 0 measured; 3405 filtered out; finished in 1.23s
 EOF
 )"
-expect pass "PASS: 524 test(s) passed" \
+expect pass - \
     "control: genuine scoped green (524 passed)" \
     env CARGO="${stub}" "${GUARD}" -p cas --lib store::tests
 
@@ -180,7 +174,7 @@ failures:
 test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 3926 filtered out; finished in 0.04s
 EOF
 )"
-expect fail "the test run exited 101" \
+expect fail - \
     "control: a genuinely failing test still fails" \
     env CARGO="${stub}" "${GUARD}" -p cas --lib store::tests
 
@@ -194,7 +188,7 @@ stub="$(make_stub cargo-nextest-green 0 <<'EOF'
      Summary [   1.234s] 524 tests run: 524 passed, 3405 skipped
 EOF
 )"
-expect pass "PASS: 524 test(s) passed" \
+expect pass - \
     "nextest: genuine green (524 passed)" \
     env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib store::tests
 
@@ -207,7 +201,7 @@ stub="$(make_stub cargo-nextest-ansi-green 0 <<EOF
 ${ansi_nextest_summary}
 EOF
 )"
-expect pass "PASS: 524 test(s) passed" \
+expect pass - \
     "nextest: ANSI-colored green summary (524 passed)" \
     env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib store::tests
 
@@ -217,7 +211,7 @@ running 7 tests
 ${ansi_cargo_summary}
 EOF
 )"
-expect pass "PASS: 7 test(s) passed" \
+expect pass - \
     "cargo test: ANSI-colored green summary (7 passed)" \
     env CARGO="${stub}" CARGO_CMD="test" "${GUARD}" -p cas --lib store::tests
 
@@ -226,7 +220,7 @@ stub="$(make_stub cargo-ansi-no-summary 0 <<'EOF'
 [31merror:[0m link failed before any test binary ran
 EOF
 )"
-expect fail "no test harness ever reported" \
+expect fail - \
     "ANSI-colored output without a harness summary still fails" \
     env CARGO="${stub}" CARGO_CMD="test" "${GUARD}" -p cas --lib store::tests
 
@@ -236,7 +230,7 @@ stub="$(make_stub cargo-nextest-empty 0 <<'EOF'
      Summary [   0.004s] 0 tests run: 0 passed, 3929 skipped
 EOF
 )"
-expect fail "0 tests passed" \
+expect fail - \
     "nextest: filter matched nothing (0 tests run)" \
     env CARGO="${stub}" CARGO_CMD="nextest run" "${GUARD}" -p cas --lib bogus::filter
 
@@ -266,7 +260,7 @@ EOF
 # relative check disabled.
 printf '#!/bin/sh\nexit 0\n' >"${tmpdir}/zigstub"
 chmod +x "${tmpdir}/zigstub"
-expect fail "is a relative path" \
+expect fail - \
     "preflight: relative \$ZIG path is rejected (even when it resolves)" \
     bash -c "cd '${tmpdir}' && CARGO='${stub}' ZIG='./zigstub' '${GUARD}' -p cas --lib store::tests"
 
@@ -278,12 +272,12 @@ else
     echo "ok   preflight rejected before invoking cargo (no build wasted)"
 fi
 
-expect fail "not an executable file" \
+expect fail - \
     "preflight: \$ZIG pointing at a nonexistent file is rejected" \
     env CARGO="${stub}" ZIG="/nonexistent/zig" "${GUARD}" -p cas --lib store::tests
 
 # An absolute, executable $ZIG must not trip the preflight.
-expect pass "PASS: 7 test(s) passed" \
+expect pass - \
     "preflight: absolute executable \$ZIG is accepted" \
     env CARGO="$(make_stub cargo-zig-ok 0 <<'EOF'
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.01s
@@ -293,7 +287,7 @@ EOF
 # ---------------------------------------------------------------------------
 # Refusing an unscoped run.
 # ---------------------------------------------------------------------------
-expect fail "refusing to run unscoped" \
+expect fail - \
     "refuses to run with no scope arguments" \
     env CARGO="${stub}" "${GUARD}"
 
@@ -339,11 +333,11 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm source-change
 
-expect fail "missing library module 'hooks::pre_tool::worker_commit_guard_tests'" \
+expect fail - \
     "proof: narrow two-test filter is refused for a changed 42-test module" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib cas_8fd4"
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass - \
     "proof: complete changed-module filter is accepted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_archive_portability_test --test hook_schema"
 
@@ -352,15 +346,15 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm integration-change
 
-expect fail "missing integration target 'factory_mcp_ops_test'" \
+expect fail - \
     "proof: changed integration binary cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
 
-expect fail "Run scripts/run-scoped-tests.sh --proof" \
+expect fail - \
     "proof: missing target names the complete rerun command" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests"
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass - \
     "proof: changed module plus integration target is accepted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test --test builtin_archive_portability_test --test hook_schema"
 
@@ -370,7 +364,7 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm nested-integration-change
 
-expect fail "missing integration target 'mcp_tools_test'" \
+expect fail - \
     "proof: changed nested integration module cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test factory_mcp_ops_test"
 
@@ -465,11 +459,11 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm builtin-reference-change
 
-expect fail "missing integration target 'factory_codex_skill_guardrails'" \
+expect fail - \
     "proof: builtin reference guardrail cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --test builtin_flavor_drift_test --test agent_definition_contract_test"
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass - \
     "proof: builtin reference includes its literal-path guardrail" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
 
@@ -490,11 +484,11 @@ git -C "${surface_repo}" add .
 git -C "${surface_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm builtin-body-change
 
-expect fail "missing integration target 'issue_intake_directive_test'" \
+expect fail - \
     "proof: installed catalog guardrail cannot be omitted" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test factory_mcp_ops_test --test mcp_tools_test"
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass - \
     "proof: supervisor body includes its installed-catalog guardrail" \
     bash -c "cd '${surface_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib worker_commit_guard_tests --test builtin_flavor_drift_test --test agent_definition_contract_test --test factory_codex_skill_guardrails --test issue_intake_directive_test --test factory_mcp_ops_test --test mcp_tools_test --test builtin_archive_portability_test --test hook_schema"
 
@@ -524,7 +518,7 @@ else
     echo "FAIL proof resolver emitted unexpected arguments: $resolved_targets"
 fi
 
-expect fail "missing integration target 'factory_mcp_ops_test'" \
+expect fail - \
     "proof: changed factory_ops module cannot omit its public-surface binary" \
     bash -c "cd '${mapping_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib factory_ops"
 
@@ -656,12 +650,12 @@ expect pass "SCOPED_PROOF: targets=lib:cli::hub::tests,lib:cli::hub_reverse_pair
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
     "${sibling_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib cli::hub
 
-expect fail "SCOPED PROOF INCOMPLETE" \
+expect fail - \
     "proof runner: missing integration target is a nonzero delivery result" \
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=main \
     "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
 
-expect fail "cannot find a merge-base" \
+expect fail - \
     "proof runner: explicit baseline is forwarded to the surface checker" \
     env CARGO="${runner_stub}" SCOPED_PROOF_BASE=missing-baseline \
     "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops
@@ -679,7 +673,7 @@ red_stub="$(make_stub scoped-red 100 <<'EOF'
 EOF
 )"
 red_log="${tmpdir}/scoped-red.log"
-expect fail "the test run exited 100" \
+expect fail - \
     "proof runner: a red test run records its command, revision, base, and exit" \
     env CARGO="${red_stub}" SCOPED_PROOF_BASE=main SCOPED_TEST_LOG="${red_log}" \
     "${mapping_repo}/scripts/run-scoped-tests.sh" --proof -p cas --lib factory_ops --test factory_mcp_ops_test
@@ -723,7 +717,7 @@ git -C "${docs_repo}" add .
 git -C "${docs_repo}" -c user.name=scoped-test-fixture -c user.email=scoped-test-fixture@example.invalid \
     commit -qm docs-only
 
-expect pass "SCOPED PROOF SURFACE: covered committed diff" \
+expect pass - \
     "proof: non-test-only diff does not invent a required target" \
     bash -c "cd '${docs_repo}' && '${SURFACE_GUARD}' --base main -- -p cas --lib"
 

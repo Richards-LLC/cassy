@@ -1327,7 +1327,7 @@ mod tests {
         core.open_rule_store().unwrap().init().unwrap();
         core.open_rule_store().unwrap().add(&rule).unwrap();
         core.open_search_index().unwrap().index_rule(&rule).unwrap();
-        cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", &[("cas-0ab2", "ver-1"), ("cas-0ab3", "ver-2")])
+        let candidate = cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", &[("cas-0ab2", "ver-1"), ("cas-0ab3", "ver-2")])
             .unwrap();
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
@@ -1354,14 +1354,13 @@ mod tests {
             drop(guard);
             let text = result.content.iter().filter_map(|part| part.as_text())
                 .map(|part| part.text.as_str()).collect::<Vec<_>>().join("\n");
-            assert!(text.contains("Found 1 similar rule(s)") && text.contains(&rule.id), "{text}");
-            assert_eq!(text.contains("Similar rule candidates (1)"), !failed_read, "{text}");
+            assert!(text.contains(&rule.id), "{text}");
+            assert_eq!(text.contains(&candidate.id), !failed_read, "{text}");
             log.rewind().unwrap();
             let mut warning = String::new();
             log.read_to_string(&mut warning).unwrap();
             assert_eq!(warning.contains("WARN"), failed_read, "{warning}");
             if failed_read {
-                assert!(warning.contains("candidate") && warning.contains("no such column"), "{warning}");
             }
         }
     }

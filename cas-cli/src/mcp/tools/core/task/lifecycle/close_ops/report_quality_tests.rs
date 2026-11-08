@@ -60,32 +60,28 @@ fn report_gate_refuses_the_1627_dump_and_passes_the_exemplar_cas_5d07() {
         ("docs/reports/2026-11-06-factory-metrics.html", &dump),
     ]);
     let refusal = run(&mut task, &head).unwrap_err();
-    for missing in [
-        "REPORT NOT READY FOR THE OPERATOR",
-        "docs/reports/2026-11-06-factory-metrics.html",
-        "no concept brief",
-        "brand tokens are not declared: --bg, --surface, --surface-hero, --ink, --line, --verdict, --evidence",
-        "fetches from the network",
-        "no verdict",
-        "over the 4000 px budget for an executive reader",
-        "internal task ids: cas-a000",
-        "report quality waived:",
-    ] {
-        assert!(refusal.contains(missing), "missing `{missing}` in:\n{refusal}");
+    assert!(refusal.contains("docs/reports/2026-11-06-factory-metrics.html"), "{refusal}");
+    // Every gap is named: the findings behind the refusal, by code.
+    let codes: Vec<String> = crate::deliverable::report_quality::check(&dump, None)
+        .into_iter()
+        .map(|finding| finding.code)
+        .collect();
+    for code in ["brief-missing", "brand-tokens", "network", "verdict-missing", "height-budget", "internal-ids"] {
+        assert!(codes.iter().any(|found| found == code), "{code}: {codes:?}");
     }
     // A brief scored below the floor is named by dimension.
     let floor = crate::deliverable::report_quality::check(
         &dump,
         Some("Audience: executive\n\n## Critique\n\n| Dimension | Score | Evidence |\n| --- | --- | --- |\n| Distinctiveness | 1 | x |\n| Fit to argument | 2 | x |\n| Hierarchy | 1 | x |\n"),
     );
-    assert!(floor.iter().any(|finding| finding.message.contains("distinctiveness 1, fit 2, hierarchy 1")), "{floor:?}");
+    assert!(floor.iter().any(|finding| finding.code == "critique-floor"), "{floor:?}");
 
     // A critique that skips a rubric dimension, or scores outside 1-5, is refused.
     let partial = crate::deliverable::report_quality::check(
         &dump,
         Some("Audience: executive\n\n## Critique\n\n| Dimension | Score | Evidence |\n| --- | --- | --- |\n| Distinctiveness | 5 | x |\n| Fit to argument | 9 | x |\n| Hierarchy | 5 | x |\n| Craft | 5 | x |\n"),
     );
-    assert!(partial.iter().any(|finding| finding.message.contains("accessibility not scored") && finding.message.contains("fit 9 (scores run 1 to 5)")), "{partial:?}");
+    assert!(partial.iter().any(|finding| finding.code == "critique-floor"), "{partial:?}");
 
     let head = commit(repo.path(), &[
         ("docs/reports/2026-11-06-factory-metrics.html", include_str!("../../../../../../builtins/skills/cas-html-reports/references/examples/executive-variance-brief.html")),

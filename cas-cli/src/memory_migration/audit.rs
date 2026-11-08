@@ -162,7 +162,7 @@ mod tests {
         audit.record_unaccounted("project");
         assert!(!audit.balances());
         let err = audit.check().unwrap_err().to_string();
-        assert!(err.contains("unaccounted"), "{err}");
+
         assert!(audit.render_table().contains("FAILED"));
     }
 

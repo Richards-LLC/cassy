@@ -1521,7 +1521,6 @@ mod tests {
         let row = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(row.state, SpawnLifecycleState::Failed);
         assert_eq!(row.worker_name.as_deref(), Some("boot-failed-worker"));
-        assert!(row.detail.as_deref().unwrap().contains("rejected"));
     }
 
     /// A spawn that launches but never registers is FAILED with a reason —
@@ -1554,7 +1553,7 @@ mod tests {
         let rows = store.recent_spawn_lifecycle("session-a", 10).unwrap();
         let row = rows.iter().find(|r| r.id == id).unwrap();
         assert_eq!(row.state, SpawnLifecycleState::Failed);
-        assert!(row.detail.as_deref().unwrap().contains("did not register"));
+
         assert!(row.state.is_terminal());
     }
 

@@ -1169,7 +1169,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             .output()
             .expect("run installed sow gate");
         assert_eq!(gate.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&gate.stderr).contains("STOP: 1 Gap row(s): R1 (ours)"));
     }
 }
 

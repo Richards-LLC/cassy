@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   DORMANT_QUERY_PARAM,
   DORMANT_STORAGE_KEY,
-  dormantCommandLabel,
   dormantRevealed,
   dormantRoute,
   saveDormantRevealed,
@@ -42,8 +41,4 @@ describe("dormant visibility", () => {
     expect(new URLSearchParams(dormantRoute("", true)).get(DORMANT_QUERY_PARAM)).toBe("1");
   });
 
-  it("labels the off-by-default recovery command", () => {
-    expect(dormantCommandLabel(false)).toEqual({ title: "Show dormant sessions", hint: "Sessions without a live supervisor, for recovery" });
-    expect(dormantCommandLabel(true)).toEqual({ title: "Hide dormant sessions", hint: "List only sessions with a live supervisor" });
-  });
 });

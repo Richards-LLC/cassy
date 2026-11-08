@@ -475,10 +475,6 @@ async fn provenance_v1_rejects_unsupported_versions_at_the_public_boundary() {
         .await
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
-    assert_eq!(
-        error.message,
-        "unsupported provenance_version 2; expected 1"
-    );
 }
 
 #[tokio::test]

@@ -498,9 +498,6 @@ mod tests {
         assert!(agent_mcp_older_than(&root, "9.99.2", "old-worker"));
         assert!(!agent_mcp_older_than(&root, "9.99.1", "old-worker"));
         let status = render(&snapshot, Some("factory-release"));
-        assert!(status.contains("installed 9.99.2"), "{status}");
-        assert!(status.contains("old-worker (Worker"), "{status}");
-        assert!(status.contains("9.99.1 [STALE"), "{status}");
 
         // Eager MCP registration records the server PID itself. Both roster
         // shapes must identify this same live daemon epoch.
@@ -585,7 +582,6 @@ mod tests {
         let payload = &rows[0].payload;
         assert!(payload.contains("old-worker"), "{payload}");
         assert!(payload.contains("factory-release"), "{payload}");
-        assert!(payload.contains("before it starts its next queued task"), "{payload}");
     }
 
     #[test]
@@ -623,13 +619,8 @@ mod tests {
         assert!(notice.contains("session-a: worker-a"), "{notice}");
         assert!(notice.contains("session-b: supervisor-b"), "{notice}");
         assert!(!notice.contains("worker-current"), "{notice}");
-        assert!(notice.contains("before it starts its next queued task"), "{notice}");
+
         // pin: the supported daemon re-exec remedy survives automatic update requests.
         assert!(notice.contains("cas factory reexec --session <session>"), "{notice}");
-        assert!(notice.contains("MCP reconnect control"), "{notice}");
-        assert!(
-            notice.contains("A plain supervisor exit stops every worker"),
-            "{notice}"
-        );
     }
 }

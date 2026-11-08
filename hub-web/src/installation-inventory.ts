@@ -80,11 +80,11 @@ export async function openInstallationInventory(doc: Document, machine: StoredMa
       const disclosure = doc.createElement("summary"); disclosure.textContent = "Technical details";
       const details = doc.createElement("dl"); details.className = "pair-details";
       const id = doc.createElement("code"); id.textContent = device.device_id;
-      detailRow(doc, details, "Installation ID", id);
-      for (const [name, value] of [["Credential generation", String(device.credential_generation)], ["Paired (UTC)", device.issued_at], ["Last used (UTC)", device.last_used_at], ["Origin", device.controller_origin], ["Signing key", device.key_fingerprint]]) {
-        detailRow(doc, details, name!, value!);
+      detailRow(doc, details, "Installation ID", id).dataset.field = "device_id";
+      for (const [field, name, value] of [["credential_generation", "Credential generation", String(device.credential_generation)], ["issued_at", "Paired (UTC)", device.issued_at], ["last_used_at", "Last used (UTC)", device.last_used_at], ["controller_origin", "Origin", device.controller_origin], ["key_fingerprint", "Signing key", device.key_fingerprint]]) {
+        detailRow(doc, details, name!, value!).dataset.field = field!;
       }
-      if (device.account_enrollment?.state === "enrolled") detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch);
+      if (device.account_enrollment?.state === "enrolled") detailRow(doc, details, "Account key epoch", device.account_enrollment.epoch).dataset.field = "epoch";
       technical.append(disclosure, details);
       row.append(heading, summary, technical);
       if (!device.revoked_at) {

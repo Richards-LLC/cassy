@@ -173,6 +173,10 @@ Factory turn costs are recorded locally for Claude, Codex and Grok supervisors a
 
 ## Authoritative Sources
 
+Delivery checks use observable behavior and stable error or rule identifiers.
+Park checks new error-message assertions for prose pins; vocabulary and required
+instruction sentences do not decide whether a delivery or release can proceed.
+
 - Product pitch and user-facing surfaces: `README.md`.
 - Coordination and context-system boundaries: `cas-cli/docs/ARCHITECTURE.md`.
 - Task lifecycle and close states: `crates/cas-types/src/task.rs`.

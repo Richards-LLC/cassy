@@ -53,9 +53,11 @@ class PublicationTimingTests(unittest.TestCase):
         self.assertEqual(bodies[0], original[0])
         self.assertEqual(bodies[2], original[2])
         for body in (bodies[1], bodies[3]):
-            self.assertIn("8 manual interventions", body)
+            self.assertRegex(body, r"\b8\b")
         self.assertIn("INTERVENTIONS=8", bodies[3])
-        self.assertIn("1260s; over budget (600s); WITHIN_BUDGET=false", bodies[3])
+        self.assertIn("1260s", bodies[3])
+        self.assertIn("600s", bodies[3])
+        self.assertIn("WITHIN_BUDGET=false", bodies[3])
         self.assertIn("Other prose retained.", after)
         self.assertEqual(self.draft.stat().st_mode & 0o777, 0o640)
         self.record()
@@ -65,7 +67,9 @@ class PublicationTimingTests(unittest.TestCase):
         self.receipt.write_text(self.receipt.read_text().replace("12:21:00", "12:04:10")
                                 .replace("1260", "250").replace("false", "true"))
         self.record()
-        self.assertIn("250s; within budget (600s); WITHIN_BUDGET=true", self.draft.read_text())
+        self.assertIn("250s", self.draft.read_text())
+        self.assertIn("600s", self.draft.read_text())
+        self.assertIn("WITHIN_BUDGET=true", self.draft.read_text())
 
     def test_missing_or_incoherent_receipt_does_not_mutate_draft(self):
         original = self.receipt.read_text()

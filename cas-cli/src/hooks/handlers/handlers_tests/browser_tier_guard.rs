@@ -82,8 +82,6 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
         ] {
             let reason = denial(command, role).expect(command);
             assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
-            assert!(reason.contains("affected"), "{reason}");
-            assert!(reason.contains("named spec"), "{reason}");
         }
     }
 }

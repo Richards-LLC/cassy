@@ -146,8 +146,6 @@ pub mod ui;
 pub mod worktree;
 
 #[cfg(test)]
-mod instruction_parity_tests;
-#[cfg(test)]
 mod test_env_guard;
 
 #[cfg(test)]

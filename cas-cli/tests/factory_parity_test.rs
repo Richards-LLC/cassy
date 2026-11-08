@@ -1,7 +1,7 @@
 //! CI-safe integration test for the launched-agent skill + instruction parity
 //! conformance gate (cas-bd9d). Runs the real `cas factory parity` command and
 //! asserts the machine-readable 4×2 report proves required skills/agents,
-//! effective role clauses, and tool prefix for every harness/role cell from the
+//! installed instruction sources and tool prefixes for every harness/role cell from the
 //! real launch configuration — with no live model process (the faithful,
 //! deterministic path). This is the Demo: "run one parity command and receive a
 //! 4×2 report".
@@ -31,7 +31,7 @@ fn factory_parity_command_reports_all_eight_cells_passing() {
     let cells = report["cells"].as_array().expect("cells array");
     assert_eq!(cells.len(), 8, "matrix must be 4 harnesses × 2 roles");
 
-    // Every (harness, role) shape is present and passes all five named stages.
+    // Every (harness, role) shape is present and passes all four named stages.
     let mut shapes: Vec<String> = Vec::new();
     for cell in cells {
         let harness = cell["harness"].as_str().unwrap();
@@ -50,10 +50,9 @@ fn factory_parity_command_reports_all_eight_cells_passing() {
                 "catalog",
                 "instruction_source",
                 "launch_args",
-                "effective_contract",
                 "prefix"
             ],
-            "{harness}/{role} must name all four+prefix stages"
+            "{harness}/{role} must name all four stages"
         );
         for stage in cell["stages"].as_array().unwrap() {
             assert_eq!(

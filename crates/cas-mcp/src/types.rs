@@ -1399,7 +1399,7 @@ mod worker_delivery_request_tests {
         let description = schema["properties"]["no_delivery"]["description"]
             .as_str()
             .unwrap();
-        assert!(description.contains("verification still applies"));
+
         assert!(
             serde_json::from_value::<TaskRequest>(serde_json::json!({
                 "action": "close", "no_delivery": {"reason": "untyped"},

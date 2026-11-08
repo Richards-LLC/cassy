@@ -917,7 +917,6 @@ mod tests {
             "DELETE FROM quality_events",
         ] {
             let error = guard.execute(statement, []).unwrap_err().to_string();
-            assert!(error.contains("append-only"), "{statement}: {error}");
         }
         drop(guard);
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap(), before);

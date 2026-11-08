@@ -17,9 +17,7 @@ test.describe("Conversation question", () => {
     await expect(waitingRegion).toContainText(question);
     await expect(waitingRegion.getByRole("button", { name: "Fix in-train" })).toBeVisible();
     await expect(waitingRegion.getByRole("button", { name: "Ship with allowlist" })).toBeVisible();
-    await expect(thread.getByRole("group", { name: "Blocker from patient-pelican-9" })).toContainText(
-      "The release gate went red. The train is held"
-    );
+    await expect(thread.getByRole("group", { name: "Blocker from patient-pelican-9" })).toBeVisible();
     await expect(thread.getByText("attention.rs:212 · needless_borrow")).toBeVisible();
 
     // 2. Click Fix in-train once.
@@ -28,11 +26,10 @@ test.describe("Conversation question", () => {
     const questionInLog = thread.getByRole("group", { name: "Question from patient-pelican-9" });
     await expect(questionInLog.locator('[aria-label="You replied: Fix in-train"]')).toBeVisible();
     await expect(thread.getByRole("log").getByRole("paragraph").filter({ hasText: /^Fix in-train$/ })).toBeVisible();
-    await expect(thread.getByRole("log").getByRole("status")).toHaveText("Sending…");
+    await expect(thread.getByRole("log").locator('.bub[data-state="sending"] .conversation-delivery')).toBeVisible();
     await expect(waitingRegion).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] [data-section="waiting"]')).toBeHidden();
     await expect(page.locator('[aria-label="Conversation context"] .context-waiting li')).toHaveCount(0);
     await expect(questionInLog.locator('[aria-label="You replied: Ship with allowlist"]')).toHaveCount(0);
-    await expect(questionInLog.getByText("Waiting on you — answer below")).toHaveCount(0);
   });
 });

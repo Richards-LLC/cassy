@@ -18,11 +18,16 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
     Ok(format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This transport replaces only the MCP recording step above. Missing evidence requires supervisor_call.\nTask: {}\nParent: {}\nDispatch: {}\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This transport replaces only the MCP recording step above. Missing evidence requires supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
         ),
+        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+            &core.cas_root,
+            task,
+        )?
+        .display(),
         serde_json::to_string(task).map_err(|e| e.to_string())?,
         serde_json::to_string(&parent).map_err(|e| e.to_string())?,
         serde_json::to_string(dispatch).map_err(|e| e.to_string())?,
@@ -617,6 +622,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert!(body.contains(&candidate.proof.worktree_root));
             assert!(body.contains("preserve drafts"));
             assert!(body.contains("scoped worker proof"));
+            // cas-e17a: the verifier reads the evidence where park wrote it.
+            let base = crate::config::resolved_factory_artifacts_root(None);
+            let [evidence, _] = crate::config::factory_task_artifact_dirs(&root, &base, &task.id);
+            assert!(body.contains(&evidence.display().to_string()), "{status}: {}", evidence.display());
             let prompts = crate::store::open_prompt_queue_store(&root)
                 .unwrap()
                 .peek_all(20)

@@ -899,7 +899,7 @@ mod tests {
 
         let store = open_task_store(&root).unwrap();
         shipped.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:fixture".into(),
+            repo_selector: "project:release-fixture".into(),
             target_branch: "main".into(),
         });
         store.update(&shipped).unwrap();
@@ -915,14 +915,14 @@ mod tests {
         shipped_child.status = TaskStatus::AwaitingMerge;
         shipped_child.deliverables.factory_branch_anchor = Some(anchor);
         shipped_child.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:fixture".into(),
+            repo_selector: "project:release-fixture".into(),
             target_branch: old_lane.clone(),
         });
         store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
         let mut open_child = Task::new("cas-526e".into(), "Next release child".into());
         open_child.origin_project = Some("release-fixture".into());
         open_child.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:fixture".into(),
+            repo_selector: "project:release-fixture".into(),
             target_branch: old_lane,
         });
         store.create_atomic(&open_child, &[], Some(&shipped.id), None).unwrap();

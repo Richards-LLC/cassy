@@ -932,7 +932,7 @@ mod tests {
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
         let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
         assert!(first.contains("reconciled"), "{first}");
-        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Closed, "{first}");
         assert_eq!(store.get(&shipped_child.id).unwrap().status, TaskStatus::Closed);
         let migrated = store.get_parent_epic(&open_child.id).unwrap().unwrap();
         assert_eq!(migrated.id, current.id);

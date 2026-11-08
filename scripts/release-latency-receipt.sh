@@ -34,9 +34,14 @@ fi
 
 budget=600
 budget_explicit=false
-# The release rule's main-to-published budget, printed in the receipt and used
-# as the publication budget whenever publication is timed from main landing.
-main_to_published_budget=1200
+# The release rule's main-to-published budget (the versioned stage budget file),
+# printed in the receipt and used as the publication budget for every main-push
+# release, so the report reads the same number the receipt states.
+main_to_published_budget="$(jq -er '.budgets.publish | select(type == "number")' \
+    "$(dirname "${BASH_SOURCE[0]}")/release-stage-budgets.json")" || {
+    echo "error: scripts/release-stage-budgets.json has no numeric publish budget" >&2
+    exit 1
+}
 run_dir="${CAS_RELEASE_TRAIN_RUN_DIR:-${CAS_RELEASE_RUN_DIR:-}}"
 # The train's post-publication stage owns its atomic receipt hand-off. A
 # standalone measurement writes into its selected artifact run directory so
@@ -216,8 +221,9 @@ end="$(epoch_of "$published_at")" || {
 }
 latency=$((end - start))
 
-# Timed from main landing, the publication budget is the main-to-published one.
-if [[ "$start_kind" == main-landed && "$budget_explicit" != true ]]; then
+# Every main-push release is timed from main (merge-queue green or landing), so
+# its publication budget is the main-to-published one.
+if [[ "$start_kind" != tag-push && "$budget_explicit" != true ]]; then
     budget="$main_to_published_budget"
 fi
 within=true

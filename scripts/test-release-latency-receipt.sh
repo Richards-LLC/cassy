@@ -133,6 +133,7 @@ expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS 1800 'cas-61e0: first child comm
 expect_field "$out" MAIN_TO_PUBLISHED_SECONDS 616 'cas-61e0: actual mergedAt to publishedAt is measured against twenty minutes'
 expect_field "$out" QUEUE_RUNS_USED 3 'cas-61e0: count all associated CI attempts before landing, including a different tree'
 expect_field "$out" PUBLISH_START_KIND gate-green 'main-push release uses authoritative merge-queue green'
+expect_field "$out" BUDGET_SECONDS "$(jq -r '.budgets.publish' "$script_dir/release-stage-budgets.json")" 'cas-a96b: a gate-green publication reports the configured main-to-published budget'
 expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:08Z 'green timing starts at the successful merge-queue CI completion'
 expect_field "$out" GATE_GREEN_EPOCH 1792079228 'receipt records the authoritative gate-green epoch'
 expect_field "$out" GATE_GREEN_RUN_ID 803 'receipt identifies the successful merge-queue CI run'

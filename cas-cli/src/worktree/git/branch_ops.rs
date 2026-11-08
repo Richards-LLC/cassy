@@ -774,6 +774,18 @@ impl GitOperations {
         }
     }
 
+    /// The tip of `target` (local branch, then `origin/<target>`) that already
+    /// contains every one of `commits`, or `None` when no tip contains them all.
+    ///
+    /// cas-06f53: a delivery the pre-merge path already merged is answered as
+    /// merged, not as a branch to restore.
+    pub fn target_tip_containing(&self, target: &str, commits: &[&str]) -> Option<String> {
+        [format!("refs/heads/{target}"), format!("refs/remotes/origin/{target}")]
+            .iter()
+            .filter_map(|refname| self.resolve_commit(refname))
+            .find(|tip| commits.iter().all(|commit| self.is_ancestor(commit, tip)))
+    }
+
     /// Resolve the full SHA of a ref (branch name, "HEAD", etc.).
     ///
     /// Returns a 40-character hex SHA, or a GitError if the ref doesn't exist.

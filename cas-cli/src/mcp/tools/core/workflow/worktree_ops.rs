@@ -1928,6 +1928,15 @@ fn worker_name_token_matches(token: &str, worker: &str) -> bool {
     token == worker || token.strip_prefix("factory/") == Some(worker)
 }
 
+/// What an active task's recorded source resolves to (cas-06f53).
+enum StartedMergeSource {
+    /// Merge this recorded source.
+    Merge(RemoteMergeSource),
+    /// The recorded delivery is already an ancestor of the target: report it,
+    /// never ask for a rebind or restore.
+    AlreadyMerged { branch: String, anchor: String, target: String, target_tip: String },
+}
+
 /// A task-recorded delivery fetched from origin, without claiming a local worker.
 struct RemoteMergeSource {
     assignee: String,
@@ -3881,7 +3890,7 @@ impl CasCore {
         repo: &Path,
         task: Option<&cas_types::Task>,
         id: &str,
-    ) -> Result<Option<RemoteMergeSource>, McpError> {
+    ) -> Result<Option<StartedMergeSource>, McpError> {
         let Some(task) = task.filter(|task| {
             task.task_type != cas_types::TaskType::Epic
                 && matches!(
@@ -3957,6 +3966,32 @@ impl CasCore {
         if !git.is_ancestor(&start.base_sha, &tip) {
             return Err(refuse("the recorded base is no longer an ancestor".into()));
         }
+        // cas-06f53: the pre-merge path merged the recorded delivery and moved
+        // the local branch to the target. Local and origin tips then differ,
+        // but nothing is unresolved: the delivery is already on the target.
+        if let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+            .map(str::trim).filter(|anchor| !anchor.is_empty())
+        {
+            let origin_tip = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+                && git.has_origin_remote()
+            {
+                requested_merge_source_tip(repo, &start.branch, true)?
+            } else {
+                None
+            };
+            let mut delivered = vec![anchor, tip.as_str()];
+            delivered.extend(origin_tip.as_deref());
+            if let Some(target_tip) =
+                git.target_tip_containing(&start.work_target.target_branch, &delivered)
+            {
+                return Ok(Some(StartedMergeSource::AlreadyMerged {
+                    branch: start.branch.clone(),
+                    anchor: anchor.to_string(),
+                    target: start.work_target.target_branch.clone(),
+                    target_tip,
+                }));
+            }
+        }
         let attributed = crate::mcp::tools::core::task::lifecycle::close_ops::task_attribution::started_delivery(repo, task)
             .map_err(&refuse)?;
         if attributed.is_none() && !git.is_ancestor(&tip, &start.work_target.target_branch) {
@@ -3974,11 +4009,11 @@ impl CasCore {
                     .into(),
             ));
         }
-        Ok(Some(RemoteMergeSource {
+        Ok(Some(StartedMergeSource::Merge(RemoteMergeSource {
             assignee,
             branch: start.branch.clone(),
             anchor: tip,
-        }))
+        })))
     }
 
     /// Prefer the task's recorded source, discovering names only if it is absent.
@@ -4629,8 +4664,20 @@ impl CasCore {
             anchor: receipt.commit_sha.clone(),
         });
         let active_source = if transactional_delivery.is_none() {
-            self.started_task_merge_source(&cwd, scoped_task.as_deref(),
+            match self.started_task_merge_source(&cwd, scoped_task.as_deref(),
                 system_a.as_ref().map(|worktree| worktree.branch.as_str()).unwrap_or(id))?
+            {
+                Some(StartedMergeSource::AlreadyMerged { branch, anchor, target, target_tip }) => {
+                    let label = crate::worktree::GitOperations::visible_git_label;
+                    return Ok(Self::success(format!(
+                        "ALREADY MERGED: task {} delivery {} @ {} is already in {} @ {}. Nothing was merged, and no rebind or restore is needed.",
+                        scoped_task.as_deref().map(|task| task.id.as_str()).unwrap_or("?"),
+                        label(&branch), label(&anchor), label(&target), label(&target_tip),
+                    )));
+                }
+                Some(StartedMergeSource::Merge(source)) => Some(source),
+                None => None,
+            }
         } else {
             None
         };
@@ -8979,6 +9026,7 @@ mod cas_7ce6_parked_merge_source_tests {
 
 #[cfg(test)]
 mod cas_6b42_peer_delivery_tests {
+    use super::StartedMergeSource;
     use crate::mcp::CasCore;
     use std::path::Path;
     use std::process::Command;
@@ -8997,6 +9045,81 @@ mod cas_6b42_peer_delivery_tests {
             .expect("git runs");
         assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// cas-06f53, replaying cas-6a3e: the pre-merge path merged the parked
+    /// delivery and moved the worker's local branch to the merged target, so
+    /// local and origin tips differ. The source is already merged, not
+    /// unresolved; a new unpushed commit on top is still a real tip conflict.
+    #[test]
+    fn an_already_merged_delivery_resolves_as_merged_cas_06f53() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("work"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(dir.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&repo, &["add", ".gitignore"]);
+        git(&repo, &["commit", "-qm", "seed"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        let branch = "factory/warm-cobra-73";
+        git(&repo, &["checkout", "-qb", branch]);
+        std::fs::write(repo.join("purge.rs"), "ids\n").unwrap();
+        git(&repo, &["add", "purge.rs"]);
+        git(&repo, &["commit", "-qm", "test(cas-6a3e): assert ids"]);
+        let anchor = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["push", "-q", "origin", branch]);
+        // The pre-merge path merges the delivery and fast-forwards the worker
+        // branch to the merged target; origin keeps the parked tip.
+        git(&repo, &["checkout", "-q", "main"]);
+        git(&repo, &["merge", "-q", "--no-ff", "-m", "merge cas-6a3e", branch]);
+        git(&repo, &["push", "-q", "origin", "main"]);
+        let merged = git(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["branch", "-f", branch, "main"]);
+
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "sup-soundwave".into(), "calm-koala-86".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "worker-warm-cobra".into(), "warm-cobra-73".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing("sup-soundwave".into());
+        let work_target = cas_types::WorkTarget {
+            repo_selector: "project:cas-src".into(),
+            target_branch: "main".into(),
+        };
+        let mut task = cas_types::Task::new("cas-6a3e".into(), "Purge wording pins".into());
+        task.status = cas_types::TaskStatus::Open;
+        task.assignee = Some("warm-cobra-73".into());
+        task.deliverables.work_target = Some(work_target.clone());
+        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target, assignee: "warm-cobra-73".into(), branch: branch.into(), base_sha: base,
+        });
+
+        let resolved = core.started_task_merge_source(&repo, Some(&task), branch).unwrap();
+        assert!(
+            matches!(&resolved, Some(StartedMergeSource::AlreadyMerged { anchor: a, target_tip, .. })
+                if *a == anchor && *target_tip == merged),
+            "{}",
+            resolved.is_some()
+        );
+
+        git(&repo, &["checkout", "-q", branch]);
+        std::fs::write(repo.join("later.rs"), "unpushed\n").unwrap();
+        git(&repo, &["add", "later.rs"]);
+        git(&repo, &["commit", "-qm", "test(cas-6a3e): unpushed follow-up"]);
+        assert!(
+            core.started_task_merge_source(&repo, Some(&task), branch).is_err(),
+            "an unpushed commit past the merged delivery is still a tip conflict"
+        );
     }
 
     /// cas-6b42 (GH #1634), replaying cas-aa10: prowl's worker parked a

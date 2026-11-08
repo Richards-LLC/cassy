@@ -688,10 +688,13 @@ pub(crate) fn ensure_deferred_close(
         return Ok(());
     }
     let (repo, target) = task_context(root, task)?;
-    let head = receipt
-        .or(task.deliverables.factory_branch_anchor.as_deref())
-        .and_then(|head| commit(&repo, head))
-        .ok_or_else(|| debt_refusal(&task.id))?;
+    // A post-merge reopen clears the active anchor; the retired one still names the
+    // reviewed delivery, exactly as `qa_status` reads it (cas-c041).
+    let head = match receipt.or(task.deliverables.factory_branch_anchor.as_deref()) {
+        Some(head) => commit(&repo, head),
+        None => delivery_anchor(&repo, task),
+    }
+    .ok_or_else(|| debt_refusal(&task.id))?;
     let satisfies = |head: &str| -> Result<bool, String> {
         Ok(
             satisfying_deferred_receipt(root, task, &repo, &target, head)?.is_some()

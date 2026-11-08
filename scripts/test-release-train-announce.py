@@ -241,6 +241,23 @@ class Announce(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("[rule: long_line]", result.stderr)
 
+    def test_lint_refuses_what_the_hub_refuses_as_unreadable(self):
+        # cas-a72d: a plain file name the post does not attach, or a UTC time, is
+        # refused by Violet as format_unreadable, so the pre-cut lint must refuse it.
+        for text, rule in (("See DESIGN.md for the layout.", "unattached_file"),
+                           ("Shipped at 14:05 UTC today.", "utc_time")):
+            with self.subTest(rule=rule):
+                bodies = list(BODIES)
+                bodies[3] = BODIES[3] + "\n\n" + text
+                self.write_draft(bodies)
+                result = self.validate()
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(re.findall(r"\[rule: (\w+)\]", result.stderr), [rule])
+        bodies = list(BODIES)
+        bodies[3] = BODIES[3] + "\n\nSee <https://example.com/docs/DESIGN.md|the guide> and ```DESIGN.md``` in code."
+        self.write_draft(bodies)
+        self.assertEqual(self.validate().returncode, 0)
+
     def test_validate_rejects_a_multiline_token(self):
         bodies = list(BODIES)
         bodies[3] += "\n\n{{UNKNOWN\nVALUE}}"

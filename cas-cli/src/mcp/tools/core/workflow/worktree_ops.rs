@@ -3981,8 +3981,10 @@ impl CasCore {
         let pushed = origin_tip.as_ref().and_then(|tip| tip.as_deref());
         let mut delivered = vec![tip.as_str()];
         delivered.extend(pushed);
-        if let Some(target_tip) =
-            git.target_tip_containing(&start.work_target.target_branch, &delivered)
+        // A branch still at its start base delivered nothing: never "merged".
+        if delivered.iter().any(|delivered| *delivered != start.base_sha)
+            && let Some(target_tip) =
+                git.target_tip_containing(&start.work_target.target_branch, &delivered)
         {
             return Ok(Some(StartedMergeSource::AlreadyMerged {
                 branch: start.branch.clone(),
@@ -9106,6 +9108,20 @@ mod cas_6b42_peer_delivery_tests {
             matches!(&resolved, Some(StartedMergeSource::AlreadyMerged { target_tip, .. }) if *target_tip == merged),
             "already merged at {merged}: {}",
             resolved.is_some()
+        );
+
+        // A freshly started task still at its base (= the target tip), with
+        // nothing pushed, delivered nothing and is never reported as merged.
+        let fresh = "factory/warm-cobra-73-cas-fresh";
+        git(&repo, &["branch", fresh, "main"]);
+        let mut started = task.clone();
+        if let Some(start) = started.deliverables.factory_branch_start.as_mut() {
+            start.branch = fresh.into();
+        }
+        let empty = core.started_task_merge_source(&repo, Some(&started), fresh);
+        assert!(
+            !matches!(empty, Ok(Some(StartedMergeSource::AlreadyMerged { .. }))),
+            "an empty delivery at its base is not already merged"
         );
 
         git(&repo, &["checkout", "-q", branch]);

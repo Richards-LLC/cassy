@@ -54,9 +54,11 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         }
         await expectRun(panel, [3, 8]);
         await expect(panel).toContainText("Build the Team view");
-        await expect(panel.locator('.team-lane[data-worker="swift-lark-3"] .team-model')).toContainText("gpt-6.1");
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).toContainText("codex");
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-model')).not.toContainText("gpt");
+        const model = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"] .team-model`);
+        await expect(model("swift-lark-3")).toHaveAttribute("data-model-reported", "true");
+        await expect(model("swift-lark-3")).toHaveAttribute("data-model", "gpt-6.1");
+        await expect(model("brisk-wren-9")).toHaveAttribute("data-model-reported", "false");
+        await expect(model("brisk-wren-9")).not.toHaveAttribute("data-model", /.*/);
         await expect(panel).not.toContainText("RAW TOOL OUTPUT");
         // Working and waiting differ by color and mark, not just by the word.
         const look = (worker: string) => panel.locator(`.team-lane[data-worker="${worker}"]`).evaluate(lane => [lane.querySelector(".team-state")!, lane.querySelector(".supervisor-state")!].map(node => { const s = getComputedStyle(node); return [s.color, s.backgroundColor, s.outlineColor, s.outlineWidth, s.borderRadius].join(" "); }));

@@ -141,14 +141,14 @@ pub(crate) fn task_disposition_committed(id: &str, outcome: &str) {
 
 /// The immutable batch attestation is the requested mutation. Closing its
 /// deliveries is subsequent work and must not hide that committed receipt.
-pub(crate) fn batch_receipt_committed(id: &str, staging: &str) {
+pub(crate) fn batch_receipt_committed(label: &str, id: &str, staging: &str) {
     if let Some(receipt) = current()
         && receipt.tool == "verification"
         && receipt.action == "batch_receipt"
     {
         let _ = receipt.commit.set(Commit {
             description: format!(
-                "batch receipt {id} recorded at {staging}; delivery closes continue through \
+                "{label} {id} recorded at {staging}; delivery closes continue through \
                  their ordinary gates, with outcomes recorded on each task"
             ),
             notification_id: None,

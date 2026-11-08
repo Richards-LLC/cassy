@@ -817,7 +817,10 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
     await expect(footer.locator(":scope > span").first()).toHaveText(count);
     await expect(footer.getByTitle("Web client release and build")).toHaveText(/^Web \S/);
   };
-  const empty = page.locator("#conversation-empty");
+  // The list's empty state is shown only when no row is (it is hidden, not
+  // removed, while rows exist).
+  const empty = page.locator("#conversation-empty:not([hidden])");
+  const outageNote = ".conversation-preview:not(.unreachable):not(.interrupted):not(.draft)";
   const outages = [
     ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],
     ["The machine stays down past its catalog's freshness: only Atlas, its hub answering 503 auth_store_unavailable, so only its conversation is last known", ["atlas"], { sockets: "close", http: "auth_store_unavailable" }, "2 conversations · 1 last known"],
@@ -825,13 +828,16 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   for (const [stage, down, outage, count] of outages) {
     await journey.stage(stage, async () => {
       for (const id of down) await hub.down(id, outage);
-      await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
+      // Reconnecting: retrying a machine that was live in this visit.
+      await expect(header).toHaveAttribute("data-phase", "backoff");
       for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) await clock.advance(5_000);
-      await expect(header).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
-      await expect(row).toBeVisible();
+      await expect(header).toHaveAttribute("data-phase", "backoff");
+      // A down machine's row carries its outage note (last known), not a
+      // draft, unreachable or interrupted line.
+      await expect(row.locator(outageNote)).toBeVisible();
       await expect(row).not.toContainText(/retry|Reconnecting|message pending/i);
-      if (down.length === 1) await expect(studioRow).not.toContainText(/last known/i);
-      else await expect(studioRow).toBeVisible();
+      if (down.length === 1) await expect(studioRow.locator(outageNote)).toHaveCount(0);
+      else await expect(studioRow.locator(outageNote)).toBeVisible();
       await expect(empty).toHaveCount(0);
       await expectFooter(count);
     });

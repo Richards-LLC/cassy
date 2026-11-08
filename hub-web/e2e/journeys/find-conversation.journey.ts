@@ -637,10 +637,13 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
           const box = line.getBoundingClientRect();
           seen.centres.add(`${Math.round(box.x + box.width / 2)},${Math.round(box.y + box.height / 2)}`);
         }
-        const header = document.querySelector<HTMLElement>("#conversation-connection")?.dataset.phase;
+        // The header's visible state is its rendered label, not the attach
+        // phase underneath it (auth, dialing and attaching all read as Live).
+        const header = document.querySelector<HTMLElement>("#conversation-connection")?.dataset.label;
         const row = document.querySelector<HTMLElement>('.conversation-row[aria-current="true"] .conversation-preview');
         if (header) seen.status.add(`header:${header}`);
-        if (row) seen.status.add(`row-interrupted:${row.classList.contains("interrupted")}`);
+        // A live row has no second line; any note it shows names its class.
+        if (row) seen.status.add(`row-note:${row.className}`);
         const composer = document.querySelector<HTMLElement>("#message-text");
         if (composer?.offsetParent) seen.composer.add(Math.round(composer.getBoundingClientRect().width));
       };
@@ -671,8 +674,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const [cx, cy] = String(seen.centres[0]).split(",").map(Number);
     expect(Math.abs(cx - (slot.x + slot.width / 2)), "line centred across the reading area").toBeLessThan(4);
     expect(Math.abs(cy - (slot.y + slot.height / 2)), "line centred down the reading area").toBeLessThan(4);
-    expect(seen.status.filter((text) => String(text).startsWith("header:")), "header words while it opened").toEqual(["header:live"]);
-    expect(seen.status.filter((text) => String(text).startsWith("row-interrupted:")), "selected row keeps its connection state while opening").toEqual(["row-interrupted:false"]);
+    const settled = await page.locator("#conversation-connection").evaluate((node) => ({ label: node.dataset.label, phase: node.dataset.phase }));
+    expect(settled.phase, "the opened conversation is live").toBe("live");
+    expect(seen.status.filter((text) => String(text).startsWith("header:")), "the header kept its live state while it opened").toEqual([`header:${settled.label}`]);
+    // Only a parked draft may give the live row a second line; a connection
+    // note (outage, interrupted or unreachable) never appears while it opens.
+    expect(seen.status.filter((text) => String(text).startsWith("row-note:") && !/\bdraft\b/.test(String(text))), "the selected row never shows a connection note while it opened").toEqual([]);
     expect(seen.composer, "composer widths while it opened").toHaveLength(1);
     // cas-766c: on a phone the empty card's machine · codename line keeps
     // the 40-character machine name (at least 16ch, its OS word dropped, never

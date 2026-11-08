@@ -872,7 +872,7 @@ mod tests {
 
     #[test]
     fn published_train_backfill_closes_and_moves_once() {
-        let (temp, root, mut shipped, _, _) = fixture();
+        let (temp, root, mut shipped, owner, _) = fixture();
         let repo = temp.path();
         let old_lane = shipped.branch.clone().unwrap();
         let next_lane = "epic/release-train-vnext-cas-51aa9";

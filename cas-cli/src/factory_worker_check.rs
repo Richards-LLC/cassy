@@ -3052,6 +3052,57 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
     #[cfg(unix)]
     #[test]
+    fn isolated_test_path_resolves_rust_tools_from_cargo_home_without_widening_path_cas_a937() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let host_bin = fixture.path().join("host-bin");
+        let slots = fixture.path().join("slots");
+        let cwd = fixture.path().join("worktree");
+        std::fs::create_dir_all(&host_bin).unwrap();
+        std::fs::create_dir_all(&slots).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        env.set("PATH", &host_bin);
+
+        let install_rust_tools = |bin: &Path| {
+            std::fs::create_dir_all(bin).unwrap();
+            for name in ["cargo", "rustc", "rustdoc", "rustup", "cargo-nextest"] {
+                fake_cargo(&bin.join(name), "exit 0");
+            }
+        };
+        let configured_bin = fixture.path().join("configured-cargo-home/bin");
+        install_rust_tools(&configured_bin);
+        let default_bin = env.home().join(".cargo/bin");
+        install_rust_tools(&default_bin);
+
+        env.set("CARGO_HOME", configured_bin.parent().unwrap());
+        let (private_bin, path) = isolated_test_path(Path::new("cargo"), &cwd, &slots).unwrap();
+        assert_eq!(
+            private_bin.path().join("cargo").canonicalize().unwrap(),
+            configured_bin.join("cargo").canonicalize().unwrap()
+        );
+        for name in ["rustc", "rustdoc", "cargo-nextest"] {
+            assert_eq!(
+                private_bin.path().join(name).canonicalize().unwrap(),
+                configured_bin.join(name).canonicalize().unwrap()
+            );
+        }
+        assert!(!std::env::split_paths(&path).any(|entry| entry == configured_bin));
+
+        env.remove("CARGO_HOME");
+        let (private_bin, path) = isolated_test_path(Path::new("cargo"), &cwd, &slots).unwrap();
+        assert_eq!(
+            private_bin.path().join("cargo").canonicalize().unwrap(),
+            default_bin.join("cargo").canonicalize().unwrap()
+        );
+        assert!(!std::env::split_paths(&path).any(|entry| entry == default_bin));
+
+        std::fs::remove_dir_all(&default_bin).unwrap();
+        let error = isolated_test_path(Path::new("cargo"), &cwd, &slots).unwrap_err();
+        assert!(error.to_string().contains("cannot resolve Cargo before isolating test PATH"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn real_rustup_cargo_cannot_restore_host_harness_path_cas_a9fc() {
         let Some(bin) = std::env::var_os("CAS_A9FC_PATH_CHILD") else {
             let _env = crate::test_support::TestEnvGuard::new();

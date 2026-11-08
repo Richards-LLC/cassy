@@ -131,10 +131,11 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const focused = () => page.evaluate(() => {
       const node = document.activeElement as HTMLElement | null;
       if (!node) return "";
-      const label = `${node.tagName.toLowerCase()}.${node.className.split(" ")[0]}:${node.textContent?.trim() ?? ""}`;
       const counter = window as unknown as { __stop?: number };
       node.dataset.stop ??= String((counter.__stop = (counter.__stop ?? 0) + 1));
-      return node.matches("button.context-sheet-close") ? "sheet-close" : node.matches("summary") ? "summary" : `${node.tagName.toLowerCase()}#${node.dataset.stop}`;
+      // Stops are named by element and class, never by their visible text.
+      const stop = node.matches("summary") ? "summary" : `${node.tagName.toLowerCase()}.${node.className.split(" ")[0]}`;
+      return node.matches("button.context-sheet-close, summary") ? stop : `${stop}#${node.dataset.stop}`;
     });
     // QA F01: Shift+Tab from Close really moves, to the sheet's last stop (the
     // collapsed Details' summary, not the Copy button hidden inside it).
@@ -148,7 +149,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
       expect(await inSheet(), `Tab ${step + 1} stays in the sheet`).toBe(true);
       stops.push(await focused());
     }
-    const close = "button.context-sheet-close:×";
+    const close = "button.context-sheet-close";
     expect(stops[0], "Tab from Details wraps to Close").toBe(close);
     const lap = stops.indexOf(close, 1);
     expect(lap, `Tab comes back round to Close: ${stops.join(" → ")}`).toBeGreaterThan(1);

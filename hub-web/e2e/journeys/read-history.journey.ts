@@ -589,7 +589,7 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     await report.scrollIntoViewIfNeeded();
     // Inline PDF previews request a session ticket, then proxy bytes. Wait
     // for this fixture's unavailable preview before counting the separate Open URL.
-    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-report"]) .rich-media')).toBeVisible();
+    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-report"]) .rich-media')).toHaveAttribute("data-preview-state", "failed");
     const reportRequests = hub.artifactRequests.filter((id) => id === "art-report").length;
     const opened = page.waitForEvent("popup");
     await report.click();
@@ -606,7 +606,7 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     const note = (id: string) => log.locator(`a[data-artifact-id="${id}"] .fnote`);
     const local = log.locator('a[data-artifact-id="art-local-draft"]');
     await local.scrollIntoViewIfNeeded();
-    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-local-draft"]) .rich-media')).toBeVisible();
+    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-local-draft"]) .rich-media')).toHaveAttribute("data-preview-state", "failed");
     const localRequests = hub.artifactRequests.filter((id) => id === "art-local-draft").length;
     await local.click();
     await expect(note("art-local-draft")).toBeVisible();

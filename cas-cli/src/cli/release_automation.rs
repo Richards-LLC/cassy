@@ -508,7 +508,7 @@ pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Str
         };
         crate::qa_pass::sync::record_batch(root, &receipt)?;
         if !closing_ids.is_empty() {
-            let core = crate::mcp::server::CasCore::with_daemon(root.to_path_buf(), None, None);
+            let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
             let close_report = runtime.block_on(core.close_release_covered_deliveries(&receipt));
             if !close_report.trim().is_empty() {
@@ -522,7 +522,7 @@ pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Str
 
     let refreshed = store.get_subtasks(train_id)?;
     let mut train_closed = false;
-    if refreshed.iter().all(Task::is_terminal) {
+    if refreshed.iter().all(cas_types::Task::is_terminal) {
         let mut closed = store.get(train_id)?;
         if !closed.is_terminal() {
             let now = chrono::Utc::now();

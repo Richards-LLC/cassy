@@ -15214,7 +15214,7 @@ fn epic_anchor_supersession(
 /// cannot supply another task's final blob to this child's epic accounting.
 fn epic_anchor_content_presence(
     task: &Task,
-    _children: &[Task],
+    children: &[Task],
     repo: &std::path::Path,
     anchor: &str,
     target: &str,

@@ -302,6 +302,11 @@ mod tests {
         train.task_type = cas_types::TaskType::Epic;
         tasks.add(&train).unwrap();
         tasks.add_dependency(&cas_types::Dependency::new("cas-live".into(), "cas-train".into(), cas_types::DependencyType::ParentChild)).unwrap();
+        // cas-c041: once a post-merge reopen retires the active anchor, close reads the same receipt qa_status does.
+        let mut reopened = tasks.get("cas-live").unwrap();
+        let retired = reopened.deliverables.factory_branch_anchor.take().unwrap();
+        reopened.deliverables.historical_factory_branch_anchors.push(retired);
+        crate::qa_batch::ensure_deferred_close(&cas, &reopened, None, None).unwrap();
         let receipt_id = qa.split("qab-").nth(1).map(|rest| format!("qab-{}", rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>())).unwrap();
         let status = text(service.verification(rmcp::handler::server::wrapper::Parameters(serde_json::from_value(serde_json::json!({
             "action": "qa_status", "task_id": "cas-train",

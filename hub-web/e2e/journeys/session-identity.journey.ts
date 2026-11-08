@@ -609,7 +609,12 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await expect(supervisorRow.locator(".conversation-role")).toHaveText("ready-cobra-72");
       await expect(supervisorRow.locator(".conversation-machine-name")).toHaveText("Atlas");
-      expect(await supervisorRow.locator(".conversation-who").evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
+      expect(await supervisorRow.evaluate(node => {
+        const avatar = node.querySelector(".conversation-avatar")!.getBoundingClientRect();
+        const who = node.querySelector<HTMLElement>(".conversation-who")!;
+        const name = node.querySelector<HTMLElement>(".conversation-role")!.getBoundingClientRect();
+        return name.left >= avatar.right && who.scrollWidth <= who.clientWidth;
+      })).toBe(true);
     }
     await page.setViewportSize({ width: 1280, height: 800 });
     const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });

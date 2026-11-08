@@ -2418,16 +2418,16 @@ url = "https://context7.invalid/mcp"
             let _env = TestEnvGuard::with_optional_vars(&[
                 ("CLAUDE_PROJECT_DIR", None),
                 ("CAS_ROOT", Some(&inherited)),
-                (QA_SANDBOX_ENV, Some(&sandbox)),
+                (super::QA_SANDBOX_ENV, Some(&sandbox)),
             ]);
             assert!(resolve_mcp_serve_root().is_err());
-            assert!(qa_sandbox().is_some());
+            assert!(super::qa_sandbox().is_some());
         }
         let own = scratch.join(".cas").to_string_lossy().into_owned();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CLAUDE_PROJECT_DIR", None),
             ("CAS_ROOT", Some(&own)),
-            (QA_SANDBOX_ENV, Some(&sandbox)),
+            (super::QA_SANDBOX_ENV, Some(&sandbox)),
         ]);
         assert_eq!(resolve_mcp_serve_root().unwrap(), scratch.join(".cas"));
     }

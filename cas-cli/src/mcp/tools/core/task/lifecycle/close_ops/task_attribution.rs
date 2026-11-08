@@ -1565,6 +1565,7 @@ pub(super) fn merge_tip_content_presence(
                 target,
                 merge_tip,
                 &carries_source,
+                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
             )
         })
         .collect();
@@ -1909,6 +1910,7 @@ pub(super) fn ordinary_anchor_content_presence(
         target,
         anchor,
         &carries_source,
+        &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
     );
     let DeliveryContentPresence::Dropped { paths } = &original else {
         return original;

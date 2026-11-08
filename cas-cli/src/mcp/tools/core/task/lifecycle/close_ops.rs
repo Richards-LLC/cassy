@@ -25987,9 +25987,11 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     parent_branch: &str,
     carrier: &str,
     carries_source: &std::cell::OnceCell<bool>,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
-    let ordinary =
-        || delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, &[]);
+    let ordinary = || {
+        delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners)
+    };
     let Some(paths) = std::process::Command::new("git")
         .args([
             "diff",
@@ -26031,7 +26033,7 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
             parent_branch,
             Some(&measured),
             false,
-            &[],
+            owners,
         )
     });
     match inner {

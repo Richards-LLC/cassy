@@ -59,14 +59,32 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/mcp" })).toHaveAttribute("data-phase", "observed");
         expect(hub.sends).toHaveLength(0);
       });
+      await journey.stage("Dismiss a stuck queued Finish through the daemon before Exit (cas-f1a2)", async () => {
+        const input = page.locator("#message-text");
+        await input.fill("/finish"); await input.press("Enter");
+        await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1]!.body as { client_ref: string; command: string };
+        expect(request.command).toBe("finish");
+        const receipt = page.locator(`[data-command-ref="${request.client_ref}"]`);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "queued");
+        await receipt.getByRole("button", { name: "Dismiss command status", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
+        expect(hub.frames.find(frame => frame.kind === "SupervisorCommandCancel")!.body).toEqual({ client_ref: request.client_ref });
+        await expect(receipt).toBeVisible();
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
+        await expect(receipt).toHaveCount(0);
+        expect(hub.sends).toHaveLength(0);
+      });
       await journey.stage("Exit once after the native turn has completed", async () => {
         const input = page.locator("#message-text");
         await input.fill("/exit"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Exit", exact: true }).click();
-        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(3);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
-        expect(frames).toHaveLength(2);
-        expect(frames[1]!.body).toMatchObject({ command: "exit", confirmed: true });
+        expect(frames).toHaveLength(3);
+        expect(frames[2]!.body).toMatchObject({ command: "exit", confirmed: true });
         expect(hub.sends).toHaveLength(0);
       });
     });

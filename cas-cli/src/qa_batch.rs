@@ -361,7 +361,8 @@ pub(crate) fn prepare_receipt(
     // refuse with its diagnostics before anything is recorded.
     if schema == cas_store::QA_BATCH_RECEIPT_SCHEMA {
         let owner = crate::store::open_task_store(root)
-            .and_then(|tasks| tasks.get(&artifact.task_id))
+            .map_err(|e| e.to_string())?
+            .get(&artifact.task_id)
             .map_err(|e| e.to_string())?;
         let report = crate::cli::qa_ledger::check(&ledger, Some(&owner));
         if !report.ok {

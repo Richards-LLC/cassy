@@ -759,23 +759,29 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
     }
     if let Some(receipt) = batch_receipt {
-        let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
-            "QA batch debt satisfied by release verdict"
+        if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+            pass.notes.push(format!(
+                "QA batch debt satisfied by published tag: receipt={} tag={} task={} anchor={}",
+                receipt.id,
+                receipt.release_tag.as_deref().unwrap_or(""),
+                task.id,
+                receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or(""),
+            ));
         } else {
-            "QA batch evidence PASS"
-        };
-        pass.notes.push(format!(
-            "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
-            receipt.id,
-            receipt.staging_sha,
-            receipt.ledger_artifact_id,
-            task.id,
-            receipt
-                .task_heads
-                .get(&task.id)
-                .map(String::as_str)
-                .unwrap_or("")
-        ));
+            let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
+                "QA batch debt satisfied by release verdict"
+            } else {
+                "QA batch evidence PASS"
+            };
+            pass.notes.push(format!(
+                "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
+                receipt.id,
+                receipt.staging_sha,
+                receipt.ledger_artifact_id,
+                task.id,
+                receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")
+            ));
+        }
     }
     if let Some(waiver) = waiver {
         let evidence = match tier {

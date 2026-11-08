@@ -475,6 +475,8 @@ pub enum ReleaseCommands {
     Track(release_automation::TrackArgs),
     /// Notify the owning supervisor after a published release is installed
     Installed(release_automation::InstalledArgs),
+    /// Backfill shipped release trains from their published tags
+    Backfill(release_automation::BackfillArgs),
     /// Validate any commit with the merge queue job set on hosted CI
     Precheck(release_precheck::ReleasePrecheckArgs),
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
@@ -1033,6 +1035,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
+        Commands::Release(ReleaseCommands::Backfill(args)) => release_automation::backfill(args, cas_root),
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),

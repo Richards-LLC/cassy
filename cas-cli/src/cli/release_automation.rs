@@ -2,6 +2,7 @@
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use cas_types::{Dependency, DependencyType, TaskStatus, TaskTerminalOutcome};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -35,6 +36,8 @@ pub struct InstalledArgs {
     #[arg(long)]
     repo: String,
 }
+#[derive(Debug, Args)]
+pub struct BackfillArgs {}
 #[derive(Debug, Serialize, Deserialize)]
 struct ReleaseContext {
     train_id: String,
@@ -402,7 +405,216 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
             "v{version} published and installed: post-release steps due (notes checksums, Slack, factory restart, release receipt)"
         ),
     )?;
+    let reconciled = close_shipped_train(root, &context.train_id, &format!("v{version}"))?;
+    println!("{reconciled}");
     Ok(true)
+}
+
+/// Apply the published tag verdict to one release train. All effects are
+/// idempotent: existing tag receipts are reused, terminal children are skipped,
+/// and migrated children already target the next train.
+pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<String> {
+    let (repo, _integration) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
+        .context("release train has no integration branch")?;
+    let tag_sha = published_tag_sha(&repo, tag)?;
+    let store = open_task_store(root)?;
+    let train = store.get(train_id)?;
+    ensure!(
+        crate::mcp::tools::core::task::release_train::is_release_train(&train),
+        "{train_id} is not a release train"
+    );
+    let lane = train.effective_epic_branch().context("release train has no lane")?;
+    let lane_ref = if git(&repo, &["rev-parse", "--verify", &format!("origin/{lane}^{{commit}}")]).is_ok() {
+        format!("origin/{lane}")
+    } else {
+        lane.to_string()
+    };
+    ensure!(
+        git(&repo, &["merge-base", "--is-ancestor", &lane_ref, &tag_sha]).is_ok(),
+        "release tag {tag} does not contain train lane {lane}"
+    );
+
+    let current_train = store.get("cas-51aa9").context("current release train cas-51aa9 is unavailable")?;
+    ensure!(
+        crate::mcp::tools::core::task::release_train::is_release_train(&current_train)
+            && !current_train.is_terminal(),
+        "cas-51aa9 is not the current open release train"
+    );
+    let next_lane = current_train.effective_epic_branch().context("current release train has no lane")?;
+    let children = store.get_subtasks(train_id)?;
+    let mut included = Vec::new();
+    let mut report = Vec::new();
+    let mut moved_count = 0;
+    let mut receipt_recorded = false;
+    for child in &children {
+        if child.status == TaskStatus::Cancelled {
+            continue;
+        }
+        let anchor = child.deliverables.factory_branch_anchor.as_deref();
+        let shipped = anchor.is_some_and(|anchor| matches!(
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                &repo, anchor, &tag_sha,
+            ),
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
+        ));
+        if shipped {
+            included.push(child.id.clone());
+            if child.status != TaskStatus::AwaitingMerge && child.status != TaskStatus::Closed {
+                report.push(format!("{}: shipped tree is present; status {} needs its ordinary close", child.id, child.status));
+            }
+            continue;
+        }
+        if child.is_terminal() {
+            continue;
+        }
+        if !child.is_terminal() {
+            moved_count += usize::from(move_to_next_train(
+                store.as_ref(), child, train_id, &current_train.id, &current_train, &next_lane,
+            )?);
+            if child.id == "cas-526e" {
+                report.push("cas-526e: two unmerged commits; left open and moved to cas-51aa9".into());
+            }
+        } else {
+            report.push(format!("{}: not present in {tag}; left {}", child.id, child.status));
+        }
+    }
+
+    let mut closed_count = 0;
+    if !included.is_empty() {
+        let closing_ids: Vec<_> = included.iter().filter(|id| {
+            store.get(id).is_ok_and(|task| task.status != TaskStatus::Closed)
+        }).cloned().collect();
+        let project = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
+        let receipts = cas_store::list_qa_batch_receipts(root, &project)?;
+        let reusable = receipts.into_iter().find(|receipt| {
+            receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA
+                && receipt.release_tag.as_deref() == Some(tag)
+                && included.iter().all(|id| {
+                    receipt.task_heads.get(id).is_some_and(|head| {
+                        store.get(id).ok().and_then(|task| task.deliverables.factory_branch_anchor)
+                            .as_deref() == Some(head.as_str())
+                    })
+                })
+        });
+        let receipt = if let Some(receipt) = reusable {
+            receipt
+        } else {
+            let receipt = crate::qa_batch::prepare_release_tag_receipt(root, &included, tag)
+                .map_err(anyhow::Error::msg)?;
+            cas_store::record_qa_batch_receipt(root, &receipt)?;
+            receipt_recorded = true;
+            receipt
+        };
+        crate::qa_pass::sync::record_batch(root, &receipt)?;
+        if !closing_ids.is_empty() {
+            let core = crate::mcp::server::CasCore::with_daemon(root.to_path_buf(), None, None);
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let close_report = runtime.block_on(core.close_release_covered_deliveries(&receipt));
+            if !close_report.trim().is_empty() {
+                report.push(close_report.trim().to_string());
+            }
+        }
+        closed_count = closing_ids.iter().filter(|id| {
+            store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed)
+        }).count();
+    }
+
+    let refreshed = store.get_subtasks(train_id)?;
+    let mut train_closed = false;
+    if refreshed.iter().all(Task::is_terminal) {
+        let mut closed = store.get(train_id)?;
+        if !closed.is_terminal() {
+            let now = chrono::Utc::now();
+            closed.status = TaskStatus::Closed;
+            closed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
+            closed.closed_at = Some(now);
+            closed.updated_at = now;
+            closed.close_reason = Some(format!("Release tag {tag} shipped train lane {lane}."));
+            store.update(&closed)?;
+            train_closed = true;
+        }
+    } else {
+        report.extend(refreshed.iter().filter(|child| !child.is_terminal()).map(|child| {
+            format!("{}: remains {} under shipped train", child.id, child.status)
+        }));
+    }
+    let changed = closed_count > 0 || moved_count > 0 || train_closed || receipt_recorded;
+    Ok(if changed {
+        format!("{train_id} reconciled from {tag}: closed {closed_count} delivery(ies). {}", report.join("; "))
+    } else if report.is_empty() {
+        format!("{train_id}: no changes for {tag}")
+    } else {
+        format!("{train_id}: no close changes for {tag}. {}", report.join("; "))
+    })
+}
+
+fn published_tag_sha(repo: &Path, tag: &str) -> Result<String> {
+    ensure!(semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).is_ok(), "invalid release tag {tag}");
+    let local = git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
+    let remote = std::process::Command::new("git")
+        .arg("-C").arg(repo)
+        .args(["ls-remote", "origin", &format!("refs/tags/{tag}"), &format!("refs/tags/{tag}^{{}}")])
+        .output()?;
+    ensure!(remote.status.success(), "cannot verify published tag {tag}: {}", String::from_utf8_lossy(&remote.stderr));
+    let found = String::from_utf8_lossy(&remote.stdout).lines().any(|line| {
+        line.split_whitespace().next() == Some(local.as_str())
+    });
+    ensure!(found, "tag {tag} is not published on origin at {local}");
+    Ok(local)
+}
+
+fn move_to_next_train(
+    store: &dyn cas_store::TaskStore,
+    child: &cas_types::Task,
+    from: &str,
+    to: &str,
+    next_train: &cas_types::Task,
+    lane: &str,
+) -> Result<bool> {
+    let already_parent = store.get_parent_epic(&child.id)?.is_some_and(|parent| parent.id == to);
+    if already_parent
+        && child.deliverables.work_target.as_ref().is_some_and(|target| target.target_branch == lane) {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now();
+    if !already_parent {
+        store.remove_dependency_of_type(&child.id, from, DependencyType::ParentChild)?;
+        store.add_dependency(&Dependency {
+            from_id: child.id.clone(),
+            to_id: to.to_string(),
+            dep_type: DependencyType::ParentChild,
+            created_at: now,
+            created_by: Some("release-automation".into()),
+        })?;
+    }
+    let mut moved = store.get(&child.id)?;
+    let repo_selector = next_train.deliverables.work_target.as_ref()
+        .context("current release train has no repository target")?.repo_selector.clone();
+    moved.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector,
+        target_branch: lane.to_string(),
+    });
+    moved.updated_at = now;
+    store.update(&moved)?;
+    store.append_note(&child.id, &format!(
+        "[{}] ✅ DECISION Release migration: not included in the published tag; moved from {from} to {to} on `{lane}`.",
+        now.format("%Y-%m-%d %H:%M"),
+    ))?;
+    Ok(true)
+}
+
+pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
+    let _ = args;
+    for (train, tag) in [
+        ("cas-c4a0", "v4.3.0"),
+        ("cas-baf5", "v4.4.0"),
+        ("cas-dcb3", "v4.5.0"),
+        ("cas-d7c7", "v4.6.0"),
+    ] {
+        println!("{}", close_shipped_train(root, train, tag)?);
+    }
+    Ok(())
 }
 
 pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()> {
@@ -656,5 +868,83 @@ mod tests {
             reminders.list_recently_ended(&owner.id, 60).unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn published_train_backfill_closes_and_moves_once() {
+        let (temp, root, mut shipped, _, _) = fixture();
+        let repo = temp.path();
+        let old_lane = shipped.branch.clone().unwrap();
+        let next_lane = "epic/release-train-vnext-cas-51aa9";
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n").unwrap();
+        let bare = temp.path().join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/released.rs"), "pub fn released() {}\n").unwrap();
+        git(repo, &["add", "src/released.rs"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "delivery"])
+            .unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        git(repo, &["merge", "--no-ff", &old_lane, "-m", "merge release train"]).unwrap();
+        fs::write(repo.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [4.3.0] - 2026-11-08\n\n- Shipped.\n").unwrap();
+        git(repo, &["add", "CHANGELOG.md"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "release: v4.3.0"])
+            .unwrap();
+        git(repo, &["tag", "-a", "v4.3.0", "-m", "release v4.3.0"]).unwrap();
+        git(repo, &["branch", next_lane, "main"]).unwrap();
+        git(repo, &["push", "origin", "main", &old_lane, next_lane, "--tags"]).unwrap();
+
+        let store = open_task_store(&root).unwrap();
+        shipped.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.update(&shipped).unwrap();
+        let mut current = Task::new("cas-51aa9".into(), "Current train".into());
+        current.task_type = TaskType::Epic;
+        current.labels.push("release-train".into());
+        current.branch = Some(next_lane.into());
+        current.deliverables.work_target = shipped.deliverables.work_target.clone();
+        store.add(&current).unwrap();
+
+        let mut shipped_child = Task::new("cas-a100".into(), "Shipped child".into());
+        shipped_child.origin_project = Some("release-fixture".into());
+        shipped_child.status = TaskStatus::AwaitingMerge;
+        shipped_child.deliverables.factory_branch_anchor = Some(anchor);
+        shipped_child.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: old_lane.clone(),
+        });
+        store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
+        let mut open_child = Task::new("cas-526e".into(), "Next release child".into());
+        open_child.origin_project = Some("release-fixture".into());
+        open_child.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: old_lane,
+        });
+        store.create_atomic(&open_child, &[], Some(&shipped.id), None).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
+        let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
+        assert!(first.contains("reconciled"), "{first}");
+        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(store.get(&shipped_child.id).unwrap().status, TaskStatus::Closed);
+        let migrated = store.get_parent_epic(&open_child.id).unwrap().unwrap();
+        assert_eq!(migrated.id, current.id);
+        assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, next_lane);
+        assert_eq!(store.get(&open_child.id).unwrap().status, TaskStatus::Open);
+        assert!(first.contains("cas-526e"), "{first}");
+        let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap();
+        assert!(receipts.iter().any(|receipt| {
+            receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA
+                && receipt.release_tag.as_deref() == Some("v4.3.0")
+                && receipt.ledger_author_id.is_none()
+        }));
+        assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no changes"));
     }
 }

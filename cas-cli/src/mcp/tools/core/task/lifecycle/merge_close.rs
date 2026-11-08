@@ -598,7 +598,10 @@ impl CasCore {
     /// finish the delivery or name the remaining verdict. QA never replaces
     /// release review or a dedicated task review. Returns the report for the receipt's response.
     pub(crate) async fn close_release_covered_deliveries(&self, receipt: &cas_store::QaBatchReceipt) -> String {
-        let recording_verdict = receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA;
+        let recording_verdict = matches!(
+            receipt.schema_version,
+            cas_store::RELEASE_VERDICT_SCHEMA | cas_store::RELEASE_TAG_VERDICT_SCHEMA
+        );
         let (mut closed, mut already, mut held) = (Vec::new(), Vec::new(), Vec::new());
         let Ok(store) = self.open_task_store() else {
             return "\nNo delivery was closed: the task store is unreadable; retry task close.".to_string();

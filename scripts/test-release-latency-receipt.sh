@@ -42,6 +42,9 @@ case "$1 $2" in
       */commits/*/pulls)
         cat "${FAKE_PR_JSON:?}"
         ;;
+      */pulls/*/commits*)
+        printf '%s\n' "${FAKE_PR_COMMIT_DATES:-}"
+        ;;
       */commits/*)
         printf '%s\n' "${FAKE_RELEASE_SHA:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
         ;;
@@ -178,6 +181,24 @@ python3 "$script_dir/release-train-announce.py" --record-latency v3.55.0 \
 grep -qF '626s' "$latency_draft" \
     && ok 'announcement draft labels authoritative gate-green timing accurately' \
     || bad 'announcement draft did not label gate-green timing'
+
+# cas-2bda: a train cut without a tracked receipt resolves its first child from
+# the merged PR's earliest commit instead of printing unavailable.
+printf '{}\n' >"$tmp/no-context.json"
+out="$(FAKE_RELEASE_CONTEXT_JSON="$tmp/no-context.json" \
+    FAKE_PR_COMMIT_DATES=$'2026-10-15T15:40:00Z\n2026-10-15T15:17:18Z' \
+    FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
+    FAKE_MERGE_GROUP_RUNS_JSON="$merge_group_runs" \
+    FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
+    "$receipt" v3.55.0)"
+expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS 1800 'cas-2bda: an untracked train resolves its first child from the merged PR commits'
+out="$(FAKE_RELEASE_CONTEXT_JSON="$tmp/no-context.json" FAKE_PR_COMMIT_DATES= \
+    FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
+    FAKE_MERGE_GROUP_RUNS_JSON="$empty_runs" \
+    FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
+    "$receipt" v3.55.0)"
+expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS unavailable 'cas-2bda: a PR with no commit list stays unavailable instead of inventing a number'
+expect_field "$out" FIRST_CHILD_TO_MAIN_UNKNOWN_REASON no-first-child-commit-in-receipt-or-merged-PR 'cas-2bda: an unavailable first-child time names a stable reason id'
 
 # Older releases may not have a merge_group CI run. Use the merged PR time as
 # an explicit main-to-published fallback and do not manufacture gate-green.

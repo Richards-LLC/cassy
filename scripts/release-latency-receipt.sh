@@ -236,6 +236,13 @@ fi
 # park time or Git committer time for the landing. Missing evidence stays unknown.
 release_context="$("${CAS_BIN:-cas}" release context --version "${tag#v}" 2>/dev/null || true)"
 first_child_epoch="$(jq -r '.first_child_epoch // empty' <<<"${release_context:-null}" 2>/dev/null || true)"
+# A train cut without a tracked receipt has no first_child_epoch; its merged PR
+# still lists the child commits, and the earliest one is the first child (cas-2bda).
+if ! [[ "$first_child_epoch" =~ ^[0-9]+$ ]] && [[ -n "${pr_number:-}" ]]; then
+    first_child_at="$("$gh_bin" api "repos/$repo/pulls/$pr_number/commits?per_page=100" --paginate \
+        --jq '.[].commit.committer.date' 2>/dev/null | sort | sed -n 1p || true)"
+    if [[ -n "$first_child_at" ]]; then first_child_epoch="$(epoch_of "$first_child_at" 2>/dev/null || true)"; fi
+fi
 first_child_to_main=unavailable
 main_to_published=unavailable
 queue_runs=unavailable
@@ -284,6 +291,9 @@ fi
     fi
     printf 'FIRST_CHILD_TO_MAIN_SECONDS=%s\n' "$first_child_to_main"
     printf 'FIRST_CHILD_TO_MAIN_BUDGET_SECONDS=1800\n'
+    if [[ "$first_child_to_main" == unavailable ]]; then
+        printf 'FIRST_CHILD_TO_MAIN_UNKNOWN_REASON=no-first-child-commit-in-receipt-or-merged-PR\n'
+    fi
     printf 'MAIN_TO_PUBLISHED_SECONDS=%s\n' "$main_to_published"
     printf 'MAIN_TO_PUBLISHED_BUDGET_SECONDS=1200\n'
     printf 'QUEUE_RUNS_USED=%s\n' "$queue_runs"

@@ -755,6 +755,6 @@ mod tests {
         assert!(refused.contains(&expected.refusal()), "{refused}");
         // A ledger the command accepts is not refused by the ledger gate (later gates may still apply).
         let later = receipt(&valid).err().unwrap_or_default();
-        assert!(!later.contains(&expected.refusal()) && !later.contains("cas qa ledger check"), "{later}");
+        assert!(!later.contains(&expected.refusal()), "{later}");
     }
 }

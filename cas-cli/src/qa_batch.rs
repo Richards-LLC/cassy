@@ -476,8 +476,8 @@ pub(crate) fn prepare_release_tag_receipt(
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         if !matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
-                &repo, &anchor, &candidate,
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                &repo, &anchor, &candidate, &task.id,
             ),
             crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
                 | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
@@ -651,8 +651,8 @@ fn covering_receipt(
                 || ![anchor.as_str(), head].contains(&reviewed.as_str())
                 || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
                 || !matches!(
-                    crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
-                        repo, reviewed, &receipt.staging_sha,
+                    crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                        repo, reviewed, &receipt.staging_sha, &task.id,
                     ),
                     crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
                         | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }

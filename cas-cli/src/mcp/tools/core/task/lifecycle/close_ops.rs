@@ -14788,11 +14788,12 @@ fn without_promoted_changelog_fragments(
     anchor: &str,
     parent_branch: &str,
     paths: Vec<String>,
+    owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
     let owned = |path: &str| {
         path.strip_prefix("changelog.d/")
             .and_then(|name| name.strip_suffix(".md"))
-            .is_some_and(|owner| !owner.is_empty() && owner != "README" && !owner.contains('/'))
+            .is_some_and(|owner| owners.contains(&owner))
     };
     if !paths.iter().any(|path| owned(path)) {
         return (None, paths);
@@ -15224,11 +15225,14 @@ fn epic_anchor_content_presence(
         task_id: Some(task.id.clone()),
         known_commits: vec![anchor.to_string()],
     };
+    let owners = std::iter::once(task.id.as_str())
+        .chain(children.iter().map(|child| child.id.as_str()))
+        .collect::<Vec<_>>();
     let presence = if git_commit_parent_count(repo, anchor) >= 2 {
         task_attribution::merge_tip_content_presence(repo, target, anchor, None, &identity, None)
-            .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target))
+            .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target, &owners))
     } else {
-        delivery_content_presence_in_parent(repo, anchor, target)
+        delivery_content_presence_in_parent(repo, anchor, target, &owners)
     };
     let DeliveryContentPresence::Dropped { paths } = &presence else {
         return (presence, None);
@@ -19749,9 +19753,11 @@ fn delivery_is_proven_on_parent(
     repo_path: &std::path::Path,
     commit_ish: &str,
     parent_branch: &str,
+    owner: Option<&str>,
 ) -> bool {
+    let owners = owner.into_iter().collect::<Vec<_>>();
     matches!(
-        delivery_content_presence_in_parent(repo_path, commit_ish, parent_branch),
+        delivery_content_presence_in_parent(repo_path, commit_ish, parent_branch, &owners),
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }
     )
 }
@@ -20025,6 +20031,7 @@ pub(crate) fn validate_task_commit_receipt(
         repo_path,
         &full_receipt,
         parent_branch,
+        &[task_id],
     ) {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
@@ -20661,7 +20668,7 @@ fn resolve_merge_evidence(
 ) -> Option<ZeroCommitCloseOutcome> {
     // cas-127f: merge-satisfied — parked tip is now on the parent.
     if let Some(anchor) = factory_branch_anchor {
-        if delivery_is_proven_on_parent(worker_worktree_path, anchor, parent_branch) {
+        if delivery_is_proven_on_parent(worker_worktree_path, anchor, parent_branch, Some(task_id)) {
             return Some(ZeroCommitCloseOutcome::Proceed);
         }
     }
@@ -25708,7 +25715,18 @@ pub(crate) fn delivery_content_presence_on_target(
     delivery_commit: &str,
     target_ref: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false)
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[])
+}
+
+pub(crate) fn delivery_content_presence_on_target_for_task(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    task_id: &str,
+) -> DeliveryContentPresence {
+    delivery_content_presence_on_target_for_paths(
+        repo_path, delivery_commit, target_ref, None, false, &[task_id],
+    )
 }
 
 fn delivery_content_presence_on_target_for_paths(
@@ -25717,6 +25735,7 @@ fn delivery_content_presence_on_target_for_paths(
     target_ref: &str,
     selected_paths: Option<&[String]>,
     resolution_only: bool,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
     let presence = delivery_content_presence_on_target_for_paths_raw(
         repo_path,
@@ -25736,6 +25755,7 @@ fn delivery_content_presence_on_target_for_paths(
         delivery_commit,
         target_ref,
         paths.clone(),
+        owners,
     );
     if remaining.is_empty() {
         DeliveryContentPresence::Present { paths }
@@ -25947,8 +25967,11 @@ pub(crate) fn delivery_content_presence_in_parent(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     parent_branch: &str,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
-    delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None, false)
+    delivery_content_presence_in_parent_for_paths(
+        repo_path, delivery_commit, parent_branch, None, false, owners,
+    )
 }
 
 /// cas-bdd2: [`delivery_content_presence_in_parent`] for a commit inside a
@@ -25965,7 +25988,7 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     carries_source: &std::cell::OnceCell<bool>,
 ) -> DeliveryContentPresence {
     let ordinary =
-        || delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch);
+        || delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, &[]);
     let Some(paths) = std::process::Command::new("git")
         .args([
             "diff",
@@ -26007,6 +26030,7 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
             parent_branch,
             Some(&measured),
             false,
+            &[],
         )
     });
     match inner {
@@ -26043,6 +26067,7 @@ fn delivery_content_presence_in_parent_for_paths(
     parent_branch: &str,
     selected_paths: Option<&[String]>,
     resolution_only: bool,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
     let origin_parent = format!("origin/{parent_branch}");
     let target = if git_ref_exists(repo_path, &origin_parent)
@@ -26066,6 +26091,7 @@ fn delivery_content_presence_in_parent_for_paths(
         target,
         selected_paths,
         resolution_only,
+        owners,
     )
 }
 
@@ -35957,7 +35983,7 @@ esac
         std::fs::write(&trace, "").unwrap();
         let first_path = vec![files[0].to_string()];
         assert_eq!(
-            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false),
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[]),
             DeliveryContentPresence::Present { paths: first_path },
         );
         let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
@@ -37483,7 +37509,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "topology predicate must remain ancestry-only for established callers"
         );
         assert!(
-            !delivery_is_proven_on_parent(p, &delivery, "main"),
+            !delivery_is_proven_on_parent(p, &delivery, "main", None),
             "delivery authorization must add content proof to topology"
         );
 

@@ -452,8 +452,8 @@ pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Str
         }
         let anchor = child.deliverables.factory_branch_anchor.as_deref();
         let shipped = anchor.is_some_and(|anchor| matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
-                &repo, anchor, &tag_sha,
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                &repo, anchor, &tag_sha, &child.id,
             ),
             crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
                 | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }

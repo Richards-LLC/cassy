@@ -277,7 +277,7 @@ mod tests {
         assert!(rows.iter().all(|row| !row.payload.contains("cas-unpushed")), "{rows:?}");
 
         let ledger = project.join("LEDGER.md");
-        fs::write(&ledger, "# Batch walk\ncas-live PASS\n").unwrap();
+        fs::write(&ledger, crate::qa_ledger::scaffold(&tasks.get("cas-live").unwrap(), &[], "rev")).unwrap();
         let store = cas_store::SqliteArtifactStore::open(&cas).unwrap();
         let context = crate::artifacts::PublishContext {
             store: &store,

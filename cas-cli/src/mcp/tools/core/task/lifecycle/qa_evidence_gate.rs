@@ -198,8 +198,6 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     }
 }
 
-/// Format preflight before either verification-dispatch path mutates state.
-/// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
 /// The task's resolved evidence directory, as the close gate reads it.
 pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf, String> {
     let config = crate::config::Config::load(cas_root).map_err(|e| e.to_string())?;
@@ -210,6 +208,8 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
     Ok(task_qa_artifacts_dir(cas_root, &paths.base, task))
 }
 
+/// Format preflight before either verification-dispatch path mutates state.
+/// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
 pub(crate) fn ledger_preflight(
     cas_root: &Path,
     task: &Task,

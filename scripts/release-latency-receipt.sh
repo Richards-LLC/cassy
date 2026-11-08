@@ -33,6 +33,15 @@ if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 
 budget=600
+budget_explicit=false
+# The release rule's main-to-published budget (the versioned stage budget file),
+# printed in the receipt and used as the publication budget for every main-push
+# release, so the report reads the same number the receipt states.
+main_to_published_budget="$(jq -er '.budgets.publish | select(type == "number")' \
+    "$(dirname "${BASH_SOURCE[0]}")/release-stage-budgets.json")" || {
+    echo "error: scripts/release-stage-budgets.json has no numeric publish budget" >&2
+    exit 1
+}
 run_dir="${CAS_RELEASE_TRAIN_RUN_DIR:-${CAS_RELEASE_RUN_DIR:-}}"
 # The train's post-publication stage owns its atomic receipt hand-off. A
 # standalone measurement writes into its selected artifact run directory so
@@ -45,6 +54,7 @@ while [[ "$#" -gt 0 ]]; do
         --budget-seconds)
             [[ "$#" -ge 2 && "$2" =~ ^[0-9]+$ ]] || { usage; exit 2; }
             budget="$2"
+            budget_explicit=true
             shift 2
             ;;
         --run-dir)
@@ -211,6 +221,11 @@ end="$(epoch_of "$published_at")" || {
 }
 latency=$((end - start))
 
+# Every main-push release is timed from main (merge-queue green or landing), so
+# its publication budget is the main-to-published one.
+if [[ "$start_kind" != tag-push && "$budget_explicit" != true ]]; then
+    budget="$main_to_published_budget"
+fi
 within=true
 if [[ "$latency" -lt 0 ]]; then
     echo "error: publication ($published_at) precedes the $start_description timestamp ($start_at)" >&2
@@ -295,7 +310,7 @@ fi
         printf 'FIRST_CHILD_TO_MAIN_UNKNOWN_REASON=no-first-child-commit-in-receipt-or-merged-PR\n'
     fi
     printf 'MAIN_TO_PUBLISHED_SECONDS=%s\n' "$main_to_published"
-    printf 'MAIN_TO_PUBLISHED_BUDGET_SECONDS=1200\n'
+    printf 'MAIN_TO_PUBLISHED_BUDGET_SECONDS=%s\n' "$main_to_published_budget"
     printf 'QUEUE_RUNS_USED=%s\n' "$queue_runs"
     printf 'QUEUE_RUN_IDS=%s\n' "$queue_run_ids"
     printf 'QUEUE_RUNS_SOURCE=associated-PR-CI-attempts-before-mergedAt\n'
@@ -330,6 +345,6 @@ fi
 if [[ "$first_child_to_main" != unavailable && "$first_child_to_main" -gt 1800 ]]; then
     echo "WARN: first child commit to main took ${first_child_to_main}s, over the 1800s target" >&2
 fi
-if [[ "$main_to_published" != unavailable && "$main_to_published" -gt 1200 ]]; then
-    echo "WARN: main to published took ${main_to_published}s, over the 1200s target" >&2
+if [[ "$main_to_published" != unavailable && "$main_to_published" -gt "$main_to_published_budget" ]]; then
+    echo "WARN: main to published took ${main_to_published}s, over the ${main_to_published_budget}s target" >&2
 fi

@@ -136,6 +136,7 @@ expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS 1800 'cas-61e0: first child comm
 expect_field "$out" MAIN_TO_PUBLISHED_SECONDS 616 'cas-61e0: actual mergedAt to publishedAt is measured against twenty minutes'
 expect_field "$out" QUEUE_RUNS_USED 3 'cas-61e0: count all associated CI attempts before landing, including a different tree'
 expect_field "$out" PUBLISH_START_KIND gate-green 'main-push release uses authoritative merge-queue green'
+expect_field "$out" BUDGET_SECONDS "$(jq -r '.budgets.publish' "$script_dir/release-stage-budgets.json")" 'cas-a96b: a gate-green publication reports the configured main-to-published budget'
 expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:08Z 'green timing starts at the successful merge-queue CI completion'
 expect_field "$out" GATE_GREEN_EPOCH 1792079228 'receipt records the authoritative gate-green epoch'
 expect_field "$out" GATE_GREEN_RUN_ID 803 'receipt identifies the successful merge-queue CI run'
@@ -209,6 +210,12 @@ out="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
     "$receipt" v3.55.0)"
 expect_field "$out" QUEUE_RUNS_USED unavailable 'cas-61e0: absent queue evidence never invents a clean run count'
 expect_field "$out" PUBLISH_START_KIND main-landed 'missing merge-queue evidence selects the main-landing fallback'
+expect_field "$out" BUDGET_SECONDS "$(grep -m1 '^MAIN_TO_PUBLISHED_BUDGET_SECONDS=' <<<"$out" | cut -d= -f2-)" 'cas-a96b: a main-landed publication reports the one main-to-published budget'
+out_explicit="$(FAKE_RUNS_JSON="$empty_runs" FAKE_MAIN_RUNS_JSON="$main_runs" \
+    FAKE_MERGE_GROUP_RUNS_JSON="$empty_runs" \
+    FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
+    "$receipt" v3.55.0 --budget-seconds 300)"
+expect_field "$out_explicit" BUDGET_SECONDS 300 'cas-a96b: an explicit budget still wins for a main-landed publication'
 expect_field "$out" PUBLISH_START_AT 2026-10-15T15:47:18Z 'fallback endpoint is the merged PR timestamp'
 expect_field "$out" MAIN_LANDED_EPOCH 1792079238 'fallback receipt records main landing epoch'
 expect_field "$out" PUBLISH_LATENCY_SECONDS 616 'fallback matches the hand-measured main-to-published interval'

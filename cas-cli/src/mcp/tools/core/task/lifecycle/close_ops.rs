@@ -20027,11 +20027,12 @@ pub(crate) fn validate_task_commit_receipt(
     // unmerged, historical, and empty receipts fail on their own predicates.
     // Content proof is the final delivery-authorization gate, not a
     // replacement for those topology/attribution diagnostics.
+    let owners = window.identity.task_id.as_deref().into_iter().collect::<Vec<_>>();
     let drop_review = match delivery_content_presence_in_parent(
         repo_path,
         &full_receipt,
         parent_branch,
-        &[task_id],
+        &owners,
     ) {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None

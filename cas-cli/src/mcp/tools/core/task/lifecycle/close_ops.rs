@@ -36258,6 +36258,16 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             }
             other => panic!("a release-promoted fragment is delivered: {other:?}"),
         }
+        assert!(
+            matches!(
+                check_zero_commit_close(
+                    dir.path(), "main", &task.id, &task.task_type, None, false,
+                    task.deliverables.factory_branch_anchor.as_deref(), None, None,
+                ),
+                ZeroCommitCloseOutcome::Proceed,
+            ),
+            "the parked close path accepts the released tree"
+        );
         let p = dir.path();
         let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
         std::fs::write(p.join("CHANGELOG.md"), changelog.replace(&format!("{ENTRY}\n"), "")).unwrap();
@@ -36268,6 +36278,16 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
         let (dir, task, _, fragment) = build("cas-test1", "older section");
         refused(&dir, &task, &fragment, "a release that did not add the fragment's lines");
+        assert!(
+            matches!(
+                check_zero_commit_close(
+                    dir.path(), "main", &task.id, &task.task_type, None, false,
+                    task.deliverables.factory_branch_anchor.as_deref(), None, None,
+                ),
+                ZeroCommitCloseOutcome::AmbiguousCodeTask(_),
+            ),
+            "a release tag without the fragment's changelog lines stays dropped"
+        );
 
         let (dir, task, anchor, fragment) = build("cas-other", "release");
         refused(&dir, &task, &fragment, "another task's fragment");

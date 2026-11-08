@@ -1077,6 +1077,9 @@ pub struct ServeArgs {
     control_fd: Option<i32>,
     #[arg(long, hide = true, requires = "backend")]
     standby: bool,
+    /// QA sandbox: serve only a store under this scratch directory, with cloud sync off
+    #[arg(long, value_name = "DIR", conflicts_with = "backend")]
+    sandbox: Option<std::path::PathBuf>,
 }
 
 fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
@@ -1086,6 +1089,11 @@ fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
     // Without the harness, stdout writes now fail with EPIPE and the service
     // ends through its normal shutdown path.
     crate::server_signals::ignore_sigpipe_for_server();
+    if let Some(dir) = &args.sandbox {
+        let dir = dir.canonicalize().with_context(|| format!("sandbox directory {} must exist", dir.display()))?;
+        // Single-threaded here: before the runtime starts. The backends inherit it.
+        unsafe { std::env::set_var(crate::mcp::QA_SANDBOX_ENV, dir) };
+    }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     crate::mcp::configure_serve_allocator();
     let runtime = tokio::runtime::Builder::new_multi_thread()

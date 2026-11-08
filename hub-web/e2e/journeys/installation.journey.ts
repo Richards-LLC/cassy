@@ -3,6 +3,7 @@ import type { Page } from "@playwright/test";
 import { ATLAS } from "./world";
 import type { HubDouble } from "./hub-double";
 import { showConversationList } from "./responsive-goals";
+import { NEEDS_PAIRING } from "../../src/connection-state";
 import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -334,7 +335,8 @@ test("HUB-J2 an admin invitation, explicitly consented, revokes another browser 
 
   await journey.stage("The revoked browser is refused; this one still lists the machine", async () => {
     await old.reload();
-    await expect(old.locator("#conversation-connection")).toHaveAttribute("data-phase", "failed", { timeout: 15_000 });
+    // The revoked browser shows the shared Needs-pairing machine state.
+    await expect(old.getByText(NEEDS_PAIRING, { exact: true }).filter({ visible: true }).first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator("#paired-machines-toggle")).toContainText("Atlas");
     await elsewhere.close();
   });

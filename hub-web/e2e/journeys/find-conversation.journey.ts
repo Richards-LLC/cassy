@@ -642,7 +642,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
         const header = document.querySelector<HTMLElement>("#conversation-connection")?.dataset.label;
         const row = document.querySelector<HTMLElement>('.conversation-row[aria-current="true"] .conversation-preview');
         if (header) seen.status.add(`header:${header}`);
-        if (row) seen.status.add(`row-interrupted:${row.classList.contains("interrupted")}`);
+        // A live row has no second line; any note it shows names its class.
+        if (row) seen.status.add(`row-note:${row.className}`);
         const composer = document.querySelector<HTMLElement>("#message-text");
         if (composer?.offsetParent) seen.composer.add(Math.round(composer.getBoundingClientRect().width));
       };
@@ -676,7 +677,7 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const settled = await page.locator("#conversation-connection").evaluate((node) => ({ label: node.dataset.label, phase: node.dataset.phase }));
     expect(settled.phase, "the opened conversation is live").toBe("live");
     expect(seen.status.filter((text) => String(text).startsWith("header:")), "the header kept its live state while it opened").toEqual([`header:${settled.label}`]);
-    expect(seen.status.filter((text) => String(text).startsWith("row-interrupted:")), "selected row keeps its connection state while opening").toEqual(["row-interrupted:false"]);
+    expect(seen.status.filter((text) => /^row-note:.*\b(?:interrupted|unreachable)\b/.test(String(text))), "the selected row never flips to a connection note while it opened").toEqual([]);
     expect(seen.composer, "composer widths while it opened").toHaveLength(1);
     // cas-766c: on a phone the empty card's machine · codename line keeps
     // the 40-character machine name (at least 16ch, its OS word dropped, never

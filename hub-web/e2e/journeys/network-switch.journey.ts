@@ -817,7 +817,9 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
     await expect(footer.locator(":scope > span").first()).toHaveText(count);
     await expect(footer.getByTitle("Web client release and build")).toHaveText(/^Web \S/);
   };
-  const empty = page.locator("#conversation-empty");
+  // The list's empty state is shown only when no row is (it is hidden, not
+  // removed, while rows exist).
+  const empty = page.locator("#conversation-empty:not([hidden])");
   const outageNote = ".conversation-preview:not(.unreachable):not(.interrupted):not(.draft)";
   const outages = [
     ["The machine stays down past its catalog's freshness: the network is gone for both machines, so every row and the whole count are last known", ["atlas", "studio"], { sockets: "close" }, "2 conversations, last known"],

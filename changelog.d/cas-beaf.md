@@ -1,0 +1,3 @@
+### Fixed — Verification
+
+- **A second verifier can no longer be spawned under a running one** — Was: while the daemon's bound task-verifier was still reviewing a parked delivery, a factory supervisor could spawn a second task-verifier on the same dispatch. The first verifier's supervisor_call was answered, the dispatch resolved and the merge continued, and the second verifier's later rejection could not be recorded, so an incomplete delivery merged. Now: that spawn is refused and names the running verifier and its dispatch, so the supervisor waits for its verdict. A supervisor-direct verdict is also refused while a bound verifier is still reviewing and has not raised a supervisor_call.

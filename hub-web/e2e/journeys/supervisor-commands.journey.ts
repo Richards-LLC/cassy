@@ -41,7 +41,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".working-turn .phase-line")).toBeVisible();
+        await expect(page.locator(".working-turn .phase-line")).toHaveAttribute("data-active", "false");
         const receipt = page.locator(".native-command-receipt");
         await expect(receipt).toContainText("/mcp reconnect cas");
         await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");
@@ -275,11 +275,20 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.locator('[data-supervisor-command="clear"]').click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
+        const clearConsequence = await page.locator("#supervisor-command-palette-consequence").innerText();
+        expect(clearConsequence).toMatch(/\S/);
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
         expect(mutations()).toHaveLength(3);
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toBeVisible();
+        // Exit states its own consequence (not Clear's), and the dialog is described by it.
+        const exitConsequence = page.locator("#supervisor-command-palette-consequence");
+        await expect(exitConsequence).toHaveText(/\S/);
+        expect(await exitConsequence.innerText()).not.toBe(clearConsequence);
+        await expect(dialog).toHaveAccessibleDescription(await exitConsequence.innerText());
+        await expect(dialog).toContainText("cas-src");
+        await expect(dialog.locator('[data-command-confirm="exit"]')).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("ArrowRight");
         await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
@@ -314,7 +323,10 @@ test("HUB-J27 explain commands without control rights and keep Raw output usable
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
-    await expect(page.locator("#supervisor-command-palette")).toBeVisible();
+    // Without command control the palette explains why and offers no command to run.
+    const palette = page.locator("#supervisor-command-palette");
+    await expect(palette.getByRole("status")).toHaveText(/\S/);
+    await expect(palette.locator("[data-supervisor-command]")).toHaveCount(0);
     expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(0);
     await page.keyboard.press("Escape");
   });

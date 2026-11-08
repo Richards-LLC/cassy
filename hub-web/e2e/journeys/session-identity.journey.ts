@@ -320,7 +320,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(rows.locator(".conversation-preview")).toHaveCount(0);
     await expect(row("calm-puma-34")).toHaveAccessibleName(/bright-robin-85/);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
-    await expect(page.locator(".hub-footer-meta")).toBeVisible();
+    await expect.poll(async () => ((await page.locator(".hub-footer-meta > span").first().innerText()).match(/\d+/g) ?? []).map(Number)).toEqual([3]);
     // A useful incoming preview can grow the last row beyond the list's
     // available height. Keep it reachable in the list's own scroll region.
     const incoming = rows.last();
@@ -363,7 +363,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await raw.click();
     const drawer = page.getByRole("dialog", { name: "Raw output" });
     await expect(drawer).toBeVisible();
-    await expect(drawer).toBeVisible();
+    await expect(drawer).toContainText("The supervisor is ready.");
     await page.keyboard.press("Escape");
     await expect(drawer).toBeHidden();
     await expect(raw).toBeFocused();

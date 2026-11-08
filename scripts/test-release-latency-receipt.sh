@@ -198,6 +198,7 @@ out="$(FAKE_RELEASE_CONTEXT_JSON="$tmp/no-context.json" FAKE_PR_COMMIT_DATES= \
     FAKE_PUBLISHED_AT=2026-10-15T15:57:34Z \
     "$receipt" v3.55.0)"
 expect_field "$out" FIRST_CHILD_TO_MAIN_SECONDS unavailable 'cas-2bda: a PR with no commit list stays unavailable instead of inventing a number'
+expect_field "$out" FIRST_CHILD_TO_MAIN_UNKNOWN_REASON no-first-child-commit-in-receipt-or-merged-PR 'cas-2bda: an unavailable first-child time names a stable reason id'
 
 # Older releases may not have a merge_group CI run. Use the merged PR time as
 # an explicit main-to-published fallback and do not manufacture gate-green.

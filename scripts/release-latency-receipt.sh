@@ -291,6 +291,9 @@ fi
     fi
     printf 'FIRST_CHILD_TO_MAIN_SECONDS=%s\n' "$first_child_to_main"
     printf 'FIRST_CHILD_TO_MAIN_BUDGET_SECONDS=1800\n'
+    if [[ "$first_child_to_main" == unavailable ]]; then
+        printf 'FIRST_CHILD_TO_MAIN_UNKNOWN_REASON=no-first-child-commit-in-receipt-or-merged-PR\n'
+    fi
     printf 'MAIN_TO_PUBLISHED_SECONDS=%s\n' "$main_to_published"
     printf 'MAIN_TO_PUBLISHED_BUDGET_SECONDS=1200\n'
     printf 'QUEUE_RUNS_USED=%s\n' "$queue_runs"

@@ -3982,13 +3982,19 @@ impl CasCore {
         let mut delivered = vec![tip.as_str()];
         delivered.extend(pushed);
         // A branch still at its start base delivered nothing: never "merged".
-        if delivered.iter().any(|delivered| *delivered != start.base_sha)
+        // A reused lane's earlier merged work is another task's delivery, so
+        // the delivered tip must also carry this task's own commit.
+        let delivered_tip = delivered.iter().copied().find(|delivered| *delivered != start.base_sha);
+        let task_claims = crate::mcp::tools::core::task::lifecycle::close_ops::task_attribution::branch_task_claims;
+        let identity = crate::mcp::tools::core::task::lifecycle::close_ops::task_commit_identity(task, None);
+        if let Some(delivered_tip) = delivered_tip
+            && task_claims(repo, delivered_tip, &identity).is_some_and(|(own, _)| own.is_some())
             && let Some(target_tip) =
                 git.target_tip_containing(&start.work_target.target_branch, &delivered)
         {
             return Ok(Some(StartedMergeSource::AlreadyMerged {
                 branch: start.branch.clone(),
-                tip: pushed.unwrap_or(tip.as_str()).to_string(),
+                tip: delivered_tip.to_string(),
                 target: start.work_target.target_branch.clone(),
                 target_tip,
             }));
@@ -9108,6 +9114,18 @@ mod cas_6b42_peer_delivery_tests {
             matches!(&resolved, Some(StartedMergeSource::AlreadyMerged { target_tip, .. }) if *target_tip == merged),
             "already merged at {merged}: {}",
             resolved.is_some()
+        );
+
+        // Another task started on the same reused lane, local at its base and
+        // origin at the prior task's merged tip, has delivered nothing.
+        let mut next = task.clone();
+        next.id = "cas-0b0e".into();
+        assert!(
+            !matches!(
+                core.started_task_merge_source(&repo, Some(&next), branch),
+                Ok(Some(StartedMergeSource::AlreadyMerged { .. }))
+            ),
+            "a prior task's merged work is not this task's delivery"
         );
 
         // A freshly started task still at its base (= the target tip), with

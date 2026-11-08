@@ -928,6 +928,9 @@ mod tests {
         store.create_atomic(&open_child, &[], Some(&shipped.id), None).unwrap();
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", &owner.id);
+        env.set("CAS_AGENT_NAME", &owner.name);
+        env.set("CAS_AGENT_ROLE", "supervisor");
         let _cwd = env.enter_dir(repo);
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
         let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();

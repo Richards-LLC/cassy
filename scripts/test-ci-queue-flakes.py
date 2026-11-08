@@ -156,6 +156,12 @@ class QueueRecovery(unittest.TestCase):
                     self.assertEqual(result.returncode,code,result.stdout+result.stderr)
                     receipt = json.loads((self.repo/'receipts/receipt.json').read_text())
                     self.assertEqual(receipt['outcome'],outcome)
+                    # cas-c6e3: FAIL names what still fails; FLAKY keeps its line.
+                    summary = result.stdout.strip().splitlines()[-1]
+                    if outcome == 'FAIL':
+                        self.assertRegex(summary, rf'^FAIL: 1 failing test\(s\): .*{name}.*; receipt ')
+                    else:
+                        self.assertRegex(summary, r'^FLAKY: 1 flaky test\(s\); receipt \S*/receipts/receipt\.json$')
                     self.assertEqual(receipt['initial_status'],1)
                     self.assertEqual(receipt['tree'],before)
                     calls = self.calls()

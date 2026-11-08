@@ -111,15 +111,7 @@ impl AuthStore {
                     && device.credential_generation == claims.epoch
             })
             .context("media ticket refused")?;
-        let context = AuthContext {
-            device_id: device.device_id.clone(),
-            credential_id: device.credential_id.clone(),
-            device_label: device.device_label.clone(),
-            operator_label: device.operator_label.clone(),
-            controller_origin: device.controller_origin.clone(),
-            scopes: device.scopes.clone(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-        };
+        let context = device.request_context();
         Self::ensure_active_context_in_state(&state, &context, now)?;
         anyhow::ensure!(context.has(Scope::SessionRead), "media ticket refused");
         Ok((claims.session, context))

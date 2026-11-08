@@ -681,6 +681,9 @@ struct MachineResponse {
     transport: super::MachineTransport,
     cloud_devices: Vec<super::CloudDeviceSuggestion>,
     default_supervisor_cli: String,
+    /// cas-93d1: running `cas hub preview` windows, for "Preview this delivery".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<super::PreviewWindow>,
 }
 
 async fn machine<R: SessionReadModel>(
@@ -726,6 +729,11 @@ async fn machine<R: SessionReadModel>(
                     .map(|llm| llm.harness_for_role("supervisor").to_owned())
             })
             .unwrap_or_else(|| "claude".into()),
+            previews: state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.live_previews(chrono::Utc::now()).ok())
+                .unwrap_or_default(),
         })
         .into_response(),
         &headers,
@@ -3535,7 +3543,10 @@ fn authenticate_mutation<R: SessionReadModel>(
         .get("dpop")
         .and_then(|value| value.to_str().ok())
         .context("proof required")?;
-    auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())
+    let context = auth.authenticate_dpop(authorization, proof, &origin, "POST", path, chrono::Utc::now())?;
+    // cas-93d1: a preview origin never mutates.
+    if context.preview { return Err(ScopeDenied.into()); }
+    Ok(context)
 }
 
 /// cas-4634: a one-use challenge for this device's account enrollment
@@ -4550,7 +4561,7 @@ async fn release_lease<R: SessionReadModel>(
 #[error("scope denied")]
 struct ScopeDenied;
 
-fn authorize<R: SessionReadModel>(
+pub(super) fn authorize<R: SessionReadModel>(
     state: &HubState<R>,
     action: HubAction,
     scope: Scope,
@@ -4577,6 +4588,10 @@ fn authorize<R: SessionReadModel>(
             chrono::Utc::now(),
         )?;
         if !context.has(scope) { return Err(ScopeDenied.into()); }
+        // cas-93d1: a preview origin shows a candidate Commander against live
+        // data. Its scopes are already read-only; no mutation route is open
+        // to it either, whatever scope that route asks for.
+        if context.preview && action == HubAction::Mutation { return Err(ScopeDenied.into()); }
         Ok(Some(context))
     } else if state
         .authorizer
@@ -5075,7 +5090,7 @@ mod upstream_unavailable_tests {
                 device_id: credential.device_id, credential_id: credential.credential_id,
                 device_label: "phone".into(), operator_label: "Operator".into(),
                 controller_origin: "https://controller.example".into(), scopes: invitation.scopes,
-                request_id: "refusal-request".into(),
+                request_id: "refusal-request".into(), preview: false,
             };
             let frame = if cause == "lease" {
                 serde_json::json!({"SupervisorCommand": {"command": "compact", "confirmed": false, "client_ref": "refused-send"}})
@@ -5117,7 +5132,7 @@ mod upstream_unavailable_tests {
         let context = AuthContext {
             device_id: credential.device_id, credential_id: credential.credential_id,
             device_label: "phone".into(), operator_label: "Operator".into(),
-            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(),
+            controller_origin: "https://controller.example".into(), scopes, request_id: "command-request".into(), preview: false,
         };
         let trusted = Some((auth.clone(), context.clone()));
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
@@ -5180,7 +5195,7 @@ mod upstream_unavailable_tests {
             operator_label: "Daniel".into(),
             controller_origin: "https://controller.example".into(),
             scopes,
-            request_id: "request-a0e2".into(),
+            request_id: "request-a0e2".into(), preview: false,
         };
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
         let frame = serde_json::json!({

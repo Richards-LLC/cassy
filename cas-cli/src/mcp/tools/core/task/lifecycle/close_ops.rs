@@ -3,6 +3,7 @@ pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
 mod docs_upkeep;
+mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
 mod gate_preflight;
@@ -9221,6 +9222,16 @@ impl CasCore {
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
                 Err(message) => upkeep_refusals.push(message),
+            }
+            // cas-5d07: a report reaches the operator only as the report the
+            // skill describes; not deferred by the fast lane.
+            match report_quality::at_park(
+                &mut close_notes, &mut task, &evidence_repo,
+                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
+                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
+            ) {
+                Ok(notices) => registry_upkeep_notices.extend(notices),
+                Err(message) => gate_refusals.push(message),
             }
             if fast_lane_stage.on_lane() {
                 upkeep_refusals = fast_lane_gate::defer_upkeep(

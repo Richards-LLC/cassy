@@ -42,6 +42,8 @@ pub(crate) mod render_scheduler;
 pub(crate) mod send_dedupe;
 #[cfg(test)]
 mod shutdown_tests;
+#[cfg(test)]
+mod supervisor_auto_clear_tests;
 pub(super) mod session_summarizer;
 pub(crate) mod store_worker;
 pub(crate) mod jobs;

@@ -269,6 +269,11 @@ fn is_any_verification_wait_note(reason: &str) -> bool {
         .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
 }
 
+/// The current blocker reason, excluding progress notes and older blockers.
+pub(crate) fn latest_blocker_reason(notes: &str) -> Option<String> {
+    blocker_note_entries(notes).pop().map(|(_, reason)| reason)
+}
+
 /// The full text of every blocker note, across all of its lines. A note
 /// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
 /// Each entry is returned with its `YYYY-MM-DD HH:MM` stamp.

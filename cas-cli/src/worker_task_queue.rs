@@ -53,7 +53,11 @@ pub(crate) fn worker_lock(root: &Path, worker: &Agent, operation: &str) -> Resul
 /// Plain starts serialize without a queue-specific contention refusal. Keep
 /// the runtime free while waiting for another process's start to finish.
 pub(crate) async fn wait_for_worker_start(root: &Path, worker: &Agent) -> Result<File, McpError> {
-    let file = worker_lock_file(root, worker, "start")?;
+    wait_for_worker_lock(root, worker, "start").await
+}
+
+async fn wait_for_worker_lock(root: &Path, worker: &Agent, operation: &str) -> Result<File, McpError> {
+    let file = worker_lock_file(root, worker, operation)?;
     tokio::task::spawn_blocking(move || {
         file.lock_exclusive().map_err(error)?;
         Ok(file)
@@ -271,6 +275,52 @@ impl CasCore {
             return Ok(None);
         }
         self.advance_worker_task_queue(worker, Some(id)).await
+    }
+
+    /// cas-526e: a release returns work to the pool, so it also leaves the
+    /// worker's queue. Left as the cursor, queue repair restarted it at once.
+    /// A released cursor advances the queue to its next pending task.
+    pub(crate) async fn drop_released_from_queue(
+        &self,
+        id: &str,
+        worker: &str,
+    ) -> Result<Option<String>, McpError> {
+        let Some(registration) = self
+            .open_agent_store()?
+            .list(None)
+            .map_err(error)?
+            .into_iter()
+            .filter(|a| a.role == AgentRole::Worker && (a.name == worker || a.id == worker))
+            .max_by_key(|a| a.registered_at)
+        else {
+            return Ok(None);
+        };
+        let Some(session) = registration.factory_session.clone() else {
+            return Ok(None);
+        };
+        let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
+        let lock = wait_for_worker_lock(&self.cas_root, &registration, "queue").await?;
+        let mut queue = queues.get(&session, &registration.name).map_err(error)?;
+        let current = queue.current_task.as_deref() == Some(id);
+        if queue.revision == 0 || (!current && !queue.pending.iter().any(|p| p == id)) {
+            return Ok(None);
+        }
+        queue.pending.retain(|p| p != id);
+        if current {
+            queue.current_task = None;
+            queue.current_started = false;
+            queue.starting = false;
+            queue.dispatch_from = None;
+        }
+        let note = format!("Task queue dropped {id}: released");
+        queue.notes.push(note.clone());
+        queues.save(&session, &registration.name, &mut queue).map_err(error)?;
+        drop(lock);
+        if !current {
+            return Ok(Some(note));
+        }
+        let advanced = self.advance_worker_task_queue(&registration.name, None).await?;
+        Ok(Some(advanced.map_or(note.clone(), |advanced| format!("{note}\n{advanced}"))))
     }
 
     async fn advance_worker_task_queue(

@@ -160,6 +160,15 @@ def identity(test):
     raise ValueError('unknown quarantine runner')
 
 
+def label(test):
+    """A readable test name for summaries; identity() stays the stable key."""
+    if test['runner'] == 'rust':
+        return f"{test['binary']} {test['name']}"
+    if test['runner'] == 'playwright':
+        return ' > '.join([test['project'], test['file'], *test['titles']])
+    return test['name']
+
+
 def rust_filter(tests):
     def escape(s):
         return ''.join('\\'+c if c in '\\),' else c for c in s)
@@ -396,7 +405,15 @@ def run(args):
                'initial_status':attempts[0]['status'],'rerun_seconds':attempts[-1]['seconds'] if len(attempts)>1 else 0,
                'flaky':flakes,'quarantine':excluded,'attempts':attempts}
     write_json(out/'receipt.json',receipt)
-    print(f'{receipt["outcome"]}: {len(flakes)} flaky test(s); receipt {out/"receipt.json"}')
+    if success:
+        print(f'{receipt["outcome"]}: {len(flakes)} flaky test(s); receipt {out/"receipt.json"}')
+    else:
+        # cas-c6e3: name what still fails (or never reran), not a flaky count.
+        failing = [t for t in final_tests.values() if not t['passed']]
+        failing += [t for t in failed if identity(t) not in final_tests]
+        names = [label(t) for t in failing[:10]]
+        more = f' (+{len(failing)-10} more)' if len(failing) > 10 else ''
+        print(f'FAIL: {len(failing)} failing test(s): {", ".join(names) or "none recorded"}{more}; receipt {out/"receipt.json"}')
     return 0 if success else 1
 
 

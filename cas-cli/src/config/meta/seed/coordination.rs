@@ -264,6 +264,14 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.supervisor_wake_input_budget", section: "factory", name: "Supervisor Wake Input Budget",
+        description: "Input tokens one supervisor wake may read before Cassy saves a handoff and clears the supervisor's context at the next idle boundary. 0 disables.", value_type: ConfigType::Int, default: "1000000",
+        constraint: Constraint::Range(0, 100_000_000), advanced: false, requires_feature: None,
+        keywords: &["factory", "supervisor", "context", "handoff", "clear", "cost"],
+        use_cases: &["Stop a long supervisor session from re-reading its whole context on every wake"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.message_max_chars",
         section: "factory",
         name: "Agent Message Character Cap",

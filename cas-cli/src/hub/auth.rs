@@ -522,6 +522,35 @@ pub struct DeviceSession {
     credential_hash: String,
     public_key: PublicJwk,
     public_key_thumbprint: String,
+    /// cas-93d1: a device paired from a `cas hub preview` origin. It reads
+    /// only, and stops authenticating at this instant whatever it refreshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_until: Option<DateTime<Utc>>,
+}
+
+impl DeviceSession {
+    fn preview_ended(&self, now: DateTime<Utc>) -> bool {
+        self.preview_until.is_some_and(|until| until <= now)
+    }
+
+    /// The request context this device authenticates as. A preview device
+    /// never carries more than the read-only scopes.
+    fn request_context(&self) -> AuthContext {
+        AuthContext {
+            device_id: self.device_id.clone(),
+            credential_id: self.credential_id.clone(),
+            device_label: self.device_label.clone(),
+            operator_label: self.operator_label.clone(),
+            controller_origin: self.controller_origin.clone(),
+            scopes: if self.preview_until.is_some() {
+                self.scopes.intersection(&Scope::default_read_only()).copied().collect()
+            } else {
+                self.scopes.clone()
+            },
+            request_id: uuid::Uuid::new_v4().to_string(),
+            preview: self.preview_until.is_some(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -550,6 +579,9 @@ pub struct AuthContext {
     pub controller_origin: String,
     pub scopes: BTreeSet<Scope>,
     pub request_id: String,
+    /// cas-93d1: authenticated from a preview origin; every mutation is refused.
+    #[serde(default)]
+    pub preview: bool,
 }
 
 impl AuthContext {
@@ -566,7 +598,7 @@ impl AuthContext {
             operator_label: "test operator".into(),
             controller_origin: origin.into(),
             scopes,
-            request_id: "request-test".into(),
+            request_id: "request-test".into(), preview: false,
         }
     }
 }
@@ -606,6 +638,19 @@ struct PersistedState {
     account_challenges: Vec<account::AccountChallenge>,
     #[serde(default)]
     account_bindings: Vec<account::AccountBinding>,
+    /// cas-93d1: running `cas hub preview` windows, announced on /v1/machine.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previews: Vec<PreviewWindow>,
+}
+
+/// cas-93d1: a running `cas hub preview`: the loopback origin serving the
+/// candidate build, the parked task it shows, and when it ends.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PreviewWindow {
+    pub origin: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub until: DateTime<Utc>,
 }
 
 // Keep the empty legacy keys readable by an older CLI during a hub upgrade;
@@ -624,6 +669,9 @@ struct PairingRecord {
     expires_at: DateTime<Utc>,
     consumed_at: Option<DateTime<Utc>>,
     failed_attempts: u8,
+    /// cas-93d1: a preview invitation; its device reads only, until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preview_until: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -942,6 +990,44 @@ impl AuthStore {
         Ok(store)
     }
 
+    /// cas-93d1: a one-time invitation for a `cas hub preview` origin. The
+    /// device it pairs reads only and stops authenticating at `until`.
+    pub fn mint_preview_pairing(
+        &self,
+        controller_origin: &str,
+        task: Option<&str>,
+        until: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<PairingInvitation> {
+        anyhow::ensure!(until > now, "preview window has already ended");
+        let invitation = self.mint_pairing(controller_origin, Scope::default_read_only(), now)?;
+        let mut state = self.lock()?;
+        let record = state.pairings.last_mut().context("preview invitation missing")?;
+        record.preview_until = Some(until);
+        record.expires_at = record.expires_at.min(until);
+        state.previews.retain(|window| window.origin != controller_origin && window.until > now);
+        state.previews.push(PreviewWindow { origin: controller_origin.into(), task: task.map(str::to_owned), until });
+        self.persist(&state)?;
+        Ok(invitation)
+    }
+
+    /// The preview windows still open at `now`, for Commander's
+    /// "Preview this delivery" link.
+    pub fn live_previews(&self, now: DateTime<Utc>) -> Result<Vec<PreviewWindow>> {
+        Ok(self.read_lock()?.previews.iter().filter(|window| window.until > now).cloned().collect())
+    }
+
+    /// End a preview now: revoke every device and invitation for its origin.
+    pub fn end_preview(&self, controller_origin: &str, now: DateTime<Utc>) -> Result<()> {
+        let mut state = self.lock()?;
+        for device in state.devices.iter_mut().filter(|device| device.preview_until.is_some() && device.controller_origin == controller_origin) {
+            device.revoked_at.get_or_insert(now);
+        }
+        state.pairings.retain(|record| record.preview_until.is_none() || record.controller_origin != controller_origin);
+        state.previews.retain(|window| window.origin != controller_origin);
+        self.persist(&state)
+    }
+
     pub fn mint_pairing(
         &self,
         controller_origin: &str,
@@ -965,6 +1051,7 @@ impl AuthStore {
             expires_at,
             consumed_at: None,
             failed_attempts: 0,
+            preview_until: None,
         });
         self.persist(&state)?;
         Ok(PairingInvitation {
@@ -1041,10 +1128,14 @@ impl AuthStore {
             return Err(anyhow::anyhow!("pairing exchange refused").into());
         };
         let record = &mut state.pairings[index];
+        let preview_until = record.preview_until;
         let valid = record.consumed_at.is_none()
             && record.expires_at >= now
             && record.failed_attempts < 10
-            && exchange.requested_scopes.is_subset(&record.max_scopes);
+            && exchange.requested_scopes.is_subset(&record.max_scopes)
+            && preview_until.is_none_or(|until| {
+                until > now && exchange.requested_scopes.is_subset(&Scope::default_read_only())
+            });
         if !valid {
             record.failed_attempts = record.failed_attempts.saturating_add(1);
             self.persist(&state)?;
@@ -1055,7 +1146,7 @@ impl AuthStore {
         let credential = random_secret();
         let device_id = uuid::Uuid::new_v4().to_string();
         let credential_id = uuid::Uuid::new_v4().to_string();
-        let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
+        let expires_at = (now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS)).min(preview_until.unwrap_or(DateTime::<Utc>::MAX_UTC));
         state.devices.push(DeviceSession {
             credential_generation: 0,
             device_id: device_id.clone(),
@@ -1071,6 +1162,7 @@ impl AuthStore {
             credential_hash: hash_b64(credential.as_bytes()),
             public_key: exchange.public_key_jwk,
             public_key_thumbprint: thumbprint,
+            preview_until,
         });
         self.persist(&state)?;
         drop(state);
@@ -1134,18 +1226,10 @@ impl AuthStore {
             .find(|device| constant_time_eq(&device.credential_hash, &credential_hash))
             .cloned()
             .ok_or(AuthRefusal::UnknownCredential)?;
-        let context = AuthContext {
-            device_id: device.device_id.clone(),
-            credential_id: device.credential_id.clone(),
-            device_label: device.device_label.clone(),
-            operator_label: device.operator_label.clone(),
-            controller_origin: device.controller_origin.clone(),
-            scopes: device.scopes.clone(),
-            request_id: uuid::Uuid::new_v4().to_string(),
-        };
+        let context = device.request_context();
         // cas-d636: each credential refusal names itself, so the client can
         // tell a revocation (re-pair) from an expiry (refresh).
-        let standing = if device.revoked_at.is_some() {
+        let standing = if device.revoked_at.is_some() || device.preview_ended(now) {
             Some(AuthRefusal::Revoked)
         } else if device.controller_origin != origin {
             Some(AuthRefusal::OriginMismatch)
@@ -1259,7 +1343,7 @@ impl AuthStore {
         let device = state.devices[device_index].clone();
         // cas-d636: a refresh refusal names itself too. Past the refresh
         // grace, an expired credential is as final as a revoked one.
-        if device.revoked_at.is_some() {
+        if device.revoked_at.is_some() || device.preview_ended(now) {
             return Err(AuthRefusal::Revoked.into());
         }
         if device.controller_origin != origin {
@@ -1296,7 +1380,7 @@ impl AuthStore {
             expires_at: now + Duration::minutes(DPOP_REPLAY_MINUTES),
         });
         let rotated = random_secret();
-        let expires_at = now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS);
+        let expires_at = (now + Duration::days(CREDENTIAL_ABSOLUTE_DAYS)).min(device.preview_until.unwrap_or(DateTime::<Utc>::MAX_UTC));
         let generation = state
             .generation_highwater
             .get(&device.device_id)
@@ -1449,9 +1533,10 @@ impl AuthStore {
             })
             .context("authorization refused")?;
         anyhow::ensure!(
-            [Scope::PaneInput, Scope::MessageSend, Scope::PaneInterrupt]
-                .into_iter()
-                .all(|scope| device.scopes.contains(&scope)),
+            device.preview_until.is_none()
+                && [Scope::PaneInput, Scope::MessageSend, Scope::PaneInterrupt]
+                    .into_iter()
+                    .all(|scope| device.scopes.contains(&scope)),
             "scope denied"
         );
         if device.scopes.contains(&scope) {
@@ -1878,6 +1963,8 @@ impl AuthStore {
                 && device.controller_origin == context.controller_origin
                 && context.scopes.is_subset(&device.scopes)
                 && device.revoked_at.is_none()
+                && !device.preview_ended(now)
+                && context.preview == device.preview_until.is_some()
                 && device.expires_at >= now
                 && device.last_used_at + Duration::days(CREDENTIAL_IDLE_DAYS) >= now,
             "authorization refused"

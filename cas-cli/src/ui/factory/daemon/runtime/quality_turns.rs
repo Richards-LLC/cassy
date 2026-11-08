@@ -40,6 +40,8 @@ struct Cursor {
     usage: (u64, u64),
     outbox: VecDeque<NewQualityEvent>,
     retry_at: Option<Instant>,
+    /// cas-5f67: input tokens and end time of turns newly written this pass.
+    recorded: Vec<(Option<u64>, DateTime<Utc>)>,
     #[cfg(test)]
     before_read: Option<Box<dyn FnOnce(&Path) + Send>>,
     #[cfg(test)]
@@ -402,6 +404,7 @@ impl Cursor {
             usage: (0, 0),
             outbox: VecDeque::new(),
             retry_at: None,
+            recorded: Vec::new(),
             #[cfg(test)]
             before_read: None,
             #[cfg(test)]
@@ -450,7 +453,11 @@ impl Cursor {
         }
         while let Some(event) = self.outbox.front() {
             match crate::quality_ledger::emit_checked(root, event) {
-                Ok(_) => {
+                Ok(inserted) => {
+                    // A replayed turn is already in the ledger; only a new row is a wake.
+                    if inserted && let QualityPayload::Turn { input_tokens, .. } = &event.payload {
+                        self.recorded.push((*input_tokens, event.occurred_at));
+                    }
                     self.outbox.pop_front();
                 }
                 Err(error) => {
@@ -804,6 +811,30 @@ impl Cursor {
     }
 }
 
+/// cas-5f67: a recorded supervisor turn may start the automatic handoff and
+/// clear; a queued clear is confirmed from the new transcript.
+fn auto_clear(root: &Path, session: &str, queue: &dyn PromptQueueStore, agent: &Agent, cursor: &mut Cursor) {
+    use crate::supervisor_auto_clear as auto;
+    if let Err(error) = auto::poll(root, queue, agent, session) {
+        tracing::warn!(%error, "automatic supervisor clear confirmation deferred");
+    }
+    let recorded = std::mem::take(&mut cursor.recorded);
+    let Some(at) = recorded.iter().map(|(_, at)| *at).max() else { return };
+    let turn = auto::TurnEnd {
+        agent,
+        cli: cursor.source.cli,
+        factory_session: session,
+        harness_session: &cursor.source.harness_session,
+        transcript: &cursor.path,
+        input_tokens: recorded.iter().filter_map(|(tokens, _)| *tokens).max(),
+        at,
+        mid_turn: cursor.pending.is_some(),
+    };
+    if let Err(error) = auto::on_turn_end(root, queue, &turn) {
+        tracing::warn!(%error, "automatic supervisor clear step deferred");
+    }
+}
+
 impl Scanner {
     #[cfg(test)]
     pub(super) fn bytes_read(&self) -> u64 {
@@ -930,6 +961,9 @@ impl Scanner {
                 }
                 if let Err(error) = cursor.refresh(root, agent, session, queue, agents) {
                     tracing::debug!(%error, "turn ledger transcript read deferred");
+                }
+                if agent.role == AgentRole::Supervisor {
+                    auto_clear(root, session, queue, agent, cursor);
                 }
             }
         }

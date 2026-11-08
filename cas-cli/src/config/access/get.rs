@@ -159,6 +159,7 @@ impl Config {
             "factory.release_train_max_age_hours" => Some(factory.release_train_max_age_hours.to_string()),
             "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
             "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
+            "factory.supervisor_wake_input_budget" => Some(factory.supervisor_wake_input_budget.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),

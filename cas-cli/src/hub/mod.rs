@@ -48,7 +48,7 @@ pub use auth::{
 };
 pub use auth::{
     AccountEnrollment, InstallationAction, InstallationProof, AuthContext, AuthStore, DeviceCredential, DeviceSession, DeviceSummary, LeaseSummary,
-    PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PublicJwk, Scope,
+    PairingExchange, PairingExchangeError, PairingInvitation, PairingPrefill, PreviewWindow, PublicJwk, Scope,
     WsTicket, required_scope,
 };
 pub(crate) use auth::PairingInvitationTarget;

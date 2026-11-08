@@ -325,9 +325,13 @@ invariants:
     check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
     bug: {task: cas-2e1c}
   HUB-J27-CARD-RELOAD:
-    statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, pending dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
+    statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, submitted dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
     check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
     bug: {task: cas-fd9ff}
+  HUB-J27-DISMISS-CANCEL:
+    statement: Dismiss cancels the caller's queued Finish or interactive receipt daemon-side without PTY input. A closed native chooser releases its stale flag before a later command, while genuinely submitted commands and native modals still prevent unsafe input. Refusals identify the blocking command and its recovery.
+    check: Run queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2 and native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser; run the HUB-J27 queued Finish dismissal before Exit at desktop and 390 px, assert one caller-owned cancel frame, no chat sends, and no dismissal before the daemon receipt.
+    bug: {task: cas-f1a2}
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
@@ -2741,7 +2745,7 @@ journeys:
   - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
+  invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

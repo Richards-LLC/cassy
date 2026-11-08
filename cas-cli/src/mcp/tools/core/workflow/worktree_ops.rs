@@ -1934,7 +1934,7 @@ enum StartedMergeSource {
     Merge(RemoteMergeSource),
     /// The recorded delivery is already an ancestor of the target: report it,
     /// never ask for a rebind or restore.
-    AlreadyMerged { branch: String, anchor: String, target: String, target_tip: String },
+    AlreadyMerged { branch: String, tip: String, target: String, target_tip: String },
 }
 
 /// A task-recorded delivery fetched from origin, without claiming a local worker.
@@ -3966,31 +3966,38 @@ impl CasCore {
         if !git.is_ancestor(&start.base_sha, &tip) {
             return Err(refuse("the recorded base is no longer an ancestor".into()));
         }
-        // cas-06f53: the pre-merge path merged the recorded delivery and moved
-        // the local branch to the target. Local and origin tips then differ,
-        // but nothing is unresolved: the delivery is already on the target.
-        if let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
-            .map(str::trim).filter(|anchor| !anchor.is_empty())
+        // One ls-remote answers both the containment and the conflict check.
+        let origin_tip = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+            && git.has_origin_remote()
         {
-            let origin_tip = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
-                && git.has_origin_remote()
-            {
-                requested_merge_source_tip(repo, &start.branch, true)?
-            } else {
-                None
-            };
-            let mut delivered = vec![anchor, tip.as_str()];
-            delivered.extend(origin_tip.as_deref());
-            if let Some(target_tip) =
+            Some(requested_merge_source_tip(repo, &start.branch, true)?)
+        } else {
+            None
+        };
+        // cas-06f53: the pre-merge path merged the delivery and moved the local
+        // branch to the target. Local and origin tips then differ, but nothing
+        // is unresolved: both are already in a target tip. The branches decide
+        // this; the request-changes path may have declined the task's anchor.
+        let pushed = origin_tip.as_ref().and_then(|tip| tip.as_deref());
+        let mut delivered = vec![tip.as_str()];
+        delivered.extend(pushed);
+        // A branch still at its start base delivered nothing: never "merged".
+        // A reused lane's earlier merged work is another task's delivery, so
+        // the delivered tip must also carry this task's own commit.
+        let delivered_tip = delivered.iter().copied().find(|delivered| *delivered != start.base_sha);
+        let task_claims = crate::mcp::tools::core::task::lifecycle::close_ops::task_attribution::branch_task_claims;
+        let identity = crate::mcp::tools::core::task::lifecycle::close_ops::task_commit_identity(task, None);
+        if let Some(delivered_tip) = delivered_tip
+            && task_claims(repo, delivered_tip, &identity).is_some_and(|(own, _)| own.is_some())
+            && let Some(target_tip) =
                 git.target_tip_containing(&start.work_target.target_branch, &delivered)
-            {
-                return Ok(Some(StartedMergeSource::AlreadyMerged {
-                    branch: start.branch.clone(),
-                    anchor: anchor.to_string(),
-                    target: start.work_target.target_branch.clone(),
-                    target_tip,
-                }));
-            }
+        {
+            return Ok(Some(StartedMergeSource::AlreadyMerged {
+                branch: start.branch.clone(),
+                tip: delivered_tip.to_string(),
+                target: start.work_target.target_branch.clone(),
+                target_tip,
+            }));
         }
         let attributed = crate::mcp::tools::core::task::lifecycle::close_ops::task_attribution::started_delivery(repo, task)
             .map_err(&refuse)?;
@@ -3999,11 +4006,7 @@ impl CasCore {
                 "the approved branch has no attributable task delivery".into(),
             ));
         }
-        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
-            && git.has_origin_remote()
-            && requested_merge_source_tip(repo, &start.branch, true)?.as_deref()
-                != Some(tip.as_str())
-        {
+        if origin_tip.is_some_and(|origin| origin.as_deref() != Some(tip.as_str())) {
             return Err(refuse(
                 "the approved local and live origin tips conflict or the pushed ref is missing"
                     .into(),
@@ -4667,12 +4670,12 @@ impl CasCore {
             match self.started_task_merge_source(&cwd, scoped_task.as_deref(),
                 system_a.as_ref().map(|worktree| worktree.branch.as_str()).unwrap_or(id))?
             {
-                Some(StartedMergeSource::AlreadyMerged { branch, anchor, target, target_tip }) => {
+                Some(StartedMergeSource::AlreadyMerged { branch, tip, target, target_tip }) => {
                     let label = crate::worktree::GitOperations::visible_git_label;
                     return Ok(Self::success(format!(
                         "ALREADY MERGED: task {} delivery {} @ {} is already in {} @ {}. Nothing was merged, and no rebind or restore is needed.",
                         scoped_task.as_deref().map(|task| task.id.as_str()).unwrap_or("?"),
-                        label(&branch), label(&anchor), label(&target), label(&target_tip),
+                        label(&branch), label(&tip), label(&target), label(&target_tip),
                     )));
                 }
                 Some(StartedMergeSource::Merge(source)) => Some(source),
@@ -9047,10 +9050,12 @@ mod cas_6b42_peer_delivery_tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    /// cas-06f53, replaying cas-6a3e: the pre-merge path merged the parked
-    /// delivery and moved the worker's local branch to the merged target, so
-    /// local and origin tips differ. The source is already merged, not
-    /// unresolved; a new unpushed commit on top is still a real tip conflict.
+    /// cas-06f53, replaying cas-6a3e at 8:08 PM ET Nov 7: the pre-merge path
+    /// merged the delivery and moved the worker's local branch to the merged
+    /// target, then request-changes reopened the task with its anchor declined
+    /// and its start base at the merged tip. Local and origin tips differ, yet
+    /// both are in the target: already merged, not unresolved. A new unpushed
+    /// commit on top is still a real tip conflict.
     #[test]
     fn an_already_merged_delivery_resolves_as_merged_cas_06f53() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -9062,7 +9067,6 @@ mod cas_6b42_peer_delivery_tests {
         std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
         git(&repo, &["add", ".gitignore"]);
         git(&repo, &["commit", "-qm", "seed"]);
-        let base = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
         git(&repo, &["push", "-q", "origin", "main"]);
         let branch = "factory/warm-cobra-73";
@@ -9070,10 +9074,9 @@ mod cas_6b42_peer_delivery_tests {
         std::fs::write(repo.join("purge.rs"), "ids\n").unwrap();
         git(&repo, &["add", "purge.rs"]);
         git(&repo, &["commit", "-qm", "test(cas-6a3e): assert ids"]);
-        let anchor = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["push", "-q", "origin", branch]);
-        // The pre-merge path merges the delivery and fast-forwards the worker
-        // branch to the merged target; origin keeps the parked tip.
+        // The pre-merge path merges the delivery and moves the worker branch
+        // to the merged target; origin keeps the delivered tip.
         git(&repo, &["checkout", "-q", "main"]);
         git(&repo, &["merge", "-q", "--no-ff", "-m", "merge cas-6a3e", branch]);
         git(&repo, &["push", "-q", "origin", "main"]);
@@ -9095,21 +9098,48 @@ mod cas_6b42_peer_delivery_tests {
             repo_selector: "project:cas-src".into(),
             target_branch: "main".into(),
         };
+        // Reopened by request-changes: in progress, anchor declined, start
+        // base at the merged tip.
         let mut task = cas_types::Task::new("cas-6a3e".into(), "Purge wording pins".into());
-        task.status = cas_types::TaskStatus::Open;
+        task.status = cas_types::TaskStatus::InProgress;
         task.assignee = Some("warm-cobra-73".into());
         task.deliverables.work_target = Some(work_target.clone());
-        task.deliverables.factory_branch_anchor = Some(anchor.clone());
+        task.deliverables.factory_branch_anchor = None;
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
-            work_target, assignee: "warm-cobra-73".into(), branch: branch.into(), base_sha: base,
+            work_target, assignee: "warm-cobra-73".into(), branch: branch.into(), base_sha: merged.clone(),
         });
 
         let resolved = core.started_task_merge_source(&repo, Some(&task), branch).unwrap();
         assert!(
-            matches!(&resolved, Some(StartedMergeSource::AlreadyMerged { anchor: a, target_tip, .. })
-                if *a == anchor && *target_tip == merged),
-            "{}",
+            matches!(&resolved, Some(StartedMergeSource::AlreadyMerged { target_tip, .. }) if *target_tip == merged),
+            "already merged at {merged}: {}",
             resolved.is_some()
+        );
+
+        // Another task started on the same reused lane, local at its base and
+        // origin at the prior task's merged tip, has delivered nothing.
+        let mut next = task.clone();
+        next.id = "cas-0b0e".into();
+        assert!(
+            !matches!(
+                core.started_task_merge_source(&repo, Some(&next), branch),
+                Ok(Some(StartedMergeSource::AlreadyMerged { .. }))
+            ),
+            "a prior task's merged work is not this task's delivery"
+        );
+
+        // A freshly started task still at its base (= the target tip), with
+        // nothing pushed, delivered nothing and is never reported as merged.
+        let fresh = "factory/warm-cobra-73-cas-fresh";
+        git(&repo, &["branch", fresh, "main"]);
+        let mut started = task.clone();
+        if let Some(start) = started.deliverables.factory_branch_start.as_mut() {
+            start.branch = fresh.into();
+        }
+        let empty = core.started_task_merge_source(&repo, Some(&started), fresh);
+        assert!(
+            !matches!(empty, Ok(Some(StartedMergeSource::AlreadyMerged { .. }))),
+            "an empty delivery at its base is not already merged"
         );
 
         git(&repo, &["checkout", "-q", branch]);

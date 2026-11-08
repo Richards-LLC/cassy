@@ -15457,3 +15457,58 @@ async fn cas_afe0_authenticated_ack_is_recipient_scoped_and_does_not_surface_a_b
     ack.notification_id = Some(foreign);
     assert!(env.service.coordination(Parameters(ack)).await.is_err());
 }
+
+/// cas-67fa (GH #1658): a reassigned task rebinds its recorded source to the new
+/// worker's own task branch at their first start, without a supervisor rebind.
+#[tokio::test]
+async fn reassigned_task_start_rebinds_the_recorded_source_to_the_new_worker_cas_67fa() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-67fa")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker = "new-worker";
+    let path = init_pushed_worker_repo(&env, worker);
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"rebind-project\"\n",
+    )
+    .unwrap();
+    {
+        use cas::store::KnownRepoStore;
+        cas::store::known_repos::ensure_host_schema().unwrap();
+        cas::store::known_repos::open_host_known_repo_store()
+            .unwrap()
+            .bind(
+                "project:rebind-project",
+                &project.canonicalize().unwrap(),
+                &project.join(".git").canonicalize().unwrap(),
+            )
+            .unwrap();
+    }
+    let worker_id = register_codex_worker_at(&env, worker, "session-67fa", &path);
+    let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
+    supervisor.factory_session = Some("session-67fa".into());
+    env.agent_store().update(&supervisor).unwrap();
+    let base = git_stdout(&path, &["rev-parse", "HEAD"]);
+    let target = WorkTarget { repo_selector: "project:rebind-project".into(), target_branch: "main".into() };
+    let mut task = Task::new("cas-67fa".into(), "Reassigned task".into());
+    task.assignee = Some(worker.into());
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: target,
+        assignee: "previous-worker".into(),
+        branch: "factory/previous-worker-cas-67fa".into(),
+        base_sha: base,
+    });
+    env.task_store().add(&task).unwrap();
+    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    core.set_agent_id_for_testing(worker_id);
+    let service = CasService::new(core, None);
+    let started = service
+        .task(Parameters(task_req(serde_json::json!({"action": "start", "id": task.id}))))
+        .await
+        .unwrap();
+    assert_ne!(started.is_error, Some(true), "{}", get_text(&started));
+    let start = env.task_store().get(&task.id).unwrap().deliverables.factory_branch_start.unwrap();
+    assert_eq!(start.assignee, worker);
+    assert!(start.branch.starts_with(&format!("factory/{worker}")), "{}", start.branch);
+}

@@ -2909,7 +2909,14 @@ impl CasCore {
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    if (task.deliverables.factory_branch_start.is_none() || reset_start_base)
+                    // cas-67fa (GH #1658): a reassigned task keeps the previous worker's
+                    // recorded source until the new worker's first start rebinds it to
+                    // the worker's own branch it is on.
+                    let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                            start.assignee != worker.name && start.branch != worker_branch
+                        })
+                        && task.assignee.as_deref().is_none_or(|assignee| assignee == worker.name);
+                    if (task.deliverables.factory_branch_start.is_none() || reset_start_base || reassigned)
                         && crate::factory_isolation::branch_at(worker_checkout).as_deref()
                             == Some(worker_branch.as_str())
                     {

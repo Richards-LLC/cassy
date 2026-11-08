@@ -1462,7 +1462,7 @@ mod tests {
         let error = queue
             .stage_task_sync_intent("cas-guarded", "update", None, None, None, None, false)
             .unwrap_err();
-        assert!(error.to_string().contains("GH #1165"), "{error}");
+
         let conn = queue.conn.lock().unwrap();
         assert!(begin_write_bounded(&conn).is_err());
         drop(conn);

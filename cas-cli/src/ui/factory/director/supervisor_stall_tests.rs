@@ -158,14 +158,13 @@ fn merged_delivery_is_classified_as_close_blocked_with_rejection_and_reclose() {
     };
     assert_eq!(tasks.len(), 1);
     let rendered = SupervisorActionableState::MergeCloseBlocked { tasks }.next_step_text();
-    assert!(rendered.contains("already merged"));
+
     assert!(rendered.contains("ZERO-COMMIT after merged delivery"));
     assert!(rendered.contains("task action=close id=cas-merged"));
     assert!(
         !rendered.contains("mcp__"),
         "event facts cannot assume a recipient harness"
     );
-    assert!(!rendered.contains("merge the ready delivery branch(es)"));
 }
 
 #[test]

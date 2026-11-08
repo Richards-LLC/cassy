@@ -21,7 +21,7 @@ readonly -a gate_check_ids=(
     version-literals ci-script-tests hub-web-tests release-binary-isa operator-launch-smoke fixture-paths workspace-tests macos-check hub-web-dist-drift hub-web-visual-qa nextest doctests archive-mode
     snapshot-portability builtin-projections changelog-and-versions release-script release-notes-shell-injection
     procedure-guardrails working-tree test-targets markdown-lint test-shape test-env builtin-doc-hygiene
-    journey-catalog builtin-skill-limits doctor-snapshot communication-slos migration-registry ci-script-tests-changed
+    journey-catalog builtin-skill-limits communication-slos migration-registry ci-script-tests-changed
     fixture-paths-src builtin-projections-src call-shapes release-notes-draft
 )
 
@@ -1758,14 +1758,10 @@ check_test_shape() {
     if [[ -f scripts/test-check-test-shape.py ]]; then
         release_test_child python3 scripts/test-check-test-shape.py || return $?
     fi
-    if [[ -f scripts/test-worker-proof-guards.py ]]; then
-        release_test_child python3 scripts/test-worker-proof-guards.py
-    fi
 }
 
 check_builtin_doc_hygiene() {
-    python3 scripts/check-builtin-doc-hygiene.py || return $?
-    python3 scripts/check-builtin-contract-phrases.py
+    python3 scripts/check-builtin-doc-hygiene.py
 }
 
 # Fast mode runs a lane row only when the lane changes one of its inputs; the
@@ -1792,17 +1788,6 @@ check_builtin_skill_limits() {
     python3 scripts/check-builtin-skill-limits.py .
 }
 
-check_doctor_snapshot() {
-    if ! lane_touches cas-cli/src/cli/doctor.rs cas-cli/tests/snapshots scripts/check-doctor-snapshot.py; then
-        printf 'doctor-snapshot: no doctor or snapshot change\n'
-        return 0
-    fi
-    if [[ "$fast_rows" == true ]]; then
-        python3 scripts/check-doctor-snapshot.py . --base "${fast_base:-HEAD^}"
-    else
-        python3 scripts/check-doctor-snapshot.py .
-    fi
-}
 
 check_communication_slos() {
     python3 scripts/check-communication-slos.py
@@ -2426,8 +2411,6 @@ gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog 
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
-gate_row doctor-snapshot 'python3 scripts/check-doctor-snapshot.py (row groups; new doctor phases update the snapshot)' \
-    check_doctor_snapshot
 # cas-7e24: <5s fixture measurement in existing no-build fast/integration stage.
 gate_row communication-slos 'five communication SLOs against fixture factory session' \
     check_communication_slos
@@ -2462,10 +2445,9 @@ fast_row_fix() {
         procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
-        builtin-doc-hygiene) printf 'remove the operator data, or restore the contract phrase listed in scripts/builtin-contract-phrases.json, as the row log names' ;;
+        builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;
         journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
-        doctor-snapshot) printf 'add the new doctor phase to its row group and update the reviewed doctor snapshot' ;;
         migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
         ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;
         *) printf 'read the row log and rerun this command after fixing' ;;

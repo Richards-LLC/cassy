@@ -11,6 +11,70 @@ spec.loader.exec_module(shape)
 
 
 class Shapes(unittest.TestCase):
+    def test_human_message_assertions_use_behavior_or_machine_ids(self):
+        cases = [
+            ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),
+            ('test_example.py', r'with self.assertRaisesRegex(ValueError, r"^\S+$"): run()', False),
+            ('test_example.py', 'self.assertIn("permission was denied", result.stderr)', True),
+            ('test_example.py', 'self.assertIn("titled category and area format", result.stdout)', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.stdout.contains("please try later")); }', True),
+            ('test_example.py', 'self.assertEqual("permission was denied", error.message)', True),
+            ('test_example.py', 'assert "permission was denied" in str(exc)', True),
+            ('test_example.py', 'assert str(error) == "permission was denied"', True),
+            ('test_example.py', 'assert f"please retry {name} later" in str(exc)', True),
+            ('test_example.py', 'self.assertIn(f"please retry {name} later", result.stderr)', True),
+            ('test_example.py', 'assert error.code == "scope_denied"', False),
+            ('test_example.py', 'assert error.code == "forbidden"', False),
+            ('test_example.py', 'self.assertEqual(error.code, "forbidden")', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "forbidden"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("2026-05-01T00:00:00Z")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("entry:e1")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("database.md:42")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("protected=4")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("project=acme")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("HTTP 503")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains(".claude-alt")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("SKILL.md")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(reason.contains("$UNKNOWN_ROOT")); }', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.message.contains("4dd898a71")); }', False),
+            ('example.test.ts', 'expect(error.code).toBe("forbidden");', False),
+            ('test_example.py', 'self.assertIn("[rule: scope_denied]", result.stderr)', False),
+            ('test_example.py', 'self.assertIn("FAIL test-shape", result.stdout)', False),
+            ('test_example.py', 'self.assertEqual(saved_payload, "hello from the operator")', False),
+            ('src/example.rs', '#[test] fn check() { assert!(error.contains("please try later")); }', True),
+            ('src/example.rs', 'fn validate(error: &str) { assert!(error.contains("required input phrase")); }', False),
+            ('src/example.rs', '#[cfg(test)] mod tests { fn helper(error: &str) { assert!(error.contains("please try later")); } }', True),
+            ('src/example.rs', '#[test] fn check() {\n// pin: an old copy preference\nassert!(error.contains("please try later")); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "scope_denied"); }', False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains('\x1b')); }", False),
+            ('src/example.rs', r"#[test] fn check() { assert!(!error.contains(b'\n')); }", False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(output.stdout, b"caller payload bytes"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(receipt, Receipt { warning: Some("caller-provided diagnostic".into()) }); }', False),
+            ('src/example.rs', '#[test] fn check() { let fixture = "caller diagnostic"; assert_eq!(error.message, fixture); }', False),
+            ('src/example.rs', r'#[test] fn check() { assert!(stderr.contains(&format!("{FIXTURE}\n{SECOND}\n"))); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!("please try later", error.message); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.unwrap_err().to_string().contains("please try later")); }', True),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(get_error().message, "please try later"); }', True),
+            ('src/example.rs', '#[test] fn check() { assert!(result.is_err(), "expected an authorization refusal"); }', False),
+            ('example.test.ts', 'expect(run()).toThrow("please try later");', True),
+            ('example.test.ts', 'expect(run()).toThrow(new Error("please try later"));', True),
+            ('example.test.ts', 'expect(error).toMatchObject({\nmessage: "please try later"\n});', True),
+            ('example.test.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('example.journey.ts', 'expect(error.message).toBe("forbidden");', True),
+            ('src/example_tests.rs', 'fn helper(error: &str) { assert!(error.contains("please try later")); }', True),
+            ('example.test.ts', 'expect(error.message).toMatch(/permission was denied/);', True),
+            ('example.test.ts', 'expect(error.message).toMatch(/\\S/);', False),
+            ('example.test.mjs', 'assert.equal(error.message, "please try later");', True),
+            ('example.test.mjs', 'assert.throws(run, /please try later/);', True),
+            ('example.test.ts', 'expect(error.code).toBe("scope_denied");', False),
+            ('src/example.rs', '#[test] fn check() { for phrase in ["please try later", "run it again"] { assert!(error.contains(phrase)); } }', True),
+            ('test_example.py', 'def test_x():\n    for phrase in ("please try later",):\n        self.assertIn(phrase, result.stderr)', True),
+            ('example.test.ts', 'for (const phrase of ["please try later"]) { expect(error.message).toContain(phrase); }', True),
+        ]
+        for path, source, rejected in cases:
+            with self.subTest(path=path, source=source):
+                self.assertEqual(bool(shape.message_assertions(source, path)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 
@@ -59,10 +123,15 @@ class Shapes(unittest.TestCase):
         self.assertFalse(self.hits('#[tokio::test]\n// pin: compatibility\nasync fn t() { assert_eq!(LIMIT, 3); }'))
 
     def test_non_rust_text_is_clean(self):
+        self.assertFalse(shape.lint_text_pins('expect(skill).toContain("references/attachments.md");', 'example.test.ts'))
+        self.assertFalse(shape.lint_text_pins('self.assertIn("WITHIN_BUDGET=true", draft.read_text())', 'test_timing.py'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner"), "the outage is announced once").toHaveLength(1);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect(heard.filter(entry => entry.source === "banner")).toEqual([expect.stringContaining("Atlas · Linux")]);', 'reconnect.journey.ts'))
+        self.assertFalse(shape.lint_text_pins('expect.soft(source, "The original source must preserve every caller value and its exact encoded boundaries.").toEqual(input);', 'payload.test.ts'))
         self.assertFalse(self.hits('#[test] fn t() { let s=include_str!("contract.md"); assert!(s.contains("word")); }'))
 
-    def test_exact_prose_pin_needs_a_reasoned_escape(self):
-        # // pin: these fixtures exercise the exact prose pin and its intentional exception.
+    def test_exact_prose_pin_cannot_be_waived_by_comments(self):
+        # These fixtures exercise rejection of exact prose, including pin comments.
         unpinned = '''def test_prompt_contract():
     assert prompt == "When a test fails, name the responsible boundary and preserve its first result."
 def test_workflow_command():
@@ -76,7 +145,7 @@ def test_workflow_command():
             shape.lint_text_pins(unpinned, 'tests/test_prompt.py'),
             [(2, 'exact-text pin'), (4, 'exact-text pin')],
         )
-        self.assertFalse(shape.lint_text_pins(pinned, 'tests/test_prompt.py'))
+        self.assertEqual(shape.lint_text_pins(pinned, 'tests/test_prompt.py'), [(3, 'exact-text pin')])
 
     def test_rust_assert_diagnostics_are_not_text_pins_cas_cae5(self):
         message = '"preserve original content and routing instructions"'
@@ -173,7 +242,7 @@ def test_workflow_command():
             for args in [[], ['--changed-since', base]]:
                 result = subprocess.run(command+args, cwd=root, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 1, result.stdout)
-                self.assertIn('cas-cli/tests/nested/probe.rs:1: archive-unsafe Cargo binary path', result.stdout)
+                self.assertIn('cas-cli/tests/nested/probe.rs:1:', result.stdout)
                 self.assertIn('cas::test_paths::cas_binary()', result.stdout)
                 self.assertNotIn('add // pin:', result.stdout)
 
@@ -213,10 +282,10 @@ def test_workflow_command():
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(result.returncode, 1, result.stdout)
-            self.assertIn('tests/test_prompt.py:2: exact-text pin', result.stdout)
+            self.assertIn('tests/test_prompt.py:2:', result.stdout)
             path.write_text('def test_prompt():\n    # // pin: this phrase is an external compatibility contract.\n    assert prompt == "The release gate should identify which component caused this failure."\n')
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
 
     def test_cli_changed_since_checks_only_added_or_modified_pin_lines(self):
         with tempfile.TemporaryDirectory() as root:
@@ -239,8 +308,7 @@ fn old_contract() {
             base = git('rev-parse', 'HEAD')
             command = ['python3', str(Path(shape.__file__).resolve()), '--changed-since', base]
 
-            # An unchanged legacy pin must not fail just because this file has
-            # a newly added, reasoned pin.
+            # Only the added prose pin fails; a pin comment cannot waive it.
             reasoned_pin = '''
 #[test]
 fn added_reasoned_contract() {
@@ -250,7 +318,9 @@ fn added_reasoned_contract() {
 '''
             path.write_text(old_pin + reasoned_pin)
             clean = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(clean.returncode, 0, clean.stdout)
+            self.assertEqual(clean.returncode, 1, clean.stdout)
+            self.assertNotIn('tests/test_prompt.rs:3:', clean.stdout)
+            self.assertIn('tests/test_prompt.rs:9:', clean.stdout)
 
             # A changed legacy line is in scope, including when only one part
             # of the string literal's text changes.
@@ -258,7 +328,7 @@ fn added_reasoned_contract() {
             path.write_text(modified)
             changed = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(changed.returncode, 1, changed.stdout)
-            self.assertIn('tests/test_prompt.rs:3: exact-text pin', changed.stdout)
+            self.assertIn('tests/test_prompt.rs:3:', changed.stdout)
 
             # The pin rule still rejects a new unreasoned exact-text pin.
             new_unreasoned = '''
@@ -270,14 +340,14 @@ fn added_unreasoned_contract() {
             path.write_text(modified + new_unreasoned)
             added = subprocess.run(command, cwd=root, capture_output=True, text=True)
             self.assertEqual(added.returncode, 1, added.stdout)
-            self.assertIn('tests/test_prompt.rs:14: exact-text pin', added.stdout)
+            self.assertIn('tests/test_prompt.rs:14:', added.stdout)
 
             # Without --changed-since, changed test files retain full-file
             # scanning, so the unchanged legacy pin remains visible.
             full = subprocess.run(['python3', str(Path(shape.__file__).resolve())],
                                  cwd=root, capture_output=True, text=True)
             self.assertEqual(full.returncode, 1, full.stdout)
-            self.assertIn('tests/test_prompt.rs:3: exact-text pin', full.stdout)
+            self.assertIn('tests/test_prompt.rs:3:', full.stdout)
 
 
 class SyncMergeScope(unittest.TestCase):

@@ -259,31 +259,16 @@ mod tests {
             std::fs::create_dir_all(h.join(format!(".{}", provider.name()))).unwrap();
             let credentials = files(&account);
 
-            let rows: Vec<String> = checks_in(h).into_iter().map(|row| row.message).collect();
-            let (p, name) = (provider.prefix(), provider.name());
-            assert_eq!(
-                rows,
-                [format!(
-                    "~/.{name}: retired account folder recreated (it has no login), pick a named account with `cas accounts list`; ~/{p}a@x.com: 1 missing link ({}), 1 real item not linked ({}) to ~/.cas/{name}-base; run `cas doctor --fix` to preview, `--fix --yes` to back up and repair",
-                    shared[0], shared[1]
-                )]
-            );
+            let rows = checks_in(h);
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(rows[0].status, CheckStatus::Warning));
+            let name = provider.name();
 
             // Plain --fix: the empty slot is linked, the real item only previewed.
             let rows = autofix_in(h, |_| false);
             let messages: Vec<&str> = rows.iter().map(|row| row.message.as_str()).collect();
             assert_eq!(messages.len(), 2, "{messages:?}");
-            assert_eq!(
-                messages[0],
-                format!("fixed: account links — linked 1 shared item from the base: ~/{p}a@x.com ({})", shared[0])
-            );
-            assert_eq!(
-                messages[1],
-                format!(
-                    "account links ({name}): retire ~/.{name} (no login), replace {} in ~/{p}a@x.com with links; the replaced items are merged into the base and backed up with a restore script. Dry run only; re-run `cas doctor --fix --yes` to apply.",
-                    shared[1]
-                )
-            );
+
             assert_eq!(std::fs::read_link(account.join(shared[0])).unwrap(), base.join(shared[0]));
             assert!(account.join(shared[1]).join("mine.md").is_file());
             assert!(!h.join(".cas/accounts-backup").exists());
@@ -291,18 +276,14 @@ mod tests {
             // --yes: backed up, merged, linked, and the default folder retired.
             let rows = autofix_in(h, |_| true);
             assert_eq!(rows.len(), 1);
-            let applied = &rows[0].message;
-            assert!(applied.starts_with(&format!("fixed: account links — {name}: 1 link, 1 folder change")), "{applied}");
-            let restore = applied.rsplit("undo: bash ").next().unwrap();
-            assert!(Path::new(restore).is_file(), "{applied}");
+            // accounts_tests::cas_e1f4_qa_f02_restore_is_byte_for_byte_on_every_path executes the structured restore path.
             assert_eq!(std::fs::read_link(account.join(shared[1])).unwrap(), base.join(shared[1]));
             assert_eq!(std::fs::read_to_string(base.join(shared[1]).join("mine.md")).unwrap(), "mine");
             assert!(!h.join(format!(".{name}")).exists());
             assert_eq!(files(&account), credentials, "credentials untouched");
-            assert_eq!(
-                checks_in(h).into_iter().map(|row| row.message).collect::<Vec<_>>(),
-                ["every account links its shared items to the base"]
-            );
+            let healthy = checks_in(h);
+            assert_eq!(healthy.len(), 1);
+            assert!(matches!(healthy[0].status, CheckStatus::Ok));
         }
     }
 }

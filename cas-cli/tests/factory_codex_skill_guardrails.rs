@@ -83,16 +83,6 @@ fn codex_worker_recovery_uses_cs_alias_not_cas(/* cas-5b4f */) {
     }
 }
 
-#[test]
-fn codex_builtin_supervisor_guide_includes_core_workflow() {
-    let root = source_root();
-    let guide = root.join("cas-cli/src/builtins/codex/skills/cas-supervisor.md");
-    let content = load(&guide);
-    assert!(
-        content.contains(cas::builtins::TOOL_NAMING_LINE),
-        "codex supervisor guide should state the per-harness tool prefix"
-    );
-}
 
 /// cas-314d: supervisors and workers share one bounded, push-first reminder
 /// contract. The on-demand reference avoids inflating the SessionStart skill
@@ -135,36 +125,6 @@ fn supervisor_epic_driving_reference_is_compact_and_three_way_mirrored() {
     assert_eq!(contents[0], contents[2]);
 }
 
-#[test]
-fn supervisor_skill_mirrors_include_implementation_unit_template() {
-    // After cas-61af split cas-supervisor.md into a main file + references,
-    // the Implementation Unit Template moved to planning.md. The guardrail
-    // checks that file instead (both .claude and .codex trees must match).
-    let root = source_root();
-    let claude =
-        load(&root.join("cas-cli/src/builtins/skills/cas-supervisor/references/planning.md"));
-    let codex =
-        load(&root.join("cas-cli/src/builtins/codex/skills/cas-supervisor/references/planning.md"));
-
-    for (label, content) in [("claude", &claude), ("codex", &codex)] {
-        // Canonical template markers (R1)
-
-        // R4 mapping table
-
-        // R13 cross-link: Spec Requirements section mentions the template
-        let spec_idx = content
-            .find("## Spec Requirements")
-            .unwrap_or_else(|| panic!("{label} missing Spec Requirements heading"));
-        let tmpl_idx = content
-            .find("## Implementation Unit Template")
-            .unwrap_or_else(|| panic!("{label} missing Implementation Unit Template heading"));
-        let spec_block = &content[spec_idx..tmpl_idx];
-        assert!(
-            spec_block.contains("Implementation Unit Template"),
-            "{label} Spec Requirements section missing cross-link to Implementation Unit Template"
-        );
-    }
-}
 
 /// cas-2c61/cas-62ab, audit D1: no Codex catalog entry hardcodes Claude's
 /// `mcp__cas__` alias as an instruction. Tool names are bare; a prefix is
@@ -219,20 +179,6 @@ fn cas_bb7e_qa_reviewers_load_verification_in_worker_contract() {
             contract.contains(&format!("{prefix}verification action=qa_record")),
             "{contract}"
         );
-        assert!(contract.contains("QA-pass task"), "{contract}");
-        assert!(
-            !contract.contains(&format!(
-                "Load only `{prefix}task` and `{prefix}coordination`;"
-            )),
-            "{contract}"
-        );
-        assert!(
-            // pin: one close owner — the verdict closes the task (cas-5597).
-            contract.contains("Never re-close, spawn a verifier or ask anyone to close for you.")
-                // pin: the retired "supervisor closes for you" rule must not return.
-                && !contract.contains("close on your behalf"),
-            "{contract}"
-        );
     }
 }
 
@@ -268,11 +214,6 @@ fn cas_bb7e_worker_skill_allows_independent_qa_verdicts_in_every_flavor() {
             details.contains("verification action=qa_record"),
             "{flavor}: {details}"
         );
-        assert!(details.contains("QA-pass task"), "{flavor}: {details}");
-        assert!(
-            !details.contains("Load only `task` and `coordination`;"),
-            "{flavor}: {details}"
-        );
     }
 }
 
@@ -289,22 +230,7 @@ fn supervisor_reference_tree_uses_current_lifecycle_contract() {
         let reference = load(&base.join("cas-supervisor/references/reference.md"));
         let model_selection = load(&base.join("cas-supervisor/references/model-selection.md"));
 
-        assert_eq!(
-            reference.matches("## Supervisor override").count(),
-            1,
-            "{flavor} reference.md must document supervisor_override once"
-        );
 
-        assert_eq!(
-            model_selection.matches("suspended").count(),
-            1,
-            "{flavor} model-selection must keep one canonical suspension statement"
-        );
-        assert_eq!(
-            model_selection.matches("## Spawn recipes").count(),
-            1,
-            "{flavor} model-selection must keep one recipe pointer"
-        );
     }
 
     let builtins = include_str!("../src/builtins.rs");

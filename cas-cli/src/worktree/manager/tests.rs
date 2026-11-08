@@ -1122,10 +1122,6 @@ fn test_create_epic_branch_rejects_corrupt_base_without_writing_ref_cas_42a4() {
         .expect_err("a corrupt configured base must abort epic branch creation");
 
     assert!(
-        error.to_string().contains("does not resolve to a commit"),
-        "failure must identify the unresolvable start point: {error}"
-    );
-    assert!(
         !repo_path
             .join(".git/refs/heads/epic/must-not-exist")
             .exists(),

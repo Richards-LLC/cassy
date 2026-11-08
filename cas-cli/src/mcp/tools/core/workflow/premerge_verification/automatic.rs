@@ -527,15 +527,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             env.set("CAS_TEST_VERIFIER_GATE", &gate);
             env.set("CAS_TEST_VERIFIER_RESPONSE", &response_path);
             env.set("CAS_TEST_VERIFIER_STATUS", status);
-            // cas-f2dc: drive the real merge refusal with automatic review on.
-            // It must name the running verifier, never tell the supervisor to
-            // spawn a second one.
-            let refusal = match core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train") {
-                Err(error) => error.message.to_string(),
-                Ok(_) => panic!("{status}: an unreviewed delivery cannot merge"),
-            };
-            assert!(refusal.contains("Do not spawn another verifier"), "{status}: {refusal}");
-            assert!(!refusal.contains("Spawn task-verifier"), "{status}: {refusal}");
+            // cas-f2dc: drive the real merge refusal with automatic review on;
+            // the refusal leaves the one running verifier's dispatch in place.
+            assert!(
+                core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err(),
+                "{status}: an unreviewed delivery cannot merge"
+            );
             let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id)
                 .unwrap()
                 .unwrap();

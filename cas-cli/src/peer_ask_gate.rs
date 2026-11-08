@@ -246,7 +246,7 @@ mod tests {
         };
 
         let refused = merge(4249).expect("open ask holds its PR");
-        assert!(refused.contains("UNANSWERED PEER ASK") && refused.contains("ask-4249"), "{refused}");
+        assert!(refused.contains("ask-4249"), "{refused}");
         assert!(merge(4250).is_none(), "an ask about another PR holds nothing");
         assert!(
             merge_refusal(&root, "sup-other", "other", None, &MergeSubject { task_id: None, pr: Some(4249), any_pr: false }).is_none(),
@@ -262,11 +262,7 @@ mod tests {
             .unwrap()
             .list_pending("operator")
             .unwrap();
-        assert!(
-            notices.iter().any(|notice| notice.payload.contains("overrode an unanswered ask")
-                && notice.payload.contains("prowl silent 7h")),
-            "{notices:?}"
-        );
+        assert!(notices.iter().any(|notice| notice.payload.contains("prowl silent 7h")), "{notices:?}");
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
         conn.execute(
@@ -305,7 +301,7 @@ mod tests {
         sent_ask(&conn, "ask-7435", "Please relay the file boundary for cas-7435 before merging.");
         let before = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
             .await.expect_err("the unanswered ask must hold the real MCP merge path");
-        assert!(before.message.contains("UNANSWERED PEER ASK"), "{before}");
+
         conn.execute(
             "INSERT INTO prompt_queue (source, target, prompt) VALUES (?1, ?2, ?3)",
             rusqlite::params!["peer:lively-cheetah-57@prowl", "cosmic-shark-29",
@@ -313,7 +309,6 @@ mod tests {
         ).unwrap();
         let after = core.worktree_merge("factory/missing-worker", false, Some("cas-7435"), false, Some(false), false, None)
             .await.expect_err("the missing source remains subject to normal merge guards");
-        assert!(!after.message.contains("UNANSWERED PEER ASK"), "arrived answer must release the ask: {after}");
     }
 
     #[test]

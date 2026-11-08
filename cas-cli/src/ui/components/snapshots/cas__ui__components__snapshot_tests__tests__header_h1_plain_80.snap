@@ -1,5 +1,0 @@
----
-source: cas-cli/src/ui/components/snapshot_tests.rs
-expression: tf.output()
----
-=== Cassy Doctor ===

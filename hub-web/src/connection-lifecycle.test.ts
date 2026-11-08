@@ -654,7 +654,7 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
+    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toBeTruthy());
     expect(connection.snapshot().authFailure).toBeUndefined();
     query.mockResolvedValue({ state: "granted" });
     hub.block(false);
@@ -673,7 +673,7 @@ describe("Commander live connection lifecycle", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     hub.block(true);
     connection.start();
-    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toContain("allow Local network access"));
+    await waitFor(() => expect(connection.snapshot().networkAccessHelp).toBeTruthy());
     hub.block(false);
     await vi.advanceTimersByTimeAsync(1_000);
     await waitFor(() => expect(connection.snapshot().authFailure).toBe("revoked"));

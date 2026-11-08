@@ -61,7 +61,7 @@ pub use opencode::{
 pub use pane::TerminalSnapshot;
 pub use pane::{Pane, PaneBackend, PaneId, PaneKind, UserInputKind};
 pub use pty::{
-    ContractRole, claude_supervisor_contract, claude_worker_contract, missing_contract_elements,
+    ContractRole, claude_supervisor_contract, claude_worker_contract,
     rendered_contract_surface,
 };
 pub use pty::{Pty, PtyConfig, PtyEvent, TeamsSpawnConfig};

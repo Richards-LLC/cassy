@@ -22,7 +22,7 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
       fetcher: () => stage === "fetch" ? new Promise(() => {}) : Promise.resolve({ ok: true, json: () => new Promise(() => {}) } as unknown as Response),
       stagePersisted, activatePersisted, rollbackPersisted,
     });
-    const rejected = expect(result).rejects.toMatchObject({ recoverable: true, message: expect.stringContaining("Allow Local network access") });
+    const rejected = expect(result).rejects.toMatchObject({ recoverable: true });
     await vi.advanceTimersByTimeAsync(10_000); await rejected;
     expect(stagePersisted).not.toHaveBeenCalled(); expect(activatePersisted).not.toHaveBeenCalled(); expect(rollbackPersisted).not.toHaveBeenCalled();
   });
@@ -140,14 +140,9 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
   it("names a retryable auth-store 503 without changing other refusal copy (cas-6348)", () => {
     const cause = httpRefusalCause(503, "auth_store_unavailable");
     expect(cause).toBe("hub_auth_store_unavailable");
-    expect(CAUSE_COPY[cause]).toMatchObject({
-      title: "Hub is temporarily unable to check pairings",
-      action: "Commander is retrying by itself; this device's pairing is intact.",
-    });
     expect(CAUSE_COPY[cause].detail).toContain("auth_store_unavailable");
     expect(httpRefusalCause(503, undefined, "auth_store_unavailable")).toBe(cause);
     expect(httpRefusalCause(503, "health_probe")).toBe("health_http_unavailable");
     expect(httpRefusalCause(500, "auth_store_unavailable")).toBe("http_refused");
-    expect(CAUSE_COPY.http_refused.title).toBe("HTTP request was refused");
   });
 });

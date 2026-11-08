@@ -44,6 +44,8 @@ Apply **Code review procedure** in `skills/cas-qa-craft/references/verifier-evid
 
 ## Phase 2: Quality (only when Phase 1 passes)
 
+Tests assert behavior or stable machine identifiers such as error codes and rule IDs. Never require human-readable wording, word lists, canonical sentences or phrase presence; changing prose alone must not fail a test. Exact caller payloads and machine protocol bytes remain data-integrity checks. Fixed safety text needs a named consumer that requires those bytes; a writing preference is insufficient. Do not record wording preferences as findings or reusable rule candidates. Require a reproduced behavior failure or a stable identifier mismatch.
+
 Read the root `CODING_STANDARDS.md` when present for judgment-only review; skip mechanically enforced rules, and let documented repo decisions override smell heuristics. Apply the gate's **Quality checklist**, then answer three questions:
 
 1. **Overbuilt?** Any step, flag, file, abstraction or test the acceptance criteria don't need; name it with file:line.

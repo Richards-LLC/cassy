@@ -161,15 +161,15 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        for word in ("agent", "lane"):
-            self.assertIn(f"forbidden user wording: {word}", result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["agent", "lane"])
 
         bodies[1] = BODIES[1] + " Agents use these lanes."
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        for word in ("Agents", "lanes"):
-            self.assertIn(f"forbidden user wording: {word}", result.stderr)
+        self.assertEqual(result.stderr.count("[rule: user_word]"), 2, result.stderr)
+        self.assertEqual([word for word, _ in announce.user_word_hits(bodies[1])], ["Agents", "lanes"])
 
         bodies[1] = BODIES[1]
         bodies[3] += " A worker can use it."
@@ -188,13 +188,12 @@ class Announce(unittest.TestCase):
         result = self.validate()
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(result.stderr.count("[rule: user_word]"), 3, result.stderr)
-        for body, line, word, swap in (
-            ("user-top-level", 2, "epic", "workstream"),
-            ("user-reply", 1, "daemon", "background service"),
-            ("user-reply", 3, "harness", "coding tool"),
+        for line, hits in (
+            (bodies[0].splitlines()[1], [("epic", "workstream")]),
+            (bodies[1].splitlines()[0], [("daemon", "background service")]),
+            (bodies[1].splitlines()[2], [("harness", "coding tool")]),
         ):
-            self.assertRegex(result.stderr,
-                rf"body {body} line {line} .*forbidden user wording: {word}; try {swap}.*\[rule: user_word\]")
+            self.assertEqual(announce.user_word_hits(line), hits)
         self.assertFalse(self.body_dir.exists(), "invalid drafts must not export partial bodies")
 
     def test_writing_rules_match_lint(self):
@@ -226,7 +225,7 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("bullet spans more than two lines", result.stderr)
+        self.assertIn("[rule: bullet_span]", result.stderr)
 
     def test_line_limit_matches_the_hub_counting_links_by_label(self):
         bodies = list(BODIES)
@@ -240,7 +239,7 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("body user-reply line 1 is 301 characters; the Violet hub refuses lines over 300", result.stderr)
+        self.assertIn("[rule: long_line]", result.stderr)
 
     def test_validate_rejects_a_multiline_token(self):
         bodies = list(BODIES)
@@ -248,8 +247,7 @@ class Announce(unittest.TestCase):
         self.write_draft(bodies)
         result = self.validate()
         self.assertEqual(result.returncode, 1)
-        self.assertIn("line 3", result.stderr)
-        self.assertIn("{{UNKNOWN\nVALUE}}", result.stderr)
+        self.assertIn("[rule: unresolved_token]", result.stderr)
 
     def test_non_message_template_notes_do_not_block_validation(self):
         with self.draft.open("a") as draft:
@@ -289,7 +287,7 @@ class Announce(unittest.TestCase):
             (self.body_dir / "dev-reply.txt").write_text(BODIES[3] + " Extra wording.\n")
 
         adapter, writes = self.adapter(change_body)
-        with self.assertRaisesRegex(ValueError, "validated body.*changed"):
+        with self.assertRaises(ValueError):
             self.post(adapter)
         self.assertFalse(writes)
         self.assertFalse(self.receipt.exists())
@@ -305,7 +303,7 @@ class Announce(unittest.TestCase):
                 }
                 if file_block is not None:
                     envelope["file"] = file_block
-                with self.assertRaisesRegex(report.AdapterError, "file id"):
+                with self.assertRaises(report.AdapterError):
                     report.file_receipt(envelope)
         for split_replies in (
             {},

@@ -203,8 +203,8 @@ mod tests {
             "budget the notice, not the old body"
         );
         assert!(!reference.rows[0].prompt.contains(body.trim()));
-        // pin: a delivery reference must distinguish surfacing from acknowledgement.
-        assert!(reference.rows[0].prompt.contains("not acknowledged"));
+
+        assert!(matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Reference(_)));
         assert_eq!(
             store.recipient_receipt(id, "worker-a").unwrap(),
             Some(SurfacingSource::InboxPoll)
@@ -254,7 +254,7 @@ mod tests {
             .poll_named_for_recipient("worker-a", None, &[id])
             .unwrap();
         assert!(!named[0].prompt.contains(body.trim()));
-        assert!(named[0].prompt.contains("acknowledged"));
+        assert!(matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Settled(_)));
         assert!(
             store
                 .poll_unseen_for_recipient("worker-a", None, 10)
@@ -265,14 +265,7 @@ mod tests {
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         assert!(
-            store
-                .recipient_delivery(id, "worker-a")
-                .unwrap()
-                .unwrap()
-                .into_prompt()
-                .prompt
-                .contains("acknowledged")
-        );
+            matches!(store.recipient_delivery(id, "worker-a").unwrap().unwrap(), RecipientDelivery::Settled(_)));
         store
             .conn
             .lock()
@@ -351,20 +344,15 @@ mod tests {
                 .unwrap();
             let delivery = store.recipient_delivery(id, "worker-a").unwrap().unwrap();
             assert!(!delivery.is_full());
-            assert!(delivery.into_prompt().prompt.contains("answered"));
+            assert!(matches!(delivery, RecipientDelivery::Settled(_)));
             store
                 .acknowledge_for_recipients(id, &["worker-a".into()], None)
                 .unwrap();
-            assert!(
-                store
-                    .recipient_delivery(id, "worker-a")
-                    .unwrap()
-                    .unwrap()
-                    .into_prompt()
-                    .prompt
-                    .contains("answered"),
-                "a later ACK must preserve the stronger actual answer"
-            );
+            let intent: (String, Option<i64>) = store.conn.lock().unwrap().query_row(
+                "SELECT disposition, reply_prompt_id FROM prompt_queue_recipient_ack WHERE prompt_id=?1 AND recipient='worker-a'",
+                [id], |row| Ok((row.get(0)?, row.get(1)?))
+            ).unwrap();
+            assert_eq!(intent, ("answered".to_string(), Some(reply)));
             let named = store
                 .poll_named_for_recipient("worker-a", None, &[id])
                 .unwrap();

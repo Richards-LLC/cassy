@@ -674,7 +674,7 @@ mod tests {
         fs::write(dir.path().join(".credentials.json"), "{}").unwrap();
         let report = collect_claude("fixture", dir.path());
         assert_eq!(report.state, "unavailable");
-        assert!(report.detail.as_deref().unwrap().contains("Claude Code statusline"));
+
         let usage = account_usage(crate::accounts::Provider::Claude, dir.path());
         assert!(!usage.rejected && !usage.authenticated);
     }
@@ -783,9 +783,9 @@ mod tests {
         assert_eq!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows[1].used_percent, Some(34.0));
         let report = LimitsReport { accounts: vec![report] };
         let compact = compact_line(&report);
-        assert!(compact.contains("34% as of ") && compact.contains(" ET"), "{compact}");
+        assert!(compact.contains("34%") && compact.contains(" ET"), "{compact}");
         let human = render_human(&report);
-        assert!(human.contains("34%") && human.contains("as of ") && human.contains(" ET"), "{human}");
+        assert!(human.contains("34%") && human.contains(" ET"), "{human}");
         snapshot.observed_at = Utc::now();
         for window in &mut snapshot.windows {
             window.reset_at = Some((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());

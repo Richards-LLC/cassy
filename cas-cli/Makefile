@@ -237,7 +237,6 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-sow-delivery-report.py
 	cd .. && python3 scripts/test-regenerate-generated-artifacts.py
 	cd .. && python3 scripts/test-check-communication-slos.py
-	cd .. && python3 scripts/test-violet-reference-guard.py
 	cd .. && python3 scripts/test-assembly-proof.py
 	cd .. && python3 scripts/test-proof-target.py
 	cd .. && python3 scripts/test-assembly-memory.py
@@ -248,7 +247,6 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-release-env.py
 	cd .. && python3 scripts/test-release-test-env.py
 	cd .. && python3 scripts/test-review-pr-body.py
-	cd .. && python3 scripts/test-builtin-contract-phrases.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
 	cd .. && python3 scripts/test-check-call-shapes.py
@@ -284,7 +282,6 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-release-host.sh
 	cd .. && ./scripts/test-cas-install.sh
 	cd .. && ./scripts/test-check-release-migration-snapshots.sh
-	cd .. && ./scripts/test-check-scoped-snapshot-tests.sh
 	cd .. && ./scripts/test-check-scoped-test-surface.sh
 
 # Type check

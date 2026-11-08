@@ -1,5 +1,4 @@
 use assert_cmd::Command;
-use predicates::prelude::*;
 use tempfile::TempDir;
 
 fn cas_cmd(root: &std::path::Path) -> Command {
@@ -42,16 +41,14 @@ fn agents_md_write_and_check_have_expected_staleness_behavior() {
         .current_dir(&project)
         .args(["sync", "agents-md", "--check"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("current"));
+        .success();
 
     std::fs::write(project.path().join("CLAUDE.md"), "new content\n").unwrap();
     cas_cmd(project.path())
         .current_dir(&project)
         .args(["sync", "agents-md", "--check"])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("stale"));
+        .failure();
 }
 
 /// Skills audit L6 F7: the tracked AGENTS.md went stale for a week because
@@ -86,6 +83,5 @@ fn repository_agents_md_is_current() {
         .current_dir(&repo_root)
         .args(["sync", "agents-md", "--check"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("current"));
+        .success();
 }

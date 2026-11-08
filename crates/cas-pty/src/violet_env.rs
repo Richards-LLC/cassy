@@ -522,7 +522,7 @@ mod tests {
         std::fs::write(&path, r#"{"mcpServers":{"violet":{"headers":{"Authorization":"Bearer ${VIOLET_SLACK_TOKEN_MISSING_FIXTURE}"}}}}"#).unwrap();
         let warnings = missing_references("claude", &resolved_environment(&[], &[]));
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("VIOLET_SLACK_TOKEN_MISSING_FIXTURE is empty or unset"));
+        assert!(warnings[0].contains("VIOLET_SLACK_TOKEN_MISSING_FIXTURE"));
     }
     #[test]
     fn violet_env_child_resolution_matches_probe_and_respects_denials() {

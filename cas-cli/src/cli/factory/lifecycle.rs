@@ -70,6 +70,28 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
     execute_kill_with_terminal_check(name, force, force_stale, || io::stdin().is_terminal())
 }
 
+/// Why `cas kill --force-stale` left a session record unchanged.
+#[derive(Debug, thiserror::Error)]
+enum ForceStaleRefusal {
+    #[error(
+        "--force-stale needs confirmation and no terminal is attached; session '{name}' was left unchanged. \
+         After checking that `ps -p {pid}` shows another program, rerun with --force."
+    )]
+    NoTerminal { name: String, pid: u32 },
+    #[error(
+        "Session '{name}' now records PID {pid}, not the PID {confirmed_pid} you confirmed; nothing was changed. Run `cas kill {name}` again."
+    )]
+    RecordMoved { name: String, pid: u32, confirmed_pid: u32 },
+    #[error(
+        "PID {pid} started a new process after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
+    )]
+    PidReused { name: String, pid: u32 },
+    #[error(
+        "PID {pid} exited while you were confirming it; nothing was changed. Run `cas kill {name} --force-stale` again."
+    )]
+    PidExited { name: String, pid: u32 },
+}
+
 fn execute_kill_with_terminal_check(
     name: Option<&str>,
     force: bool,
@@ -107,10 +129,7 @@ fn execute_kill_with_terminal_check(
         let confirmed_starttime = crate::mcp::daemon::read_pid_starttime(pid);
         if !force {
             if !stdin_is_terminal() {
-                bail!(
-                    "--force-stale needs confirmation and no terminal is attached; session '{name}' was left unchanged. \
-                     After checking that `ps -p {pid}` shows another program, rerun with --force."
-                );
+                return Err(ForceStaleRefusal::NoTerminal { name, pid }.into());
             }
             StatusLine::warning(force_stale_prompt(&name, pid, crate::hub::process_command(pid)))
                 .render(&mut fmt)?;
@@ -381,22 +400,25 @@ fn force_clear_stale_session(
     // The operator confirmed one PID; a record rewritten since then belongs
     // to a daemon nobody has looked at.
     if pid != confirmed_pid {
-        bail!(
-            "Session '{name}' now records PID {pid}, not the PID {confirmed_pid} you confirmed; nothing was changed. Run `cas kill {name}` again."
-        );
+        return Err(ForceStaleRefusal::RecordMoved {
+            name: name.to_string(),
+            pid,
+            confirmed_pid,
+        }
+        .into());
     }
     // The same PID may have been reused by a new process since the prompt.
     // A missing fingerprint is different: check whether the confirmed process
     // exited, and otherwise refuse without guessing why its identity is unreadable.
     if let Some(confirmed_starttime) = confirmed_starttime {
         match starttime_of(pid) {
-            Some(current) if current != confirmed_starttime => bail!(
-                "PID {pid} started a new process after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
-            ),
+            Some(current) if current != confirmed_starttime => {
+                return Err(ForceStaleRefusal::PidReused { name: name.to_string(), pid }.into());
+            }
             Some(_) => {}
-            None if !crate::mcp::daemon::pid_alive(pid) => bail!(
-                "PID {pid} exited while you were confirming it; nothing was changed. Run `cas kill {name} --force-stale` again."
-            ),
+            None if !crate::mcp::daemon::pid_alive(pid) => {
+                return Err(ForceStaleRefusal::PidExited { name: name.to_string(), pid }.into());
+            }
             None => bail!(
                 "PID {pid}'s start time could not be read after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
             ),
@@ -669,16 +691,10 @@ mod tests {
         kill_group(worker_pgid);
         daemon.join().unwrap().unwrap();
         worker.join().unwrap().unwrap();
-        let error = outcome.unwrap_err().to_string();
+        assert!(outcome.is_err(), "an unreadable start time must refuse the kill");
         assert!(daemon_alive && worker_alive, "an alive daemon's worker was reaped");
         assert!(still_recorded, "an alive daemon's session record was removed");
-        assert!(
-            error.contains("start time could not be read")
-                && error.contains(&format!("ps -p {pid}"))
-                && error.contains("cas kill opaque --force-stale")
-                && !error.contains("gc cleanup"),
-            "every remedy offered must clear the session: {error}"
-        );
+
         assert!(daemon_log("opaque").contains("\"worker_reap_skipped\""));
     }
 
@@ -784,9 +800,12 @@ mod tests {
         save_session("moved", i32::MAX as u32, project.path());
 
         let error = force_clear_stale_session("moved", 1, None, &|_| None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("not the PID 1 you confirmed"), "{error}");
+            .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<ForceStaleRefusal>(), Some(ForceStaleRefusal::RecordMoved { .. })),
+            "{error}"
+        );
+
         assert!(SessionManager::new().find_session(Some("moved")).unwrap().is_some());
     }
 
@@ -800,10 +819,12 @@ mod tests {
         save_session("exited", pid, project.path());
 
         let error = force_clear_stale_session("exited", pid, Some(1), &|_| None)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(&format!("PID {pid} exited")), "{error}");
-        assert!(!error.contains("started a new process"), "{error}");
+            .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<ForceStaleRefusal>(), Some(ForceStaleRefusal::PidExited { .. })),
+            "{error}"
+        );
+
         assert!(SessionManager::new().find_session(Some("exited")).unwrap().is_some());
     }
 
@@ -817,9 +838,12 @@ mod tests {
         save_session("reused", pid, project.path());
 
         let error = force_clear_stale_session("reused", pid, Some(1), &|_| Some(2))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("started a new process"), "{error}");
+            .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<ForceStaleRefusal>(), Some(ForceStaleRefusal::PidReused { .. })),
+            "{error}"
+        );
+
         assert!(SessionManager::new().find_session(Some("reused")).unwrap().is_some());
     }
 
@@ -832,9 +856,12 @@ mod tests {
         save_session("unconfirmed", i32::MAX as u32, project.path());
 
         let error = execute_kill_with_terminal_check(Some("unconfirmed"), false, true, || false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("no terminal is attached"), "{error}");
+            .unwrap_err();
+        assert!(
+            matches!(error.downcast_ref::<ForceStaleRefusal>(), Some(ForceStaleRefusal::NoTerminal { .. })),
+            "{error}"
+        );
+
         assert!(SessionManager::new().find_session(Some("unconfirmed")).unwrap().is_some());
     }
 
@@ -855,13 +882,8 @@ mod tests {
         let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
         kill_group(pid);
         daemon.join().unwrap().unwrap();
-        let error = outcome.unwrap_err().to_string();
+        assert!(outcome.is_err(), "a withheld SIGKILL must refuse the kill");
         assert!(alive, "SIGKILL must not be sent without a start-time match");
-        assert!(
-            error.contains("SIGKILL was withheld because the session record has no daemon start time")
-                && error.contains(&format!("kill -9 {pid}")),
-            "{error}"
-        );
         assert!(daemon_log("unverified").contains("\"kill_withheld\""));
     }
 

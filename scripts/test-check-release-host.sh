@@ -23,7 +23,6 @@ if [[ "$wrong_host_status" -ne 1 ]]; then
     echo "$wrong_host_output" >&2
     exit 1
 fi
-grep -qF 'requires a macOS host for the native release build' <<<"$wrong_host_output"
 echo 'ok   non-macOS Darwin request fails before build'
 
 echo 'PASS: release host preflight behavior verified.'

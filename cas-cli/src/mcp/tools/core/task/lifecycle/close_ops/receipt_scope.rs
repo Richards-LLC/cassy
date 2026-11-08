@@ -123,6 +123,9 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    if let Some(refusal) = message_assertion_refusal(proof_repo, target) {
+        refusals.push(refusal);
+    }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
@@ -160,6 +163,28 @@ pub(super) fn park_refusals(
         targets = widened.join(","),
     ));
     refusals
+}
+
+/// Read-only source check: a test receipt cannot authorize a new prose pin.
+fn message_assertion_refusal(repo: &Path, target: &str) -> Option<String> {
+    let guard = repo.join("scripts/check-test-shape.py");
+    if !guard.is_file() {
+        return None;
+    }
+    let output = std::process::Command::new("python3")
+        .arg(&guard)
+        .args(["--messages-only", "--changed-since", target])
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .current_dir(repo)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => None,
+        Ok(output) => Some(format!(
+            "TEST_ASSERTION_PROSE: tests must assert behavior, error codes or rule IDs rather than human messages.\n{}{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
+        )),
+        Err(error) => Some(format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}")),
+    }
 }
 
 fn product_source_path(path: &str) -> bool {
@@ -912,6 +937,24 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "--allow-empty", "-qm", subject]);
         git(&["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn park_checks_new_message_assertions_cas_6a3e() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-6a3e".into(), "source guard".into());
+        let script = repo.path().join("scripts/check-test-shape.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        for (exit, rejected) in [(1, true), (0, false)] {
+            std::fs::write(&script, format!("raise SystemExit({exit})\n")).unwrap();
+            let refusal = park_refusal(cas_root.path(), repo.path(), &task,
+                &["docs/guide.md".into()], &"a".repeat(40), "main", None);
+            assert_eq!(refusal.is_some(), rejected);
+            if let Some(refusal) = refusal {
+                assert!(refusal.contains("TEST_ASSERTION_PROSE"));
+            }
+        }
     }
 
     #[test]

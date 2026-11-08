@@ -777,24 +777,26 @@ mod tests {
             let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
                 panic!("text_error must use a concrete theme color");
             };
+            let error_payload = "configuration failed";
+            let success_payload = "sync complete";
             let mut error_buf = Vec::new();
             {
                 let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
-                fmt.error("configuration failed").unwrap();
+                fmt.error(error_payload).unwrap();
             }
             assert_eq!(
                 String::from_utf8(error_buf).unwrap(),
-                format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+                format!("\x1b[38;2;{r};{g};{b}m{}\x1b[0m {error_payload}\n", Verdict::Error.label(false))
             );
 
             let mut success_buf = Vec::new();
             {
                 let mut fmt = Formatter::styled(&mut success_buf, theme);
-                fmt.success("sync complete").unwrap();
+                fmt.success(success_payload).unwrap();
             }
             assert_eq!(
                 String::from_utf8(success_buf).unwrap(),
-                "\x1b[1m[OK]\x1b[0m sync complete\n"
+                format!("\x1b[1m{}\x1b[0m {success_payload}\n", Verdict::Ok.label(false))
             );
         }
     }

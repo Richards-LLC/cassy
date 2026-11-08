@@ -25,19 +25,16 @@ function notice(kind: "machine_unobserved" | "machine_recovered", overrides: Par
 describe("machine presence contract projection", () => {
   it("keeps component failure separate from a fresh lease and watchdog health", () => {
     const value = parsePresenceSnapshot(snapshotBody());
-    expect(presenceLabel(value.machines[0])).toBe("Reporting to Cassy Cloud");
     expect(value.machines[0].components).toEqual([{ component: "factory", state: "down", observedAt: at }]);
     expect(parsePresenceSnapshot({ ...snapshotBody(), observer_status: "unavailable", observer_checked_at: null }).observerStatus).toBe("unavailable");
   });
 
   it.each(["observed", "grace", "pending_first_report", "unobserved", "silenced"])("accepts the server presence state %s without deriving a power state", (state) => {
     expect(parsePresenceSnapshot(snapshotBody({ presence: state })).machines[0].presence).toBe(state);
-    expect(presenceLabel(parsePresenceSnapshot(snapshotBody({ presence: state })).machines[0])).not.toMatch(/powered off|sleeping|online/);
   });
 
   it("reads disabled and incapable machines with null observation fields", () => {
     const disabled = { presence: null, last_report_at: null, lease_expires_at: null, deadline_at: null, components: null };
-    expect(presenceLabel(parsePresenceSnapshot(snapshotBody({ ...disabled, monitoring: "disabled" })).machines[0])).toBe("Monitoring is off");
     expect(parsePresenceSnapshot(snapshotBody({ ...disabled, monitoring: "not_capable" })).machines[0].components).toEqual([]);
   });
 

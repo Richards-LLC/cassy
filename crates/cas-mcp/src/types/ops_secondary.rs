@@ -440,8 +440,8 @@ pub struct VerificationRequest {
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
-    /// Verification type: 'task' (default) or 'epic'; batch_receipt also takes 'release'.
-    #[schemars(description = "task (default), epic; batch_receipt: release.")]
+    /// Verification type: 'task' (default) or 'epic'. For batch_receipt, omit it to record a batch QA receipt; 'release' records only the release code-review verdict, never a QA walk.
+    #[schemars(description = "task (default), epic. batch_receipt: omit for a batch QA receipt; release records only the release code-review verdict, never a QA walk.")]
     #[serde(default)]
     pub verification_type: Option<String>,
 

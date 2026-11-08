@@ -104,12 +104,14 @@ describe("project-first navigation", () => {
     const nav = setup();
     new ProjectNavigation().render(nav, [
       row("named", { projectDir: "/projects/cassy", supervisor: "ready-cobra-72" }),
-      row("unnamed", { projectDir: "/projects/legacy", supervisor: "" }),
+      row("unnamed", { projectDir: "/projects/legacy", supervisor: "supervisor" }),
+      row("blank", { projectDir: "/projects/blank", supervisor: "" }),
     ], vi.fn());
 
     const role = (key: string) => nav.querySelector(`[data-thread-key="${key}"] .conversation-role`)?.textContent;
     expect(role("named")).toBe("ready-cobra-72");
     expect(role("unnamed")).toBe("Supervisor");
+    expect(role("blank")).toBe("Supervisor");
   });
 
   it("orders cards by project name and rows by supervisor, and activity never moves either (cas-ade2)", () => {

@@ -677,7 +677,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const settled = await page.locator("#conversation-connection").evaluate((node) => ({ label: node.dataset.label, phase: node.dataset.phase }));
     expect(settled.phase, "the opened conversation is live").toBe("live");
     expect(seen.status.filter((text) => String(text).startsWith("header:")), "the header kept its live state while it opened").toEqual([`header:${settled.label}`]);
-    expect(seen.status.filter((text) => /^row-note:.*\b(?:interrupted|unreachable)\b/.test(String(text))), "the selected row never flips to a connection note while it opened").toEqual([]);
+    // Only a parked draft may give the live row a second line; a connection
+    // note (outage, interrupted or unreachable) never appears while it opens.
+    expect(seen.status.filter((text) => String(text).startsWith("row-note:") && !/\bdraft\b/.test(String(text))), "the selected row never shows a connection note while it opened").toEqual([]);
     expect(seen.composer, "composer widths while it opened").toHaveLength(1);
     // cas-766c: on a phone the empty card's machine · codename line keeps
     // the 40-character machine name (at least 16ch, its OS word dropped, never

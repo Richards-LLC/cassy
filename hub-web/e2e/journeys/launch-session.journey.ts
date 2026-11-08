@@ -456,7 +456,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
       await page.getByRole("button", { name: "Accounts", exact: true }).click();
       await expect(dialog.getByText("hello@example.test", { exact: true })).toBeVisible();
       await expect(dialog.locator(".accounts-editor")).toBeHidden();
-      await expect(dialog.locator(".accounts-meter").filter({ has: dialog.locator('.accounts-bar > [data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
+      await expect(dialog.locator(".accounts-meter").filter({ has: page.locator('.accounts-bar > [data-left="62"]') })).toContainText(/(AM|PM) [A-Z]/);
       await expect(dialog.locator('.accounts-row[data-login-state="stale_login"]')).toBeVisible();
       await expect(dialog.locator(".accounts-where").filter({ hasText: "~/.claude-spare" })).toBeVisible();
       expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);

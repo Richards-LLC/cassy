@@ -34,8 +34,8 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     ))
 }
 
-/// The account spawn_workers would launch (cas-c386). With no eligible Codex
-/// home, refuse with each home's state rather than blame the default home.
+/// The account spawn_workers would launch (cas-c386). With no eligible home,
+/// refuse with each home's state rather than blame the default home.
 fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<String>, String> {
     let provider = match cli {
         cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
@@ -53,9 +53,6 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
     if let Some(choice) = selection.recommended {
         return Ok(Some(choice.account.name.clone()));
     }
-    if provider != crate::accounts::Provider::Codex {
-        return Ok(None);
-    }
     let homes = selection
         .excluded
         .iter()
@@ -63,30 +60,66 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
         .collect::<Vec<_>>()
         .join("; ");
     Err(format!(
-        "no eligible Codex account ({}); launch the task-verifier yourself",
+        "no eligible {} account ({})",
+        provider.name(),
         if homes.is_empty() { "no accounts found" } else { &homes }
     ))
 }
 
-fn command(root: &Path, output: &Path) -> Result<Command, String> {
+/// The verifier command, plus a notice when it fell back to Claude.
+fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
-    let model = route.spec.model.ok_or("verifier route has no model")?;
-    let effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    let mut cli = route.spec.cli;
+    let mut model = route.spec.model.ok_or("verifier route has no model")?;
+    let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
     // A daemon may have no provider account selector, even when the host has
     // authenticated named accounts. Choose the account spawn_workers would
     // (cas-c386), then use the checked launch environment supervisors use,
-    // rather than inheriting the daemon's default home.
-    let account = launch_account(route.spec.cli, root)?;
+    // rather than inheriting the daemon's default home. With no eligible
+    // Codex home, the same verifier runs on an eligible Claude account
+    // (cas-bdde); only when neither has one is the supervisor asked.
+    let mut notice = None;
+    let account = match launch_account(cli, root) {
+        Ok(account) => account,
+        Err(codex) if cli == cas_mux::SupervisorCli::Codex => {
+            match launch_account(cas_mux::SupervisorCli::Claude, root) {
+                Ok(Some(account)) => {
+                    let recipe = cas_factory::routing::registry()
+                        .map_err(|e| e.to_string())?
+                        .recipes
+                        .get("claude_opus_5_5")
+                        .ok_or("verifier Claude recipe missing")?;
+                    cli = cas_mux::SupervisorCli::Claude;
+                    model = recipe.model.clone();
+                    effort = recipe.default_effort;
+                    notice = Some(format!(
+                        "Automatic verifier started on Claude account {account} ({model}, {}): {codex}.",
+                        effort.as_str()
+                    ));
+                    Some(account)
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "{codex}; Claude accounts could not be read; launch the task-verifier yourself"
+                    ));
+                }
+                Err(claude) => {
+                    return Err(format!("{codex}; {claude}; launch the task-verifier yourself"));
+                }
+            }
+        }
+        Err(_) => None,
+    };
     let environment =
-        crate::hub::launch_env::resolve_for_project(route.spec.cli, account.as_deref(), Some(root))
+        crate::hub::launch_env::resolve_for_project(cli, account.as_deref(), Some(root))
             .map_err(|e| e.to_string())?;
     let mut command = Command::new(environment.executable);
     for key in environment.remove {
         command.env_remove(key);
     }
     command.envs(environment.set);
-    match route.spec.cli {
+    match cli {
         cas_mux::SupervisorCli::Codex => {
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
@@ -115,7 +148,7 @@ fn command(root: &Path, output: &Path) -> Result<Command, String> {
     for key in ["CAS_AGENT_ID", "CLAUDECODE", "CODEX_THREAD_ID"] {
         command.env_remove(key);
     }
-    Ok(command)
+    Ok((command, notice))
 }
 
 /// Claim synchronously, then do provider work off the MCP/control loop. The
@@ -132,9 +165,15 @@ pub(super) fn launch(
     let directory = core.cas_root.join("verification-runs").join(&dispatch.id);
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
-    let mut command = command(&core.cas_root, &output)?;
+    let (mut command, notice) = command(&core.cas_root, &output)?;
     command.current_dir(&proof.worktree_root);
-    launch_command(core, task, dispatch, command, output)
+    let handle = launch_command(core, task, dispatch, command, output)?;
+    if handle.is_some()
+        && let Some(notice) = notice
+    {
+        attention(core, dispatch, &notice)?;
+    }
+    Ok(handle)
 }
 
 fn launch_command(
@@ -415,6 +454,14 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // cas-bdde: a logged-in Claude CLI, written before any child runs.
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '9.9.9 (Claude Code)'; exit 0; }\necho '{\"loggedIn\":true}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         // Registry login probes use the CLI on PATH. Isolate that PATH in a
         // child test process, never mutate the library test process's PATH.
@@ -693,5 +740,28 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         for needle in [".codex-review", "100%", " ET", "not logged in", "launch the task-verifier yourself"] {
             assert!(refused.contains(needle), "{needle}: {refused}");
         }
+        // cas-bdde: with every Codex home ineligible, an eligible Claude home
+        // runs the same verifier, and the notice names harness and account.
+        let claude_home = env.home().join(".claude-review");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let reset = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        std::fs::write(
+            claude_home.join(".cas-claude-usage.json"),
+            serde_json::json!({"identity": null, "observed_at": chrono::Utc::now(), "windows": [
+                {"name": "5h", "used_percent": 10.0, "reset_at": reset, "spend_dollars": null},
+                {"name": "weekly", "used_percent": 20.0, "reset_at": reset, "spend_dollars": null},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
+        assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
+        assert!(
+            fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value.is_some_and(|dir| std::path::Path::new(dir) == claude_home)),
+            "{fallback:?}"
+        );
+        let notice = notice.expect("fallback notice");
+        assert!(notice.contains("Claude") && notice.contains("review"), "{notice}");
     }
 }

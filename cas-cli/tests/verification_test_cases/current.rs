@@ -624,7 +624,7 @@ async fn supervisor_verdict_waits_for_a_running_verifier_and_the_late_rejection_
     text(fixture.as_agent("running-verifier").verification(json!({
         "action":"add", "task_id":"cas-running", "dispatch_id":dispatch.id,
         "status":"rejected", "summary":"verifier rejects", "verifier_capability":issued.token,
-        "issues":"[{\"severity\":\"blocking\",\"description\":\"incomplete\"}]",
+        "issues":"[{\"file\":\"src/lib.rs\",\"category\":\"correctness\",\"problem\":\"incomplete\"}]",
     })).await.expect("the verifier's late verdict is recorded"));
     let latest = open_verification_store(&fixture.root).unwrap().get_latest_for_task("cas-running").unwrap().unwrap();
     assert_eq!(latest.status.to_string(), "rejected");

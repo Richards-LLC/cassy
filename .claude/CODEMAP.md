@@ -92,7 +92,7 @@
 - `cas-cli/src/factory_ci_retry.rs` - exact-SHA merge retries, terminal CI notices, expiry and corrupt-intent quarantine.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs` - durable ordered train merges, target reservation, exact parked anchors and daemon continuation through the existing merge path.
 - `cas-cli/src/train_ci.rs`, `scripts/train-ci.py` - existing CI suite receipts, complete logs, red-tip supervisor wakes, queue holds and starting-tip release admission.
-- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs` - capped proof admission, builder guards, short owned temporary roots and durable capacity waits.
+- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs` - capped proof admission, builder guards, short owned temporary roots, durable capacity waits and private resolution of Cargo-home Rust tools.
 - `cas-cli/src/factory_build_routing.rs` - passive capacity presence and spawn overflow routing to same-account peers, with expiring task-stable asks and peer cooldowns in the existing outbox.
 - `cas-cli/src/factory_worker_runs.rs` - worker-bound detached command records, completion wakes, PID-fenced liveness and retry recovery.
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator-only project hold commands, audited state, task presentation and action-relay admission; internal parked-task lists stay complete.

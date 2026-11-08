@@ -730,11 +730,19 @@ fn isolated_test_path(
     let started = std::time::Instant::now();
     let bin = tempfile::tempdir_in(slots)?;
     let search = std::env::var_os("PATH").unwrap_or_default();
+    let mut resolve_dirs = std::env::split_paths(&search).collect::<Vec<_>>();
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        resolve_dirs.push(PathBuf::from(cargo_home).join("bin"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        resolve_dirs.push(PathBuf::from(home).join(".cargo").join("bin"));
+    }
     let resolve = |name: &Path| {
         let candidates = if name.is_absolute() || name.components().count() > 1 {
             vec![name.to_path_buf()]
         } else {
-            std::env::split_paths(&search)
+            resolve_dirs
+                .iter()
                 .map(|dir| dir.join(name))
                 .collect()
         };
@@ -781,9 +789,15 @@ fn isolated_test_path(
         }
         Ok(direct)
     };
-    std::os::unix::fs::symlink(concrete("cargo", resolved_cargo)?, bin.path().join("cargo"))?;
+    let concrete_cargo = concrete("cargo", resolved_cargo)?.canonicalize()?;
+    let toolchain_bin = concrete_cargo.parent();
+    std::os::unix::fs::symlink(&concrete_cargo, bin.path().join("cargo"))?;
     for name in ["rustc", "rustdoc", "rustup", "cargo-nextest"] {
-        if let Some(tool) = resolve(Path::new(name)) {
+        let tool = toolchain_bin
+            .map(|directory| directory.join(name))
+            .filter(|path| executable(path))
+            .or_else(|| resolve(Path::new(name)));
+        if let Some(tool) = tool {
             std::os::unix::fs::symlink(concrete(name, tool)?, bin.path().join(name))?;
         }
     }
@@ -3052,28 +3066,53 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
 
     #[cfg(unix)]
     #[test]
-    fn isolated_test_path_resolves_rust_tools_from_cargo_home_without_widening_path_cas_a937() {
+    fn isolated_test_path_resolves_cargo_and_toolchain_siblings_from_minimal_path_cas_a937() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture = tempfile::tempdir().unwrap();
         let host_bin = fixture.path().join("host-bin");
+        let launch_bin = fixture.path().join("launch-bin");
         let slots = fixture.path().join("slots");
         let cwd = fixture.path().join("worktree");
         std::fs::create_dir_all(&host_bin).unwrap();
+        std::fs::create_dir_all(&launch_bin).unwrap();
         std::fs::create_dir_all(&slots).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         env.set("PATH", &host_bin);
 
-        let install_rust_tools = |bin: &Path| {
+        let install_rust_tools = |bin: &Path, names: &[&str]| {
             std::fs::create_dir_all(bin).unwrap();
-            for name in ["cargo", "rustc", "rustdoc", "rustup", "cargo-nextest"] {
+            for name in names.iter().copied() {
                 fake_cargo(&bin.join(name), "exit 0");
             }
         };
         let configured_bin = fixture.path().join("configured-cargo-home/bin");
-        install_rust_tools(&configured_bin);
+        install_rust_tools(
+            &configured_bin,
+            &["cargo", "rustc", "rustdoc", "rustup", "cargo-nextest"],
+        );
         let default_bin = env.home().join(".cargo/bin");
-        install_rust_tools(&default_bin);
+        install_rust_tools(
+            &default_bin,
+            &["cargo", "rustc", "rustdoc", "rustup", "cargo-nextest"],
+        );
 
+        // The launch PATH may resolve a cargo link to a toolchain binary
+        // outside PATH; keep its sibling compiler tools available privately.
+        let toolchain_bin = fixture.path().join("rustup/toolchains/stable/bin");
+        install_rust_tools(&toolchain_bin, &["cargo", "rustc", "rustdoc"]);
+        std::os::unix::fs::symlink(toolchain_bin.join("cargo"), launch_bin.join("cargo"))
+            .unwrap();
+        env.set("PATH", &launch_bin);
+        let (private_bin, path) = isolated_test_path(Path::new("cargo"), &cwd, &slots).unwrap();
+        for name in ["cargo", "rustc", "rustdoc"] {
+            assert_eq!(
+                private_bin.path().join(name).canonicalize().unwrap(),
+                toolchain_bin.join(name).canonicalize().unwrap()
+            );
+        }
+        assert!(!std::env::split_paths(&path).any(|entry| entry == toolchain_bin));
+
+        env.set("PATH", &host_bin);
         env.set("CARGO_HOME", configured_bin.parent().unwrap());
         let (private_bin, path) = isolated_test_path(Path::new("cargo"), &cwd, &slots).unwrap();
         assert_eq!(

@@ -852,6 +852,40 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&input).matches("/exit").count(), 1);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let finish = Request::Run { command: Command::Finish, confirmed: true };
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
+        let queued = daemon.dispatch_supervisor_command(finish.clone(), "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        daemon.supervisor_commands.records.get_mut(&("device-a".into(), "stuck-finish".into())).unwrap().started -= REPLAY_WINDOW;
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), foreign).await.is_err());
+        let cancelled = daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(cancelled, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled && !receipt.interactive));
+        // Cancellation and a replay must never type the queued Finish.
+        let replay = daemon.dispatch_supervisor_command(finish, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled));
+        daemon.advance_queued_finish();
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        let exit = daemon.dispatch_supervisor_command(Request::Run { command: Command::Exit, confirmed: true }, "exit-after-cancel".into(), owner.clone()).await.unwrap();
+        assert!(matches!(exit, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        // Dismiss cannot release a genuinely submitted command for another mutation.
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "exit-after-cancel".into(), owner.clone()).await.is_err());
+        assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "blocked-finish".into(), owner).await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), b"/exit\r");
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }

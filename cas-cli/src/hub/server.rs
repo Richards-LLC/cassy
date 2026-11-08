@@ -3932,6 +3932,7 @@ pub(crate) fn admit_correlated_daemon_frame(
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Cancelled => "cancelled",
         }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
     }
     match correlate_daemon_frame(pending, session, bytes) {

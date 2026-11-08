@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.7.0] - 2026-11-08
+
+### Fixed — Factory merges
+
+- **An already-merged delivery reports as merged** — Was: `worktree_merge` on a delivery that the pre-merge path had already merged answered "DELIVERY BRANCH UNRESOLVED" and asked for a rebind or restore. Now: it answers "ALREADY MERGED", naming the target tip that contains the delivery, and changes nothing. The branches decide this, so it holds after request-changes declines the task's recorded anchor. A real conflict between local and origin tips on unmerged work is still refused.
+
+### Fixed — Developer workflow
+
+- **Wording changes no longer decide delivery** — Removed phrase registries, vocabulary lists and copied-message checks from tests and delivery admission. Error checks keep behavior or machine identifiers, and park rejects new human-message assertions, including a phrase bound to a local or supplied by a loop. Worker and verifier guidance now follows the same rule. Product output checks are unchanged: customer reports still refuse internal process words, tool names and placeholders, and the release announcement lint still refuses internal words in user threads.
+- **Release scratch cleanup survives a busy host** — A process exiting while the release gate scanned for users of its scratch made the scan fail, so the gate kept scratch it should have removed and its test failed about once in twenty parallel runs. An exiting process now counts as gone.
+
 ## [4.6.0] - 2026-11-07
 
 ### Fixed — Worker test runner

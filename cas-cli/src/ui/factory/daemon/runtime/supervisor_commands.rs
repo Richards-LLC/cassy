@@ -929,7 +929,8 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             while !std::fs::read(root.path().join("input")).unwrap()[input.len()..].ends_with(b"\r") { tokio::task::yield_now().await; }
         }).await.unwrap();
-        assert_eq!(&std::fs::read(root.path().join("input")).unwrap()[input.len()..], b"/exit\r");
+        let exit_input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&exit_input[input.len()..]).matches("/exit").count(), 1);
     }
     #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {

@@ -1,0 +1,3 @@
+### Fixed — Re-running a merge already in its train
+
+- **A delivery already in its train is reported as merged** — Was: re-running `factory action=worktree_merge` on an awaiting-merge delivery whose parked tip was already in the target, while its latest review was bound to an earlier round's candidate, refused with "review the new candidate" or opened a fresh review. Now: an earlier round's review candidate no longer holds the merge (only a candidate of the parked tip or the branch tip, or a transactional one, does), so the re-run reports the delivery as already contained and changes nothing. Deliveries not yet in the target are reviewed as before.

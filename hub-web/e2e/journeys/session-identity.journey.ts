@@ -575,7 +575,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     return { name, started_at: journeyStamp(offset - 60_000), supervisor: name, project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: false, workers: [], liveness: "stale_metadata" as const, last_activity: "Session ended", last_activity_at: at, ended: { at, reason: "prompt_input_exit", workers_stopped: [], orphans: [] } };
   };
   machine.sessions = [{ ...machine.sessions[1]!, project: "github.com/acme/studio", project_name: "Studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
-    name: "golden-jaguar-44", supervisor: "golden-jaguar-44", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
+    name: "golden-jaguar-44", supervisor: "ready-cobra-72", project: "pulse-card", project_dir: "/projects/pulse-card", machine_online: true, workers: [], liveness: "live", last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000),
   }, endedSession("watchful-heron-16", -3_600_000), endedSession("solid-parrot-40", -2 * 3_600_000), endedSession("patient-heron-27", -3 * 3_600_000)];
   const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "github.com/acme/studio", project_name: "Studio", harness: "claude", machine_online: true }] };
   const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
@@ -604,6 +604,19 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     const old = list.getByRole("group", { name: /^pulse-card ·/ });
     await expect(old.locator("[data-harness]")).toHaveCount(0);
     await expect(old.locator(".project-card-summary")).toContainText("no workers");
+    const supervisorRow = old.locator('.conversation-row[data-thread-key$=":golden-jaguar-44"]');
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await expect(supervisorRow.locator(".conversation-role")).toHaveText("ready-cobra-72");
+      await expect(supervisorRow.locator(".conversation-machine-name")).toHaveText("Atlas");
+      expect(await supervisorRow.evaluate(node => {
+        const avatar = node.querySelector(".conversation-avatar")!.getBoundingClientRect();
+        const who = node.querySelector<HTMLElement>(".conversation-who")!;
+        const name = node.querySelector<HTMLElement>(".conversation-role")!.getBoundingClientRect();
+        return name.left >= avatar.right && who.scrollWidth <= who.clientWidth;
+      })).toBe(true);
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
     const pulseMachine = old.getByRole("button", { name: "Filter conversations on Atlas, online", exact: true });
     await expect(pulseMachine).toBeVisible();
     expect(await pulseMachine.evaluate((chip) => getComputedStyle(chip).borderRadius)).toBe(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--radius-pill").trim()));

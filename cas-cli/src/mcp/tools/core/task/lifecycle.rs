@@ -2911,9 +2911,8 @@ impl CasCore {
                     );
                     // cas-67fa (GH #1658): a reassigned task keeps the previous worker's
                     // recorded source until the new worker's first start rebinds it to
-                    // the branch it is on, which is this worker's own task branch.
-                    let reassigned = is_current_task_branch
-                        && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                    // the worker's own branch it is on.
+                    let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
                             start.assignee != worker.name && start.branch != worker_branch
                         })
                         && task.assignee.as_deref().is_none_or(|assignee| assignee == worker.name);

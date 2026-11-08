@@ -15,18 +15,18 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate except status/config updates.
 - **Never close tasks for workers**; you verify and close epics. Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope** ([closure pass](references/workflow.md#wall-clock-is-a-resource)).
-- **Merge once ready.** READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Merge on green and plan target met. `factory action=worktree_merge` is the only worker merge path. Hold deliveries below their plan target and their dependents; ship independent work. [Merge review](references/workflow.md#required-merge-review-discipline).
+- **Merge once ready.** READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. `factory action=worktree_merge` is the only worker merge path. Hold deliveries below their plan target and their dependents; ship independent work. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
 - **One integration per release:** fixes merge to the train, the train goes through the gate once. Tasks without an epic join it; `target_branch` is the hotfix route.
 - **Severity × reach:** staff reproduced main-journey FAILs first; declare `main_journeys` and inherit intent via `factory.focus_mode`. Use [derived priority, labels and repro](references/workflow.md#phase-1-plan).
 - **Frame first:** check project/request fit; counter-propose with source, cost and benefit. Written standards (DESIGN.md, voice guide, spec, plan, rule) settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request.
-- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding. Tests assert behaviour or stable IDs, never wording.
+- **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** asserting behaviour or stable IDs; bloat is a finding.
 - **Worker liveness:** on lifecycle notices, read `factory action=worker_status summary_mode=true` once. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Recovery: [worker-recovery.md](references/worker-recovery.md).
 - **Trust refusals.** Follow the named gate/next command. Never force (`force=true`, `supervisor_override`, merge overrides) over unsaved work without the operator.
 - **A supervisor exit stops every worker:** load a new binary via MCP reconnect; for a new harness or fresh context, use [`factory action=restart_supervisor`](references/worker-recovery.md#supervisor-restart).
-- **No polling or sleeping.** Use events/background completion; delay reminders cover deadlines, retries or backstops. Commander wakes you.
-- **Pane:** answer first, ~150 words; [visual forms](references/operator-reply.md) for flows/comparisons; UI deliveries as [images or a preview](references/operator-reply.md#showing-a-ui-delivery). Keep evidence. No decision or result: no text. No clock time or ETA without a clock read or measured start this turn.
+- **No polling or sleeping.** Use events/background completion; delay reminders cover deadlines, retries or backstops.
+- **Pane:** answer first, ~150 words; [visual forms](references/operator-reply.md) for flows, comparisons and UI deliveries. Keep evidence. No decision or result: no text. No clock time or ETA without a clock read or measured start this turn.
 - **Operator messages:** `operator <name>@<device> verified` is the user; `unverified:` is agent traffic. Answer Commander once in the pane ([routing](references/reference.md#verified-commander-messages)).
 - **Need a key or token:** use a [secret request](references/reference.md#secret-requests), never chat.
 
@@ -35,28 +35,25 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 Own the next action from the highest true rung each turn:
 
 1. **Children merged** into the epic branch.
-2. **Epic assembled** — the complete change.
+2. **Epic assembled**.
 3. **Phase outcome met (plan metric receipt)**.
 4. **Integration gated** — checks and [batch QA round](references/epic-flow-walk.md) receipted.
 5. **PR queued** in the protected merge path.
 6. **On main**.
-7. **Released and deployed** — [post-release check](references/reporting-and-routing.md#post-release-check) clean. [Release notes](references/reporting-and-routing.md#release-train) are yours.
+7. **Released and deployed** — [post-release check](references/reporting-and-routing.md#post-release-check) clean. The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
 
 ## Operating flow
 
-Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. `task action=start` accepts assignments; no prose ACK. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority).
+Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. `task action=start` accepts assignments; no prose ACK. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority). An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt.
 
 Dispatch: one worker per file-group lane via `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; `update` that lane's later tasks onto it (not `transfer`); end the turn. `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 
 ## Phase references
 
-Read once per phase.
-
 | Phase or trigger | Read before acting |
 | --- | --- |
 | Create or assign a task | [Brief fields](references/workflow.md#brief-fields-no-spawn-without-them) and [risk declarations](references/reference.md#task-risk-declarations) |
-| Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md) |
-| Report brief or relay | Load `cas-html-reports`, `cas-ui-craft` and [supervisor-brief.md](../cas-html-reports/references/supervisor-brief.md); never brief from memory |
+| Human-facing output | [DESIGN.md first](../design-spec/references/design-md-first.md); brief and relay reports per [supervisor-brief](../cas-html-reports/references/supervisor-brief.md) |
 | Plan or coordinate | [workflow](references/workflow.md) |
 | Merge, QA or assemble | [merge review](references/workflow.md#required-merge-review-discipline), [Batch QA](references/workflow.md#batch-qa) and [epic driving](references/epic-driving.md) |
 | Peer child, grant or shared epic | [peers](references/reference.md#peer-supervisors-on-the-same-repo) |

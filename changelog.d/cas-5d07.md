@@ -1,3 +1,0 @@
-### Fixed — Factory
-
-- **Reports reach the operator branded, clear and short** — A report under `docs/` (an HTML page beside its markdown) now parks only when it has its concept brief with an audience and a critique that meets the floor, declares the project's DESIGN.md brand tokens, loads nothing from the network, states one verdict first and fits its height budget (4,000 px for executive and external readers, 8,000 px for practitioners). Executive and external reports also carry no task ids and no internal jargon. A refusal lists exactly what is missing. Supervisors brief report tasks from a template in `cas-html-reports`, and the skill states that a visual-QA pass is necessary but not sufficient.

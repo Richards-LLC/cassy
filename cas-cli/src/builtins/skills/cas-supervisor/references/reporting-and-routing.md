@@ -8,8 +8,6 @@
 
 ## Release train
 
-The supervisor writes release notes; workers never draft them, and release prep only merges, writes the changelog and regenerates the codemap.
-
 <!-- cas-src:begin -->
 Runtime releases use only skills/cas-cut-release/SKILL.md; it owns the mechanical gate, merge queue, publish receipt, Slack POSTED block and host verification. Slack goes through skills/violet/SKILL.md on every harness; route a worker to it rather than taking its draft back by hand.
 <!-- cas-src:else -->

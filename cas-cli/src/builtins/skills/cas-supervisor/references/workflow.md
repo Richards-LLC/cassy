@@ -131,8 +131,6 @@ Before landing a lane, check that the worker's capped `check: PASS <sha>` and ta
 
 `force=true` merges a dirty worktree; never use it over a worker's uncommitted work without the operator. `allow_trunk=true` is only for a genuine missing-target fallback to trunk.
 
-`READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip.
-
 **READY TO MERGE / MERGE REQUIRED:**
 
 1. READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Green lane CI without a park is not ready. Hold deliveries below their plan target and their dependents; ship independent work. Drain ready merges before free-form replies.

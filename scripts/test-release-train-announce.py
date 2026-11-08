@@ -252,7 +252,7 @@ class Announce(unittest.TestCase):
                 self.write_draft(bodies)
                 result = self.validate()
                 self.assertEqual(result.returncode, 1)
-                self.assertIn(f"[rule: {rule}]", result.stderr)
+                self.assertEqual(re.findall(r"\[rule: (\w+)\]", result.stderr), [rule])
         bodies = list(BODIES)
         bodies[3] = BODIES[3] + "\n\nSee <https://example.com/docs/DESIGN.md|the guide> and ```DESIGN.md``` in code."
         self.write_draft(bodies)

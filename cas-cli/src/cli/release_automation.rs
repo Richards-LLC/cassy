@@ -959,4 +959,63 @@ mod tests {
         }));
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no changes"));
     }
+
+    #[test]
+    fn backfill_closes_the_four_published_train_lanes_idempotently() {
+        let (temp, root, _, _, _) = fixture();
+        let repo = temp.path();
+        let bare = temp.path().join("origin.git");
+        fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n",
+        ).unwrap();
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        let store = open_task_store(&root).unwrap();
+        let target = WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: "main".into(),
+        };
+        let mut current = Task::new("cas-51aa9".into(), "Current train".into());
+        current.task_type = TaskType::Epic;
+        current.labels.push("release-train".into());
+        current.branch = Some("epic/release-train-vnext-cas-51aa9".into());
+        current.deliverables.work_target = Some(target.clone());
+        store.add(&current).unwrap();
+
+        let trains = [
+            ("cas-c4a0", "v4.3.0"),
+            ("cas-baf5", "v4.4.0"),
+            ("cas-dcb3", "v4.5.0"),
+            ("cas-d7c7", "v4.6.0"),
+        ];
+        let main = git(repo, &["rev-parse", "main"]).unwrap();
+        for (id, tag) in trains {
+            let lane = format!("epic/release-train-{id}");
+            git(repo, &["branch", &lane, &main]).unwrap();
+            let mut train = Task::new(id.into(), format!("Release train {id}").into());
+            train.task_type = TaskType::Epic;
+            train.labels.push("release-train".into());
+            train.branch = Some(lane);
+            train.deliverables.work_target = Some(target.clone());
+            store.add(&train).unwrap();
+            git(repo, &["tag", "-a", tag, "-m", tag]).unwrap();
+        }
+        let mut push = vec!["push", "origin", "main"];
+        let lanes = trains.iter().map(|(id, _)| format!("epic/release-train-{id}")).collect::<Vec<_>>();
+        push.extend(lanes.iter().map(String::as_str));
+        push.push("--tags");
+        git(repo, &push).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        backfill(&BackfillArgs {}, &root).unwrap();
+        for (id, _) in trains {
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
+        }
+        backfill(&BackfillArgs {}, &root).unwrap();
+        for (id, _) in trains {
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
+        }
+    }
 }

@@ -65,6 +65,9 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    Reports and release notes read pairs there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
    use the transcript and diff, with credentials redacted; record sandbox reset and the check that
    no smoke rows remain inline.
+   To drive a candidate build's MCP surface, serve it with `cas serve --sandbox <scratch-dir>` from a
+   scratch project: it refuses a store outside that directory (an inherited live `CAS_ROOT`) and
+   turns cloud sync off, so the walk cannot register an agent or sync into the live store.
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`, `THRESHOLD`, `GRACE`,
    `DEBOUNCE`, and `RETRY`; record whether each constant is predictable from the user's visible
    contract. For terminal states, dump all visible text across surfaces and flag

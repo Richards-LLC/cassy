@@ -297,6 +297,16 @@ mod tests {
             .filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None })
             .collect::<Vec<_>>().join("\n");
         let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
+        // cas-809a: an epic takes no receipt of its own, so its status names the child receipts covering it.
+        let mut train = Task::new("cas-train".into(), "train".into());
+        train.task_type = cas_types::TaskType::Epic;
+        tasks.add(&train).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new("cas-live".into(), "cas-train".into(), cas_types::DependencyType::ParentChild)).unwrap();
+        let receipt_id = qa.split("qab-").nth(1).map(|rest| format!("qab-{}", rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect::<String>())).unwrap();
+        let status = text(service.verification(rmcp::handler::server::wrapper::Parameters(serde_json::from_value(serde_json::json!({
+            "action": "qa_status", "task_id": "cas-train",
+        })).unwrap())).await.unwrap());
+        assert!(status.contains("cas-live") && status.contains(&receipt_id), "{status}");
         // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
 
         assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);

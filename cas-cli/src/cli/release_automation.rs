@@ -877,7 +877,7 @@ mod tests {
         let old_lane = shipped.branch.clone().unwrap();
         let next_lane = "epic/release-train-vnext-cas-51aa9";
         fs::write(root.join("config.toml"),
-            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n").unwrap();
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n\n[qa]\nmode = \"batch\"\n").unwrap();
         let bare = temp.path().join("origin.git");
         git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
         git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
@@ -912,12 +912,21 @@ mod tests {
 
         let mut shipped_child = Task::new("cas-a100".into(), "Shipped child".into());
         shipped_child.origin_project = Some("release-fixture".into());
+        shipped_child.assignee = Some(owner.id.clone());
         shipped_child.status = TaskStatus::AwaitingMerge;
+        let start_base = git(repo, &["rev-parse", &format!("{anchor}^")]).unwrap();
         shipped_child.deliverables.factory_branch_anchor = Some(anchor);
-        shipped_child.deliverables.work_target = Some(WorkTarget {
+        let shipped_target = WorkTarget {
             repo_selector: "project:release-fixture".into(),
             target_branch: old_lane.clone(),
+        };
+        shipped_child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: shipped_target.clone(),
+            assignee: owner.id.clone(),
+            branch: old_lane.clone(),
+            base_sha: start_base,
         });
+        shipped_child.deliverables.work_target = Some(shipped_target);
         store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
         let mut open_child = Task::new("cas-526e".into(), "Next release child".into());
         open_child.origin_project = Some("release-fixture".into());

@@ -1087,6 +1087,14 @@ pub fn validate_round_bundle(
             field("head_sha")
         ));
     }
+    // New bundles identify their immutable pass as well as the head. Keep
+    // historical, untagged bundles readable at their recorded explicit paths.
+    if value.get("pass_id").is_some() && field("pass_id") != pass.id {
+        return Err(format!(
+            "{}: pass_id must be {} (found {:?})",
+            bundle.display(), pass.id, value["pass_id"]
+        ));
+    }
     // cas-a6a3 (GH #1007): a round that claims a visual-QA pass backs it with
     // the strict run's own report, generated after the round opened, against
     // a local build of the reviewed tip, never the production URL. cas-e371
@@ -1470,7 +1478,7 @@ pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
     )
 }
 
-/// Ledger directory for one round, under the delivery's artifacts dir.
+/// Ledger directory for one immutable pass, under the delivery's artifacts dir.
 ///
 /// Deliberately beside, not inside, the implementer's own cas-qa-craft
 /// bundle (`<task>/qa/`): the close-time evidence gate reads that directory
@@ -1480,6 +1488,8 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
     artifacts_root
         .join(&pass.task_id)
         .join("independent-qa")
+        .join(&pass.bound_head)
+        .join(&pass.id)
         .join(format!("round-{}", pass.round))
 }
 
@@ -1575,7 +1585,7 @@ pub fn qa_task_description(
          cites a trace action and a screenshot.\n\n\
          {bar}\n\n\
          Evidence: {ledger}/bundle.json with producer \"independent-qa\", task_id {task} and \
-         head_sha {head}, listing trace.zip, trace-actions.txt, receipt.webm, final.aria.yml/json, \
+         head_sha {head} and pass_id {pass_id}, listing trace.zip, trace-actions.txt, receipt.webm, final.aria.yml/json, \
          one F0N.png per finding, visual-qa/ and visual-qa.stdout, critique.md, and one \
          journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
@@ -2122,6 +2132,7 @@ mod tests {
         for (head, id) in [
             ("69ffa4c84dd908f94474774aea02949e788ccbaa", "qapass-corrected"),
             (old.bound_head.as_str(), "qapass-recheck"),
+            ("69ffa4c84dd908f94474774aea02949e788ccbaa", old.id.as_str()),
         ] {
             let mut next = old.clone();
             next.bound_head = head.into();
@@ -2133,7 +2144,7 @@ mod tests {
             assert_eq!(round_dir(root.path(), &next), dir);
             std::fs::create_dir_all(&dir).unwrap();
             for (name, _) in files { std::fs::write(dir.join(name), b"new evidence").unwrap(); }
-            for reasons in [vec!["demo_statement".into()], vec!["api_paths".into()]] {
+            for reasons in [vec!["demo_statement".into()], vec!["api:server/**".into()]] {
                 let description = qa_task_description(&task(), &next, &reasons, &dir, "main");
                 assert!(description.contains(dir.join("LEDGER.md").to_str().unwrap()));
                 if !api_only_reasons(&reasons) {

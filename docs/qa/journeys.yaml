@@ -328,6 +328,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-QA-EVIDENCE-IDENTITY:
+    statement: Distinct independent QA heads and passes have separate stable evidence directories; prior bytes survive correction and verdict evidence cannot name another head or pass.
+    check: Run independent_pass_paths_preserve_prior_evidence_cas_6813 and round_bundle_must_name_the_reviewed_tip_and_producer; verify generated web/API ledger paths, old capture bytes, explicit-path compatibility and wrong-head/pass refusals. Batch QA walks corrected-head dispatch and recording.
+    bug: {task: cas-6813}
   FACTORY-UNDELIVERED-RELAY-ACTION:
     statement: A stale undelivered lifecycle relay queues one supervisor action before retiring its obsolete payload; failed escalation keeps the original pending and retries never duplicate the action.
     check: Run stale_blocked_relay_escalates_once_cas_f66d and failed_relay_escalation_keeps_original_pending_cas_f66d against the real prompt store; batch QA checks a supervisor receives the failure action without replaying the obsolete blocker.
@@ -996,7 +1000,7 @@ journeys:
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
   owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-EVIDENCE-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

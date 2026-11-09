@@ -33,9 +33,10 @@ missing optional 1.64 features do not make a cell NOT EXERCISED.
 ## Layout
 
 The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
-level up. An independent QA round uses `independent-qa/round-<n>/` and a
+level up. An independent QA round uses `independent-qa/<full-head>/<pass-id>/round-<n>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
-`bundle.json`.
+`bundle.json`. Use the dispatched pass's directory; leave historical round-only
+directories unchanged.
 
 | `files` key | name | required |
 | --- | --- | --- |
@@ -66,6 +67,9 @@ journey evaluation scores polish for it.
 
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
+- `pass_id`: for `independent-qa`, the immutable pass id from the dispatched QA task.
+  `qa_record` rejects a supplied id for another pass; historical bundles without
+  this field remain readable at their recorded paths.
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
 - `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
   `pass` is a claim that close checks against the run's own report,

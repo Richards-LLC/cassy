@@ -11,6 +11,28 @@ use crate::mcp::tools::core::imports::*;
 
 use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 
+/// Read-only admission shared by receipt close and release backfill preview.
+/// `Some` retains the task's own ordinary review path; `None` lets the release
+/// verdict authorize it. Neither result bypasses the remaining close gates.
+pub(crate) fn release_receipt_close_admission(
+    root: &std::path::Path,
+    task: &Task,
+    repo: &std::path::Path,
+) -> Result<Option<String>, String> {
+    if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
+        return Err("merged under a CI override; it needs its own close".into());
+    }
+    if task.deliverables.factory_branch_anchor.is_none()
+        && !task.deliverables.historical_factory_branch_anchors.is_empty()
+    {
+        return Err("request_changes moved the task out of its park; close the retired delivery with task close commit_receipt=<merged sha>".into());
+    }
+    if task.status != TaskStatus::AwaitingMerge && task.deliverables.green_merge_commit.is_none() {
+        return Err("not parked; it needs its own close".into());
+    }
+    Ok(super::review_tier::own_review(root, task, repo))
+}
+
 /// The delivery a `worktree_merge` just landed: the repository, the source
 /// branch it merged and the exact source commit it merged.
 pub(crate) struct MergedLane<'a> {
@@ -646,7 +668,13 @@ impl CasCore {
                     continue;
                 }
             }
-            let own_review = super::review_tier::own_review(&self.cas_root, &task, &repo);
+            let own_review = match release_receipt_close_admission(&self.cas_root, &task, &repo) {
+                Ok(own_review) => own_review,
+                Err(reason) => {
+                    hold(&reason);
+                    continue;
+                }
+            };
             // cas-bc15: after request_changes the retired anchor is the delivery.
             let anchor = crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target).unwrap_or_default();
             let verdict = match crate::qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, &anchor) {

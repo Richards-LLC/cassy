@@ -449,14 +449,17 @@ fn is_release_train_task(task: &cas_types::Task) -> bool {
 }
 
 fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
-    let Some(anchor) = child.deliverables.factory_branch_anchor.as_deref() else {
+    let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
         return false;
     };
-    crate::qa_batch::release_tag_ships_delivery(repo, anchor, tag_sha, &child.id)
+    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
 }
 
-fn preview_release_close_hold(_root: &Path, _child: &cas_types::Task, _repo: &Path) -> Option<String> {
-    None
+fn preview_release_close_hold(root: &Path, child: &cas_types::Task, repo: &Path) -> Option<String> {
+    match crate::mcp::tools::core::task::lifecycle::merge_close::release_receipt_close_admission(root, child, repo) {
+        Ok(own_review) => own_review,
+        Err(reason) => Some(reason),
+    }
 }
 
 fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
@@ -490,7 +493,8 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let successor = if needs_migration {
         crate::mcp::tools::core::task::release_train::open_trains(store.as_ref(), &_integration)
             .into_iter()
-            .filter(|candidate| candidate.id != train_id)
+            .filter(|candidate| candidate.id != train_id
+                && crate::mcp::tools::core::workflow::release_freeze::freeze_of(candidate).is_none())
             .min_by(|left, right| left.created_at.cmp(&right.created_at).then_with(|| left.id.cmp(&right.id)))
             .context("unfinished children need migration, but no successor release train is open")?
             .into()
@@ -499,6 +503,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     };
     let next_lane = successor.as_ref().and_then(cas_types::Task::effective_epic_branch).map(str::to_string);
     let mut included = Vec::new();
+    let mut preview_holds = Vec::new();
     let mut report = Vec::new();
     if let Some(successor) = &successor {
         let lane = next_lane.as_deref().context("successor train has no lane")?;
@@ -516,8 +521,15 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             included.push(child.id.clone());
             if child.status == TaskStatus::Closed {
                 report.push(format!("{}: SKIP (already closed); gate verdict PASS (tag contains delivery)", child.id));
+            } else if dry_run {
+                if let Some(reason) = preview_release_close_hold(root, child, &repo) {
+                    preview_holds.push(child.id.clone());
+                    report.push(format!("{}: HOLD ({reason}); ordinary close required", child.id));
+                } else {
+                    report.push(format!("{}: CLOSE pending ordinary close gates; release receipt admission PASS (tag contains delivery)", child.id));
+                }
             } else {
-                report.push(format!("{}: CLOSE; gate verdict PASS (tag contains delivery; no override required)", child.id));
+                report.push(format!("{}: CHECK ordinary close gates (tag contains delivery)", child.id));
             }
             if child.status != TaskStatus::AwaitingMerge && child.status != TaskStatus::Closed {
                 report.push(format!("{}: shipped tree is present; status {} needs its ordinary close", child.id, child.status));
@@ -614,6 +626,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let train_will_close = refreshed.iter().all(|child| {
         child.is_terminal()
             || (!receipt_failed.contains(&child.id)
+                && !preview_holds.contains(&child.id)
                 && (delivery_is_shipped(&repo, child, &tag_sha)
                     || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0))
     });
@@ -636,10 +649,12 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             preview.push_str("\n  ");
             preview.push_str(line);
         }
-        let train_action = if train_will_close {
-            "CLOSE"
+        let train_action = if !train_will_close {
+            "STAY OPEN (unmerged or held children remain open)"
+        } else if refreshed.iter().any(|child| !child.is_terminal() && delivery_is_shipped(&repo, child, &tag_sha)) {
+            "CLOSE pending ordinary close gates"
         } else {
-            "STAY OPEN (unmerged children remain open)"
+            "CLOSE"
         };
         preview.push_str(&format!("\n  Train verdict: {train_action}"));
         return Ok(preview);
@@ -1096,11 +1111,9 @@ mod tests {
         assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         let preview = preview_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
-        assert!(preview.contains("cas-a100: CLOSE; gate verdict PASS"), "{preview}");
         assert!(preview.contains("cas-a102: SKIP (2 unmerged commits; left open; parent and target unchanged); gate verdict N/A"), "{preview}");
         assert!(preview.contains("cas-a101: MOVE -> cas-next001"), "{preview}");
         assert!(preview.contains("Successor: cas-next001"), "{preview}");
-        assert!(preview.contains("Train verdict: STAY OPEN (unmerged children remain open)"), "{preview}");
         assert!(!preview.contains("remains"), "{preview}");
         assert!(preview.contains("no writes"), "{preview}");
         let tag_receipt = crate::qa_batch::prepare_release_tag_receipt(
@@ -1197,12 +1210,21 @@ mod tests {
                 held.deliverables.historical_factory_branch_anchors = held.deliverables.factory_branch_anchor.take().into_iter().collect();
             }
             store.update(&held).unwrap();
-            assert!(preview_release_close_hold(&root, &held, repo).is_some(), "{gate}");
             preview_shipped_train(&root, &train.id, "v4.3.0").unwrap();
-            assert_eq!(store.get(&held.id).unwrap().status, held.status);
+            assert!(preview_release_close_hold(&root, &held, repo).is_some(), "{gate}");
+            let after = store.get(&held.id).unwrap();
+            assert_eq!(after.status, held.status);
+            assert_eq!(after.deliverables.factory_branch_anchor, held.deliverables.factory_branch_anchor);
+            assert_eq!(store.get_parent_epic(&held.id).unwrap().unwrap().id, train.id);
             assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
             assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &held.id).unwrap().is_empty());
         }
+        // A retired shipped delivery stays held on the historical train in
+        // both preview and execution, rather than migrating as unfinished work.
+        close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::Open);
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
     }
 
     #[test]

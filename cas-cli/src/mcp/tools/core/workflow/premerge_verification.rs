@@ -4,7 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cas_types::{RepositoryProofBoundary, Task, VerificationDispatch, VerificationStatus};
+use cas_types::{
+    RepositoryProofBoundary, Task, Verification, VerificationDispatch, VerificationProvenance,
+    VerificationStatus,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,6 +27,86 @@ pub(crate) struct Candidate {
     pub context_digest: String,
     pub proof: RepositoryProofBoundary,
     pub preparation_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherited_supervisor_call: Option<InheritedSupervisorCall>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct InheritedSupervisorCall {
+    pub prior_dispatch_id: String,
+    pub question_verification_id: String,
+    pub answer_verification_id: String,
+    pub question: String,
+    pub answer: String,
+    pub answer_status: VerificationStatus,
+    pub source_sha: String,
+    pub prior_target_sha: String,
+    pub target_sha: String,
+}
+
+fn inherited_supervisor_call_for_candidate(
+    task: &Task,
+    prior_dispatch: &VerificationDispatch,
+    prior_candidate: &Candidate,
+    candidate: &Candidate,
+    verifications: &[Verification],
+) -> Option<InheritedSupervisorCall> {
+    if prior_dispatch.state != cas_types::VerificationDispatchState::Resolved
+        || prior_dispatch.task_id != task.id
+        || candidate.task_id != task.id
+        || prior_candidate.task_id != task.id
+        || prior_candidate.repository != candidate.repository
+        || prior_candidate.source_branch != candidate.source_branch
+        || prior_candidate.target_branch != candidate.target_branch
+        || prior_candidate.context_digest != candidate.context_digest
+        || prior_candidate.source_sha != candidate.source_sha
+        || prior_candidate.target_sha == candidate.target_sha
+        || task.deliverables.factory_branch_anchor.as_deref()
+            != Some(candidate.source_sha.as_str())
+        || prior_dispatch.repository.as_ref() != Some(&prior_candidate.proof)
+    {
+        return None;
+    }
+
+    let mut calls = verifications.iter().filter(|verification| {
+        verification.dispatch_id.as_deref() == Some(prior_dispatch.id.as_str())
+            && verification.provenance == VerificationProvenance::TaskVerifier
+            && verification.status == VerificationStatus::SupervisorCall
+            && prior_dispatch
+                .verifier_agent_id
+                .as_deref()
+                .is_some_and(|id| verification.agent_id.as_deref() == Some(id))
+            && verification.summary.to_ascii_uppercase().contains("NOT EXERCISED")
+    });
+    let question = calls.next()?;
+    if calls.next().is_some() {
+        return None;
+    }
+    let mut answers = verifications.iter().filter(|verification| {
+        verification.dispatch_id.as_deref() == Some(prior_dispatch.id.as_str())
+            && verification.provenance == VerificationProvenance::SupervisorDirect
+            && verification
+                .issuer_agent_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+            && matches!(verification.status, VerificationStatus::Approved | VerificationStatus::Rejected)
+            && verification.created_at >= question.created_at
+    });
+    let answer = answers.next()?;
+    if answers.next().is_some() {
+        return None;
+    }
+    Some(InheritedSupervisorCall {
+        prior_dispatch_id: prior_dispatch.id.clone(),
+        question_verification_id: question.id.clone(),
+        answer_verification_id: answer.id.clone(),
+        question: question.summary.clone(),
+        answer: answer.summary.clone(),
+        answer_status: answer.status,
+        source_sha: candidate.source_sha.clone(),
+        prior_target_sha: prior_candidate.target_sha.clone(),
+        target_sha: candidate.target_sha.clone(),
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +316,38 @@ fn candidate_key(
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
+fn bound_candidate_key(
+    task: &str,
+    repo: &Path,
+    source: &str,
+    source_sha: &str,
+    target: &str,
+    target_sha: &str,
+    context: &str,
+    inherited: Option<&InheritedSupervisorCall>,
+) -> Result<String, String> {
+    let base = candidate_key(task, repo, source, source_sha, target, target_sha, context)?;
+    let Some(inherited) = inherited else {
+        return Ok(base);
+    };
+    let bytes = serde_json::to_vec(&("premerge-supervisor-call-v1", base, inherited))
+        .map_err(|error| error.to_string())?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn candidate_manifest_key(candidate: &Candidate) -> Result<String, String> {
+    bound_candidate_key(
+        &candidate.task_id,
+        &candidate.repository,
+        &candidate.source_branch,
+        &candidate.source_sha,
+        &candidate.target_branch,
+        &candidate.target_sha,
+        &candidate.context_digest,
+        candidate.inherited_supervisor_call.as_ref(),
+    )
+}
+
 fn write_once<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
     path: &Path,
     value: &T,
@@ -359,15 +474,7 @@ pub(crate) fn candidate_for_dispatch(
         "VERIFIED_DELIVERY_CANDIDATE_PARSE: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
         manifest.display(), dispatch.id,
     ))?;
-    let key = candidate_key(
-        &candidate.task_id,
-        &candidate.repository,
-        &candidate.source_branch,
-        &candidate.source_sha,
-        &candidate.target_branch,
-        &candidate.target_sha,
-        &candidate.context_digest,
-    )?;
+    let key = candidate_manifest_key(&candidate)?;
     if candidate.proof != *proof
         || candidate.task_id != dispatch.task_id
         || candidate.repository.to_string_lossy() != proof.repository_root
@@ -385,15 +492,7 @@ pub(crate) fn candidate_for_dispatch(
 
 impl Candidate {
     fn directory(&self) -> Result<PathBuf, String> {
-        let key = candidate_key(
-            &self.task_id,
-            &self.repository,
-            &self.source_branch,
-            &self.source_sha,
-            &self.target_branch,
-            &self.target_sha,
-            &self.context_digest,
-        )?;
+        let key = candidate_manifest_key(self)?;
         Ok(self.cas_root.join("verification-candidates").join(key))
     }
 
@@ -864,6 +963,44 @@ impl CasCore {
         Ok(format!("\n{action}"))
     }
 
+    fn inherited_supervisor_call_for_target(
+        &self,
+        task: &Task,
+        repo: &Path,
+        source: &str,
+        target: &str,
+        digest: &str,
+        prior_dispatch: &VerificationDispatch,
+        prior_candidate: &Candidate,
+    ) -> Result<Option<InheritedSupervisorCall>, McpError> {
+        let repository = repo.canonicalize().map_err(fail)?;
+        let preview = Candidate {
+            cas_root: self.cas_root.clone(),
+            task_id: task.id.clone(),
+            repository,
+            source_branch: source.into(),
+            source_sha: git(repo, &["rev-parse", source]).map_err(fail)?,
+            target_branch: target.into(),
+            target_sha: review_target(repo, target).map_err(fail)?,
+            tree: String::new(),
+            context_digest: digest.into(),
+            proof: prior_candidate.proof.clone(),
+            preparation_ms: 0,
+            inherited_supervisor_call: None,
+        };
+        let verifications = self
+            .open_verification_store()?
+            .get_for_task(&task.id)
+            .map_err(fail)?;
+        Ok(inherited_supervisor_call_for_candidate(
+            task,
+            prior_dispatch,
+            prior_candidate,
+            &preview,
+            &verifications,
+        ))
+    }
+
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
     pub(crate) fn prepare_premerge_verification(
@@ -925,6 +1062,7 @@ impl CasCore {
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
+        let mut inherited_supervisor_call = None;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
@@ -1004,6 +1142,15 @@ impl CasCore {
             {
                 return Ok(Some(approval));
             }
+            inherited_supervisor_call = self.inherited_supervisor_call_for_target(
+                task,
+                repo,
+                source,
+                target,
+                &digest,
+                dispatch,
+                &candidate,
+            )?;
             cas_store::invalidate_verification_dispatch_for_repository_drift(
                 &self.cas_root,
                 &dispatch.id,
@@ -1016,8 +1163,31 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
-        let candidate = self.build_verification_candidate(task, repo, source, target, digest)?;
+        let candidate = self.build_verification_candidate(
+            task,
+            repo,
+            source,
+            target,
+            digest,
+            inherited_supervisor_call,
+        )?;
         candidate.validate(&self.cas_root, task).map_err(fail)?;
+        if let Some(inherited) = &candidate.inherited_supervisor_call {
+            let store = self.open_task_store()?;
+            let current = store.get(&task.id).map_err(fail)?;
+            let marker = format!(
+                "INHERITED_SUPERVISOR_CALL: {}:{}",
+                inherited.prior_dispatch_id, inherited.answer_verification_id
+            );
+            if !current.notes.lines().any(|line| line.contains(&marker)) {
+                let inherited_json = serde_json::to_string(inherited).map_err(fail)?;
+                let note = format!(
+                    "[{}] 📝 PROGRESS {marker}; inherited={inherited_json}.",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                );
+                store.append_note(&task.id, &note).map_err(fail)?;
+            }
+        }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
         let dispatch = cas_store::create_verification_dispatch_bound(
@@ -1097,7 +1267,7 @@ impl CasCore {
         // candidate must fall through so the caller invalidates the old approval
         // before the fresh-review path reports the candidate error.
         let Ok(candidate) =
-            self.build_verification_candidate(task, repo, source, target, digest.to_string())
+            self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
         else {
             return Ok(None);
         };
@@ -1165,6 +1335,7 @@ impl CasCore {
             source,
             target,
             context_digest(&self.cas_root, task).map_err(fail)?,
+            None,
         )?;
         candidate.validate(&self.cas_root, task).map_err(fail)?;
         Ok(candidate)
@@ -1177,6 +1348,7 @@ impl CasCore {
         source: &str,
         target: &str,
         digest: String,
+        inherited_supervisor_call: Option<InheritedSupervisorCall>,
     ) -> Result<Candidate, McpError> {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
@@ -1184,7 +1356,7 @@ impl CasCore {
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
-        let key = candidate_key(
+        let key = bound_candidate_key(
             &task.id,
             &repository,
             source,
@@ -1192,6 +1364,7 @@ impl CasCore {
             target,
             &target_sha,
             &digest,
+            inherited_supervisor_call.as_ref(),
         )
         .map_err(fail)?;
         let directory = self.cas_root.join("verification-candidates").join(key);
@@ -1216,6 +1389,7 @@ impl CasCore {
                 || candidate.target_branch != target
                 || candidate.target_sha != target_sha
                 || candidate.context_digest != digest
+                || candidate.inherited_supervisor_call != inherited_supervisor_call
                 || candidate.cas_root != self.cas_root
                 || proof_candidate_key(&candidate.proof)
                     .map_err(fail)?
@@ -1327,6 +1501,7 @@ impl CasCore {
             context_digest: digest,
             proof,
             preparation_ms: started.elapsed().as_millis(),
+            inherited_supervisor_call,
         };
         write_once(&manifest, &candidate).map_err(fail)?;
         let store = self.open_task_store()?;
@@ -1356,6 +1531,199 @@ impl CasCore {
 mod tests {
     use super::*;
 
+    fn inheritance_candidate(task_id: &str, source: &str, target: &str) -> Candidate {
+        let repository = PathBuf::from("/repo");
+        let proof = RepositoryProofBoundary {
+            peer_premerge: None,
+            repository_root: repository.display().to_string(),
+            worktree_root: "/repo/candidate".into(),
+            head_commit: "candidate-head".into(),
+            state_digest: "state-digest".into(),
+            target_branch: Some("epic/train".into()),
+            anchor_commits: vec![source.into()],
+        };
+        Candidate {
+            cas_root: PathBuf::from("/repo/.cas"),
+            task_id: task_id.into(),
+            repository,
+            source_branch: "factory/worker".into(),
+            source_sha: source.into(),
+            target_branch: "epic/train".into(),
+            target_sha: target.into(),
+            tree: "candidate-tree".into(),
+            context_digest: "context-digest".into(),
+            proof,
+            preparation_ms: 0,
+            inherited_supervisor_call: None,
+        }
+    }
+
+    #[test]
+    fn carries_an_answer_for_unchanged_delivery_after_target_movement() {
+        let now = chrono::Utc::now();
+        let mut task = Task::new("cas-inherit-call".into(), "Review".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let prior_candidate = inheritance_candidate(&task.id, &"a".repeat(40), &"b".repeat(40));
+        let candidate = inheritance_candidate(&task.id, &"a".repeat(40), &"c".repeat(40));
+        let prior_dispatch = VerificationDispatch {
+            id: "vdispatch-prior".into(),
+            task_id: task.id.clone(),
+            receipt_id: None,
+            delivery_transaction_id: None,
+            repository: Some(prior_candidate.proof.clone()),
+            requester_agent_id: "worker".into(),
+            owner_agent_id: "supervisor".into(),
+            verifier_agent_id: Some("verifier".into()),
+            capability_id: None,
+            state: cas_types::VerificationDispatchState::Resolved,
+            requested_at: now - chrono::Duration::minutes(2),
+            deadline_at: now + chrono::Duration::minutes(8),
+            resolved_at: Some(now - chrono::Duration::minutes(1)),
+            recovery_action: Default::default(),
+        };
+        let mut question = Verification::new("ver-question".into(), task.id.clone());
+        question.status = VerificationStatus::SupervisorCall;
+        question.provenance = VerificationProvenance::TaskVerifier;
+        question.agent_id = Some("verifier".into());
+        question.dispatch_id = Some(prior_dispatch.id.clone());
+        question.summary = "SUPERVISOR CALL: 1 NOT EXERCISED row: HUB-J26".into();
+        question.created_at = now - chrono::Duration::minutes(2);
+        let mut answer = Verification::new("ver-answer".into(), task.id.clone());
+        answer.status = VerificationStatus::Approved;
+        answer.provenance = VerificationProvenance::SupervisorDirect;
+        answer.issuer_agent_id = Some(prior_dispatch.owner_agent_id.clone());
+        answer.dispatch_id = Some(prior_dispatch.id.clone());
+        answer.summary = "Supervisor answer payload".into();
+        answer.created_at = now - chrono::Duration::minutes(1);
+
+        let inherited = inherited_supervisor_call_for_candidate(
+            &task,
+            &prior_dispatch,
+            &prior_candidate,
+            &candidate,
+            &[question.clone(), answer.clone()],
+        )
+        .expect("target-only movement should carry the same row's answer");
+        assert_eq!(inherited.prior_dispatch_id, prior_dispatch.id);
+        assert_eq!(inherited.question_verification_id, question.id);
+        assert_eq!(inherited.answer_verification_id, answer.id);
+        assert_eq!(inherited.question, question.summary);
+        assert_eq!(inherited.answer, answer.summary);
+
+        let provenances = [
+            VerificationProvenance::Legacy,
+            VerificationProvenance::TaskVerifier,
+            VerificationProvenance::SupervisorDirect,
+            VerificationProvenance::System,
+            VerificationProvenance::PeerAttested,
+        ];
+        for call_provenance in provenances {
+            for answer_provenance in provenances {
+                let mut pair = [question.clone(), answer.clone()];
+                pair[0].provenance = call_provenance;
+                pair[1].provenance = answer_provenance;
+                assert_eq!(
+                    inherited_supervisor_call_for_candidate(
+                        &task,
+                        &prior_dispatch,
+                        &prior_candidate,
+                        &candidate,
+                        &pair,
+                    )
+                    .is_some(),
+                    call_provenance == VerificationProvenance::TaskVerifier
+                        && answer_provenance == VerificationProvenance::SupervisorDirect,
+                    "call={call_provenance:?}, answer={answer_provenance:?}",
+                );
+            }
+        }
+
+        let statuses = [
+            VerificationStatus::Approved,
+            VerificationStatus::Rejected,
+            VerificationStatus::SupervisorCall,
+            VerificationStatus::Pending,
+            VerificationStatus::Skipped,
+            VerificationStatus::Error,
+        ];
+        for question_status in statuses {
+            for answer_status in statuses {
+                let mut pair = [question.clone(), answer.clone()];
+                pair[0].status = question_status;
+                pair[1].status = answer_status;
+                assert_eq!(
+                    inherited_supervisor_call_for_candidate(
+                        &task,
+                        &prior_dispatch,
+                        &prior_candidate,
+                        &candidate,
+                        &pair,
+                    )
+                    .is_some(),
+                    question_status == VerificationStatus::SupervisorCall
+                        && matches!(answer_status, VerificationStatus::Approved | VerificationStatus::Rejected),
+                    "question={question_status:?}, answer={answer_status:?}",
+                );
+            }
+        }
+
+        for verifier_id in [Some("verifier"), Some("other-verifier"), None] {
+            let mut question_variant = question.clone();
+            question_variant.agent_id = verifier_id.map(str::to_string);
+            assert_eq!(
+                inherited_supervisor_call_for_candidate(
+                    &task,
+                    &prior_dispatch,
+                    &prior_candidate,
+                    &candidate,
+                    &[question_variant, answer.clone()],
+                )
+                .is_some(),
+                verifier_id == Some("verifier"),
+                "verifier={verifier_id:?}",
+            );
+        }
+
+        for issuer_id in [Some("supervisor"), Some("other-supervisor"), Some(""), None] {
+            let mut answer_variant = answer.clone();
+            answer_variant.issuer_agent_id = issuer_id.map(str::to_string);
+            assert_eq!(
+                inherited_supervisor_call_for_candidate(
+                    &task,
+                    &prior_dispatch,
+                    &prior_candidate,
+                    &candidate,
+                    &[question.clone(), answer_variant],
+                )
+                .is_some(),
+                issuer_id.is_some_and(|id| !id.trim().is_empty()),
+                "issuer={issuer_id:?}",
+            );
+        }
+
+        let mut wrong_dispatch_answer = answer.clone();
+        wrong_dispatch_answer.dispatch_id = Some("vdispatch-other".into());
+        assert!(inherited_supervisor_call_for_candidate(
+            &task,
+            &prior_dispatch,
+            &prior_candidate,
+            &candidate,
+            &[question.clone(), wrong_dispatch_answer],
+        )
+        .is_none());
+
+        let changed_candidate = inheritance_candidate(&task.id, &"d".repeat(40), &"c".repeat(40));
+        task.deliverables.factory_branch_anchor = Some(changed_candidate.source_sha.clone());
+        assert!(inherited_supervisor_call_for_candidate(
+            &task,
+            &prior_dispatch,
+            &prior_candidate,
+            &changed_candidate,
+            &[question, answer],
+        )
+        .is_none(), "changed delivery content must require a fresh supervisor decision");
+    }
+
     pub(super) fn run(repo: &Path, args: &[&str]) -> String {
         git(repo, &["-c", "user.name=t", "-c", "user.email=t@example.invalid"].iter().chain(args).copied().collect::<Vec<_>>()).unwrap()
     }
@@ -1382,6 +1750,7 @@ mod tests {
                 head_commit: String::new(), state_digest: String::new(), target_branch: None,
                 anchor_commits: Vec::new(),
             },
+            inherited_supervisor_call: None,
             preparation_ms: 0,
         }
     }
@@ -1530,6 +1899,7 @@ mod tests {
                 anchor_commits: Vec::new(),
             },
             preparation_ms: 0,
+            inherited_supervisor_call: None,
         };
         assert_eq!(candidate.verify_landing(&regenerated), Ok(()));
 

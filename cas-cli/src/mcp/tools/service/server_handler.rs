@@ -350,6 +350,8 @@ fn response_grace(tool: &str, arguments: Option<&serde_json::Map<String, serde_j
     let action = arguments.and_then(|args| args.get("action")).and_then(serde_json::Value::as_str);
     if matches!((tool, action), ("factory", Some("worktree_merge")) | ("task", Some("close"))) {
         std::time::Duration::ZERO
+    } else if matches!((tool, action), ("verification", Some("add"))) {
+        std::time::Duration::from_secs(1)
     } else {
         POST_COMMIT_GRACE
     }
@@ -500,8 +502,9 @@ impl CasService {
         // Before spawning the handler: a call in flight is already activity.
         // This universal boundary also covers factory and proxy tool calls.
         record_worker_mcp_activity(&self.inner, tool_name, action);
+        let task_id_key = if tool_name == "verification" { "task_id" } else { "id" };
         let task_id = arguments
-            .and_then(|args| args.get("id"))
+            .and_then(|args| args.get(task_id_key))
             .and_then(serde_json::Value::as_str);
         let receipt = super::mutation_receipt::Receipt::new(tool_name, action, task_id);
         let tool_work = self.tool_work.permit();
@@ -570,7 +573,12 @@ impl CasService {
                     .map(|commit| commit.description.clone()))
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                if !matches!(receipt.action(), "worktree_merge" | "batch_receipt" | "close") {
+                if !matches!(
+                    (tool_name, receipt.action()),
+                    ("factory", "worktree_merge")
+                        | ("verification", "batch_receipt" | "add")
+                        | ("task", "close")
+                ) {
                     let watcher_receipt = receipt.clone();
                     let tool = tool_name.to_string();
                     tokio::spawn(async move {
@@ -617,7 +625,13 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
-                } else if commit.is_some() && matches!(receipt.action(), "worktree_merge" | "batch_receipt") {
+                } else if commit.is_some()
+                    && matches!(
+                        (tool_name, receipt.action()),
+                        ("factory", "worktree_merge")
+                            | ("verification", "batch_receipt" | "add")
+                    )
+                {
                     // cas-3937 review: committed, still running; keep its result.
                     self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
@@ -636,15 +650,22 @@ impl CasService {
                 } else {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
+                let timings = receipt.timings();
+                let timing_suffix = if tool_name == "verification" && receipt.action() == "add" {
+                    format!(" Timing (inclusive, + running): {timings}")
+                } else {
+                    String::new()
+                };
                 warn!(tool = tool_name, elapsed_ms = elapsed.as_millis() as u64, budget_ms = budget.as_millis() as u64, mutation_outcome = %outcome, "MCP response deadline elapsed");
                 Err(rmcp::ErrorData {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
-                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
+                    message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
                         "mutation_outcome": if close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
                         "budget_ms": budget.as_millis() as u64,
+                        "timings": if tool_name == "verification" && receipt.action() == "add" { Some(timings) } else { None },
                     })),
                 })
             }
@@ -831,7 +852,11 @@ impl CasService {
         let service = self.clone();
         tokio::spawn(async move {
             let joined = handle.await;
-            let tool = match receipt.action() { "batch_receipt" => "verification", "close" => "task", _ => "factory" };
+            let tool = match (receipt.tool(), receipt.action()) {
+                ("verification", "batch_receipt" | "add") => "verification",
+                (_, "close") => "task",
+                _ => "factory",
+            };
             log_post_commit(tool, &receipt, "finished in the background");
             // cas-3937 review: the close's own outcome, not the merge
             // answer's first line (always its CI block).
@@ -855,6 +880,7 @@ impl CasService {
                 None => late_close_summary(&joined),
             };
             let action = receipt.action().to_string();
+            let result_label = if action == "add" { "Verification continuation" } else { "Close outcome" };
             let timings = receipt.timings();
             let elapsed = start.elapsed();
             let recorded = tokio::task::spawn_blocking(move || {
@@ -866,7 +892,7 @@ impl CasService {
                         .map(|task| task.status.to_string())
                         .unwrap_or_else(|error| format!("unreadable ({error})"));
                     let note = format!(
-                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}. Timing (inclusive): {timings}",
+                        "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. {result_label}: {followup}. Timing (inclusive): {timings}",
                         chrono::Utc::now().format("%Y-%m-%d %H:%M"),
                         elapsed.as_secs_f64(),
                     );
@@ -1561,6 +1587,41 @@ mod tests {
         assert_eq!(receipts[0].task_heads.len(), 2);
         release.send(()).unwrap();
         continued.await.expect("post-commit work must survive the early answer");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn verification_add_answers_after_verdict_commit_while_merge_continues() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let task = cas_types::Task::new("cas-add-response".into(), "review".into());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        let arguments = serde_json::json!({"action":"add", "task_id":task.id});
+        let receipt = super::super::mutation_receipt::Receipt::new(
+            "verification", "add", Some("cas-add-response"),
+        );
+        let request = super::super::mutation_receipt::scope(receipt, async {
+            super::super::mutation_receipt::verification_add_committed(
+                "cas-add-response", "ver-recorded",
+            );
+            let _phase = super::super::mutation_receipt::phase("verification_auto_merge");
+            std::future::pending::<super::ToolResult>().await
+        });
+        let answered = service.call_with_deadline_and_grace(
+            "verification",
+            arguments.as_object(),
+            std::time::Duration::from_secs(55),
+            super::response_grace("verification", arguments.as_object()),
+            request,
+        ).await.expect("a committed verdict must answer before its merge finishes");
+        let text = format!("{answered:?}");
+        assert_eq!(answered.is_error, Some(false));
+        assert!(text.contains("COMMITTED:"), "{text}");
+        assert!(text.contains("verification_auto_merge="), "{text}");
     }
 
     #[tokio::test]

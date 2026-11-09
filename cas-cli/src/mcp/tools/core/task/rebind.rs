@@ -231,11 +231,23 @@ impl CasCore {
         });
         // The common root was validated above. A linked checkout need not
         // duplicate its project configuration, and shares these same refs.
-        let delivery = close_ops::task_attribution::started_delivery(&context.repo_root, &rebound)
-            .map_err(refused)?
-            .ok_or_else(|| refused("replacement has no unmerged task delivery"))?;
-        if delivery.commits.is_empty() {
-            return Err(refused("replacement has no attributable commits"));
+        // GH #1673: after a reviewed retarget, an untouched lane has no
+        // delivery to attribute yet. Approve its replacement at the new
+        // target without requiring the worker to commit on an unbound ref.
+        let empty_retarget = previous.work_target != *target
+            && previous.assignee == assignee
+            && previous_tip.as_deref() == Some(previous.base_sha.as_str())
+            && tip == target_tip
+            && expected.deliverables.parked_branch.is_none()
+            && expected.deliverables.factory_branch_anchor.is_none()
+            && expected.deliverables.historical_factory_branch_anchors.is_empty();
+        if !empty_retarget {
+            let delivery = close_ops::task_attribution::started_delivery(&context.repo_root, &rebound)
+                .map_err(refused)?
+                .ok_or_else(|| refused("replacement has no unmerged task delivery"))?;
+            if delivery.commits.is_empty() {
+                return Err(refused("replacement has no attributable commits"));
+            }
         }
         let anchor_still_reachable = match expected.deliverables.factory_branch_anchor.as_deref() {
             Some(anchor) => git
@@ -257,6 +269,10 @@ impl CasCore {
         }
         if git.tip(&format!("refs/heads/{branch}")).map_err(refused)? != tip
             || git.tip(&target_ref).map_err(refused)? != target_tip
+            || (empty_retarget
+                && git.tip(&format!("refs/heads/{}", previous.branch))
+                    .or_else(|_| git.tip(&format!("refs/remotes/origin/{}", previous.branch)))
+                    .ok() != previous_tip)
             || git
                 .text(&["symbolic-ref", "--short", "HEAD"])
                 .map_err(refused)?

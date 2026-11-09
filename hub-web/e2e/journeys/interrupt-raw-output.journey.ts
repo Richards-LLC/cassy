@@ -142,7 +142,7 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     // pin: the confirmation must name the device taken over and the interrupted supervisor.
     await expect(toast).toBeVisible();
     expect(hub.leaseTakes.filter((take) => take.force)).toEqual([{ machine: "atlas", session: PELICAN, force: true, status: 200 }]);
-    expect(interrupts(hub)).toHaveLength(2);
+    await expect.poll(() => interrupts(hub).length).toBe(2);
   });
 
   await journey.stage("Read the raw output from the keyboard", async () => {

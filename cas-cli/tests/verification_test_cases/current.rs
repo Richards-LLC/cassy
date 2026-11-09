@@ -593,3 +593,39 @@ async fn supervisor_call_can_be_answered_on_the_same_dispatch() {
         );
     }
 }
+
+/// cas-beaf: a supervisor verdict must not close the dispatch under a running verifier.
+#[tokio::test]
+async fn supervisor_verdict_waits_for_a_running_verifier_and_the_late_rejection_is_recorded() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = Fixture::new(&mut env);
+    let agents = open_agent_store(&fixture.root).unwrap();
+    let mut supervisor = Agent::new("running-supervisor".into(), "running-supervisor".into());
+    supervisor.role = AgentRole::Supervisor;
+    agents.register(&supervisor).unwrap();
+    let mut task = Task::new("cas-running".into(), "Verifier still running".into());
+    task.status = TaskStatus::InProgress;
+    task.pending_verification = true;
+    open_task_store_local(&fixture.root).unwrap().add(&task).unwrap();
+    let dispatch = cas_store::create_verification_dispatch_bound(
+        &fixture.root, "cas-running", "running-supervisor", "running-supervisor",
+        &VerificationProofBoundary::task(), chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    agents.register(&Agent::new_sub_agent("running-verifier".into(), "task-verifier".into(), "running-supervisor".into())).unwrap();
+    let issued = cas_store::issue_verifier_capability(&fixture.root, "cas-running", "running-supervisor").unwrap();
+    cas_store::bind_verifier_capability(&fixture.root, &issued.token, "running-verifier").unwrap();
+    cas_store::claim_verification_dispatch(&fixture.root, "cas-running", "running-supervisor", "running-verifier", &issued.capability.id).unwrap();
+    let early = fixture.as_agent("running-supervisor").verification(json!({
+        "action":"add", "task_id":"cas-running", "dispatch_id":dispatch.id,
+        "status":"approved", "summary":"supervisor approves early",
+    })).await;
+    assert!(early.is_err(), "a live verifier keeps the dispatch open");
+    assert!(open_task_store_local(&fixture.root).unwrap().get("cas-running").unwrap().pending_verification);
+    text(fixture.as_agent("running-verifier").verification(json!({
+        "action":"add", "task_id":"cas-running", "dispatch_id":dispatch.id,
+        "status":"rejected", "summary":"verifier rejects", "verifier_capability":issued.token,
+        "issues":"[{\"file\":\"src/lib.rs\",\"category\":\"correctness\",\"problem\":\"incomplete\"}]",
+    })).await.expect("the verifier's late verdict is recorded"));
+    let latest = open_verification_store(&fixture.root).unwrap().get_latest_for_task("cas-running").unwrap().unwrap();
+    assert_eq!(latest.status.to_string(), "rejected");
+}

@@ -247,7 +247,7 @@ export class ProjectNavigation {
       // The card supplies the heading; the row primitive supplies the row,
       // marks and controls. No second group wrapper is needed inside it.
       const shared = new Set(sorted.filter((row, index) => sorted.findIndex(other => other.machineId === row.machineId) !== index).map(row => row.machineId));
-      const nested = sorted.map((row) => ({ ...row, showCodename: shared.has(row.machineId), supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
+      const nested = sorted.map((row) => ({ ...row, showCodename: shared.has(row.machineId), showSupervisorName: true, supervisorState: needsYou(row) ? "needs-you" as const : row.supervisorState ?? (row.machine_online === false ? "offline" as const : "idle" as const), group: { key, label, size: sorted.length, first: false, active: sorted.length > 1 && row === newest } }));
       card.rows.render(card.body, nested, open, end, options.reload);
       ordered.push(card.node);
     }

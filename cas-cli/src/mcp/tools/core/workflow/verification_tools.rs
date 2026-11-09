@@ -756,6 +756,31 @@ impl CasCore {
         // boundary: an identical verdict from the same registered supervisor
         // is idempotent. Only a supervisor-call question allows a new answer;
         // a conflicting terminal retry fails closed.
+        // cas-beaf: a verifier that is still running owes this dispatch its verdict.
+        // A supervisor verdict (including an answer to some other call) must not
+        // resolve the dispatch under it, or that verdict could never be recorded.
+        // A question the verifier itself raised is its hand-off, so that stays open.
+        if supervisor_direct
+            && status != VerificationStatus::SupervisorCall
+            && matches!(
+                proof_dispatch.state,
+                cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed
+            )
+            && let Some(verifier) = proof_dispatch.verifier_agent_id.as_deref().filter(|id| *id != caller_id)
+            && agent_store.get(verifier).is_ok_and(|agent| agent.is_alive())
+        {
+            let existing = cas_store::get_verification_for_dispatch(&self.cas_root, &requested_dispatch_id)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            let verifier_asked = existing.as_ref().is_some_and(|call| {
+                call.status == VerificationStatus::SupervisorCall && call.agent_id.as_deref() == Some(verifier)
+            });
+            if existing.as_ref().is_none_or(|call| call.status == VerificationStatus::SupervisorCall) && !verifier_asked {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Supervisor-direct verification refused: verifier {verifier} is still running on dispatch {requested_dispatch_id} and owes its verdict. Wait for it, or end that verifier first."),
+                ));
+            }
+        }
         if supervisor_direct {
             verification.set_agent(caller_id.clone());
             verification.provenance = cas_types::VerificationProvenance::SupervisorDirect;

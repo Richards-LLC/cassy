@@ -251,9 +251,26 @@ impl QueueStamp {
             Self::ParkBusy { detail, recheck_at } => {
                 queue.park_for_busy_recipient(row, Some(detail), *recheck_at).map(drop)
             }
-            Self::UndeliveredRelay { notice } => queue
-                .mark_undelivered_lifecycle_relay(row, Some(notice))
-                .map(drop),
+            Self::UndeliveredRelay { notice } => {
+                let Some(original) = queue.queued_prompt(row)? else { return Ok(()); };
+                // Lifecycle sources are synthetic, so a sender abandonment
+                // notice cannot tell the supervisor. Persist its action first;
+                // a failed write leaves the original pending, and replay after
+                // either write reuses this alert instead of duplicating it.
+                // No task binding: this reports a failed delivery even after
+                // the task has moved on from the obsolete lifecycle premise.
+                queue.enqueue_idempotent(
+                    "delivery-watchdog",
+                    recipient,
+                    &crate::prompt_revalidation::attach_blocker_envelope(notice, "daemon", None),
+                    original.factory_session.as_deref(),
+                    Some("Lifecycle relay undelivered"),
+                    Some(cas_store::NotificationPriority::High),
+                    &format!("undelivered-lifecycle-relay:{row}"),
+                    Some(&cas_store::QueueOrigin::Daemon),
+                )?;
+                queue.mark_undelivered_lifecycle_relay(row, Some(notice))
+            }
             Self::SupersedeWithGuidance {
                 source,
                 session,

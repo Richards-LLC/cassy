@@ -2318,6 +2318,12 @@ impl CasCore {
             if let Some(target) = retarget {
                 task.deliverables.work_target = Some(target);
                 changes.push("work_target");
+            } else if !already_matches && !epic_id.is_empty() && !work_target_supplied
+                && let Some(target) = task.deliverables.work_target.as_ref()
+            {
+                warnings.push(format!(
+                    "Work target kept: {} @ {}.", target.repo_selector, target.target_branch,
+                ));
             }
         }
 

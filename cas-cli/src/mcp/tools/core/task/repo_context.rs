@@ -691,14 +691,26 @@ pub(crate) fn work_target_for_task_moved_into_epic(
     previous_parents: &[cas_types::Task],
     known_epics: impl FnOnce() -> Vec<cas_types::Task>,
 ) -> Option<WorkTarget> {
-    if task.deliverables.work_target_pinned {
-        return None;
-    }
     if let Some(target) = default_child_work_target_from_epic(task, epic) {
         return Some(target);
     }
     let task_target = task.deliverables.work_target.as_ref()?;
     let inherited = inherited_work_target_from_epic(epic)?;
+    // An explicit epic move also carries a corrected target on the old
+    // parent's lane. A pin to any other branch remains authoritative.
+    let inherited_from_previous_parent = previous_parents.iter().any(|parent| {
+        parent.id != epic.id
+            && parent.task_type == cas_types::TaskType::Epic
+            && (inherited_work_target_from_epic(parent).as_ref() == Some(task_target)
+                || (!task.deliverables.work_target_pinned
+                    && parent.deliverables.work_target.as_ref() == Some(task_target)))
+    });
+    if inherited_from_previous_parent {
+        return Some(inherited);
+    }
+    if task.deliverables.work_target_pinned {
+        return None;
+    }
     // cas-e258: the epic may already target its own lane rather than trunk.
     // Compare against the repository's standalone creation policy as well,
     // otherwise a loose task on main never follows such an epic. Resolve both
@@ -714,15 +726,6 @@ pub(crate) fn work_target_for_task_moved_into_epic(
         if standalone_branch.as_deref() == Some(task_target.target_branch.as_str()) {
             return Some(inherited);
         }
-    }
-    let inherited_from_previous_parent = previous_parents.iter().any(|parent| {
-        parent.id != epic.id
-            && parent.task_type == cas_types::TaskType::Epic
-            && (parent.deliverables.work_target.as_ref() == Some(task_target)
-                || inherited_work_target_from_epic(parent).as_ref() == Some(task_target))
-    });
-    if inherited_from_previous_parent {
-        return Some(inherited);
     }
     let same_repository = task_target.repo_selector == inherited.repo_selector
         || matches!(

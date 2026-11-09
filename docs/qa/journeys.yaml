@@ -880,9 +880,10 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs]
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
+  check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: HUB-J1
   name: First open and pair a machine with a code

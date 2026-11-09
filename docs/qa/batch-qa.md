@@ -75,6 +75,28 @@ A task note never overrides, because the delivering worker can write notes on
 its own task. The receipt keeps the operator's words and the task gets an audit
 note.
 
+For a delivery containing only QA records, a supervisor has a narrower release
+closeout route (GH #1655). The recorded start-to-anchor Git diff must contain
+only `docs/qa/**/LEDGER.md` or Markdown files directly under
+`docs/qa/batch-evaluations/`. Product code, journey catalogs, agent instructions,
+unreadable diffs and a `no-code` declaration alone do not qualify.
+
+Record `verification action=qa_waive task_id=<id> head_sha=<pushed-delivery-tip>
+summary="<reason citing the independent walk>"`, then publish the release report
+and record `verification action=batch_receipt verification_type=release
+task_ids=["<id>"] staging_sha=<assembled-target-tip> ledger_artifact_id=<artifact>
+ledger_path=<published-report-path> ledger_author=<walker>`. The report must name
+the delivery, and its anchor must be integrated on its configured target.
+
+For this route only, the release report's walker may be the QA record's author.
+The supervisor recording the receipt must still be outside its implementation
+lineage. The latest QA round must be a reasoned supervisor waiver bound to the
+exact delivery anchor; missing, stale or superseded waivers do not qualify.
+The receipt's task note cites the waiver, and close rechecks it and the measured
+diff. Recording the release verdict retries ordinary close. This exception
+creates no operator author override and does not admit a self-authored batch
+QA receipt (`verification_type=task`) or waive review of product implementation.
+
 Use the verification MCP tool:
 
 ```json

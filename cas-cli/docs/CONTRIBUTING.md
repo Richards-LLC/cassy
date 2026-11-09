@@ -7,6 +7,20 @@ with `content`. Omitted fields retain their stored values. A successful edit
 returns `structured_content` with `id` and `changes` (the updated field names),
 alongside the existing text receipt.
 
+## Native Codex verifier identity
+
+An MCP caller belongs to its connection. Native Codex children share the
+parent's connection; choosing a role or receiving a dispatch ID does not create
+independent reviewer authority. `coordination whoami` shows the caller's type,
+role and parent. A shared-connection child registration fails before mutation
+with `rule_id=shared_mcp_child_identity`.
+
+Use the daemon-owned candidate verifier or a separately registered reviewer
+with a sealed handoff for the exact dispatch. A native child that observes its
+parent's identity returns that evidence without recording a verdict, including
+`status=error`. A registered supervisor may perform its own review and record
+the verdict directly; its provenance remains `supervisor_direct`.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to
@@ -136,6 +150,15 @@ worker's transcript is unresolved, its own recent activity or outbound message
 to the supervisor/director can establish execution within the configured stall
 window. Heartbeats and other workers' activity cannot. Resolved terminal turns
 and confirmed process exits retain precedence over this fallback.
+
+Supervisor memory handoffs carry a writer-assigned `handoff-machine:` tag.
+Supersession, SessionStart and automatic-clear judgement select by project
+store, machine and role. A local successor can change its name and factory
+session without losing its predecessor's handoff. `handoff-owner:` and author
+session provenance are audit stamps, never selection keys. Registry restart
+reconciliation cannot replace a same-name supervisor on another machine.
+Legacy handoffs without a machine stamp remain readable through memory tools
+but cannot inject approvals into startup.
 
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,

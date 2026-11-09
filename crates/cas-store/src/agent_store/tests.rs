@@ -170,6 +170,7 @@ fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
         "steady-fox-24".to_string(),
     );
     original_supervisor.role = AgentRole::Supervisor;
+    original_supervisor.machine_id = Some("machine-a".into());
     original_supervisor.factory_session = Some("factory-session-1".to_string());
     store.register(&original_supervisor).unwrap();
 
@@ -184,14 +185,23 @@ fn supervisor_reregistration_rehomes_workers_and_supersedes_the_old_row() {
         "steady-fox-24".to_string(),
     );
     replacement_supervisor.role = AgentRole::Supervisor;
+    replacement_supervisor.machine_id = Some("machine-a".into());
     replacement_supervisor.factory_session = Some("factory-session-2".to_string());
     store.register(&replacement_supervisor).unwrap();
+
+    let mut peer = replacement_supervisor.clone();
+    peer.id = "peer-supervisor".into();
+    peer.machine_id = Some("machine-b".into());
+    peer.factory_session = Some("peer-factory".into());
+    store.register(&peer).unwrap();
+    assert_eq!(store.get(&replacement_supervisor.id).unwrap().status, AgentStatus::Active);
 
     let active_supervisors = store
         .list(Some(AgentStatus::Active))
         .unwrap()
         .into_iter()
-        .filter(|agent| agent.role == AgentRole::Supervisor && agent.name == "steady-fox-24")
+        .filter(|agent| agent.role == AgentRole::Supervisor && agent.name == "steady-fox-24"
+            && agent.machine_id == original_supervisor.machine_id)
         .collect::<Vec<_>>();
     assert_eq!(
         active_supervisors.len(),

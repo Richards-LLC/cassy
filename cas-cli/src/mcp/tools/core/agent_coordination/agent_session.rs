@@ -76,6 +76,121 @@ mod tests {
         let agent = core.open_agent_store().unwrap().get("explicit-worker").unwrap();
         assert_eq!(agent.role, AgentRole::Worker);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_mcp_child_registration_refuses_before_mutating_parent_gh1418() {
+        use crate::mcp::tools::{SessionStartRequest, VerificationAddRequest};
+        use crate::types::{Agent, Task, VerificationProvenance};
+        use rmcp::model::ErrorCode;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        for role in [AgentRole::Supervisor, AgentRole::Director, AgentRole::Worker, AgentRole::Standard] {
+            let parent_id = format!("parent-{role}");
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            let agents = core.open_agent_store().unwrap();
+            let parent = Agent::new_with_role(parent_id.clone(), "parent".into(), role);
+            agents.register(&parent).unwrap();
+            core.set_agent_id_for_testing(parent_id.clone());
+            let before = serde_json::to_value(agents.get(&parent_id).unwrap()).unwrap();
+            let whoami = core.cas_agent_whoami(Parameters(crate::mcp::tools::IdRequest {
+                id: core.get_agent_id().unwrap(),
+            })).await.unwrap();
+            let whoami = serde_json::to_value(whoami).unwrap();
+            assert!(whoami["content"][0]["text"].as_str().unwrap().contains(&parent_id));
+
+            // Generic and typed native children use the parent's MCP connection.
+            // Neither a new ID nor the inherited ID may change its identity.
+            for name in ["default", "task-verifier"] {
+                let native_type = if name == "default" { "primary" } else { "sub_agent" };
+                for session_id in [format!("child-{role}-{name}"), parent_id.clone()] {
+                    for entry in ["register", "session_start"] {
+                        let result = if entry == "register" {
+                            core.cas_agent_register(Parameters(AgentRegisterRequest {
+                                name: name.into(), agent_type: native_type.into(),
+                                session_id: Some(session_id.clone()), parent_id: Some(parent_id.clone()),
+                            })).await
+                        } else {
+                            core.cas_agent_session_start(Parameters(SessionStartRequest {
+                                session_id: Some(session_id.clone()), name: Some(name.into()),
+                                agent_type: Some(native_type.into()), parent_id: Some(parent_id.clone()),
+                                permission_mode: None, cwd: None, limit: None,
+                            })).await
+                        };
+                        let error = result.expect_err("shared connection cannot authenticate a child");
+                        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+                        assert_eq!(error.data.as_ref().unwrap()["rule_id"], "shared_mcp_child_identity");
+                        assert_eq!(core.get_agent_id().unwrap(), parent_id);
+                        assert_eq!(serde_json::to_value(agents.get(&parent_id).unwrap()).unwrap(), before);
+                        if session_id != parent_id {
+                            assert!(agents.get(&session_id).is_err());
+                        }
+                        assert!(!root.join("current_session").exists());
+                    }
+                }
+            }
+
+            let task = Task::new(format!("cas-parent-{role}"), "Parent authority".into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let dispatch = cas_store::create_verification_dispatch(
+                &root, &task.id, "worker", &parent_id,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ).unwrap();
+            let verdict = core.cas_verification_add(Parameters(VerificationAddRequest {
+                task_id: task.id.clone(), status: "error".into(), summary: "Parent-owned verdict".into(),
+                confidence: Some(0.0), issues: None, files_reviewed: None, duration_ms: None,
+                verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+            })).await;
+            let record = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+            if role == AgentRole::Supervisor {
+                verdict.expect("parent keeps direct supervisor authority");
+                let record = record.unwrap();
+                assert_eq!(record.agent_id.as_deref(), Some(parent_id.as_str()));
+                assert_eq!(record.provenance, VerificationProvenance::SupervisorDirect);
+            } else {
+                assert_eq!(verdict.unwrap_err().code, ErrorCode::INVALID_PARAMS);
+                assert!(record.is_none());
+            }
+        }
+
+        // A child on its own authenticated connection can refresh its identity.
+        let child = Agent::new_sub_agent("official-child".into(), "task-verifier".into(), "parent-supervisor".into());
+        let child_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        child_core.open_agent_store().unwrap().register(&child).unwrap();
+        child_core.set_agent_id_for_testing(child.id.clone());
+        child_core.cas_agent_register(Parameters(AgentRegisterRequest {
+            name: child.name, agent_type: "sub_agent".into(), session_id: Some(child.id.clone()),
+            parent_id: child.parent_id,
+        })).await.expect("separate child refresh");
+        assert_eq!(child_core.get_agent_id().unwrap(), child.id);
+
+        // A native child cannot capture an as-yet lazy factory connection.
+        env.set("CAS_SESSION_ID", "lazy-parent");
+        env.set("CAS_AGENT_NAME", "lazy-parent");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let lazy = crate::mcp::CasCore::with_daemon(root, None, None);
+        let error = lazy.cas_agent_register(Parameters(AgentRegisterRequest {
+            name: "task-verifier".into(), agent_type: "sub_agent".into(),
+            session_id: Some("lazy-child".into()), parent_id: Some("lazy-parent".into()),
+        })).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["rule_id"], "shared_mcp_child_identity");
+        assert_eq!(lazy.get_agent_id().unwrap(), "lazy-parent");
+        assert!(lazy.open_agent_store().unwrap().get("lazy-child").is_err());
+
+        // A supported independent session keeps its typed name without
+        // replacing the shared process's parent launch hint.
+        env.set("CAS_AGENT_ROLE", "standard");
+        env.set("CAS_AGENT_NAME", "parent-launch-hint");
+        let independent = crate::mcp::CasCore::with_daemon(lazy.cas_root.clone(), None, None);
+        independent.cas_agent_session_start(Parameters(SessionStartRequest {
+            session_id: Some("independent-session".into()), name: Some("independent-reviewer".into()),
+            agent_type: Some("primary".into()), parent_id: None,
+            permission_mode: None, cwd: None, limit: Some(1),
+        })).await.expect("independent session start");
+        assert_eq!(independent.open_agent_store().unwrap().get("independent-session").unwrap().name, "independent-reviewer");
+        assert_eq!(std::env::var("CAS_AGENT_NAME").unwrap(), "parent-launch-hint");
+    }
 }
 
 impl CasCore {
@@ -147,14 +262,11 @@ impl CasCore {
 
         let (requested_agent_type, requested_role) =
             public_registration_hints(req.agent_type.as_deref())?;
+        self.ensure_public_child_identity(
+            &session_id, req.parent_id.as_deref(), requested_agent_type,
+        )?;
         self.ensure_public_registration_target(&session_id)?;
 
-        // Best-effort name hint for session registration
-        if let Some(ref name) = req.name {
-            unsafe { std::env::set_var("CAS_AGENT_NAME", name) };
-        } else if std::env::var("CAS_AGENT_NAME").is_err() {
-            unsafe { std::env::set_var("CAS_AGENT_NAME", &agent_name) };
-        }
         let cwd = req.cwd.unwrap_or_else(|| {
             self.cas_root
                 .parent()
@@ -188,9 +300,8 @@ impl CasCore {
             agent_id: None,
             agent_type: None,
             subagent_prompt: None,
-            // Carry the role explicitly so downstream handlers don't depend on
-            // the process-global env mutation above (which races under shared
-            // MCP process dispatch).
+            // Carry the role explicitly; process-global hints belong to the
+            // launching parent, not a public session registration request.
             agent_role: requested_role.map(|r| r.to_string()),
             message: None,
             message_is_final: None,

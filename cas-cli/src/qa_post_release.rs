@@ -308,7 +308,7 @@ mod tests {
             }).collect::<Vec<_>>();
         assert_eq!(pending_holds().len(), 2, "{qa}");
         let prompts = crate::store::open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap();
-        let holds: Vec<_> = prompts.iter().filter(|row| row.kind.as_deref() == Some("batch_close_hold")).collect();
+        let holds: Vec<_> = prompts.iter().filter(|row| row.summary.as_deref() == Some("batch_close_hold")).collect();
         assert_eq!(holds.len(), 2);
         assert!(holds.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
         let receipt = cas_store::list_qa_batch_receipts(&cas, "batch-offer-fixture").unwrap().remove(0);

@@ -102,6 +102,15 @@ fn cli_round_trip() {
                 with self.subTest(assertion=assertion, changed=changed):
                     self.assertEqual(bool(shape.message_assertions(code, 'src/cli.rs', changed)), rejected)
 
+        # Calling generated code or a same-named binding in another block
+        # must not make generated prose look like the parser's returned field.
+        assertion = 'assert_eq!(args.reason, "Harmless fixture cleanup");'
+        parser_bindings = source[source.index('    let parsed'):source.index('    ASSERTION')]
+        for extra in ['let args = render(parsed.command);',
+                      'let args = render(parsed.command); {' + parser_bindings + '}']:
+            code = source.replace('ASSERTION', extra + '\n    ' + assertion)
+            self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 

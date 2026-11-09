@@ -138,6 +138,85 @@ def rust_bindings(ts, ps, begin, end):
     return bound
 
 
+def rust_function_body(ts, ps, position):
+    for owner in range(position - 1, -1, -1):
+        if ts[owner].string or ts[owner].value != 'fn':
+            continue
+        brace = next((b for b in range(owner, position)
+                      if not ts[b].string and ts[b].value in ('{', ';')), None)
+        if brace is not None and ts[brace].value == '{' and ps.get(brace, -1) > position:
+            return brace
+    return None
+
+
+def rust_cli_payload_preserved(ts, ps, assertion, literal, end, value):
+    """Exact immutable CLI argv -> parsed flag field, including let-else routing.
+
+    Unknown calls, mutable bindings and non-field assertions fail closed. A
+    matching string elsewhere in the function never grants an exemption.
+    """
+    body = rust_function_body(ts, ps, assertion)
+    if body is None:
+        return False
+    other = (ts[literal + 1:ps[assertion + 2]] if literal == assertion + 3 else ts[assertion + 3:literal])
+    other = [t for t in other if t.start < end]
+    while other and other[0].value in (',', '&'):
+        other = other[1:]
+    while other and other[-1].value == ',':
+        other = other[:-1]
+    if len(other) != 3 or other[1].value != '.' or any(t.string for t in other):
+        return False
+    receiver, field = other[0].value, other[2].value
+    bound = {}
+    for i in range(body + 1, assertion):
+        if ts[i].string or ts[i].value != 'let':
+            continue
+        if any(ts[start].value == '{' and start < i < close < assertion for start, close in ps.items()):
+            continue  # A completed inner block cannot export its local bindings.
+        eq = i + 1
+        while eq < assertion and ts[eq].value not in ('=', ';'):
+            eq = ps.get(eq, eq) + 1
+        if eq >= assertion or ts[eq].value != '=':
+            continue
+        finish = eq + 1
+        while finish < assertion and ts[finish].value not in (';', 'else'):
+            finish = ps.get(finish, finish) + 1
+        names = [ts[k].value for k in range(i + 1, eq)
+                 if not ts[k].string and re.fullmatch(r'[A-Za-z_]\w*', ts[k].value)
+                 and ts[k].value not in ('mut', 'ref') and ts[k - 1].value != '::'
+                 and ts[k + 1].value not in ('::', '(')]
+        rhs = ts[eq + 1:finish]
+        payload = None
+        projection = ''.join(t.value for t in rhs)
+        if not any(t.string for t in rhs) and re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*', projection):
+            payload = bound.get(rhs[0].value)
+        method = next((k for k in range(eq + 1, finish)
+                       if ts[k].value in ('try_parse_from', 'parse_from') and not ts[k].string), None)
+        if method is not None and re.fullmatch(r'(?:[A-Za-z_]\w*::)+', ''.join(t.value for t in ts[eq + 1:method])):
+            call = method + 1
+            array = call + 1
+            if array < finish and ts[array].value == '&':
+                array += 1
+            if (call in ps and array in ps and ts[array].value == '['
+                    and ps[array] + 1 == ps[call]):
+                suffix = ts[ps[call] + 1:finish]
+                suffix_shape = ''.join(t.value if not t.string else 'STRING' for t in suffix)
+                values = [t for t in ts[array + 1:ps[array]] if t.value != ',']
+                if (suffix_shape in ('', '.unwrap()', '.expect(STRING)')
+                        and all(t.string and t.value.startswith('"') for t in values)):
+                    try:
+                        argv = [ast.literal_eval(t.value) for t in values]
+                    except (ValueError, SyntaxError):
+                        argv = []
+                    payload = {flag[2:].replace('-', '_'): item for flag, item in zip(argv, argv[1:])
+                               if flag.startswith('--') and not item.startswith('--')}
+        for name in names:
+            bound.pop(name, None)
+            if payload is not None and not any(ts[k].value in ('mut', 'ref', ':') for k in range(i + 1, eq)):
+                bound[name] = payload
+    return bound.get(receiver, {}).get(field) == value
+
+
 def rust_caller_data(ts, ps, body, name):
     """Whether local `name` is used outside assertions in the body at `body`,
     so it is input the test supplies, not an expected phrase."""
@@ -301,6 +380,9 @@ def message_assertions(source, path, changed_lines=None):
                         pass
                 line = source.count('\n', 0, literal.start) + 1
                 if human_message_literal(value) and (changed_lines is None or line in changed_lines):
+                    if (scalar and token.value == 'assert_eq'
+                            and rust_cli_payload_preserved(ts, ps, i, literal_index, end, value)):
+                        continue
                     hits.append((line, 'TEST_ASSERTION_PROSE'))
             # A substring operand naming a local resolves to the literals it holds.
             for operand in range(i + 3, close):
@@ -310,14 +392,7 @@ def message_assertions(source, path, changed_lines=None):
                 prefix = source[token.start:item.start]
                 if machine_id_receiver(prefix) or not re.search(r'\.(?:contains|starts_with|ends_with)\(\s*&?\s*$', prefix):
                     continue
-                body = None
-                for owner in range(i - 1, -1, -1):
-                    if ts[owner].value != 'fn' or ts[owner].string:
-                        continue
-                    brace = next((b for b in range(owner, i) if not ts[b].string and ts[b].value in ('{', ';')), None)
-                    if brace is not None and ts[brace].value == '{' and ps.get(brace, -1) > i:
-                        body = brace
-                        break
+                body = rust_function_body(ts, ps, i)
                 if body is None:
                     continue
                 if rust_caller_data(ts, ps, body, item.value):

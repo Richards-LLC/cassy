@@ -350,6 +350,10 @@ invariants:
   FACTORY-CAPACITY-NOTICES:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
+  FACTORY-CLI-PAYLOAD-SHAPE:
+    statement: Exact CLI flag payload round trips are data-integrity checks; generated prose and unrelated fields remain rejected by the test-shape gate.
+    check: Run scripts/test-check-test-shape.py, including test_cli_parser_payload_round_trip_cas_5442; pass exact parser argv values through immutable let-else command routing in both equality orders and changed-line mode, while rejecting different values, unrelated fields, unknown transformations, expired inner bindings, inequalities and substrings. Replay the changed-lane guard with a caller payload and a generated-prose control.
+    bug: {task: cas-5442}
   FACTORY-REFUSED-CLOSE-CORRECTION:
     statement: A validation refusal does not park stale delivery A; corrected pushed B parks as B, and supervisor request_changes preserves owned restart lineage while foreign descendants remain refused.
     check: Run refused_registry_close_keeps_correction_tip_and_restart_cas_56f1 through worker and supervisor MCP on a shared factory lane. Refuse duplicate inline/file journey metadata at A, remove only the duplicate and push B, verify exact B park, seed a historical stale A park and request changes, then verify owned restart and foreign-descendant refusal without moving refs.
@@ -992,8 +996,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-REFUSED-CLOSE-CORRECTION]
+  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

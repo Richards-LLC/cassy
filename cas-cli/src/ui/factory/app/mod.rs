@@ -2195,7 +2195,7 @@ impl FactoryApp {
         assignment: &assignment_evidence::AssignmentEvidence,
     ) -> Option<super::director::SupervisorActionableState> {
         let no_holds = HashSet::new();
-        supervisor_actionable_state_with_ownership(
+        let actionable = supervisor_actionable_state_with_ownership(
             data,
             self.epic_state.epic_id().or(self.current_epic_id.as_deref()),
             &self.supervisor_name,
@@ -2212,7 +2212,23 @@ impl FactoryApp {
         .filter(|state| {
             held_workers.is_some()
                 || !matches!(state, super::director::SupervisorActionableState::AssignReadyWork { .. })
-        })
+        })?;
+        match actionable {
+            super::director::SupervisorActionableState::AssignReadyWork {
+                task_ids,
+                idle_workers,
+            } => {
+                let idle_workers = idle_workers
+                    .into_iter()
+                    .filter(|worker| !assignment.worker_waiting_on_other(worker))
+                    .collect::<Vec<_>>();
+                (!idle_workers.is_empty()).then_some(super::director::SupervisorActionableState::AssignReadyWork {
+                    task_ids,
+                    idle_workers,
+                })
+            }
+            other => Some(other),
+        }
     }
 
     /// Route worker panes whose registry rows are all non-live through the normal shutdown path.

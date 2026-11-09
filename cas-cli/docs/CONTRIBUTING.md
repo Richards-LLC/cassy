@@ -1,5 +1,12 @@
 # Contributing to Cassy
 
+## Memory update receipts
+
+`memory action=update id=<id> title=<title>` saves the title alone or together
+with `content`. Omitted fields retain their stored values. A successful edit
+returns `structured_content` with `id` and `changes` (the updated field names),
+alongside the existing text receipt.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to
@@ -239,14 +246,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
-When one newly recorded supervisor turn reads more input than
-`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables), the
-turn scanner hands `supervisor_auto_clear` the turn. It acts only at an idle
+At each newly recorded supervisor turn, `supervisor_auto_clear` reads the
+latest call's input occupancy, including cache reads/writes once. Its threshold
+is 80% of the harness-reported `model_context_window`, capped by
+`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
+a reported window, only that configured per-call cap applies; capacity is never
+inferred from a model name. Cumulative wake billing cannot trigger a clear.
+It acts only at an idle
 boundary: the turn has ended, no newer turn is running, no delivery-target
 lock is held, no release train is frozen, no `release-repair` task is open, and
 no operator ask or operator message is waiting. Otherwise it defers to a later
 turn end. It saves a role-supervisor handoff memory from the session-end lane
-snapshot (with a JSON receipt under `supervisor-handoffs/`). It gives the
+snapshot (with a JSON receipt under `supervisor-handoffs/`). The auto-clear
+projection includes only in-progress and awaiting-merge tasks, active/idle
+workers, recent operator decisions and pending actor/kind/task/age summaries.
+It caps each section at 100 receipt rows, reports omissions, and bounds the
+injected sections separately. Full histories remain in their stores. It gives the
 supervisor one turn to save judgement as a handoff, merges that under the
 facts, and queues the context-reset control to the supervisor pane. When the
 new transcript records the `/clear`, it queues the handoff to the new session.
@@ -1187,7 +1202,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -1418,6 +1433,19 @@ denying things those workers never saw before: raw `cargo`, `&` background
 jobs under worker-memory admission, non-Violet Slack writes, publication and
 unfiltered browser runs. Codex workers are unaffected (their trust was
 already pre-seeded by `codex_trust.rs`).
+
+### macOS Claude account linking
+
+`cas accounts link` asks `claude auth status --json` about each macOS Claude
+profile. Both Claude directory selectors bind named profiles; the default
+profile keeps the legacy unscoped Keychain store with its own home. Active
+or unavailable authentication keeps the original directory in place, including
+when a credential file also exists. Only confirmed logged-out profiles follow
+the ordinary rename/retirement rules. Shared items can still link to the base;
+keeping an authenticated default at its original path is not itself drift.
+Link health and launch-time repair use the same preservation rule. No raw
+credential or Keychain secret is read. Account unit fixtures replace only the
+external status executable through `CAS_TEST_CLAUDE_BIN` in test builds.
 
 ### Factory worker account selection
 
@@ -1950,6 +1978,15 @@ proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log`.
+
+Close measures a delivery's recorded `parked_branch` (local, then origin)
+before deriving branches from its current assignee. Its recorded `work_target`
+remains authoritative after parking, including squash-integrated deliveries;
+a later epic lane does not redefine that proof boundary. Ownership, start-range,
+publication and receipt checks still apply. QA reads project-scoped evidence
+before historical flat task directories. A flat directory is a fallback only
+when the task explicitly cites its historical bundle and no scoped QA evidence
+exists; a colliding short task ID alone never selects another project's ledger.
 
 ## Project capture configuration
 
@@ -4429,6 +4466,24 @@ frozen train to the next train. The freeze ends when a published release covers 
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
+Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
+poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
+has a green train-suite receipt, it acts when the tip holds `changelog.d/`
+fragments, no merge-queue run is in flight, the operator has not paused it
+(Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
+label), the train's supervisor is registered on this machine and the cadence
+allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
+frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
+(default 2) ago. It freezes the train, then waits for the supervisor's
+`release-notes.md` in the train's artifact directory, waking the supervisor
+once per tip with a deadline. With the draft present it runs the
+repository's `scripts/release.sh --notes <draft>` once per tip in a dedicated
+lane worktree and logs to `auto-cut.log` beside it; a nonzero exit wakes the
+supervisor once. `release.sh` arms landing and publication reminders, and the
+post-publish notice has the supervisor post the approved notes. Cassy never
+writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
+which names the reason.
 
 ## Ordered train merge queue
 

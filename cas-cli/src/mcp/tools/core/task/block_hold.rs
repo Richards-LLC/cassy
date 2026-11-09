@@ -274,6 +274,40 @@ pub(crate) fn latest_blocker_reason(notes: &str) -> Option<String> {
     blocker_note_entries(notes).pop().map(|(_, reason)| reason)
 }
 
+/// Whether a blocker reason is currently gated on an operator decision.
+/// Keep the explicit `owner:` marker authoritative, matching the progress
+/// watchdog's cas-e239 exclusion; older notes without it retain the operator
+/// mention fallback.
+pub(crate) fn reason_is_operator_owned(reason: &str) -> bool {
+    let words: Vec<_> = reason
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words
+        .windows(2)
+        .find(|pair| pair[0] == "owner")
+        .map_or_else(
+            || words.iter().any(|word| word == "operator"),
+            |pair| pair[1] == "operator",
+        )
+}
+
+/// Whether the current blocker names an owner. The operator mention fallback
+/// is shared with the progress watchdog; explicit owners include the
+/// supervisor, who may still be waiting on an open operator ask.
+pub(crate) fn reason_has_named_owner(reason: &str) -> bool {
+    if reason_is_operator_owned(reason) {
+        return true;
+    }
+    let words: Vec<_> = reason
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words.windows(2).any(|pair| pair[0] == "owner")
+}
+
 /// The full text of every blocker note, across all of its lines. A note
 /// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
 /// Each entry is returned with its `YYYY-MM-DD HH:MM` stamp.

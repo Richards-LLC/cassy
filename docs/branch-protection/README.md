@@ -209,11 +209,18 @@ only with a version bump and is rebuilt and checked in the queue compile step.
 Any product change, moved main, partial/legacy proof or uncertainty runs the full
 graph. A release-plumbing continuation can reuse the source's earlier receipt.
 
-On reuse, the queue runs Rust compile/no-default-features build, a source-built
-CLI smoke, and a web asset rebuild/drift check. CI tiers, web tests, journeys,
-Rust suite and doctests are already covered by the full-set source proof and do
-not run again. The target is under eight minutes; the live release ledger records
-the measured result rather than assuming it. Train and queue wall clocks are
+On reuse, preflight first restores `preflight-cli` from the validated full-gate
+run only when its receipt tree exactly matches the queue tree. A matching
+per-job receipt can also restore its original producer's CLI. The producer
+uploads a stripped copy of its no-default-features executable; restore checks
+that it runs on the current runner before skipping Rust setup, check and build.
+Missing artifacts, lookup failures, incompatible executables and release-plumbing
+tree changes keep source compilation. A job receipt is reusable only while its
+CLI artifact remains available. Every full-gate reuse still runs CLI smoke and
+the web asset rebuild/drift check, including when the job receipt also matches.
+CI tiers, web tests, journeys, Rust suite and doctests are already covered by
+the full-set source proof and do not run again. The target is under eight
+minutes; the live release ledger records the measured result rather than assuming it. Train and queue wall clocks are
 measured from the GitHub run start through the required fan-in, and the daemon
 records them in the friction ledger once per train/run attempt.
 

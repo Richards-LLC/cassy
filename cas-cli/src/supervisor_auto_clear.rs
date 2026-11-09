@@ -1,10 +1,8 @@
-//! cas-5f67: clear a supervisor's context at an idle boundary once one wake
-//! reads more input than `factory.supervisor_wake_input_budget`.
-//!
-//! A long supervisor session re-reads its whole conversation on every wake
-//! (v4.4.0: 53 wakes cost 69M input tokens, about 1.3M each). The turn ledger
-//! already measures each wake's input, so the daemon's turn scanner calls
-//! [`on_turn_end`] for every newly recorded supervisor turn.
+//! Clear a supervisor at an idle boundary under live context pressure.
+//! GH #1665: cumulative cached re-reads are billing, not prompt occupancy.
+//! The latest call's input is compared with 80% of the reported model window,
+//! capped by `factory.supervisor_wake_input_budget`. Without a reported window,
+//! only the configured per-call cap applies; zero disables automatic clearing.
 //!
 //! The steps run only when a turn has just ended, no newer turn has started,
 //! and nothing is in flight (see [`idle_blockers`]). It is never mid-release.
@@ -35,6 +33,7 @@ const FRESH_MINUTES: i64 = 30;
 /// A clear that leaves no new transcript in this window is abandoned.
 const LANDING_MINUTES: i64 = 15;
 const SECTION_CHARS: usize = 1_400;
+const RECEIPT_ROWS: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
@@ -57,6 +56,9 @@ struct State {
     agent_id: String,
     harness_session: String,
     trigger_tokens: u64,
+    /// Old cumulative-budget state must not cause a clear after upgrading.
+    #[serde(default)]
+    latest_call: bool,
     budget: u64,
     triggered_at: DateTime<Utc>,
     #[serde(default)]
@@ -71,7 +73,6 @@ pub(crate) struct TurnEnd<'a> {
     pub factory_session: &'a str,
     pub harness_session: &'a str,
     pub transcript: &'a Path,
-    pub input_tokens: Option<u64>,
     pub at: DateTime<Utc>,
     /// A newer turn had already started when the scan stopped reading.
     pub mid_turn: bool,
@@ -213,6 +214,68 @@ fn section(out: &mut String, label: &str, lines: &[String]) {
     }
 }
 
+/// Keep auto-clear receipts bounded without changing retirement/recovery evidence.
+fn compact_snapshot(snapshot: &mut cas_store::SupervisorLaneSnapshot, now: DateTime<Utc>) {
+    let dead_owners: BTreeSet<String> = snapshot.workers.iter()
+        .filter(|worker| !matches!(worker["status"].as_str(), Some("active" | "idle")))
+        .flat_map(|worker| ["id", "name"].into_iter().filter_map(|key| worker[key].as_str().map(str::to_owned)))
+        .collect();
+    snapshot.workers.retain(|worker| matches!(worker["status"].as_str(), Some("active" | "idle")));
+    snapshot.tasks.retain(|task| match task["status"].as_str() {
+        Some("awaiting_merge") => true, // A parked delivery survives its worker.
+        Some("in_progress") => !task["assignee"].as_str().is_some_and(|owner| dead_owners.contains(owner)),
+        _ => false,
+    });
+    for task in &mut snapshot.tasks {
+        let notes = task["notes"].as_str().unwrap_or_default().lines()
+            .filter(|line| line.contains("DECISION") && line.to_ascii_lowercase().contains("operator"))
+            .map(|line| clip(line, 320)).collect::<Vec<_>>();
+        let notes = notes.iter().rev().take(3).rev().cloned().collect::<Vec<_>>().join("\n");
+        task["notes"] = Value::String(notes);
+        for (key, limit) in [("title", 90), ("external_ref", 180)] {
+            if let Some(text) = task[key].as_str() { task[key] = Value::String(clip(text, limit)); }
+        }
+        // Long proof histories remain in the task store, not each new context.
+        let mut refs = serde_json::Map::new();
+        for key in ["parked_branch", "parked_head", "pr_url", "target_branch"] {
+            if let Some(text) = task["deliverables"][key].as_str() {
+                refs.insert(key.into(), Value::String(clip(text, 180)));
+            }
+        }
+        task["deliverables"] = Value::Object(refs);
+    }
+    for row in &mut snapshot.pending {
+        let payload: Value = row["payload"].as_str()
+            .and_then(|text| serde_json::from_str(text).ok()).unwrap_or(Value::Null);
+        let filter: Value = row["trigger_filter"].as_str()
+            .and_then(|text| serde_json::from_str(text).ok()).unwrap_or(Value::Null);
+        let actor = ["actor", "agent_name", "worker_name", "source"].into_iter()
+            .find_map(|key| payload[key].as_str()).or_else(|| row["source"].as_str()).unwrap_or("supervisor");
+        let kind = row["kind"].as_str().or_else(|| row["event_type"].as_str())
+            .or_else(|| row["trigger_type"].as_str()).unwrap_or("message");
+        let task = payload["task_id"].as_str().or_else(|| row["task_id"].as_str())
+            .or_else(|| filter["task_id"].as_str()).unwrap_or("none");
+        let created = row["created_at"].as_str().and_then(|raw| {
+            DateTime::parse_from_rfc3339(raw).map(|at| at.with_timezone(&Utc)).ok()
+                .or_else(|| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S").ok().map(|at| at.and_utc()))
+        });
+        let age_minutes = created.map(|at| (now - at).num_minutes().max(0));
+        let summary = [payload.get("message"), row.get("prompt"), row.get("message")].into_iter()
+            .flatten().find_map(Value::as_str).filter(|text| !text.trim_start().starts_with(['{', '[']))
+            .map(|text| clip(text, 100)).unwrap_or_default();
+        *row = serde_json::json!({"id":row["id"], "actor":clip(actor, 60), "kind":clip(kind, 60),
+            "task_id":clip(task, 80), "age_minutes":age_minutes, "summary":summary});
+    }
+    let omitted = [snapshot.tasks.len().saturating_sub(RECEIPT_ROWS),
+        snapshot.workers.len().saturating_sub(RECEIPT_ROWS), snapshot.pending.len().saturating_sub(RECEIPT_ROWS)];
+    snapshot.tasks.truncate(RECEIPT_ROWS);
+    snapshot.workers.truncate(RECEIPT_ROWS);
+    snapshot.pending.truncate(RECEIPT_ROWS);
+    if omitted.iter().any(|count| *count > 0) {
+        snapshot.reason.push_str(&format!("; additional tasks/workers/pending in stores: {}/{}/{}", omitted[0], omitted[1], omitted[2]));
+    }
+}
+
 /// Render the lane snapshot. Approvals come first so a truncated injection
 /// keeps them.
 fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: &Path) -> String {
@@ -229,12 +292,9 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
         .pending
         .iter()
         .map(|row| {
-            let body = ["prompt", "message", "payload", "event_type"]
-                .into_iter()
-                .find_map(|key| row[key].as_str())
-                .unwrap_or("see receipt");
-            let from = row["source"].as_str().map(|s| format!("{s}: ")).unwrap_or_default();
-            format!("- {from}{}\n", clip(body.lines().next().unwrap_or(body), 140))
+            let age = row["age_minutes"].as_i64().map(|age| format!("{age}m")).unwrap_or_else(|| "unknown".into());
+            format!("- #{} {}: {}; task {}; age {}; {}\n", row["id"],
+                field(row, "actor"), field(row, "kind"), field(row, "task_id"), age, field(row, "summary"))
         })
         .collect();
     let tasks: Vec<String> = snapshot
@@ -258,12 +318,13 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
         .map(|worker| format!("- {}: {}\n", field(worker, "name"), field(worker, "status")))
         .collect();
     let mut out = format!(
-        "Automatic context clear: one wake at {} read {} input tokens; the budget is {}. \
+        "Automatic context clear: latest call at {} used {} input tokens; the context threshold is {}. \
          Cassy wrote these facts. Your own judgement lines follow them when you saved any.\n\
-         Full receipt: {}\n",
+         Snapshot: {}\nHandoff receipt: {}\n",
         crate::cli::release_report::eastern_time(state.triggered_at),
         tokens(state.trigger_tokens),
         tokens(state.budget),
+        snapshot.reason,
         receipt.display(),
     );
     section(&mut out, "Operator approvals (task decision notes)", &approvals);
@@ -291,9 +352,10 @@ fn add_handoff(root: &Path, title: &str, content: String) -> anyhow::Result<Entr
 }
 
 fn save_handoff(root: &Path, agent: &Agent, state: &State) -> anyhow::Result<String> {
-    let snapshot = cas_store::SqliteAgentStore::open(root)?
+    let mut snapshot = cas_store::SqliteAgentStore::open(root)?
         .supervisor_lane_snapshot(&agent.id, "automatic context clear")?
         .context("supervisor row missing")?;
+    compact_snapshot(&mut snapshot, Utc::now());
     let dir = root.join("supervisor-handoffs");
     std::fs::create_dir_all(&dir)?;
     let receipt = dir.join(format!("auto-clear-{}-{}.json", agent.name, state.triggered_at.timestamp()));
@@ -316,7 +378,7 @@ fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>) -> an
     };
     let facts = entries.iter().find(|e| e.id == handoff_id).map(|e| e.content.clone()).unwrap_or_default();
     let title = current.title.clone().unwrap_or_else(|| "Supervisor handoff before automatic context clear".into());
-    let content = format!("{facts}\nSupervisor judgement (saved before the clear):\n{}\n", current.content.trim());
+    let content = format!("{facts}\nSupervisor judgement (saved before the clear):\n{}\n", clip_block(current.content.trim(), SECTION_CHARS));
     Ok(add_handoff(root, &title, content)?.id)
 }
 
@@ -324,18 +386,25 @@ fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>) -> an
 pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &TurnEnd<'_>) -> anyhow::Result<Step> {
     let mut state = load(root, &turn.agent.id)?;
     if state.as_ref().is_some_and(|s| {
-        s.harness_session != turn.harness_session && !matches!(s.phase, Phase::ClearQueued { .. })
+        (!s.latest_call || s.harness_session != turn.harness_session)
+            && !matches!(s.phase, Phase::ClearQueued { .. })
     }) {
-        // That session ended some other way; its pending clear is moot.
+        // A different session or a legacy cumulative trigger cannot clear this one.
         clear_state(root, &turn.agent.id);
         state = None;
     }
     let mut state = match state {
         Some(state) => state,
         None => {
-            let budget = crate::config::Config::load(root)?.factory().supervisor_wake_input_budget;
-            let over = turn.input_tokens.filter(|tokens| budget > 0 && *tokens > budget);
-            let Some(trigger_tokens) = over else { return Ok(Step::Nothing) };
+            let cap = crate::config::Config::load(root)?.factory().supervisor_wake_input_budget;
+            if cap == 0 { return Ok(Step::Nothing); }
+            let Some(usage) = crate::mcp::tools::service::factory_ops::read_context_usage_from_tail_for_cli(
+                turn.transcript, turn.cli,
+            ) else { return Ok(Step::Nothing) };
+            let budget = usage.model_context_window.filter(|window| *window > 0)
+                .map(|window| (window.saturating_mul(80) / 100).min(cap)).unwrap_or(cap);
+            let trigger_tokens = usage.input_tokens;
+            if trigger_tokens < budget { return Ok(Step::Nothing); }
             if Utc::now() - turn.at > Duration::minutes(FRESH_MINUTES)
                 || crate::factory_context_reset::context_reset_command(turn.cli).is_none()
             {
@@ -345,6 +414,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
                 agent_id: turn.agent.id.clone(),
                 harness_session: turn.harness_session.to_string(),
                 trigger_tokens,
+                latest_call: true,
                 budget,
                 triggered_at: turn.at,
                 blockers: Vec::new(),
@@ -383,7 +453,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
         Phase::Deferred => {
             let handoff_id = save_handoff(root, turn.agent, &state)?;
             let notice = format!(
-                "Context budget: your wake at {} read {} input tokens; the budget is {}. Cassy saved your handoff as {handoff_id} \
+                "Context budget: your latest call at {} used {} input tokens; the context threshold is {}. Cassy saved your handoff as {handoff_id} \
                  from facts (owned tasks, operator approvals from decision notes, pending asks, workers). In this turn, add only \
                  judgement Cassy can't know (what you were about to do, promises, risks) with `memory action=remember \
                  entry_type=handoff content=\"<your lines>\"`; Cassy merges it under the facts. Start no new work. When this \
@@ -447,7 +517,7 @@ pub(crate) fn poll(root: &Path, queue: &dyn PromptQueueStore, agent: &Agent, fac
     };
     let body = crate::store::open_store(root)?.get(handoff_id).map(|e| e.content).unwrap_or_default();
     let brief = format!(
-        "Cassy cleared your context at an idle boundary: one wake read {} input tokens (budget {}). Workers kept running. \
+        "Cassy cleared your context at an idle boundary: the latest call used {} input tokens (context threshold {}). Workers kept running. \
          Your handoff is memory {handoff_id}; it is below and was injected at session start.\n\n{}",
         tokens(state.trigger_tokens),
         tokens(state.budget),

@@ -1568,7 +1568,23 @@ impl CasCore {
         // must not require a registered session or readable agent store.
         let mut triaged_labels = task.labels.clone();
         if let Some(labels) = req.labels.as_deref() {
-            triaged_labels.extend(labels.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned));
+            if labels.trim().is_empty() {
+                // Clearing user labels cannot erase finding provenance or
+                // promote a theoretical finding through the legacy default.
+                let finding = triaged_labels.iter().any(|label| label == "from-finding");
+                triaged_labels.clear();
+                if finding {
+                    triaged_labels.extend(["from-finding".into(), "reach:theoretical".into()]);
+                }
+            } else {
+                let additions: Vec<_> = labels.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+                for axis in ["severity:", "reach:", "journey:"] {
+                    if additions.iter().any(|label| label.starts_with(axis)) {
+                        triaged_labels.retain(|label| !label.starts_with(axis));
+                    }
+                }
+                triaged_labels.extend(additions.into_iter().map(str::to_owned));
+            }
         }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
             crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,

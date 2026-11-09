@@ -11,7 +11,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
          "Rolling window in hours, measured from report task creation. Only Bug tasks labelled stakeholder-reported with P0/P1 count, including closed reports.",
          ConfigType::Int, "48", Constraint::Range(1, 8760)),
         ("factory.release_train_max_age_hours", "Release Train Max Age",
-         "Hours after a release train's first child merge before the supervisor gets one \"train ready to cut\" notice, even with children still in progress. Never cuts automatically.",
+         "Hours after a release train's first child merge before the supervisor gets one \"train ready to cut\" notice, even with children still in progress. The notice never cuts; release.auto_cut_max_per_day governs automatic cuts.",
          ConfigType::Int, "3", Constraint::Range(1, 168)),
         ("factory.focus_mode", "Operator Focus",
          "Operator intent inherited by every worker and reviewer brief, for example visible chunks first.",
@@ -264,11 +264,11 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
-        key: "factory.supervisor_wake_input_budget", section: "factory", name: "Supervisor Wake Input Budget",
-        description: "Input tokens one supervisor wake may read before Cassy saves a handoff and clears the supervisor's context at the next idle boundary. 0 disables.", value_type: ConfigType::Int, default: "1000000",
+        key: "factory.supervisor_wake_input_budget", section: "factory", name: "Supervisor Latest-call Input Cap",
+        description: "Latest-call input cap for idle-boundary supervisor clearing, also capped at 80% of the harness-reported model window when available. 0 disables.", value_type: ConfigType::Int, default: "1000000",
         constraint: Constraint::Range(0, 100_000_000), advanced: false, requires_feature: None,
         keywords: &["factory", "supervisor", "context", "handoff", "clear", "cost"],
-        use_cases: &["Stop a long supervisor session from re-reading its whole context on every wake"],
+        use_cases: &["Clear supervisor context under measured prompt pressure without counting repeated cache reads"],
     });
 
     registry.register(ConfigMeta {

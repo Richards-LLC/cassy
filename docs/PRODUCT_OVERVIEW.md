@@ -178,7 +178,9 @@ queueing, so lifting the hold releases no stale READY backlog.
 Pre-merge reviews launched by the MCP daemon start the existing task verifier
 automatically, carrying the candidate, criteria, receipts and supervisor review
 notes. Approval continues merge admission and leaves a quiet receipt; rejection,
-questions and failed or expired reviews wake the owner with findings. Manual
+questions and failed or expired reviews wake the owner with findings. Host-path
+redaction preserves surrounding questions in review notices and verification
+show/latest while hiding the path itself. Manual
 verifiers keep their existing handoff and authority. Automatic reviews select
 a provider account through the shared launch resolver; failed harness notices
 include the stderr tail and full log path.

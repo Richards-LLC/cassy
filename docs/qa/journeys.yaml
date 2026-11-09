@@ -319,6 +319,10 @@ invariants:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
     bug: {task: cas-0f7b}
+  FACTORY-VERIFIER-QUESTION:
+    statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
+    check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
+    bug: {task: cas-ef5e8}
   FACTORY-FINDING-PRIORITY:
     statement: Reproduced primary factory and CLI findings retain severity times main reach priority; correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
     check: Run independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
@@ -906,12 +910,13 @@ journeys:
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs
+  - crates/cas-types/src/verification.rs
   - cas-cli/src/mcp/tools/core/workflow/verification_tools.rs
   - cas-cli/src/mcp/tools/service/mutation_receipt.rs
   - cas-cli/src/mcp/tools/service/server_handler.rs
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
-  invariants: [FACTORY-FINDING-PRIORITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-QUESTION]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE

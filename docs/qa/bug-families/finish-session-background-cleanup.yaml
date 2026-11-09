@@ -1,0 +1,4 @@
+title: Finish stops session-owned background work before Exit
+tasks: [cas-1318]
+invariants: [HUB-J27-FINISH-BACKGROUND-CLEANUP]
+journeys: [HUB-J27]

@@ -1,4 +1,4 @@
-title: Project card supervisor rows show the supervisor name and fit at phone width
-tasks: [cas-219c]
+title: Project card supervisor rows show the supervisor name clear of the avatar and fit at phone width
+tasks: [cas-219c, cas-be27]
 invariants: [HUB-J14-PROJECT-SUPERVISOR-NAME]
 journeys: [HUB-J14]

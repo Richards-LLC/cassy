@@ -17,12 +17,18 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
 fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
+    let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
+        .and_then(|candidate| candidate.inherited_supervisor_call)
+        .map(|call| serde_json::to_string(&call).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_else(|| "none".into());
     Ok(format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Missing evidence requires supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Missing evidence requires supervisor_call.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
         ),
+        inherited,
         crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
             &core.cas_root,
             task,
@@ -396,6 +402,7 @@ pub(super) async fn approved(
         dispatch.owner_agent_id.clone(),
         crate::mcp::AgentIdentitySource::ServerInternal,
     )?;
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("verification_auto_merge");
     let result = crate::async_runtime::heap_future(|| {
         owner.worktree_merge(
             &candidate.source_branch,

@@ -40,6 +40,10 @@ impl Receipt {
             phases: std::sync::Mutex::new(Vec::new()),
         })
     }
+
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
 }
 
 pub(crate) fn current() -> Option<Arc<Receipt>> {
@@ -150,6 +154,24 @@ pub(crate) fn batch_receipt_committed(label: &str, id: &str, staging: &str) {
             description: format!(
                 "{label} {id} recorded at {staging}; delivery closes continue through \
                  their ordinary gates, with outcomes recorded on each task"
+            ),
+            notification_id: None,
+        });
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
+}
+
+/// A verification add's durable verdict is the requested mutation; any
+/// automatic merge or recovery after it is observable background work.
+pub(crate) fn verification_add_committed(task_id: &str, verification_id: &str) {
+    if let Some(receipt) = current()
+        && receipt.tool == "verification"
+        && receipt.action == "add"
+        && receipt.task_id.as_deref().is_none_or(|expected| expected == task_id)
+    {
+        let _ = receipt.commit.set(Commit {
+            description: format!(
+                "verification `{verification_id}` recorded for task `{task_id}`; merge continuation may still be running"
             ),
             notification_id: None,
         });

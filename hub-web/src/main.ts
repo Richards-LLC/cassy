@@ -170,6 +170,7 @@ function supervisorCommandSession(machineId: string, session: string): Superviso
       },
       send: message => connections.get(machineId)?.send(session, message) ?? false,
       changed: () => { updateConversationViews(); renderConversationList(); },
+      settled: receipt => toast(receipt.detail, { thread: key }),
     });
     supervisorCommands.set(key, commands);
   }

@@ -2548,9 +2548,14 @@ capped command to be retried; it does not hold a builder slot while waiting.
 Registered workers retain their InProgress task and lease during capacity
 waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
-shows that episode once; the background reminder scan queues at most one capacity
-notice after 20 minutes. Its wake request follows normal supervisor readiness
-policy and retains the task's active state. A delivered explicit assistance
+shows that episode once. Higher-priority queue waits never wake the supervisor.
+Disk-watermark waits share one pressure notice per factory session after 20
+minutes, listing waiting workers and reclaimable target caches. The background
+reminder scan persists the pressure snapshot and updates it only when the
+waiting set or reclaimable bytes change; incomplete inventories report an
+unknown total. A resolved pressure episode can recur. Other resource refusals
+retain their one-notice-per-worker escalation after 20 minutes. Notice wakes
+follow normal supervisor readiness policy and retain the task's active state. A delivered explicit assistance
 message consumes that episode's automatic notice even after a gap longer than
 four minutes between retries. A stale retry stops reserving queue position;
 the live task lease still preserves its original wait age and notice state.

@@ -238,13 +238,6 @@ impl CasCore {
             });
         }
 
-        let removed = Dependency {
-            from_id: req.from_id.clone(),
-            to_id: req.to_id.clone(),
-            dep_type,
-            created_at: chrono::Utc::now(),
-            created_by: None,
-        };
         let split_cleanup = if dep_type == DependencyType::ParentChild {
             Some(crate::cloud::epic_split::release_obsolete_claims_for_task(
                 &self.cas_root,
@@ -253,9 +246,21 @@ impl CasCore {
         } else {
             None
         };
-        let mut response = format!("Removed dependency: {}", describe_dependency(&removed));
+        let mut response = format!(
+            "Removed dependency: {}'s `{dep_type}` link to {} no longer applies.",
+            req.from_id, req.to_id
+        );
         append_split_claim_cleanup(&mut response, split_cleanup);
-        Ok(Self::success(response))
+        Ok(CallToolResult {
+            structured_content: Some(serde_json::json!({
+                "removed_dependency": {
+                    "from_id": req.from_id,
+                    "to_id": req.to_id,
+                    "dep_type": dep_type,
+                }
+            })),
+            ..Self::success(response)
+        })
     }
 }
 

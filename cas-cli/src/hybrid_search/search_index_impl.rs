@@ -411,7 +411,7 @@ impl SearchIndex {
     /// The shared snapshot avoids rewriting the index until a task is added,
     /// removed, or updated, while a new process always performs an initial
     /// reconciliation before returning task search results.
-    pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<bool, MemError> {
+    pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<usize, MemError> {
         let mut snapshot = tasks
             .iter()
             .map(|task| (task.id.clone(), task.updated_at.timestamp_micros()))
@@ -424,7 +424,7 @@ impl SearchIndex {
         if indexed_snapshot.as_ref() == Some(&snapshot)
             && self.count_documents(DocType::Task)? == tasks.len() as u64
         {
-            return Ok(false);
+            return Ok(0);
         }
 
         #[cfg(test)]
@@ -462,7 +462,7 @@ impl SearchIndex {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         *indexed_snapshot = Some(snapshot);
-        Ok(true)
+        Ok(tasks.len())
     }
 
     /// Index durable task artifacts with one commit for a close-time scan or

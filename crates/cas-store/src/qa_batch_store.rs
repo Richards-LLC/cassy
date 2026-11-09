@@ -22,6 +22,9 @@ pub const QA_BATCH_RECEIPT_SCHEMA: u32 = 1;
 /// assembled tip, never a QA walk. Binaries that know only schema 1 skip it as QA
 /// evidence, so the two cannot be mistaken across an upgrade.
 pub const RELEASE_VERDICT_SCHEMA: u32 = 2;
+/// A published release tag attests that a delivery's tree effect shipped.
+/// It is neither a QA walk nor a code-review ledger.
+pub const RELEASE_TAG_VERDICT_SCHEMA: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QaBatchReceipt {
@@ -37,6 +40,9 @@ pub struct QaBatchReceipt {
     pub task_heads: BTreeMap<String, String>,
     pub recorder_agent_id: String,
     pub recorded_at: String,
+    /// Present only for a verdict derived from a published version tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_tag: Option<String>,
     /// Who walked the ledger (cas-26ac). Absent on receipts recorded before
     /// authors were tracked; present ones must stay outside each task's
     /// implementation lineage unless the operator overrode it for that task.
@@ -65,12 +71,22 @@ fn connection(root: &Path) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::C
 }
 
 fn check_receipt(receipt: &QaBatchReceipt) -> Result<String> {
-    if !matches!(receipt.schema_version, QA_BATCH_RECEIPT_SCHEMA | RELEASE_VERDICT_SCHEMA)
+    let release_tag = receipt.schema_version == RELEASE_TAG_VERDICT_SCHEMA;
+    if !matches!(receipt.schema_version, QA_BATCH_RECEIPT_SCHEMA | RELEASE_VERDICT_SCHEMA | RELEASE_TAG_VERDICT_SCHEMA)
         || receipt.id.is_empty()
         || receipt.project_id.is_empty()
         || receipt.task_heads.is_empty()
-        || receipt.ledger_size_bytes == 0
+        || (!release_tag && receipt.ledger_size_bytes == 0)
         || receipt.recorder_agent_id.is_empty()
+        || (release_tag && receipt.release_tag.as_deref().is_none_or(str::is_empty))
+        || (!release_tag && receipt.release_tag.is_some())
+        || (release_tag
+            && (!receipt.ledger_artifact_id.is_empty()
+                || !receipt.ledger_path.is_empty()
+                || !receipt.ledger_sha256.is_empty()
+                || receipt.ledger_author_id.is_some()
+                || receipt.ledger_author_role.is_some()
+                || !receipt.author_overrides.is_empty()))
     {
         return Err(StoreError::Parse("incomplete QA batch receipt".into()));
     }
@@ -209,7 +225,13 @@ pub fn release_verdicts_for_task(
     project: &str,
     task: &str,
 ) -> Result<Vec<QaBatchReceipt>> {
-    receipts_for_task(root, project, task, RELEASE_VERDICT_SCHEMA)
+    Ok(list_qa_batch_receipts(root, project)?
+        .into_iter()
+        .filter(|receipt| {
+            matches!(receipt.schema_version, RELEASE_VERDICT_SCHEMA | RELEASE_TAG_VERDICT_SCHEMA)
+                && receipt.task_heads.contains_key(task)
+        })
+        .collect())
 }
 
 fn receipts_for_task(
@@ -334,6 +356,7 @@ mod tests {
             staging_sha: "b".repeat(40),
             recorder_agent_id: "supervisor".into(),
             recorded_at: Utc::now().to_rfc3339(),
+            release_tag: None,
             ledger_author_id: None,
             ledger_author_role: None,
             author_overrides: BTreeMap::new(),

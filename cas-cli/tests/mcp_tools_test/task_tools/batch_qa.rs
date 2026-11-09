@@ -634,9 +634,12 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
     let supervisor = CasCore::with_daemon(repo.join(".cas"), None, None);
     supervisor.set_agent_id_for_testing(supervisor_id.into());
     let ledger = repo.join("LEDGER.md");
+    // A QA receipt's ledger must pass `cas qa ledger check` for its owner task.
+    let owner = tasks.get("cas-bq01").unwrap();
     std::fs::write(
         &ledger,
-        "# Staging QA\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n",
+        cas::qa_ledger::scaffold(&owner, &[], "rev")
+            + "\ncas-bq01 PASS at 390/1440\ncas-bq02 PASS at 390/1440\n",
     )
     .unwrap();
     let store = cas_store::SqliteArtifactStore::open(&repo.join(".cas")).unwrap();

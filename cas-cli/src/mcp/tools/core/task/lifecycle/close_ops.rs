@@ -14794,7 +14794,7 @@ fn without_regenerated_ledger(
 /// cas-7f95: `scripts/release.sh` folds each `changelog.d/<task>.md` fragment
 /// into CHANGELOG.md and deletes the file in its `release: vX.Y.Z` commit, so
 /// a delivery closing after a release no longer finds its fragment. A
-/// fragment named for one of `owners` was promoted, not dropped, when the
+/// fragment named in the delivered path was promoted, not dropped, when the
 /// commit that deleted it on the target is a release commit that added every
 /// entry line of the fragment to CHANGELOG.md, and the target still has them.
 /// Headings are not compared: promotion merges same-title headings.
@@ -14813,11 +14813,16 @@ fn without_promoted_changelog_fragments(
     if !paths.iter().any(|path| owned(path)) {
         return (None, paths);
     }
-    let origin = format!("origin/{parent_branch}");
+    let local_target = parent_branch.strip_prefix("origin/").unwrap_or(parent_branch);
+    let origin = if parent_branch.starts_with("origin/") {
+        parent_branch.to_string()
+    } else {
+        format!("origin/{parent_branch}")
+    };
     let target_ref = if git_ref_exists(repo_path, &origin) && git_commit_is_ancestor(repo_path, anchor, &origin) {
         origin
     } else {
-        parent_branch.to_string()
+        local_target.to_string()
     };
     let git_text = |args: &[&str]| {
         std::process::Command::new("git")
@@ -14831,7 +14836,15 @@ fn without_promoted_changelog_fragments(
     let Some(changelog) = git_text(&["show", &format!("{target_ref}:CHANGELOG.md")]) else {
         return (None, paths);
     };
-    let current: std::collections::HashSet<&str> = changelog.lines().map(str::trim_end).collect();
+    let mut current = std::collections::HashSet::new();
+    let mut in_released_version = false;
+    for line in changelog.lines() {
+        if line.starts_with("## [") {
+            in_released_version = released_version_heading(line);
+        } else if in_released_version {
+            current.insert(line.trim_end());
+        }
+    }
     let is_release = |subject: &str| {
         subject.trim().strip_prefix("release: v").is_some_and(|version| {
             let parts: Vec<&str> = version.split('.').collect();
@@ -14892,22 +14905,29 @@ fn without_promoted_changelog_fragments(
     )
 }
 
-/// Both history-derived drop exceptions, with their notes joined. `owners`
-/// are the task ids whose changelog fragments this close may account for.
+fn released_version_heading(line: &str) -> bool {
+    let Some(version) = line
+        .strip_prefix("## [")
+        .and_then(|line| line.split_once("] - ").map(|(version, _)| version))
+    else {
+        return false;
+    };
+    let components: Vec<_> = version.split('.').collect();
+    components.len() == 3
+        && components.iter().all(|component| {
+            !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// The history-derived ledger drop exception and its audit note.
 fn without_regenerated_history(
     repo_path: &std::path::Path,
     anchor: &str,
     parent_branch: &str,
     paths: Vec<String>,
-    owners: &[&str],
 ) -> (Option<String>, Vec<String>) {
     let (ledger, paths) = without_regenerated_ledger(repo_path, anchor, parent_branch, paths);
-    let (fragments, paths) = without_promoted_changelog_fragments(repo_path, anchor, parent_branch, paths, owners);
-    let note = match (ledger, fragments) {
-        (Some(ledger), Some(fragments)) => Some(format!("{ledger}; {fragments}")),
-        (ledger, fragments) => ledger.or(fragments),
-    };
-    (note, paths)
+    (ledger, paths)
 }
 
 /// cas-2ea6: the ledger keys whose `anchor` hashes `target` lacks, when each
@@ -15220,11 +15240,14 @@ fn epic_anchor_content_presence(
         task_id: Some(task.id.clone()),
         known_commits: vec![anchor.to_string()],
     };
+    let owners = std::iter::once(task.id.as_str())
+        .chain(children.iter().map(|child| child.id.as_str()))
+        .collect::<Vec<_>>();
     let presence = if git_commit_parent_count(repo, anchor) >= 2 {
         task_attribution::merge_tip_content_presence(repo, target, anchor, None, &identity, None)
-            .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target))
+            .unwrap_or_else(|| delivery_content_presence_in_parent(repo, anchor, target, &owners))
     } else {
-        delivery_content_presence_in_parent(repo, anchor, target)
+        delivery_content_presence_in_parent(repo, anchor, target, &owners)
     };
     let DeliveryContentPresence::Dropped { paths } = &presence else {
         return (presence, None);
@@ -15232,10 +15255,7 @@ fn epic_anchor_content_presence(
     // cas-2ea6: the history-derived ledger is judged by regeneration.
     // Supervisor decision (cas-7f95): an epic close also accounts for its
     // children's changelog fragments.
-    let owners: Vec<&str> = std::iter::once(task.id.as_str())
-        .chain(children.iter().map(|child| child.id.as_str()))
-        .collect();
-    let (ledger_note, remaining) = without_regenerated_history(repo, anchor, target, paths.clone(), &owners);
+    let (ledger_note, remaining) = without_regenerated_history(repo, anchor, target, paths.clone());
     if remaining.is_empty() {
         return (DeliveryContentPresence::Present { paths: paths.clone() }, ledger_note);
     }
@@ -15755,7 +15775,7 @@ fn anchored_delivery_content_gate_unbounded(
         DeliveryContentPresence::Dropped { paths } => {
             // cas-2ea6: the history-derived ledger is judged by regeneration,
             // and its note rides on whichever check accepts the rest.
-            let (ledger_note, paths) = without_regenerated_history(repo_path, anchor, parent_branch, paths, &[task_id.as_str()]);
+            let (ledger_note, paths) = without_regenerated_history(repo_path, anchor, parent_branch, paths);
             let with_ledger = |note: String| match &ledger_note {
                 Some(ledger) if note.is_empty() => ledger.clone(),
                 Some(ledger) => format!("{note}; {ledger}"),
@@ -19785,9 +19805,11 @@ fn delivery_is_proven_on_parent(
     repo_path: &std::path::Path,
     commit_ish: &str,
     parent_branch: &str,
+    owner: Option<&str>,
 ) -> bool {
+    let owners = owner.into_iter().collect::<Vec<_>>();
     matches!(
-        delivery_content_presence_in_parent(repo_path, commit_ish, parent_branch),
+        delivery_content_presence_in_parent(repo_path, commit_ish, parent_branch, &owners),
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }
     )
 }
@@ -20057,10 +20079,12 @@ pub(crate) fn validate_task_commit_receipt(
     // unmerged, historical, and empty receipts fail on their own predicates.
     // Content proof is the final delivery-authorization gate, not a
     // replacement for those topology/attribution diagnostics.
+    let owners = window.identity.task_id.as_deref().into_iter().collect::<Vec<_>>();
     let drop_review = match delivery_content_presence_in_parent(
         repo_path,
         &full_receipt,
         parent_branch,
+        &owners,
     ) {
         DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. } => {
             None
@@ -20697,7 +20721,7 @@ fn resolve_merge_evidence(
 ) -> Option<ZeroCommitCloseOutcome> {
     // cas-127f: merge-satisfied — parked tip is now on the parent.
     if let Some(anchor) = factory_branch_anchor {
-        if delivery_is_proven_on_parent(worker_worktree_path, anchor, parent_branch) {
+        if delivery_is_proven_on_parent(worker_worktree_path, anchor, parent_branch, Some(task_id)) {
             return Some(ZeroCommitCloseOutcome::Proceed);
         }
     }
@@ -25744,10 +25768,56 @@ pub(crate) fn delivery_content_presence_on_target(
     delivery_commit: &str,
     target_ref: &str,
 ) -> DeliveryContentPresence {
-    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false)
+    delivery_content_presence_on_target_for_paths(repo_path, delivery_commit, target_ref, None, false, &[])
+}
+
+pub(crate) fn delivery_content_presence_on_target_for_task(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    task_id: &str,
+) -> DeliveryContentPresence {
+    delivery_content_presence_on_target_for_paths(
+        repo_path, delivery_commit, target_ref, None, false, &[task_id],
+    )
 }
 
 fn delivery_content_presence_on_target_for_paths(
+    repo_path: &std::path::Path,
+    delivery_commit: &str,
+    target_ref: &str,
+    selected_paths: Option<&[String]>,
+    resolution_only: bool,
+    owners: &[&str],
+) -> DeliveryContentPresence {
+    let presence = delivery_content_presence_on_target_for_paths_raw(
+        repo_path,
+        delivery_commit,
+        target_ref,
+        selected_paths,
+        resolution_only,
+    );
+    let DeliveryContentPresence::Dropped { paths } = presence else {
+        return presence;
+    };
+    // A release cut consumes per-task fragments after promoting their entries
+    // into CHANGELOG.md. Apply that content-equivalence rule at the shared
+    // target seam so close, merge and epic callers cannot disagree.
+    let (_, remaining) = without_promoted_changelog_fragments(
+        repo_path,
+        delivery_commit,
+        target_ref,
+        paths.clone(),
+        owners,
+    );
+    if remaining.is_empty() {
+        DeliveryContentPresence::Present { paths }
+    } else {
+        DeliveryContentPresence::Dropped { paths: remaining }
+    }
+}
+
+fn delivery_content_presence_on_target_for_paths_raw(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     target_ref: &str,
@@ -25950,8 +26020,11 @@ pub(crate) fn delivery_content_presence_in_parent(
     repo_path: &std::path::Path,
     delivery_commit: &str,
     parent_branch: &str,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
-    delivery_content_presence_in_parent_for_paths(repo_path, delivery_commit, parent_branch, None, false)
+    delivery_content_presence_in_parent_for_paths(
+        repo_path, delivery_commit, parent_branch, None, false, owners,
+    )
 }
 
 /// cas-bdd2: [`delivery_content_presence_in_parent`] for a commit inside a
@@ -25966,9 +26039,11 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
     parent_branch: &str,
     carrier: &str,
     carries_source: &std::cell::OnceCell<bool>,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
-    let ordinary =
-        || delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch);
+    let ordinary = || {
+        delivery_content_presence_in_parent(repo_path, delivery_commit, parent_branch, owners)
+    };
     let Some(paths) = std::process::Command::new("git")
         .args([
             "diff",
@@ -26010,6 +26085,7 @@ pub(super) fn delivery_content_presence_in_parent_leaving_artifacts(
             parent_branch,
             Some(&measured),
             false,
+            owners,
         )
     });
     match inner {
@@ -26046,6 +26122,7 @@ fn delivery_content_presence_in_parent_for_paths(
     parent_branch: &str,
     selected_paths: Option<&[String]>,
     resolution_only: bool,
+    owners: &[&str],
 ) -> DeliveryContentPresence {
     let origin_parent = format!("origin/{parent_branch}");
     let target = if git_ref_exists(repo_path, &origin_parent)
@@ -26069,6 +26146,7 @@ fn delivery_content_presence_in_parent_for_paths(
         target,
         selected_paths,
         resolution_only,
+        owners,
     )
 }
 
@@ -36056,7 +36134,7 @@ esac
         std::fs::write(&trace, "").unwrap();
         let first_path = vec![files[0].to_string()];
         assert_eq!(
-            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false),
+            delivery_content_presence_on_target_for_paths(p, &delivery, "merge-heavy", Some(&first_path), false, &[]),
             DeliveryContentPresence::Present { paths: first_path },
         );
         let presence = delivery_content_presence_on_target(p, &delivery, "merge-heavy");
@@ -36401,11 +36479,19 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
 
         let (dir, task, _, fragment) = build("cas-test1", "release");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", dir.path()) {
-            MergeStateGateOutcome::ProceedWithNote(note) => {
-                assert!(note.contains("cas-7f95") && note.contains(&fragment), "{note}")
-            }
+            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => {}
             other => panic!("a release-promoted fragment is delivered: {other:?}"),
         }
+        assert!(
+            matches!(
+                check_zero_commit_close(
+                    dir.path(), "main", &task.id, &task.task_type, None, false,
+                    task.deliverables.factory_branch_anchor.as_deref(), None, None,
+                ),
+                ZeroCommitCloseOutcome::Proceed,
+            ),
+            "the parked close path accepts the released tree"
+        );
         let p = dir.path();
         let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
         std::fs::write(p.join("CHANGELOG.md"), changelog.replace(&format!("{ENTRY}\n"), "")).unwrap();
@@ -36416,14 +36502,23 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
         let (dir, task, _, fragment) = build("cas-test1", "older section");
         refused(&dir, &task, &fragment, "a release that did not add the fragment's lines");
+        assert!(
+            matches!(
+                check_zero_commit_close(
+                    dir.path(), "main", &task.id, &task.task_type, None, false,
+                    task.deliverables.factory_branch_anchor.as_deref(), None, None,
+                ),
+                ZeroCommitCloseOutcome::AmbiguousCodeTask(_),
+            ),
+            "a release tag without the fragment's changelog lines stays dropped"
+        );
 
         let (dir, task, anchor, fragment) = build("cas-other", "release");
         refused(&dir, &task, &fragment, "another task's fragment");
         let sibling = Task { id: "cas-other".into(), ..task.clone() };
         let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");
         assert!(
-            matches!(presence, DeliveryContentPresence::Present { .. })
-                && note.as_deref().is_some_and(|note| note.contains("cas-7f95") && note.contains(&fragment)),
+            matches!(presence, DeliveryContentPresence::Present { .. }),
             "an epic close accepts its child's promoted fragment: {presence:?} {note:?}"
         );
     }
@@ -37565,7 +37660,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "topology predicate must remain ancestry-only for established callers"
         );
         assert!(
-            !delivery_is_proven_on_parent(p, &delivery, "main"),
+            !delivery_is_proven_on_parent(p, &delivery, "main", None),
             "delivery authorization must add content proof to topology"
         );
 

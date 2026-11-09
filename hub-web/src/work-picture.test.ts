@@ -88,6 +88,7 @@ describe("work events (cas-ff22)", () => {
 
   it("binds each source edit to its retrieval state while retaining cached success offline", () => {
     let online = true, request = 0;
+    const cachedPayload = "cached source", recoveredPayload = "Recovered edit";
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? `detail-${++request}` : undefined) };
     const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn() });
     const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [
@@ -103,34 +104,32 @@ describe("work events (cas-ff22)", () => {
     paint();
     node.querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
     buttons()[0]!.click();
-    picture.detail("m", "s", { request_id: "detail-1", event_id: "cached", detail: "cached source", truncated: false });
+    picture.detail("m", "s", { request_id: "detail-1", event_id: "cached", detail: cachedPayload, truncated: false });
     online = false; picture.disconnected("m", "s"); paint();
     buttons()[1]!.click();
-    expect(detail(0).dataset.sourceEventId).toBe("cached");
-    expect(detail(0).dataset.retrievalState).toBe("ready");
-    expect(detail(0).textContent).toContain("cached source");
-    expect(detail(1).dataset.sourceEventId).toBe("edit");
-    expect(detail(1).dataset.retrievalState).toBe("offline");
-    expect(detail(1).textContent).not.toContain("cached source");
+    expect(detail(0).dataset).toMatchObject({ sourceEventId: "cached", retrievalState: "ready" });
+    expect(detail(0).textContent).toContain(cachedPayload);
+    expect(detail(1).dataset).toMatchObject({ sourceEventId: "edit", retrievalState: "offline" });
+    expect(detail(1).textContent).not.toContain(cachedPayload);
     expect(node.querySelector('[aria-busy="true"]')).toBeNull();
     paint(); paint();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
     online = true; picture.reattached("m", "s"); paint(); paint();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
-    expect(detail(1).dataset.retrievalState).toBe("loading");
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
     picture.disconnected("m", "s"); paint(); paint();
-    expect(detail(1).dataset.retrievalState).toBe("offline");
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "offline" });
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
     picture.reattached("m", "s"); paint();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(4);
     picture.detail("m", "s", { request_id: "detail-2", event_id: "edit", detail: "abandoned response", truncated: false });
     paint();
-    expect(detail(1).dataset.retrievalState).toBe("loading");
-    picture.detail("m", "s", { request_id: "detail-3", event_id: "edit", detail: "Recovered edit", truncated: false });
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
+    picture.detail("m", "s", { request_id: "detail-3", event_id: "edit", detail: recoveredPayload, truncated: false });
     paint();
-    expect(detail(1).dataset.retrievalState).toBe("ready");
-    expect(detail(1).textContent).toContain("Recovered edit");
-    expect(detail(0).textContent).toContain("cached source");
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "ready" });
+    expect(detail(1).textContent).toContain(recoveredPayload);
+    expect(detail(0).textContent).toContain(cachedPayload);
     node.remove();
   });
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {

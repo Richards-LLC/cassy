@@ -2358,13 +2358,15 @@ async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
 
 #[tokio::test]
 async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
-    for (before, after) in [
-        (TaskStatus::Open, TaskStatus::InProgress),
-        (TaskStatus::InProgress, TaskStatus::Closed),
-        (TaskStatus::InProgress, TaskStatus::Cancelled),
-        (TaskStatus::Blocked, TaskStatus::InProgress),
-        (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
-        (TaskStatus::AwaitingMerge, TaskStatus::Closed),
+    for (before, after, offset) in [
+        (TaskStatus::Open, TaskStatus::InProgress, 60),
+        (TaskStatus::InProgress, TaskStatus::Closed, 60),
+        (TaskStatus::InProgress, TaskStatus::Cancelled, 60),
+        (TaskStatus::Blocked, TaskStatus::InProgress, 60),
+        (TaskStatus::AwaitingMerge, TaskStatus::InProgress, 60),
+        (TaskStatus::AwaitingMerge, TaskStatus::Closed, 60),
+        (TaskStatus::InProgress, TaskStatus::Open, -60),
+        (TaskStatus::InProgress, TaskStatus::Blocked, 60),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
@@ -2377,7 +2379,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
             after,
             project,
             project,
-            local.updated_at + chrono::Duration::minutes(1),
+            local.updated_at + chrono::Duration::seconds(offset),
         );
         if before == TaskStatus::AwaitingMerge {
             raw["notes"] = serde_json::json!(format!(
@@ -2388,7 +2390,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         if !matches!(after, TaskStatus::Closed | TaskStatus::Cancelled) {
             raw["assignee"] = serde_json::json!(local.assignee);
         }
-        let (_temp, result, store, _queue) = pull_team_fixtures_with_delivery(
+        let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
             project,
             vec![raw],
             vec![local.clone()],
@@ -2400,9 +2402,21 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         )
         .await;
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(result.pulled_tasks, 1);
-        assert_eq!(store.get(&local.id).unwrap().status, after);
-        assert_eq!(result.task_status_transitions.len(), 1);
+        let stored = store.get(&local.id).unwrap();
+        if offset < 0 {
+            assert_eq!(result.pulled_tasks, 0);
+            assert_eq!(stored.status, before);
+            assert_eq!(stored.updated_at, local.updated_at);
+            assert!(result.task_status_transitions.is_empty());
+            let conflict = queue.list_conflicts(1).unwrap().pop().unwrap();
+            assert_eq!(conflict.strategy, "task_lifecycle_guard");
+            let rejected: serde_json::Value = serde_json::from_str(&conflict.discarded_row_json).unwrap();
+            assert_eq!(rejected["reason"], "lifecycle_timestamp");
+        } else {
+            assert_eq!(result.pulled_tasks, 1);
+            assert_eq!(stored.status, after);
+            assert_eq!(result.task_status_transitions.len(), 1);
+        }
     }
 }
 

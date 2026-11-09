@@ -2402,7 +2402,7 @@ else:
         #[cfg(target_os = "linux")]
         {
             assert!(refusal.to_string().contains(&pids[0].to_string()), "{refusal}");
-            assert!(!refusal.to_string().contains(&format!("pid {}", std::process::id())), "contender named as holder: {refusal}");
+            assert!(!refusal.to_string().contains(&std::process::id().to_string()), "contender named as holder: {refusal}");
         }
         let mut app = crate::ui::factory::app::FactoryApp::for_test_at(root.clone());
         let pty = cas_mux::Pty::spawn("respawn-worker", cas_mux::PtyConfig {

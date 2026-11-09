@@ -903,7 +903,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 2. Read the observed native result without resending the command
 3. Send pasted paths and unknown slash text as messages (cas-62ea)
 4. Submit an exact Usage token from the composer (cas-62ea)
-5. Finish waits for the active turn, then its reply reaches the conversation
+5. Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)
 6. Cancel Clear, then confirm Exit for the named supervisor
 7. Remove the stopped session after Exit without claiming an unobserved command result
 8. Open the quick controls and read the permission explanation

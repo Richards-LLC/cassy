@@ -40,6 +40,15 @@ deployed staging where one exists), capped per release, and writes one ledger
 citing that evidence; uncovered changes are `NOT EXERCISED`. Include only tasks that passed;
 failed or unreviewed tasks remain open.
 
+Before the walk, run `cas qa ledger init --task <batch-task-or-epic>
+--covers cas-delivery-a,cas-delivery-b` with every intended receipt delivery.
+The generated `covers:` header names those IDs; without `--covers`, init uses
+its owner task. Before publishing, run `cas qa ledger check <path>
+--task <batch-task-or-epic> --covers cas-delivery-a,cas-delivery-b` with the same
+set. Missing, malformed or incomplete coverage fails preflight. QA and release
+receipts enforce declared coverage even when other tasks appear in the prose.
+Historical ledgers without this header retain their existing receipt checks.
+
 Publish the ledger using `artifact action=publish task_id=<batch-task-or-epic>
 path=<absolute-ledger-path>`. Cloud storage is optional: a locally published
 artifact is sufficient. A live registered supervisor who did not implement

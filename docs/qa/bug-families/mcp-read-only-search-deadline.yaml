@@ -1,0 +1,3 @@
+title: Read-only evidence search deadlines report non-mutating metadata and preserve search stage timings
+tasks: [cas-533a]
+journeys: [FACTORY-MERGE]

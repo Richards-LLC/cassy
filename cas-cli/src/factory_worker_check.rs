@@ -2327,7 +2327,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b() {
-        use std::os::unix::process::CommandExt;
         use std::time::{Duration, Instant};
         const NAME: &str = "factory_worker_check::tests::recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b";
         const CHILD: &str = "CAS_9F7B_RUNNER";
@@ -2404,7 +2403,7 @@ else:
             assert!(refusal.to_string().contains(&pids[0].to_string()), "{refusal}");
             assert!(!refusal.to_string().contains(&std::process::id().to_string()), "contender named as holder: {refusal}");
         }
-        let mut app = crate::ui::factory::app::FactoryApp::for_test_at(root.clone());
+        let mut app = crate::ui::factory::FactoryApp::for_test_at(root.clone());
         let pty = cas_mux::Pty::spawn("respawn-worker", cas_mux::PtyConfig {
             command: "sleep".into(), args: vec!["120".into()], cwd: Some(repo.clone()),
             env: vec![], env_remove: vec![], rows: 24, cols: 80,

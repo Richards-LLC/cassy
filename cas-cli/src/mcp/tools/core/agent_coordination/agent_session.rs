@@ -76,6 +76,78 @@ mod tests {
         let agent = core.open_agent_store().unwrap().get("explicit-worker").unwrap();
         assert_eq!(agent.role, AgentRole::Worker);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shared_mcp_child_registration_refuses_before_mutating_parent_gh1418() {
+        use crate::mcp::tools::{SessionStartRequest, VerificationAddRequest};
+        use crate::types::{Agent, Task, VerificationProvenance};
+        use rmcp::model::ErrorCode;
+
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Standard] {
+            let parent_id = format!("parent-{role}");
+            let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+            let agents = core.open_agent_store().unwrap();
+            let parent = Agent::new_with_role(parent_id.clone(), "parent".into(), role);
+            agents.register(&parent).unwrap();
+            core.set_agent_id_for_testing(parent_id.clone());
+            let before = serde_json::to_value(agents.get(&parent_id).unwrap()).unwrap();
+
+            // Generic and typed native children use the parent's MCP connection.
+            // Neither a new ID nor the inherited ID may change its identity.
+            for name in ["default", "task-verifier"] {
+                for session_id in [format!("child-{role}-{name}"), parent_id.clone()] {
+                    for entry in ["register", "session_start"] {
+                        let result = if entry == "register" {
+                            core.cas_agent_register(Parameters(AgentRegisterRequest {
+                                name: name.into(), agent_type: "sub_agent".into(),
+                                session_id: Some(session_id.clone()), parent_id: Some(parent_id.clone()),
+                            })).await
+                        } else {
+                            core.cas_agent_session_start(Parameters(SessionStartRequest {
+                                session_id: Some(session_id.clone()), name: Some(name.into()),
+                                agent_type: Some("sub_agent".into()), parent_id: Some(parent_id.clone()),
+                                permission_mode: None, cwd: None, limit: None,
+                            })).await
+                        };
+                        let error = result.expect_err("shared connection cannot authenticate a child");
+                        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+                        assert_eq!(error.data.as_ref().unwrap()["rule_id"], "shared_mcp_child_identity");
+                        assert_eq!(core.get_agent_id().unwrap(), parent_id);
+                        assert_eq!(serde_json::to_value(agents.get(&parent_id).unwrap()).unwrap(), before);
+                        if session_id != parent_id {
+                            assert!(agents.get(&session_id).is_err());
+                        }
+                        assert!(!root.join("current_session").exists());
+                    }
+                }
+            }
+
+            let task = Task::new(format!("cas-parent-{role}"), "Parent authority".into());
+            core.open_task_store().unwrap().add(&task).unwrap();
+            let dispatch = cas_store::create_verification_dispatch(
+                &root, &task.id, "worker", &parent_id,
+                chrono::Utc::now() + chrono::Duration::minutes(10),
+            ).unwrap();
+            let verdict = core.cas_verification_add(Parameters(VerificationAddRequest {
+                task_id: task.id.clone(), status: "error".into(), summary: "Parent-owned verdict".into(),
+                confidence: Some(0.0), issues: None, files_reviewed: None, duration_ms: None,
+                verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
+            })).await;
+            let record = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+            if role == AgentRole::Supervisor {
+                verdict.expect("parent keeps direct supervisor authority");
+                let record = record.unwrap();
+                assert_eq!(record.agent_id.as_deref(), Some(parent_id.as_str()));
+                assert_eq!(record.provenance, VerificationProvenance::SupervisorDirect);
+            } else {
+                assert_eq!(verdict.unwrap_err().code, ErrorCode::INVALID_PARAMS);
+                assert!(record.is_none());
+            }
+        }
+    }
 }
 
 impl CasCore {

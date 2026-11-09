@@ -1,0 +1,5 @@
+title: Target-only candidate re-dispatch carries the supervisor's answer for the unchanged NOT EXERCISED row
+found: '2026-11-09'
+tasks: [cas-1d99]
+invariants: []
+journeys: [FACTORY-MERGE]

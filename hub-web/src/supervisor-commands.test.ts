@@ -131,6 +131,29 @@ describe("supervisor slash commands", () => {
 });
 
 describe("supervisor command receipts", () => {
+  it("settles a finished /mcp into one toast with no card, while a failure keeps its card until Dismiss (cas-95ea)", async () => {
+    vi.useFakeTimers();
+    try {
+      const settled = vi.fn();
+      const session = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send: () => true, changed: () => {}, settled });
+      await session.run("mcp", false);
+      const ok = [...session.receipts.keys()][0]!;
+      const observed: CommandReceipt = { client_ref: ok, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false };
+      session.receive(observed); session.receive(observed);
+      expect(settled).toHaveBeenCalledExactlyOnceWith(observed);
+      expect(session.visibleReceipts).toEqual([]);
+
+      await session.run("mcp", false);
+      const failed = [...session.receipts.keys()][1]!;
+      session.reject(failed, `${COMMAND_ERROR_PREFIX} The supervisor is busy.`);
+      expect(session.visibleReceipts.map(receipt => [receipt.client_ref, receipt.phase])).toEqual([[failed, "refused"]]);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(session.visibleReceipts).toHaveLength(1);
+      await session.dismiss(failed);
+      expect(session.visibleReceipts).toEqual([]);
+      expect(settled).toHaveBeenCalledTimes(1);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
   it("cancels queued or interactive receipts on Dismiss and waits for the daemon before allowing Exit (cas-f1a2)", async () => {
     vi.useFakeTimers();
     try {

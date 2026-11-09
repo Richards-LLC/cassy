@@ -792,7 +792,7 @@ invariants:
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
   HUB-J25-SOURCE-RETRIEVAL:
-    description: Each expanded changed file exposes the source event and current retrieval state; offline recovery cannot pass by observing a cached sibling diff.
+    statement: Each expanded changed file exposes the source event and current retrieval state; offline recovery cannot pass by observing a cached sibling diff.
     check: Run the source-edit controller regression in work-picture.test.ts and the named tool-reported-edits part of HUB-J25; verify offline and recovered states on the selected file, cached sibling availability and no offline request loop.
   HUB-J25-TYPED-TOOL-EVIDENCE:
     statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.

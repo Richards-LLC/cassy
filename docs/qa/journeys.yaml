@@ -2714,6 +2714,8 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - crates/cas-store/src/task_store.rs
+  - cas-cli/src/cloud/syncer/pull.rs
   - cas-cli/src/cli/factory/wedged.rs
   - cas-cli/src/mcp/tools/service/worker_liveness.rs
   - cas-cli/src/mcp/tools/service/worker_liveness/tests.rs

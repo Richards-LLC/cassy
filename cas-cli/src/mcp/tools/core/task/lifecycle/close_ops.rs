@@ -34918,6 +34918,47 @@ esac
         ));
     }
 
+    #[test]
+    fn fresh_park_uses_pushed_tip_from_recorded_start_cas_787e() {
+        use cas_store::TaskStore;
+        let _env = TestEnvGuard::temp_home();
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        let base = rev_parse_local(repo, "HEAD");
+        let red = commit_local(repo, "red.rs", "test(factory): replay incident");
+        let green = commit_local(repo, "green.rs", "fix(factory): resolve incident");
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", "factory/worker"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::InProgress;
+        task.deliverables.factory_branch_anchor = Some(red.clone());
+        let target = cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: "factory/worker".into(), base_sha: base,
+        });
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        store.add(&task).unwrap();
+        let parking = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo, "main", Some("factory/worker"), Some(&green),
+        );
+        assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(green.as_str()));
+        assert_eq!(parking.status, TaskStatus::InProgress);
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(red.as_str()),
+            "prediction must leave persistence to the guarded park");
+        task.deliverables.factory_branch_start.as_mut().unwrap().assignee = "another-worker".into();
+        let unrelated = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo, "main", Some("factory/worker"), Some(&green),
+        );
+        assert_eq!(unrelated.deliverables.factory_branch_anchor.as_deref(), Some(red.as_str()));
+    }
+
     /// cas-43d2: a parked push delivery never advances to a commit origin
     /// lacks; once that commit is pushed, the same advance succeeds.
     #[test]

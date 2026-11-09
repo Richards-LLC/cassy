@@ -408,9 +408,10 @@ impl SearchIndex {
     }
 
     /// Refresh task documents from the canonical store in one batch.
-    /// The shared snapshot avoids rewriting the index until a task is added,
-    /// removed, or updated, while a new process always performs an initial
-    /// reconciliation before returning task search results.
+    /// The shared snapshot avoids rewriting unchanged documents, while a new
+    /// process always performs an initial reconciliation before returning task
+    /// search results. Returns the number of task documents added, updated, or
+    /// removed.
     pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<usize, MemError> {
         let mut snapshot = tasks
             .iter()
@@ -430,30 +431,49 @@ impl SearchIndex {
         #[cfg(test)]
         let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
         let mut writer = self.writer()?;
-        writer.delete_term(tantivy::Term::from_field_text(
-            self.doc_type_field,
-            DocType::Task.as_str(),
-        ));
-
-        for task in tasks {
-            let mut content = task.title.clone();
-            if !task.description.is_empty() {
-                content.push(' ');
-                content.push_str(&task.description);
+        let previous = indexed_snapshot.as_ref();
+        let full_rebuild = match previous {
+            None => true,
+            Some(previous) => self.count_documents(DocType::Task)? != previous.len() as u64,
+        };
+        let mut rewritten = 0;
+        if full_rebuild {
+            writer.delete_term(tantivy::Term::from_field_text(
+                self.doc_type_field,
+                DocType::Task.as_str(),
+            ));
+            for task in tasks {
+                Self::add_task_document(&mut writer, self, task)?;
+                rewritten += 1;
             }
-            if !task.acceptance_criteria.is_empty() {
-                content.push(' ');
-                content.push_str(&task.acceptance_criteria);
-            }
+        } else if let Some(previous) = previous {
+            let current_ids = snapshot
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let previous_by_id = previous
+                .iter()
+                .map(|(id, updated_at)| (id.as_str(), *updated_at))
+                .collect::<std::collections::HashMap<_, _>>();
 
-            let mut doc = tantivy::TantivyDocument::new();
-            doc.add_text(self.id_field, &task.id);
-            doc.add_text(self.content_field, &content);
-            doc.add_text(self.tags_field, "");
-            doc.add_text(self.type_field, task.status.to_string());
-            doc.add_text(self.doc_type_field, DocType::Task.as_str());
-            doc.add_text(self.title_field, &task.title);
-            writer.add_document(doc)?;
+            for (id, _) in previous {
+                if !current_ids.contains(id.as_str()) {
+                    writer.delete_term(tantivy::Term::from_field_text(self.id_field, id));
+                    rewritten += 1;
+                }
+            }
+            for task in tasks {
+                if previous_by_id.get(task.id.as_str()) == Some(&task.updated_at.timestamp_micros())
+                {
+                    continue;
+                }
+                Self::add_task_document(&mut writer, self, task)?;
+                rewritten += 1;
+            }
+        }
+
+        if rewritten == 0 {
+            return Ok(0);
         }
 
         writer.commit()?;
@@ -462,7 +482,35 @@ impl SearchIndex {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         *indexed_snapshot = Some(snapshot);
-        Ok(tasks.len())
+        Ok(rewritten)
+    }
+
+    fn add_task_document(
+        writer: &mut tantivy::IndexWriter,
+        index: &SearchIndex,
+        task: &Task,
+    ) -> Result<(), MemError> {
+        writer.delete_term(tantivy::Term::from_field_text(index.id_field, &task.id));
+
+        let mut content = task.title.clone();
+        if !task.description.is_empty() {
+            content.push(' ');
+            content.push_str(&task.description);
+        }
+        if !task.acceptance_criteria.is_empty() {
+            content.push(' ');
+            content.push_str(&task.acceptance_criteria);
+        }
+
+        let mut doc = tantivy::TantivyDocument::new();
+        doc.add_text(index.id_field, &task.id);
+        doc.add_text(index.content_field, &content);
+        doc.add_text(index.tags_field, "");
+        doc.add_text(index.type_field, task.status.to_string());
+        doc.add_text(index.doc_type_field, DocType::Task.as_str());
+        doc.add_text(index.title_field, &task.title);
+        writer.add_document(doc)?;
+        Ok(())
     }
 
     /// Index durable task artifacts with one commit for a close-time scan or
@@ -982,14 +1030,10 @@ fn prepare_versioned_index_dir(index_dir: &Path) -> Result<(), MemError> {
     // The suffix is deterministic for the normal one-time migration, while
     // the loop preserves an old process that recreated `index/tantivy` after
     // an earlier migration.
-    let mut quarantine = index_parent.join(format!(
-        "tantivy-legacy-v{existing_field_count}"
-    ));
+    let mut quarantine = index_parent.join(format!("tantivy-legacy-v{existing_field_count}"));
     let mut ordinal = 2;
     while quarantine.exists() {
-        quarantine = index_parent.join(format!(
-            "tantivy-legacy-v{existing_field_count}-{ordinal}"
-        ));
+        quarantine = index_parent.join(format!("tantivy-legacy-v{existing_field_count}-{ordinal}"));
         ordinal += 1;
     }
     match std::fs::rename(&legacy_dir, &quarantine) {

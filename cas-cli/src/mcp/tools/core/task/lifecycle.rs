@@ -51,14 +51,14 @@ impl TaskLifecycleGateError {
 pub(crate) mod close_ops;
 pub(crate) mod epic_lane;
 mod epic_overlap;
-mod recall_terms;
-pub(crate) mod merge_close;
 #[cfg(test)]
 mod gate_error_tests;
+pub(crate) mod merge_close;
 pub(crate) mod proof_scope;
 mod qa_dispatch;
-pub(crate) mod qa_impact;
 pub(crate) mod qa_evidence_gate;
+pub(crate) mod qa_impact;
+mod recall_terms;
 pub(crate) mod repository_proof;
 pub(crate) mod review_loop;
 pub(crate) mod review_tier;
@@ -127,7 +127,9 @@ enum ReusedFactoryBranchStart {
     /// cas-dd0e: the lane carries commits this task cannot claim, such as an
     /// earlier hotfix PR that was squash-merged or is still open. Nothing was
     /// changed; a fresh start cuts its own branch beside it, a resume refuses.
-    Occupied { commit: String },
+    Occupied {
+        commit: String,
+    },
 }
 
 /// The resume refusal for a lane carrying work this task cannot claim.
@@ -188,12 +190,15 @@ fn parked_tip_target_conflicts(
     tip: &str,
 ) -> Option<(String, Vec<String>)> {
     let git = crate::worktree::GitOperations::new(repo.to_path_buf());
-    [target_branch.to_string(), format!("refs/remotes/origin/{target_branch}")]
-        .into_iter()
-        .find_map(|target| {
-            let paths = git.preflight_merge_conflicts(&target, tip).ok()?;
-            (!paths.is_empty()).then_some((target, paths))
-        })
+    [
+        target_branch.to_string(),
+        format!("refs/remotes/origin/{target_branch}"),
+    ]
+    .into_iter()
+    .find_map(|target| {
+        let paths = git.preflight_merge_conflicts(&target, tip).ok()?;
+        (!paths.is_empty()).then_some((target, paths))
+    })
 }
 
 /// cas-ff6c: starting a task on another task's `factory/<worker>-<task>`
@@ -247,17 +252,24 @@ fn checkout_task_beside_parked_delivery(
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
     if require_fresh_base {
-        let base = git.resolve_fresh_base(target)
+        let base = git
+            .resolve_fresh_base(target)
             .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
         let expected = git.resolve_commit(&base.branch_ref);
         for reference in [format!("refs/heads/{branch}"), format!("origin/{branch}")] {
             if let Some(existing) = git.resolve_commit(&reference)
-                && Some(existing) != expected {
-                return Err(format!("Queued branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"));
+                && Some(existing) != expected
+            {
+                return Err(format!(
+                    "Queued branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"
+                ));
             }
         }
     }
-    if git.resolve_commit(&format!("refs/heads/{branch}")).is_none() {
+    if git
+        .resolve_commit(&format!("refs/heads/{branch}"))
+        .is_none()
+    {
         let remote = format!("origin/{branch}");
         let base = if git.resolve_commit(&remote).is_some() {
             remote
@@ -285,7 +297,10 @@ pub(crate) fn initial_factory_branch_reset_target(
     if status != TaskStatus::Open
         || task.deliverables.factory_branch_anchor.is_some()
         || task.deliverables.factory_branch_start.is_some()
-        || !task.deliverables.historical_factory_branch_anchors.is_empty()
+        || !task
+            .deliverables
+            .historical_factory_branch_anchors
+            .is_empty()
     {
         return None;
     }
@@ -325,20 +340,22 @@ fn reconcile_reused_factory_branch(
     // Equal-tip starts consult this before checking a dirty tree; reuse the
     // answer rather than walking the same attribution history twice.
     let prior_task_work = std::cell::OnceCell::new();
-    let has_prior_task_work = || *prior_task_work.get_or_init(|| {
-        task_identity.is_some_and(|identity| {
-            identity
-                .known_commits
-                .iter()
-                .any(|anchor| git.is_ancestor(anchor, &factory_tip))
-                || close_ops::task_attribution::branch_task_claims(
-                    worktree_path,
-                    &factory_tip,
-                    identity,
-                )
-                .is_some_and(|(own, _)| own.is_some())
+    let has_prior_task_work = || {
+        *prior_task_work.get_or_init(|| {
+            task_identity.is_some_and(|identity| {
+                identity
+                    .known_commits
+                    .iter()
+                    .any(|anchor| git.is_ancestor(anchor, &factory_tip))
+                    || close_ops::task_attribution::branch_task_claims(
+                        worktree_path,
+                        &factory_tip,
+                        identity,
+                    )
+                    .is_some_and(|(own, _)| own.is_some())
+            })
         })
-    });
+    };
 
     // Fresh tasks must not inherit another task's edits; resets must not
     // discard edits. Proven task continuations may retain their own dirty
@@ -485,7 +502,8 @@ fn reconcile_reused_factory_branch(
     if let Some(task_id) = parked_task_for_tip(&factory_tip) {
         // A per-task branch already is the parked delivery's stable ref.
         // Only the reusable base lane may move after preserving its old tip.
-        if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some() {
+        if crate::factory_isolation::own_task_branch_task_id(worker_name, expected_branch).is_some()
+        {
             return Err(format!(
                 "Cannot start task: {expected_branch} is parked for {task_id} at {factory_tip}; its delivery branch must remain unchanged. Switch to this task's own branch from `{target_branch}` BEFORE `{tool_prefix}task action=start`; do not start and then switch branches.",
                 tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
@@ -526,7 +544,7 @@ fn reconcile_reused_factory_branch(
 
 #[cfg(test)]
 mod reused_factory_branch_tests {
-    use super::{reconcile_reused_factory_branch, ReusedFactoryBranchStart};
+    use super::{ReusedFactoryBranchStart, reconcile_reused_factory_branch};
     use std::path::Path;
     use std::process::Command;
 
@@ -547,7 +565,10 @@ mod reused_factory_branch_tests {
     fn repo() -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("temp repo");
         git(repo.path(), &["init", "-b", "main"]);
-        git(repo.path(), &["config", "user.email", "cas-test@example.invalid"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "cas-test@example.invalid"],
+        );
         git(repo.path(), &["config", "user.name", "Cassy Test"]);
         std::fs::write(repo.path().join("base"), "base\n").expect("base file");
         git(repo.path(), &["add", "base"]);
@@ -563,11 +584,27 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["add", "prior"]);
         git(repo.path(), &["commit", "-m", "prior delivery"]);
         git(repo.path(), &["checkout", "main"]);
-        git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
+        git(
+            repo.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "factory/test-worker",
+                "-m",
+                "merge prior delivery",
+            ],
+        );
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect("merged prior delivery can be reset");
+        let result = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |_| None,
+        )
+        .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
         assert_eq!(
@@ -590,8 +627,15 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect("unrelated prior delivery is reported, not reset");
+        let result = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |_| None,
+        )
+        .expect("unrelated prior delivery is reported, not reset");
         let ReusedFactoryBranchStart::Occupied { commit } = result else {
             panic!("unrelated prior delivery must occupy the lane: {result:?}");
         };
@@ -608,8 +652,15 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect("matching base needs no reset");
+        let result = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |_| None,
+        )
+        .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
         assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), before);
@@ -623,13 +674,28 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["add", "prior"]);
         git(repo.path(), &["commit", "-m", "prior delivery"]);
         git(repo.path(), &["checkout", "main"]);
-        git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
+        git(
+            repo.path(),
+            &[
+                "merge",
+                "--no-ff",
+                "factory/test-worker",
+                "-m",
+                "merge prior delivery",
+            ],
+        );
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
-            .expect_err("tracked changes must block reset");
-
+        let error = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |_| None,
+        )
+        .expect_err("tracked changes must block reset");
     }
 
     /// GH #1006 item 3: a branch parked for merge on another target is kept
@@ -648,9 +714,14 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
-            (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        let result = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |tip| (tip == parked_tip).then(|| "cas-park".to_string()),
+        )
         .expect("a parked tip moves instead of refusing");
 
         assert_eq!(
@@ -661,10 +732,19 @@ mod reused_factory_branch_tests {
                 delivery_branch: Some("factory/test-worker-cas-park".to_string()),
             }
         );
-        assert_eq!(git(repo.path(), &["rev-parse", "HEAD"]), git(repo.path(), &["rev-parse", "main"]));
-        assert_eq!(git(repo.path(), &["rev-parse", "parked/cas-park"]), parked_tip);
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "HEAD"]),
+            git(repo.path(), &["rev-parse", "main"])
+        );
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "parked/cas-park"]),
+            parked_tip
+        );
         // cas-7ce6: the parked SHA keeps a delivery branch of its own.
-        assert_eq!(git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]), parked_tip);
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]),
+            parked_tip
+        );
     }
 
     /// cas-7ce6: a per-task branch of that name that already points elsewhere
@@ -672,7 +752,10 @@ mod reused_factory_branch_tests {
     #[test]
     fn existing_foreign_delivery_branch_is_left_alone() {
         let repo = repo();
-        git(repo.path(), &["branch", "factory/test-worker-cas-park", "main"]);
+        git(
+            repo.path(),
+            &["branch", "factory/test-worker-cas-park", "main"],
+        );
         let foreign = git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]);
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         std::fs::write(repo.path().join("parked"), "parked\n").expect("parked file");
@@ -685,15 +768,26 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
-            (tip == parked_tip).then(|| "cas-park".to_string())
-        })
+        let result = reconcile_reused_factory_branch(
+            repo.path(),
+            "test-worker",
+            "factory/test-worker",
+            "main",
+            None,
+            |tip| (tip == parked_tip).then(|| "cas-park".to_string()),
+        )
         .expect("a parked tip moves instead of refusing");
-        let ReusedFactoryBranchStart::MovedFromParked { delivery_branch, .. } = result else {
+        let ReusedFactoryBranchStart::MovedFromParked {
+            delivery_branch, ..
+        } = result
+        else {
             panic!("moved from parked: {result:?}");
         };
         assert_eq!(delivery_branch, None);
-        assert_eq!(git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]), foreign);
+        assert_eq!(
+            git(repo.path(), &["rev-parse", "factory/test-worker-cas-park"]),
+            foreign
+        );
     }
 }
 
@@ -836,17 +930,82 @@ fn description_similarity(left: &str, right: &str) -> f64 {
 // such as Inbox/ideas are retained for the GH #679 duplicate contract.
 fn is_generic_task_token(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
-    lower.split(['/', '-']).all(|part| matches!(part,
-        "a" | "an" | "the" | "and" | "or" | "not" | "no" | "do" | "does" | "is"
-        | "are" | "be" | "been" | "to" | "of" | "for" | "in" | "on" | "with" | "without"
-        | "before" | "after" | "all" | "only" | "when" | "then" | "this" | "that"
-        | "must" | "should" | "can" | "will" | "use" | "using" | "add" | "remove"
-        | "update" | "create" | "publish" | "prepare" | "review" | "report" | "reports"
-        | "task" | "tasks" | "release" | "releases" | "note" | "notes" | "test" | "tests"
-        | "change" | "changes" | "output" | "input" | "result" | "results" | "status"
-        | "file" | "files" | "command" | "commands" | "code" | "service" | "build"
-        | "batch" | "done" | "true" | "false" | "none" | "warning" | "warnings"
-    ))
+    lower.split(['/', '-']).all(|part| {
+        matches!(
+            part,
+            "a" | "an"
+                | "the"
+                | "and"
+                | "or"
+                | "not"
+                | "no"
+                | "do"
+                | "does"
+                | "is"
+                | "are"
+                | "be"
+                | "been"
+                | "to"
+                | "of"
+                | "for"
+                | "in"
+                | "on"
+                | "with"
+                | "without"
+                | "before"
+                | "after"
+                | "all"
+                | "only"
+                | "when"
+                | "then"
+                | "this"
+                | "that"
+                | "must"
+                | "should"
+                | "can"
+                | "will"
+                | "use"
+                | "using"
+                | "add"
+                | "remove"
+                | "update"
+                | "create"
+                | "publish"
+                | "prepare"
+                | "review"
+                | "report"
+                | "reports"
+                | "task"
+                | "tasks"
+                | "release"
+                | "releases"
+                | "note"
+                | "notes"
+                | "test"
+                | "tests"
+                | "change"
+                | "changes"
+                | "output"
+                | "input"
+                | "result"
+                | "results"
+                | "status"
+                | "file"
+                | "files"
+                | "command"
+                | "commands"
+                | "code"
+                | "service"
+                | "build"
+                | "batch"
+                | "done"
+                | "true"
+                | "false"
+                | "none"
+                | "warning"
+                | "warnings"
+        )
+    })
 }
 
 fn distinctive_identifier_terms(text: &str) -> std::collections::HashSet<String> {
@@ -937,7 +1096,8 @@ fn task_similarity(
     shared_identifiers.sort_unstable();
     let candidate_title = title_terms(title);
     let existing_title = title_terms(existing_title);
-    let generic_title_overlap = candidate_title.intersection(&existing_title)
+    let generic_title_overlap = candidate_title
+        .intersection(&existing_title)
         .all(|term| is_generic_task_token(term));
     let title_threshold = if generic_title_overlap && shared_identifiers.is_empty() {
         GENERIC_TITLE_SIMILARITY_THRESHOLD
@@ -1009,20 +1169,33 @@ fn open_task_similarity(
         None => std::collections::HashSet::new(),
     };
     let tasks = task_store.list(None).map_err(|error| error.to_string())?;
-    let sibling_descriptions: Vec<_> = tasks.iter()
-        .filter(|task| siblings.contains(&task.id)
-            && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled))
+    let sibling_descriptions: Vec<_> = tasks
+        .iter()
+        .filter(|task| {
+            siblings.contains(&task.id)
+                && !matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled)
+        })
         .map(|task| task.description.as_str())
         .collect();
-    let epic_description = tasks.iter().find(|task| epic_id == Some(task.id.as_str()))
-        .map(|task| task.description.as_str()).unwrap_or_default();
-    let common_blocks: std::collections::HashSet<String> = description.split("\n\n")
+    let epic_description = tasks
+        .iter()
+        .find(|task| epic_id == Some(task.id.as_str()))
+        .map(|task| task.description.as_str())
+        .unwrap_or_default();
+    let common_blocks: std::collections::HashSet<String> = description
+        .split("\n\n")
         .map(str::trim)
-        .filter(|block| block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
-            && (epic_description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
-                || sibling_descriptions.iter().all(|description| {
-                    description.split("\n\n").any(|paragraph| paragraph.trim() == *block)
-                })))
+        .filter(|block| {
+            block.lines().filter(|line| !line.trim().is_empty()).count() >= 2
+                && (epic_description
+                    .split("\n\n")
+                    .any(|paragraph| paragraph.trim() == *block)
+                    || sibling_descriptions.iter().all(|description| {
+                        description
+                            .split("\n\n")
+                            .any(|paragraph| paragraph.trim() == *block)
+                    }))
+        })
         .map(str::to_string)
         .collect();
     let mut overlap = OpenTaskOverlap::default();
@@ -1040,10 +1213,16 @@ fn open_task_similarity(
         let (candidate_scope, existing_scope) = if siblings.contains(&task.id) {
             let candidate_blocks: Vec<_> = description.split("\n\n").map(str::trim).collect();
             let existing_blocks: Vec<_> = task.description.split("\n\n").map(str::trim).collect();
-            let candidate = candidate_blocks.into_iter()
-                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
-            let existing = existing_blocks.into_iter()
-                .filter(|block| !common_blocks.contains(*block)).collect::<Vec<_>>().join("\n\n");
+            let candidate = candidate_blocks
+                .into_iter()
+                .filter(|block| !common_blocks.contains(*block))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let existing = existing_blocks
+                .into_iter()
+                .filter(|block| !common_blocks.contains(*block))
+                .collect::<Vec<_>>()
+                .join("\n\n");
             if !candidate.trim().is_empty() && !existing.trim().is_empty() {
                 (candidate, existing)
             } else {
@@ -1151,7 +1330,12 @@ impl CasCore {
 
     /// Durable start instructions retain matching context even if this session
     /// has already seen it. Only the response path claims session markers.
-    fn related_recall_context(&self, query: &str, exclude_id: Option<&str>, dedupe: bool) -> Option<String> {
+    fn related_recall_context(
+        &self,
+        query: &str,
+        exclude_id: Option<&str>,
+        dedupe: bool,
+    ) -> Option<String> {
         use crate::hybrid_search::{DocType, SearchOptions};
 
         let query = query.trim();
@@ -1174,15 +1358,28 @@ impl CasCore {
         let tasks = self.open_task_store().ok();
         let mut lines = Vec::new();
         let query_terms = recall_terms::content_terms(query);
-        let session = self.get_registered_agent_id_read_only().ok().and_then(|id| {
-            self.open_agent_store().ok()?.get(&id).ok().map(|agent| agent.cc_session_id.unwrap_or(id))
-        }).or_else(|| std::env::var("CAS_SESSION_ID").ok())
-            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok()).unwrap_or_default();
+        let session = self
+            .get_registered_agent_id_read_only()
+            .ok()
+            .and_then(|id| {
+                self.open_agent_store()
+                    .ok()?
+                    .get(&id)
+                    .ok()
+                    .map(|agent| agent.cc_session_id.unwrap_or(id))
+            })
+            .or_else(|| std::env::var("CAS_SESSION_ID").ok())
+            .or_else(|| crate::agent_id::read_session_for_mcp(&self.cas_root).ok())
+            .unwrap_or_default();
         let relevant = |text: &str| {
             let terms = recall_terms::content_terms(text);
             // BM25 ranks even incidental single-word matches. Require two
             // content terms (or the complete query when it has one term).
-            query_terms.iter().filter(|term| terms.contains(term)).count() >= query_terms.len().min(2).max(1)
+            query_terms
+                .iter()
+                .filter(|term| terms.contains(term))
+                .count()
+                >= query_terms.len().min(2).max(1)
         };
 
         for hit in results {
@@ -1194,22 +1391,34 @@ impl CasCore {
             }
             let line = match hit.doc_type {
                 DocType::Entry => store.as_ref().and_then(|store| {
-                    store.get(&hit.id).ok().filter(|entry| !entry.archived && relevant(&format!("{} {}", entry.title.as_deref().unwrap_or_default(), entry.content))).map(|entry| {
-                        let title = entry.title.as_deref().unwrap_or("untitled memory");
-                        format!(
-                            "- Memory [{}]: {} — {}",
-                            entry.id,
-                            title,
-                            entry.preview(140)
-                        )
-                    })
+                    store
+                        .get(&hit.id)
+                        .ok()
+                        .filter(|entry| {
+                            !entry.archived
+                                && relevant(&format!(
+                                    "{} {}",
+                                    entry.title.as_deref().unwrap_or_default(),
+                                    entry.content
+                                ))
+                        })
+                        .map(|entry| {
+                            let title = entry.title.as_deref().unwrap_or("untitled memory");
+                            format!(
+                                "- Memory [{}]: {} — {}",
+                                entry.id,
+                                title,
+                                entry.preview(140)
+                            )
+                        })
                 }),
                 DocType::Rule => rules.as_ref().and_then(|rules| {
                     rules.get(&hit.id).ok().and_then(|rule| {
-                        (relevant(&rule.content) && !matches!(
-                            rule.status,
-                            cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
-                        ))
+                        (relevant(&rule.content)
+                            && !matches!(
+                                rule.status,
+                                cas_types::RuleStatus::Stale | cas_types::RuleStatus::Retired
+                            ))
                         .then(|| {
                             let first = rule.content.lines().next().unwrap_or_default();
                             format!("- Rule [{}]: {}", rule.id, truncate_str(first, 160))
@@ -1218,7 +1427,9 @@ impl CasCore {
                 }),
                 DocType::Task => tasks.as_ref().and_then(|tasks| {
                     tasks.get(&hit.id).ok().and_then(|task| {
-                        (task.task_type == crate::types::TaskType::Epic && relevant(&format!("{} {}", task.title, task.description))).then(|| {
+                        (task.task_type == crate::types::TaskType::Epic
+                            && relevant(&format!("{} {}", task.title, task.description)))
+                        .then(|| {
                             let detail = task.description.lines().next().unwrap_or_default();
                             format!(
                                 "- Past epic [{}]: {} — {}",
@@ -1234,7 +1445,12 @@ impl CasCore {
             if let Some(line) = line
                 && lines.iter().map(String::len).sum::<usize>() + line.len()
                     <= RELATED_RECALL_CHAR_CAP
-                && (!dedupe || crate::hooks::operation_lessons::claim_session_item(&self.cas_root, &session, &hit.id))
+                && (!dedupe
+                    || crate::hooks::operation_lessons::claim_session_item(
+                        &self.cas_root,
+                        &session,
+                        &hit.id,
+                    ))
             {
                 lines.push(line);
             }
@@ -1367,9 +1583,15 @@ impl CasCore {
             .unwrap_or_default();
 
         let supervisor_override = req.supervisor_override.unwrap_or(false);
-        let door = req.door.as_deref().map(str::parse::<cas_types::TaskDoor>)
-            .transpose().map_err(|error| McpError {
-                code: ErrorCode::INVALID_PARAMS, message: Cow::from(error.to_string()), data: None,
+        let door = req
+            .door
+            .as_deref()
+            .map(str::parse::<cas_types::TaskDoor>)
+            .transpose()
+            .map_err(|error| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(error.to_string()),
+                data: None,
             })?;
         let (risk, proof_targets) = crate::mcp::tools::types::validate_task_risk_declaration(
             task_type,
@@ -1442,11 +1664,19 @@ impl CasCore {
         // hotfix route.
         // A task aimed at a frozen train joins the next one (cas-2f4d);
         // only a release repair stays on the frozen train.
-        let frozen_epic = epic_id.as_deref()
-            .filter(|_| task_type != TaskType::Epic
-                && !labels.iter().any(|label| label == crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL))
+        let frozen_epic = epic_id
+            .as_deref()
+            .filter(|_| {
+                task_type != TaskType::Epic
+                    && !labels.iter().any(|label| {
+                        label == crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL
+                    })
+            })
             .and_then(|epic| task_store.get(epic).ok())
-            .filter(|epic| crate::mcp::tools::core::workflow::release_freeze::active(&self.cas_root, epic).is_some())
+            .filter(|epic| {
+                crate::mcp::tools::core::workflow::release_freeze::active(&self.cas_root, epic)
+                    .is_some()
+            })
             .map(|epic| epic.id);
         let (release_train, mut release_train_receipt) = if frozen_epic.is_some()
             || (task_type != TaskType::Epic
@@ -1480,11 +1710,16 @@ impl CasCore {
             let mut blocking_warnings = Vec::new();
             if task_type == TaskType::Epic {
                 let warning = epic_overlap::warning(
-                    self, task_store.as_ref(), &req.title,
+                    self,
+                    task_store.as_ref(),
+                    &req.title,
                     req.description.as_deref().unwrap_or_default(),
-                ).await.map_err(|message| McpError {
+                )
+                .await
+                .map_err(|message| McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(message), data: None,
+                    message: Cow::from(message),
+                    data: None,
                 })?;
                 if let Some(message) = warning {
                     blocking_warnings.push(message);
@@ -1492,9 +1727,11 @@ impl CasCore {
             }
             // Every supervisor shares the release train; that is not a
             // competing plan.
-            if let (Some(epic), Some(creator), None) =
-                (epic_id.as_deref(), created_by.as_deref(), release_train.as_deref())
-            {
+            if let (Some(epic), Some(creator), None) = (
+                epic_id.as_deref(),
+                created_by.as_deref(),
+                release_train.as_deref(),
+            ) {
                 if let Some((other_creator, planned_at)) = recent_other_epic_planner(
                     task_store.as_ref(),
                     epic,
@@ -1748,7 +1985,9 @@ impl CasCore {
             crate::issue_reconcile::ExternalRefHint::Set { issue, .. }
                 if execution_note.as_deref() == Some("no-code") =>
             {
-                crate::issue_reconcile::ExternalRefHint::Suggest { issues: vec![issue] }
+                crate::issue_reconcile::ExternalRefHint::Suggest {
+                    issues: vec![issue],
+                }
             }
             hint => hint,
         };
@@ -1760,10 +1999,16 @@ impl CasCore {
         let source_admission = if execution_note.as_deref() == Some("no-code") {
             super::source_claim::SourceAdmission::default()
         } else {
-            self.task_source_admission(external_ref.as_deref(), &id,
-                supervisor_override.then_some(req.reason.as_deref().unwrap_or(""))).await?
+            self.task_source_admission(
+                external_ref.as_deref(),
+                &id,
+                supervisor_override.then_some(req.reason.as_deref().unwrap_or("")),
+            )
+            .await?
         };
-        if source_admission.override_grant.is_some() { task_notes.push_str(&source_admission.notice); }
+        if source_admission.override_grant.is_some() {
+            task_notes.push_str(&source_admission.notice);
+        }
         let mut task = Task {
             id: id.clone(),
             scope: crate::types::Scope::Project, // MCP tasks are project-scoped
@@ -1809,9 +2054,13 @@ impl CasCore {
         // Validate before the atomic create or assignment enqueue: refusing
         // the whole create leaves neither a task nor a misleading worker prompt.
         let mut assignee_warnings = Vec::new();
-        if !source_admission.notice.is_empty() { assignee_warnings.push(source_admission.notice.clone()); }
+        if !source_admission.notice.is_empty() {
+            assignee_warnings.push(source_admission.notice.clone());
+        }
         let mut assignee_override_audit = None;
-        task.assignee = task.assignee.as_deref()
+        task.assignee = task
+            .assignee
+            .as_deref()
             .and_then(super::update::normalize_assignee_update_value)
             .map(|assignee| {
                 self.validate_task_assignee(
@@ -1831,7 +2080,9 @@ impl CasCore {
                 message: Cow::from(format!("Task not created: {message}")),
                 data: None,
             })?;
-        let assignee_receipt = task.assignee.as_deref()
+        let assignee_receipt = task
+            .assignee
+            .as_deref()
             .map(|assignee| format!("\nAssignee: {assignee}"))
             .unwrap_or_default();
         let assignee_receipt = if assignee_warnings.is_empty() {
@@ -1843,13 +2094,20 @@ impl CasCore {
         let requested_priority = task.priority;
         crate::finding_triage::apply(&self.cas_root, &mut task);
         let assignee_receipt = match crate::finding_triage::priority_not_applied(
-            &task.labels, requested_priority, task.priority, requested_priority,
+            &task.labels,
+            requested_priority,
+            task.priority,
+            requested_priority,
         ) {
-            Some(notice) if requested_priority != Priority::MEDIUM => format!("{assignee_receipt}\n{notice}"),
+            Some(notice) if requested_priority != Priority::MEDIUM => {
+                format!("{assignee_receipt}\n{notice}")
+            }
             _ => assignee_receipt,
         };
         let predicted = qa_impact::predicted(self, &task);
-        if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
+        if !task.notes.is_empty() {
+            task.notes.push_str("\n\n");
+        }
         task.notes.push_str(&predicted);
 
         // Associate the creation event and dependency metadata with the
@@ -1892,16 +2150,25 @@ impl CasCore {
                 }
             })?;
 
-        crate::epic_design_review::observe(&self.cas_root, &id)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
+        crate::epic_design_review::observe(&self.cas_root, &id).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!(
+                    "Task created, but epic design review trigger could not be evaluated: {error}"
+                ),
+            )
+        })?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let triage_notice = if task.assignee.is_some() {
             crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
-            Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
+            Err(error) => format!(
+                "\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."
+            ),
         };
 
         // Recall before indexing this task so an epic cannot surface itself as
@@ -1917,11 +2184,14 @@ impl CasCore {
                 let repo = self.cas_root.parent()?.to_path_buf();
                 let text = format!(
                     "{}\n{}\n{}",
-                    task.title,
-                    task.description,
-                    task.acceptance_criteria
+                    task.title, task.description, task.acceptance_criteria
                 );
-                Some(epic_lane::cited_commit_warning(&repo, store.as_ref(), &epic, &text))
+                Some(epic_lane::cited_commit_warning(
+                    &repo,
+                    store.as_ref(),
+                    &epic,
+                    &text,
+                ))
             })
             .unwrap_or_default();
         let related_context = sibling_warning
@@ -2047,7 +2317,9 @@ impl CasCore {
                     let predecessor = self
                         .open_task_store()
                         .ok()
-                        .and_then(|store| epic_lane::open_predecessor_epic(store.as_ref(), &blocked_by_ids))
+                        .and_then(|store| {
+                            epic_lane::open_predecessor_epic(store.as_ref(), &blocked_by_ids)
+                        })
                         .and_then(|(id, branch)| {
                             // resolve_fresh_base reports success with an empty
                             // SHA for a branch that exists neither locally nor
@@ -2070,7 +2342,9 @@ impl CasCore {
                             }
                         });
                     let (base_ref, base_sha) = match &predecessor {
-                        Some((_, _, predecessor_ref, sha)) => (predecessor_ref.clone(), sha.clone()),
+                        Some((_, _, predecessor_ref, sha)) => {
+                            (predecessor_ref.clone(), sha.clone())
+                        }
                         None => (base_ref, base_sha),
                     };
                     let sha_preview = &base_sha[..base_sha.len().min(8)];
@@ -2081,7 +2355,8 @@ impl CasCore {
                             if let Ok(mut updated_task) = task_store.get(&id) {
                                 if updated_task.branch.as_deref().unwrap_or("").is_empty() {
                                     updated_task.branch = Some(branch_name.clone());
-                                    updated_task.deliverables.epic_branch_origin = epic_lane::branch_origin(&branch_name);
+                                    updated_task.deliverables.epic_branch_origin =
+                                        epic_lane::branch_origin(&branch_name);
                                 }
                                 // A newly-created epic owns its coordination
                                 // branch. Persist that same canonical ref as
@@ -2273,7 +2548,9 @@ impl CasCore {
             })?
         };
 
-        for task in &mut tasks { crate::finding_triage::apply(&self.cas_root, task); }
+        for task in &mut tasks {
+            crate::finding_triage::apply(&self.cas_root, task);
+        }
 
         let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
@@ -2326,10 +2603,7 @@ impl CasCore {
             let blocker_warning = if open_blocker_ids.is_empty() {
                 String::new()
             } else {
-                format!(
-                    " ⚠️ open blockers: {}",
-                    open_blocker_ids.join(", ")
-                )
+                format!(" ⚠️ open blockers: {}", open_blocker_ids.join(", "))
             };
             output.push_str(&format!(
                 "- [{}] P{} {} - {}{}\n",
@@ -2367,13 +2641,17 @@ impl CasCore {
     }
 
     pub(crate) async fn task_start_for_queue(
-        &self, req: TaskStartRequest, principal: crate::worker_task_queue::QueueStartPrincipal,
+        &self,
+        req: TaskStartRequest,
+        principal: crate::worker_task_queue::QueueStartPrincipal,
     ) -> Result<CallToolResult, McpError> {
         self.start_task_with_principal(req, Some(principal)).await
     }
 
     async fn start_task_with_principal(
-        &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
+        &self,
+        req: TaskStartRequest,
+        principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {
         let mut queued_start = principal.is_some();
         let agent_id = match principal.as_ref() {
@@ -2381,20 +2659,44 @@ impl CasCore {
             None => self.get_agent_id()?,
         };
         let agents = self.open_agent_store()?;
-        let worker = agents.get(&agent_id).ok().filter(|a| a.role == cas_types::AgentRole::Worker);
-        let load_worker_queue = || worker.as_ref().filter(|a| a.factory_session.is_some())
-            .map(|worker| cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&self.cas_root)
-                .and_then(|queues| queues.get(worker.factory_session.as_deref().unwrap_or_default(), &worker.name)))
-            .transpose().map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()));
+        let worker = agents
+            .get(&agent_id)
+            .ok()
+            .filter(|a| a.role == cas_types::AgentRole::Worker);
+        let load_worker_queue = || {
+            worker
+                .as_ref()
+                .filter(|a| a.factory_session.is_some())
+                .map(|worker| {
+                    cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(
+                        &self.cas_root,
+                    )
+                    .and_then(|queues| {
+                        queues.get(
+                            worker.factory_session.as_deref().unwrap_or_default(),
+                            &worker.name,
+                        )
+                    })
+                })
+                .transpose()
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))
+        };
         let mut worker_queue = load_worker_queue()?;
-        let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
-            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
-        let _start_lock = if queued_start { None } else {
+        let queue_enabled = worker_queue.as_ref().is_some_and(|queue| {
+            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty()
+        });
+        let _start_lock = if queued_start {
+            None
+        } else {
             match worker.as_ref().filter(|a| a.factory_session.is_some()) {
                 Some(worker) if queue_enabled => Some(crate::worker_task_queue::worker_lock(
-                    &self.cas_root, worker, "start")?),
-                Some(worker) => Some(crate::worker_task_queue::wait_for_worker_start(
-                    &self.cas_root, worker).await?),
+                    &self.cas_root,
+                    worker,
+                    "start",
+                )?),
+                Some(worker) => Some(
+                    crate::worker_task_queue::wait_for_worker_start(&self.cas_root, worker).await?,
+                ),
                 None => None,
             }
         };
@@ -2403,51 +2705,83 @@ impl CasCore {
         if _start_lock.is_some() {
             worker_queue = load_worker_queue()?;
         }
-        let queue_enabled = worker_queue.as_ref().is_some_and(|queue|
-            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty());
+        let queue_enabled = worker_queue.as_ref().is_some_and(|queue| {
+            queue.current_task.is_some() || queue.starting || !queue.pending.is_empty()
+        });
         if let (Some(queue), Some(worker)) = (worker_queue.as_ref(), worker.as_ref())
             && queue.current_task.as_deref() == Some(req.id.as_str())
-            && queue.context_reset_from.as_deref() == Some(crate::worker_task_queue::conversation_generation(worker).as_str())
+            && queue.context_reset_from.as_deref()
+                == Some(crate::worker_task_queue::conversation_generation(worker).as_str())
         {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task"));
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Queued successor is waiting for a fresh context; the daemon will restart this worker before it starts that task",
+            ));
         }
         if !queued_start && let Some(queue) = worker_queue.as_ref() {
             if queue.starting && queue.current_task.as_deref() == Some(req.id.as_str()) {
                 queued_start = true;
             } else if queue.starting && !queue.current_started {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "The worker has a reserved queue task; resolve or start that task before starting another"));
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "The worker has a reserved queue task; resolve or start that task before starting another",
+                ));
             }
         }
         if queued_start {
-            let worker = worker.as_ref().ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued start requires its registered worker"))?;
+            let worker = worker.as_ref().ok_or_else(|| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Queued start requires its registered worker",
+                )
+            })?;
             crate::worker_task_queue::ensure_owned_queue_checkout(worker)?;
         }
         let task_store = self.open_task_store()?;
 
         if queue_enabled && let Some(worker) = worker.as_ref() {
-            let mut active = task_store.list(Some(TaskStatus::InProgress))
+            let mut active = task_store
+                .list(Some(TaskStatus::InProgress))
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                .into_iter().filter(|task| task.id != req.id
-                    && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
-                    && task.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
-                .map(|task| task.id).collect::<Vec<_>>();
-            active.extend(agents.list_active_leases()
-                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
-                .into_iter().filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
-                .map(|lease| lease.task_id));
+                .into_iter()
+                .filter(|task| {
+                    task.id != req.id
+                        && !matches!(task.task_type, TaskType::Epic | TaskType::Gate)
+                        && task
+                            .assignee
+                            .as_deref()
+                            .is_some_and(|a| a == worker.name || a == worker.id)
+                })
+                .map(|task| task.id)
+                .collect::<Vec<_>>();
+            active.extend(
+                agents
+                    .list_active_leases()
+                    .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                    .into_iter()
+                    .filter(|lease| lease.agent_id == worker.id && lease.task_id != req.id)
+                    .map(|lease| lease.task_id),
+            );
             active.sort();
             active.dedup();
             if !active.is_empty() {
                 let prefix = self.guidance_prefix();
-                let holds = active.iter().map(|id|
-                    format!("{prefix}task action=update id={id} status=blocked"))
-                    .collect::<Vec<_>>().join("\n");
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
-                    "Cannot start task {} while {} has active work: {}. Finish active work before starting unrelated work. For returned-delivery recovery, checkpoint the unfinished branch and put its task on hold:\n{holds}\nThen switch to the returned task's recorded branch (see `{prefix}task action=show id={} full=true`) and retry `{prefix}task action=start id={}`. The held successor keeps its queue slot. After the returned delivery is parked, switch back, set the held task open and start it again.",
-                    req.id, worker.name, active.join(", "), req.id, req.id)));
+                let holds = active
+                    .iter()
+                    .map(|id| format!("{prefix}task action=update id={id} status=blocked"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!(
+                        "Cannot start task {} while {} has active work: {}. Finish active work before starting unrelated work. For returned-delivery recovery, checkpoint the unfinished branch and put its task on hold:\n{holds}\nThen switch to the returned task's recorded branch (see `{prefix}task action=show id={} full=true`) and retry `{prefix}task action=start id={}`. The held successor keeps its queue slot. After the returned delivery is parked, switch back, set the held task open and start it again.",
+                        req.id,
+                        worker.name,
+                        active.join(", "),
+                        req.id,
+                        req.id
+                    ),
+                ));
             }
         }
 
@@ -2509,9 +2843,15 @@ impl CasCore {
         // mutating the task, lease or checkout. A foreign factory ref must not
         // silently fall back to the reusable worker lane (cas-b153).
         if let Some(worker) = worker.as_ref()
-            && let Some(checkout) = worker.metadata.get("clone_path")
+            && let Some(checkout) = worker
+                .metadata
+                .get("clone_path")
                 .map(std::path::Path::new)
-                .or_else(|| declared_repo_context.as_ref().map(|context| context.repo_root.as_path()))
+                .or_else(|| {
+                    declared_repo_context
+                        .as_ref()
+                        .map(|context| context.repo_root.as_path())
+                })
             && let Some(branch) = crate::factory_isolation::branch_at(checkout)
             && matches!(
                 crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch)),
@@ -2519,20 +2859,27 @@ impl CasCore {
             )
         {
             let own = crate::factory_isolation::worker_task_branch(&worker.name, &task.id);
-            let base = declared_repo_context.as_ref().map(|context| context.target_branch.clone())
+            let base = declared_repo_context
+                .as_ref()
+                .map(|context| context.target_branch.clone())
                 .unwrap_or_else(|| crate::factory_isolation::expected_worker_branch(&worker.name));
             let [switch] = GitOperations::git_remedies([&["switch", "-c", &own, &base]])
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
-                "Cannot start task {}: '{branch}' is not worker '{}'s factory branch.\n\
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "Cannot start task {}: '{branch}' is not worker '{}'s factory branch.\n\
                  Use your own per-task branch '{own}' before starting:\n{switch}",
-                task.id, worker.name,
-            )));
+                    task.id, worker.name,
+                ),
+            ));
         }
 
         // cas-619f: a QA work item may never be started by the implementer of
         // the delivery it reviews; starting it claims the round.
-        let qa_claim_note = self.claim_qa_round_on_start(&task, principal.as_ref().map(|p| p.agent().id.as_str()))?.unwrap_or_default();
+        let qa_claim_note = self
+            .claim_qa_round_on_start(&task, principal.as_ref().map(|p| p.agent().id.as_str()))?
+            .unwrap_or_default();
         // cas-31a3: the QA preflight (cas-d5c1) appends its report to this
         // task's notes in the store. The start writes `task` back below, so
         // take the notes as they are now; the copy read above would overwrite
@@ -2545,8 +2892,10 @@ impl CasCore {
                 comparable.notes = expected.notes.clone();
                 comparable.updated_at = expected.updated_at;
                 if serde_json::to_value(&comparable).ok() != serde_json::to_value(&*expected).ok() {
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                        "Queued task changed during QA preflight; retry before preparing Git"));
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "Queued task changed during QA preflight; retry before preparing Git",
+                    ));
                 }
                 *expected = fresh.clone();
             }
@@ -2568,17 +2917,25 @@ impl CasCore {
         };
 
         if let Some(snapshot) = queued_start_snapshot.as_ref() {
-            let fresh = task_store.get(&req.id).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-            if snapshot.status != TaskStatus::Open || snapshot.assignee.as_deref()
-                != worker.as_ref().map(|a| a.name.as_str())
-                || serde_json::to_value(snapshot).ok() != serde_json::to_value(&fresh).ok() {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, "Queued task changed before start; no Git or lease mutation was applied"));
+            let fresh = task_store
+                .get(&req.id)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+            if snapshot.status != TaskStatus::Open
+                || snapshot.assignee.as_deref() != worker.as_ref().map(|a| a.name.as_str())
+                || serde_json::to_value(snapshot).ok() != serde_json::to_value(&fresh).ok()
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Queued task changed before start; no Git or lease mutation was applied",
+                ));
             }
         }
 
         if queued_start && declared_repo_context.is_none() {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                "Queued task needs a declared work target before its branch can be allocated"));
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "Queued task needs a declared work target before its branch can be allocated",
+            ));
         }
 
         // cas-a844/cas-5054: a genuinely conflicted parked branch is unfinished
@@ -2594,7 +2951,10 @@ impl CasCore {
                 .then(|| declared_repo_context.as_ref())
                 .flatten()
                 .and_then(|context| {
-                    let tip = task.deliverables.factory_branch_anchor.as_deref()
+                    let tip = task
+                        .deliverables
+                        .factory_branch_anchor
+                        .as_deref()
                         .or(task.deliverables.parked_branch.as_deref())?;
                     parked_tip_target_conflicts(&context.repo_root, &context.target_branch, tip)
                 });
@@ -2617,7 +2977,10 @@ impl CasCore {
             }
 
             let now = chrono::Utc::now();
-            let parked_branch = task.deliverables.parked_branch.as_deref()
+            let parked_branch = task
+                .deliverables
+                .parked_branch
+                .as_deref()
                 .unwrap_or("the parked factory branch");
             let audit = audit::merge_recovery_note(now, parked_branch, task.delivery_mode);
             task.notes = if task.notes.is_empty() {
@@ -2639,24 +3002,35 @@ impl CasCore {
         let split_note = match crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
             Some(hold) => {
                 let agent = agent_store.get(&agent_id).ok();
-                let authorization = task.deliverables.split_takeover.as_ref().filter(|authorization| {
-                    authorization.split_id == hold.split_id
-                        && authorization.worker_id == agent_id
-                        && !authorization.supervisor_id.is_empty()
-                        && !authorization.reason.trim().is_empty()
-                        && agent.as_ref().is_some_and(|agent| {
-                            agent.role == cas_types::AgentRole::Worker
-                                && super::task_assignee_matches_agent(
-                                    agent_store.as_ref(), task.assignee.as_deref(), agent,
-                                )
-                        })
-                });
+                let authorization =
+                    task.deliverables
+                        .split_takeover
+                        .as_ref()
+                        .filter(|authorization| {
+                            authorization.split_id == hold.split_id
+                                && authorization.worker_id == agent_id
+                                && !authorization.supervisor_id.is_empty()
+                                && !authorization.reason.trim().is_empty()
+                                && agent.as_ref().is_some_and(|agent| {
+                                    agent.role == cas_types::AgentRole::Worker
+                                        && super::task_assignee_matches_agent(
+                                            agent_store.as_ref(),
+                                            task.assignee.as_deref(),
+                                            agent,
+                                        )
+                                })
+                        });
                 match authorization {
                     Some(authorization) => hold.override_note(&req.id, authorization),
-                    None => return Err(Self::error(
-                        ErrorCode::INVALID_PARAMS,
-                        hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
-                    )),
+                    None => {
+                        return Err(Self::error(
+                            ErrorCode::INVALID_PARAMS,
+                            hold.refusal(
+                                &req.id,
+                                &crate::mcp::tools::core::guidance::caller_prefix(),
+                            ),
+                        ));
+                    }
                 }
             }
             None => String::new(),
@@ -2706,11 +3080,15 @@ impl CasCore {
                         .map_err(|error| {
                             Self::error(
                                 ErrorCode::INVALID_PARAMS,
-                                format!("Cannot inspect worker checkout before task start: {error}"),
+                                format!(
+                                    "Cannot inspect worker checkout before task start: {error}"
+                                ),
                             )
                         })?;
-                    if !super::repo_context::repo_answers_to(&worker_repo_root, &context.repo_selector)
-                    {
+                    if !super::repo_context::repo_answers_to(
+                        &worker_repo_root,
+                        &context.repo_selector,
+                    ) {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
                             "Cannot start task: worker checkout belongs to another repository",
@@ -2734,10 +3112,16 @@ impl CasCore {
                     let parked_branch_note = if queued_start && task.status == TaskStatus::Open {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
-                            worker_checkout, &worker.name, &task.id, target_branch,
+                            worker_checkout,
+                            &worker.name,
+                            &task.id,
+                            target_branch,
                             task.deliverables.factory_branch_start.is_none(),
-                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-                        Some(format!("\nTask queue preserved {previous}; starting on {worker_branch}."))
+                        )
+                        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        Some(format!(
+                            "\nTask queue preserved {previous}; starting on {worker_branch}."
+                        ))
                     } else if task.status == TaskStatus::Open {
                         crate::mcp::tools::worktree_head(worker_checkout)
                             .and_then(|tip| crate::mcp::tools::parked_delivery_at_tip(
@@ -2778,14 +3162,12 @@ impl CasCore {
                         &worker_branch,
                     )
                     .filter(|owner_task| {
-                        *owner_task != task.id
-                            && !owner_task.starts_with(&format!("{}-", task.id))
-                    })
-                        && task
-                            .deliverables
-                            .factory_branch_start
-                            .as_ref()
-                            .is_none_or(|start| start.branch != worker_branch)
+                        *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
+                    }) && task
+                        .deliverables
+                        .factory_branch_start
+                        .as_ref()
+                        .is_none_or(|start| start.branch != worker_branch)
                     {
                         if !fresh_start {
                             return Err(Self::error(
@@ -2803,8 +3185,13 @@ impl CasCore {
                         let owner_task = owner_task.to_string();
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
-                            worker_checkout, &worker.name, &task.id, target_branch, false,
-                        ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                            worker_checkout,
+                            &worker.name,
+                            &task.id,
+                            target_branch,
+                            false,
+                        )
+                        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         beside_note = Some(format!(
                             "\n\n🔀 TASK BRANCH CUT: {previous} stays {owner_task}'s delivery, unchanged. This task starts on {worker_branch} from `{target_branch}`."
                         ));
@@ -2825,14 +3212,12 @@ impl CasCore {
                         &worker_branch,
                     )
                     .filter(|owner_task| {
-                        *owner_task != task.id
-                            && !owner_task.starts_with(&format!("{}-", task.id))
-                    })
-                        && task
-                            .deliverables
-                            .factory_branch_start
-                            .as_ref()
-                            .is_none_or(|start| start.branch != worker_branch)
+                        *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
+                    }) && task
+                        .deliverables
+                        .factory_branch_start
+                        .as_ref()
+                        .is_none_or(|start| start.branch != worker_branch)
                     {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
@@ -2848,9 +3233,12 @@ impl CasCore {
                     }
                     let mut reset_start_base = false;
                     let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
-                        let identity =
-                            close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
-                                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                        let identity = close_ops::task_commit_identity_in_repo(
+                            worker_checkout,
+                            &task,
+                            None,
+                        )
+                        .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                         match reconcile_reused_factory_branch(
                             worker_checkout,
                             &worker.name,
@@ -2891,8 +3279,15 @@ impl CasCore {
                             Ok(ReusedFactoryBranchStart::Occupied { commit }) if fresh_start => {
                                 let lane = worker_branch.clone();
                                 worker_branch = checkout_task_beside_parked_delivery(
-                                    worker_checkout, &worker.name, &task.id, target_branch, false,
-                                ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                                    worker_checkout,
+                                    &worker.name,
+                                    &task.id,
+                                    target_branch,
+                                    false,
+                                )
+                                .map_err(|message| {
+                                    Self::error(ErrorCode::INVALID_PARAMS, message)
+                                })?;
                                 Some(format!(
                                     "\n\n🔀 TASK BRANCH CUT: {lane} still holds {commit} outside `{target_branch}` and stays unchanged. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
                                 ))
@@ -3105,7 +3500,9 @@ impl CasCore {
         let elsewhere_note = match task.assignee.as_deref() {
             Some(assignee) if task.status == TaskStatus::InProgress => {
                 let local = agent_store.list(None).map(|agents| {
-                    agents.iter().any(|agent| agent.name == assignee || agent.id == assignee)
+                    agents
+                        .iter()
+                        .any(|agent| agent.name == assignee || agent.id == assignee)
                 });
                 if matches!(local, Ok(false)) {
                     format!(
@@ -3222,9 +3619,15 @@ impl CasCore {
                 let cas_root = self.cas_root.clone();
                 peer_budget
                     .run(move || {
-                        claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
-                            local.contains(holder)
-                        })
+                        claims.acquire_for_local_lease(
+                            &cas_root,
+                            &id,
+                            kind,
+                            &agent,
+                            &name,
+                            cloud_duration,
+                            &|holder| local.contains(holder),
+                        )
                     })
                     .await
                     .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
@@ -3285,7 +3688,10 @@ impl CasCore {
             Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by == &agent_id,
             _ => false,
         };
-        if !won && cloud_claimed && let Some(claims) = peer_claims.clone() {
+        if !won
+            && cloud_claimed
+            && let Some(claims) = peer_claims.clone()
+        {
             // A refusal or failed local write leaves no newly acquired claim
             // behind. Never release a claim retained by another local agent.
             // cas-da31: the release holds the claim fence until it really
@@ -3306,7 +3712,10 @@ impl CasCore {
         let claim_info = match local_claim {
             Ok(ClaimResult::Success(lease)) => {
                 start_lease_epoch = Some(lease.epoch);
-                Some(format!(" (claimed until {})", lease.expires_at.format("%H:%M")))
+                Some(format!(
+                    " (claimed until {})",
+                    lease.expires_at.format("%H:%M")
+                ))
             }
             Ok(ClaimResult::AlreadyClaimed {
                 held_by,
@@ -3332,21 +3741,25 @@ impl CasCore {
                             holder_display,
                             expires_at.format("%H:%M"),
                             task.id,
-                            tool_prefix = self.supervisor_guidance_prefix().unwrap_or_else(
-                                crate::mcp::tools::core::guidance::caller_prefix,
-                            ),
+                            tool_prefix = self
+                                .supervisor_guidance_prefix()
+                                .unwrap_or_else(crate::mcp::tools::core::guidance::caller_prefix,),
                         ),
                     ));
                 }
             }
-            Ok(refused) => return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("Cannot start task: local lease refused: {refused:?}"),
-            )),
-            Err(error) => return Err(Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to claim task before start: {error}"),
-            )),
+            Ok(refused) => {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Cannot start task: local lease refused: {refused:?}"),
+                ));
+            }
+            Err(error) => {
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to claim task before start: {error}"),
+                ));
+            }
         };
         // A delayed synchronous release now sees this lease under the same
         // fence. Never expose the Cloud-first/local-later publication gap.
@@ -3561,14 +3974,20 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        let start_update = match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
+        let start_update = match queued_start_snapshot
+            .as_ref()
+            .or(split_start_snapshot.as_ref())
+        {
             Some(expected) => task_store.update_if_current(&task, expected),
             None => task_store.update(&task),
         };
         task.updated_at = match start_update {
             Ok(updated_at) => updated_at,
             Err(error) => {
-                if matches!(error, crate::store::StoreError::SyncDegradedAfterCommit { .. }) {
+                if matches!(
+                    error,
+                    crate::store::StoreError::SyncDegradedAfterCommit { .. }
+                ) {
                     // The local status committed, but publishing its sync intent
                     // failed. Keep the matching lease and report the commit.
                     crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
@@ -3580,7 +3999,10 @@ impl CasCore {
                         format!("Failed to start: {error}; lease rollback failed: {rollback}; re-query before retrying"),
                     ))?;
                 }
-                return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to update: {error}"),
+                ));
             }
         };
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
@@ -3612,7 +4034,9 @@ impl CasCore {
             let (id, agent, name) = (req.id.clone(), agent_id.clone(), agent_name.clone());
             let kind = task_claim_kind;
             let _ = peer_budget
-                .run(move || claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration))
+                .run(move || {
+                    claims.take_from_local(&id, kind, &holder, &agent, &name, cloud_duration)
+                })
                 .await;
         }
         // cas-5f28: a standard agent's start also focuses the parent epic
@@ -3732,7 +4156,11 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let start_guidance = format!("{}{}", self.close_requirements(&task), start_guidance(&task));
+        let start_guidance = format!(
+            "{}{}",
+            self.close_requirements(&task),
+            start_guidance(&task)
+        );
         let related_context = self
             .related_recall_excluding(
                 &task_recall_query(&task.title, &task.labels, &task.description),
@@ -3751,7 +4179,8 @@ impl CasCore {
         if let (Some(start), Some(current)) = (
             task.deliverables.factory_branch_start.as_ref(),
             current_checkout_branch.as_deref(),
-        ) && current != start.branch {
+        ) && current != start.branch
+        {
             source_readback.push_str(&format!(
                 "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
                  Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
@@ -3799,20 +4228,26 @@ impl CasCore {
                 wt_info,
                 start_guidance,
             );
-            let durable_recall = self.related_recall_context(
-                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id), false,
-            ).unwrap_or_default();
+            let durable_recall = self
+                .related_recall_context(
+                    &task_recall_query(&task.title, &task.labels, &task.description),
+                    Some(&task.id),
+                    false,
+                )
+                .unwrap_or_default();
             let context = format!("{peer_notes}{advisory}{durable_recall}{cited_issues}");
             let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
-            let read_saved = || task_store.get(&task.id).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!(
-                        "Task {} started, but reading saved start instructions failed: {error}",
-                        task.id
-                    ),
-                )
-            });
+            let read_saved = || {
+                task_store.get(&task.id).map_err(|error| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Task {} started, but reading saved start instructions failed: {error}",
+                            task.id
+                        ),
+                    )
+                })
+            };
             let mut saved = read_saved()?;
             // Only compare the most recent context, ignoring its timestamp and
             // any later progress notes. Lease display is intentionally transient.
@@ -3820,11 +4255,8 @@ impl CasCore {
                 .chain(saved.notes.match_indices("\n\n[").map(|(i, _)| i + 2))
                 .filter_map(|offset| {
                     let entry = &saved.notes[offset..];
-                    chrono::NaiveDateTime::parse_from_str(
-                        entry.get(..18)?,
-                        "[%Y-%m-%d %H:%M]",
-                    )
-                    .ok()?;
+                    chrono::NaiveDateTime::parse_from_str(entry.get(..18)?, "[%Y-%m-%d %H:%M]")
+                        .ok()?;
                     Some((offset, entry.get(18..)?.strip_prefix(" START CONTEXT")?))
                 })
                 .last();
@@ -4217,12 +4649,7 @@ mod related_recall_response_tests {
             "Quasar marigold dependency reconciliation".into(),
         );
         store
-            .create_atomic(
-                &peer_task,
-                &[],
-                Some(&epic.id),
-                None,
-            )
+            .create_atomic(&peer_task, &[], Some(&epic.id), None)
             .expect("persist peer-created task and parent edge");
 
         let id_results = core
@@ -4249,11 +4676,16 @@ mod related_recall_response_tests {
             .await
             .expect("search peer-created task by content");
         let semantic_results = text(semantic_results);
-        assert!(semantic_results.contains(&peer_task.id), "{semantic_results}");
+        assert!(
+            semantic_results.contains(&peer_task.id),
+            "{semantic_results}"
+        );
 
         let mut changed_task = peer_task.clone();
         changed_task.title.push_str(" updated");
-        store.update(&changed_task).expect("update one canonical task");
+        store
+            .update(&changed_task)
+            .expect("update one canonical task");
         let search_index = core.open_search_index().expect("search index");
         let refreshed = search_index
             .refresh_tasks(&store.list(None).expect("list tasks after update"))
@@ -4290,9 +4722,18 @@ mod related_recall_response_tests {
                       BUILD: NUXT_SSR=false; use 200.html and tests/auth.setup.ts.\n\
                       DELIVER: ledger rows PASS or FAIL; all HARD assertions apply.";
         for (title, scope) in [
-            ("Walk checkout", "Verify checkout-payment on /checkout in pages/checkout.vue."),
-            ("Walk account", "Verify account-profile on /account in pages/account.vue."),
-            ("Walk search", "Verify search-results on /search in pages/search.vue."),
+            (
+                "Walk checkout",
+                "Verify checkout-payment on /checkout in pages/checkout.vue.",
+            ),
+            (
+                "Walk account",
+                "Verify account-profile on /account in pages/account.vue.",
+            ),
+            (
+                "Walk search",
+                "Verify search-results on /search in pages/search.vue.",
+            ),
         ] {
             let mut request = child_request(title, epic.id.clone());
             request.description = Some(format!("{scope}\n\n{safety}"));
@@ -4304,23 +4745,41 @@ mod related_recall_response_tests {
             "Check checkout-payment on /checkout in pages/checkout.vue for a completed order.\n\n{safety}"
         ));
         let receipt = text(core.cas_task_create(Parameters(duplicate)).await.unwrap());
-        assert!(receipt.contains("SIBLING OVERLAP"), "genuine scope overlap: {receipt}");
+        assert!(
+            receipt.contains("SIBLING OVERLAP"),
+            "genuine scope overlap: {receipt}"
+        );
         assert!(receipt.contains("pages/checkout.vue"), "{receipt}");
-        assert!(!receipt.contains("overlapping identifiers: .env"), "{receipt}");
+        assert!(
+            !receipt.contains("overlapping identifiers: .env"),
+            "{receipt}"
+        );
 
         // Shared scope in just a pair is not epic-wide boilerplate, even
         // when the two briefs also repeat the real safety block.
-        let settlement = "Read ledgerStore in src/ledger.ts.\nRepair settlementReader in src/settlement.ts.";
+        let settlement =
+            "Read ledgerStore in src/ledger.ts.\nRepair settlementReader in src/settlement.ts.";
         for (title, scope, should_warn) in [
-            ("Inspect settlement storage", "Unique extraction scope.", false),
+            (
+                "Inspect settlement storage",
+                "Unique extraction scope.",
+                false,
+            ),
             ("Repair settlement history", "Unique history scope.", true),
         ] {
             let mut request = child_request(title, epic.id.clone());
             request.description = Some(format!("{scope}\n\n{settlement}\n\n{safety}"));
             let receipt = text(core.cas_task_create(Parameters(request)).await.unwrap());
-            assert_eq!(receipt.contains("SIBLING OVERLAP"), should_warn, "{title}: {receipt}");
+            assert_eq!(
+                receipt.contains("SIBLING OVERLAP"),
+                should_warn,
+                "{title}: {receipt}"
+            );
             if should_warn {
-                assert!(receipt.contains("ledgerStore"), "pair-only scope stays visible: {receipt}");
+                assert!(
+                    receipt.contains("ledgerStore"),
+                    "pair-only scope stays visible: {receipt}"
+                );
             }
         }
     }
@@ -4328,8 +4787,16 @@ mod related_recall_response_tests {
     #[tokio::test]
     async fn generic_identifier_overlap_does_not_warn_cas_b8ad() {
         let mut env = TestEnvGuard::temp_home();
-        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
-            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+        for key in [
+            "CAS_FACTORY_MODE",
+            "CAS_FACTORY_SESSION",
+            "CAS_AGENT_ROLE",
+            "CAS_AGENT_ID",
+            "CAS_AGENT_NAME",
+            "CAS_ROOT",
+            "CAS_CLONE_PATH",
+            "CAS_SESSION_ID",
+        ] {
             env.remove(key);
         }
         let temp = TempDir::new().unwrap();
@@ -4341,23 +4808,44 @@ mod related_recall_response_tests {
         core.cas_task_create(Parameters(described_task_request(
             "Publish batch two release notes",
             "Do NOT repeat before/after report. Describe search ranking rollout with cursor query.",
-        ))).await.expect("NOT and before/after are generic prose, not shared identifiers");
+        )))
+        .await
+        .expect("NOT and before/after are generic prose, not shared identifiers");
     }
 
     #[tokio::test]
     async fn generic_only_title_overlap_requires_near_identity_cas_b8ad() {
         let mut env = TestEnvGuard::temp_home();
-        for key in ["CAS_FACTORY_MODE", "CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
-            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+        for key in [
+            "CAS_FACTORY_MODE",
+            "CAS_FACTORY_SESSION",
+            "CAS_AGENT_ROLE",
+            "CAS_AGENT_ID",
+            "CAS_AGENT_NAME",
+            "CAS_ROOT",
+            "CAS_CLONE_PATH",
+            "CAS_SESSION_ID",
+        ] {
             env.remove(key);
         }
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        core.cas_task_create(Parameters(plain_task_request("Publish release notes report"))).await.unwrap();
-        core.cas_task_create(Parameters(plain_task_request("Publish release notes report before")))
-            .await.expect("generic-only title overlap needs a higher threshold");
-        let warning = core.cas_task_create(Parameters(plain_task_request("Publish release notes report")))
-            .await.expect_err("an exact duplicate title still warns");
+        core.cas_task_create(Parameters(plain_task_request(
+            "Publish release notes report",
+        )))
+        .await
+        .unwrap();
+        core.cas_task_create(Parameters(plain_task_request(
+            "Publish release notes report before",
+        )))
+        .await
+        .expect("generic-only title overlap needs a higher threshold");
+        let warning = core
+            .cas_task_create(Parameters(plain_task_request(
+                "Publish release notes report",
+            )))
+            .await
+            .expect_err("an exact duplicate title still warns");
     }
 
     #[tokio::test]
@@ -4393,7 +4881,11 @@ mod related_recall_response_tests {
             .await
             .expect_err("the GH #679 twin must require confirmation");
         assert_eq!(warning.code, ErrorCode::INVALID_PARAMS);
-        assert!(warning.message.contains(&original_id), "{}", warning.message);
+        assert!(
+            warning.message.contains(&original_id),
+            "{}",
+            warning.message
+        );
         for identifier in [
             "ensuredefaultprojects",
             "phone-workspace.service.ts:158",
@@ -4595,14 +5087,23 @@ mod related_recall_response_tests {
         let temp = TempDir::new().expect("temporary project");
         let repo = temp.path();
         let git = |args: &[&str]| {
-            let output = Command::new("git").args(args).current_dir(repo).output().unwrap();
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .output()
+                .unwrap();
             assert!(output.status.success(), "git {args:?}: {output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_string()
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "test@cas.test"]);
         git(&["config", "user.name", "Cassy Test"]);
-        git(&["remote", "add", "origin", "https://github.com/example/target-test.git"]);
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/target-test.git",
+        ]);
         std::fs::write(repo.join("seed.txt"), "seed\n").unwrap();
         git(&["add", "seed.txt"]);
         git(&["commit", "-q", "-m", "seed"]);
@@ -4613,11 +5114,20 @@ mod related_recall_response_tests {
         let create = |title: &'static str| {
             let core = &core;
             async move {
-                text(core.cas_task_create(Parameters(plain_task_request(title))).await.unwrap())
+                text(
+                    core.cas_task_create(Parameters(plain_task_request(title)))
+                        .await
+                        .unwrap(),
+                )
             }
         };
         let task = |title: &str| {
-            store.list(None).unwrap().into_iter().find(|task| task.title == title).unwrap()
+            store
+                .list(None)
+                .unwrap()
+                .into_iter()
+                .find(|task| task.title == title)
+                .unwrap()
         };
         let trains = |integration: &str| {
             store
@@ -4633,23 +5143,56 @@ mod related_recall_response_tests {
 
         // GH #1613: trains are opt-in. A fresh project targets the integration branch.
         let fresh = create("Fresh project").await;
-        assert_eq!(task("Fresh project").deliverables.work_target.unwrap().target_branch, "main");
-        assert!(store.get_parent_epic(&task("Fresh project").id).unwrap().is_none());
+        assert_eq!(
+            task("Fresh project")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            "main"
+        );
+        assert!(
+            store
+                .get_parent_epic(&task("Fresh project").id)
+                .unwrap()
+                .is_none()
+        );
 
         // Cassy's own repository opts in.
         std::fs::create_dir_all(repo.join(".cas")).unwrap();
-        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        std::fs::write(
+            repo.join(".cas/config.toml"),
+            "[factory]\nrelease_train = true\n",
+        )
+        .unwrap();
         let first = create("Fix one").await;
 
         let train = trains("main").pop().expect("train opened from main");
         let lane = train.branch.clone().expect("train lane");
         assert_eq!(git(&["rev-parse", &lane]), git(&["rev-parse", "main"]));
-        assert_eq!(task("Fix one").deliverables.work_target.unwrap().target_branch, lane);
+        assert_eq!(
+            task("Fix one")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            lane
+        );
 
         let second = create("Fix two").await;
-        assert!(second.contains(&format!("RELEASE TRAIN: joined {}", train.id)), "{second}");
+        assert!(
+            second.contains(&format!("RELEASE TRAIN: joined {}", train.id)),
+            "{second}"
+        );
         assert_eq!(trains("main").len(), 1, "second task joins the same train");
-        assert_eq!(task("Fix two").deliverables.work_target.unwrap().target_branch, lane);
+        assert_eq!(
+            task("Fix two")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            lane
+        );
 
         // The release lands: children merged into the lane, the lane on main.
         git(&["checkout", "-q", &lane]);
@@ -4664,13 +5207,23 @@ mod related_recall_response_tests {
             store.update(&child).unwrap();
         }
         let next = create("Fix three").await;
-        assert!(next.contains(&format!("{} landed on `main`", train.id)), "{next}");
+        assert!(
+            next.contains(&format!("{} landed on `main`", train.id)),
+            "{next}"
+        );
         assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
-        let open: Vec<_> = trains("main").into_iter().filter(|t| !t.is_terminal()).collect();
+        let open: Vec<_> = trains("main")
+            .into_iter()
+            .filter(|t| !t.is_terminal())
+            .collect();
         assert_eq!(open.len(), 1, "next train opens");
         assert_ne!(open[0].id, train.id);
         assert_eq!(
-            task("Fix three").deliverables.work_target.unwrap().target_branch,
+            task("Fix three")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
             open[0].branch.clone().unwrap()
         );
 
@@ -4678,7 +5231,14 @@ mod related_recall_response_tests {
         core.cas_task_create_with_target(plain_task_request("Hotfix"), None, Some("main"), false)
             .await
             .unwrap();
-        assert_eq!(task("Hotfix").deliverables.work_target.unwrap().target_branch, "main");
+        assert_eq!(
+            task("Hotfix")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            "main"
+        );
 
         // Staging-first repositories cut the train from staging.
         std::fs::write(
@@ -4690,8 +5250,18 @@ mod related_recall_response_tests {
         assert!(staged.contains("RELEASE TRAIN: opened"), "{staged}");
         let staging_train = trains("staging").pop().expect("train opened from staging");
         let staging_lane = staging_train.branch.clone().unwrap();
-        assert_eq!(git(&["rev-parse", &staging_lane]), git(&["rev-parse", "staging"]));
-        assert_eq!(task("Use staging").deliverables.work_target.unwrap().target_branch, staging_lane);
+        assert_eq!(
+            git(&["rev-parse", &staging_lane]),
+            git(&["rev-parse", "staging"])
+        );
+        assert_eq!(
+            task("Use staging")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            staging_lane
+        );
 
         // release_train=false restores the per-task integration target.
         std::fs::write(
@@ -4701,23 +5271,42 @@ mod related_recall_response_tests {
         .unwrap();
         let off = create("No train").await;
         assert!(!off.contains("RELEASE TRAIN"), "{off}");
-        assert_eq!(task("No train").deliverables.work_target.unwrap().target_branch, "staging");
-        assert!(store.get_parent_epic(&task("No train").id).unwrap().is_none());
+        assert_eq!(
+            task("No train")
+                .deliverables
+                .work_target
+                .unwrap()
+                .target_branch,
+            "staging"
+        );
+        assert!(
+            store
+                .get_parent_epic(&task("No train").id)
+                .unwrap()
+                .is_none()
+        );
 
         // GH #1613: with trains off, a close leaves the train for the
         // integration branch and the emptied train is cancelled.
-        let close: crate::mcp::tools::types::TaskCloseRequest =
-            serde_json::from_value(serde_json::json!({"id": task("Use staging").id, "reason": "done"}))
-                .unwrap();
+        let close: crate::mcp::tools::types::TaskCloseRequest = serde_json::from_value(
+            serde_json::json!({"id": task("Use staging").id, "reason": "done"}),
+        )
+        .unwrap();
         let _ = core.cas_task_close(Parameters(close)).await;
         let healed = task("Use staging");
-        assert_eq!(healed.deliverables.work_target.unwrap().target_branch, "staging");
+        assert_eq!(
+            healed.deliverables.work_target.unwrap().target_branch,
+            "staging"
+        );
         assert!(store.get_parent_epic(&healed.id).unwrap().is_none());
         assert!(healed.notes.contains(&staging_train.id), "{}", healed.notes);
         for train in trains("staging").into_iter().chain(trains("main")) {
             assert!(train.is_terminal(), "{train:?}");
         }
-        assert_eq!(store.get(&staging_train.id).unwrap().status, TaskStatus::Cancelled);
+        assert_eq!(
+            store.get(&staging_train.id).unwrap().status,
+            TaskStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -4796,33 +5385,70 @@ mod related_recall_response_tests {
     async fn gh1123_create_with_live_assignee_queues_dispatch() {
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        let mut worker = cas_types::Agent::new_with_role("worker-id".into(), "assigned-worker".into(), cas_types::AgentRole::Worker);
+        let mut worker = cas_types::Agent::new_with_role(
+            "worker-id".into(),
+            "assigned-worker".into(),
+            cas_types::AgentRole::Worker,
+        );
         worker.factory_session = Some("assignment-session".into());
         worker.metadata.insert("cli".into(), "codex".into());
         core.open_agent_store().unwrap().register(&worker).unwrap();
         let mut request = plain_task_request("Assigned creation dispatch");
         request.assignee = Some(worker.name.clone());
         core.cas_task_create(Parameters(request)).await.unwrap();
-        let task = core.open_task_store().unwrap().list(None).unwrap().pop().unwrap();
+        let task = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .pop()
+            .unwrap();
         let queue = crate::store::open_prompt_queue_store(&core.cas_root).unwrap();
-        let rows = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
-        assert_eq!(rows.len(), 1, "assigned creation must persist one dispatch without a director tick");
+        let rows = queue
+            .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "assigned creation must persist one dispatch without a director tick"
+        );
         assert_eq!(rows[0].target, worker.name);
         assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
-        assert!(rows[0].prompt.contains(&format!("action=start id={}", task.id)));
-        assert!(rows[0]
-            .prompt
-            .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY));
-        assert!(!rows[0].urgent, "assignment waits for an active tool call to finish");
+        assert!(
+            rows[0]
+                .prompt
+                .contains(&format!("action=start id={}", task.id))
+        );
+        assert!(
+            rows[0]
+                .prompt
+                .contains(crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY)
+        );
+        assert!(
+            !rows[0].urgent,
+            "assignment waits for an active tool call to finish"
+        );
         // A later director tick shares the producer; it cannot duplicate this dispatch.
         crate::task_assignment::enqueue(&core.cas_root, &task).unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 1);
+        assert_eq!(
+            queue
+                .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
         let mut dependent = plain_task_request("Dependent dashboard calibration");
         dependent.assignee = Some(worker.name.clone());
         dependent.blocked_by = Some(task.id.clone());
         // Ordinary blocks permit parallel preparation in the current ready policy.
         core.cas_task_create(Parameters(dependent)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert_eq!(
+            queue
+                .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+                .unwrap()
+                .len(),
+            2
+        );
         let mut config = crate::config::Config::load(&core.cas_root).unwrap();
         let mut orchestration = config.orchestration();
         orchestration.auto_prompt.on_task_assigned = false;
@@ -4831,25 +5457,50 @@ mod related_recall_response_tests {
         let mut disabled = plain_task_request("Disabled dispatch nutrition study");
         disabled.assignee = Some(worker.id.clone());
         core.cas_task_create(Parameters(disabled)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
+        assert_eq!(
+            queue
+                .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+                .unwrap()
+                .len(),
+            2
+        );
         orchestration.auto_prompt.on_task_assigned = true;
         config.orchestration = Some(orchestration);
         config.save(&core.cas_root).unwrap();
-        let mut next = cas_types::Agent::new_with_role("next-worker-id".into(), "next-worker".into(), cas_types::AgentRole::Worker);
+        let mut next = cas_types::Agent::new_with_role(
+            "next-worker-id".into(),
+            "next-worker".into(),
+            cas_types::AgentRole::Worker,
+        );
         next.factory_session = worker.factory_session.clone();
         core.open_agent_store().unwrap().register(&next).unwrap();
-        let update = serde_json::from_value(serde_json::json!({"id": task.id, "assignee": next.name})).unwrap();
+        let update =
+            serde_json::from_value(serde_json::json!({"id": task.id, "assignee": next.name}))
+                .unwrap();
         core.cas_task_update(Parameters(update)).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&next.name], Some("assignment-session"), 10).unwrap().len(), 1,
-            "reassignment must use the same durable producer");
+        assert_eq!(
+            queue
+                .peek_for_targets(&[&next.name], Some("assignment-session"), 10)
+                .unwrap()
+                .len(),
+            1,
+            "reassignment must use the same durable producer"
+        );
         worker.mark_shutdown();
         core.open_agent_store().unwrap().register(&worker).unwrap();
         let mut retired = plain_task_request("Retired billing workflow");
         retired.assignee = Some(worker.id.clone());
         core.cas_task_create(Parameters(retired)).await.unwrap();
-        core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup"))).await.unwrap();
-        assert_eq!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap().len(), 2);
-
+        core.cas_task_create(Parameters(plain_task_request("Unassigned storage cleanup")))
+            .await
+            .unwrap();
+        assert_eq!(
+            queue
+                .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -5085,10 +5736,15 @@ mod related_recall_response_tests {
                 .as_deref()
                 .and_then(|id| store.get(id).ok())
                 .filter(super::super::release_train::is_release_train);
-            let rides_train =
-                matches!(case, "no-lease" | "expired" | "blocked" | "other-agent" | "empty-epic");
+            let rides_train = matches!(
+                case,
+                "no-lease" | "expired" | "blocked" | "other-agent" | "empty-epic"
+            );
             assert_eq!(train.is_some(), rides_train, "{case}: {response}");
-            let train_lane = train.as_ref().and_then(|t| t.branch.clone()).unwrap_or_default();
+            let train_lane = train
+                .as_ref()
+                .and_then(|t| t.branch.clone())
+                .unwrap_or_default();
             let expected_epic = match case {
                 "default" => Some(epic.id.clone()),
                 "explicit-epic" => Some(alternate.id.clone()),
@@ -5297,7 +5953,8 @@ mod related_recall_response_tests {
                 } else {
                     "cas-parent-a"
                 };
-                let mut dep = Dependency::new(id.into(), parent.into(), DependencyType::ParentChild);
+                let mut dep =
+                    Dependency::new(id.into(), parent.into(), DependencyType::ParentChild);
                 dep.created_by = Some("filing-worker".into());
                 store.add_dependency(&dep).unwrap();
                 agents.try_claim(id, "filing-worker", 600, None).unwrap();
@@ -5435,9 +6092,17 @@ mod related_recall_response_tests {
         epic_lane_git(&repo, &["commit", "-q", "-m", "seed"]);
         epic_lane_git(
             temp.path(),
-            &["init", "-q", "--bare", origin.to_str().expect("utf-8 origin")],
+            &[
+                "init",
+                "-q",
+                "--bare",
+                origin.to_str().expect("utf-8 origin"),
+            ],
         );
-        epic_lane_git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        epic_lane_git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         epic_lane_git(&repo, &["push", "-q", "-u", "origin", "main"]);
         (temp, repo)
     }
@@ -5501,7 +6166,10 @@ mod related_recall_response_tests {
             .await
             .expect("create epic");
         let receipt = format!("{created:?}");
-        assert!(receipt.contains("Epic lane adopted: epic/violet-log-hygiene"), "{receipt}");
+        assert!(
+            receipt.contains("Epic lane adopted: epic/violet-log-hygiene"),
+            "{receipt}"
+        );
         assert!(!receipt.contains("Epic branch created"), "{receipt}");
         let store = core.open_task_store().expect("task store");
         let epic = store
@@ -5592,7 +6260,9 @@ mod related_recall_response_tests {
             .into_iter()
             .find(|task| task.title == "Staging based epic")
             .expect("created epic");
-        let lane = epic.branch.expect("an auto lane is still cut from a base target");
+        let lane = epic
+            .branch
+            .expect("an auto lane is still cut from a base target");
         assert!(lane.starts_with("epic/staging-based-epic-"), "{lane}");
         assert!(receipt.contains("Epic branch created"), "{receipt}");
         assert!(
@@ -5608,7 +6278,10 @@ mod related_recall_response_tests {
             .await
             .expect("create epic");
         let receipt = format!("{created:?}");
-        assert!(receipt.contains("Epic branch created: epic/implicit-epic-"), "{receipt}");
+        assert!(
+            receipt.contains("Epic branch created: epic/implicit-epic-"),
+            "{receipt}"
+        );
         assert!(!receipt.contains("Deliveries land on"), "{receipt}");
     }
 
@@ -5730,10 +6403,23 @@ mod related_recall_response_tests {
             .expect("create epic"),
         );
 
-        let repeated = text(core.cas_task_create_with_target(epic_request(
-            "Timeline import follow-up again", "Plan timeline import work for the next release."
-        ), None, None, true).await.expect("repeat create"));
-        assert!(!repeated.contains("m-recall-memory"), "repeated memory: {repeated}");
+        let repeated = text(
+            core.cas_task_create_with_target(
+                epic_request(
+                    "Timeline import follow-up again",
+                    "Plan timeline import work for the next release.",
+                ),
+                None,
+                None,
+                true,
+            )
+            .await
+            .expect("repeat create"),
+        );
+        assert!(
+            !repeated.contains("m-recall-memory"),
+            "repeated memory: {repeated}"
+        );
         assert!(response.contains("Related prior context:"), "{response}");
         assert!(response.contains("m-recall-memory"), "{response}");
         assert!(
@@ -5781,13 +6467,21 @@ mod related_recall_response_tests {
             .expect("created task")
             .id;
         let started = text(
-            core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
-                .await
-                .expect("start qa task"),
+            core.cas_task_start(Parameters(IdRequest {
+                id: task_id.clone(),
+            }))
+            .await
+            .expect("start qa task"),
         );
-        assert!(!started.contains("m-golden-set"), "the same session already saw this memory: {started}");
+        assert!(
+            !started.contains("m-golden-set"),
+            "the same session already saw this memory: {started}"
+        );
         let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
-        assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
+        assert!(
+            saved.notes.contains("never ad-hoc fixtures."),
+            "complete recalled instructions must be recoverable"
+        );
     }
 
     #[test]
@@ -5799,7 +6493,10 @@ mod related_recall_response_tests {
         );
         let terms: Vec<&str> = query.split(' ').collect();
         assert_eq!(terms.first(), Some(&"qa"));
-        assert!(terms.contains(&"checkout") && terms.contains(&"release"), "{query}");
+        assert!(
+            terms.contains(&"checkout") && terms.contains(&"release"),
+            "{query}"
+        );
         for filler in ["the", "you", "see", "next", "before"] {
             assert!(!terms.contains(&filler), "{filler} in {query}");
         }
@@ -5812,28 +6509,58 @@ mod related_recall_response_tests {
         let _env = TestEnvGuard::temp_home();
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        let beta = Agent::new_with_role("reg-supervisor-beta-07".into(), "beta".into(), AgentRole::Supervisor);
+        let beta = Agent::new_with_role(
+            "reg-supervisor-beta-07".into(),
+            "beta".into(),
+            AgentRole::Supervisor,
+        );
         core.open_agent_store().unwrap().register(&beta).unwrap();
         core.set_agent_id_for_testing(beta.id.clone());
-        crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy").unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(temp.path(), "github.com/richards-llc/cassy")
+            .unwrap();
         let source = "https://richards-llc.slack.com/archives/C08COORD01/p1760616000123456";
-        let contract: serde_json::Value = serde_json::from_str(include_str!("../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json")).unwrap();
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tests/fixtures/coordination_contract/v1/external_work--claim.json"
+        ))
+        .unwrap();
         // pin: the coordination v1 fixture names its cross-machine ownership refusal case.
-        let mut held = contract["cases"].as_array().unwrap().iter().find(|case| case["name"] == "held by a peer").unwrap()["response"]["payload"].clone();
-        let owner = held["receipt"]["visible_owner"]["label"].as_str().unwrap().to_owned();
-        held["receipt"]["expires_at"] = serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
+        let mut held = contract["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"] == "held by a peer")
+            .unwrap()["response"]["payload"]
+            .clone();
+        let owner = held["receipt"]["visible_owner"]["label"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        held["receipt"]["expires_at"] =
+            serde_json::json!((chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339());
         let journal = SqliteRequestJournal::open(temp.path()).unwrap();
         let request = "00000002-2222-4222-8222-000000000002";
-        journal.prepare(request, "claim", &serde_json::json!({
-            "schema":CONTRACT_SCHEMA,"project_id":"github.com/richards-llc/cassy",
-            "external_ref":source,"actor":{"registration_id":beta.id},
-        })).unwrap();
+        journal
+            .prepare(
+                request,
+                "claim",
+                &serde_json::json!({
+                    "schema":CONTRACT_SCHEMA,"project_id":"github.com/richards-llc/cassy",
+                    "external_ref":source,"actor":{"registration_id":beta.id},
+                }),
+            )
+            .unwrap();
         journal.record_result(request, &held, None).unwrap();
         let tasks = core.open_task_store().unwrap();
-        let mut synced = crate::types::Task::new("cas-synced".into(), "Already synchronized task".into());
+        let mut synced =
+            crate::types::Task::new("cas-synced".into(), "Already synchronized task".into());
         synced.external_ref = Some(source.into());
         tasks.add(&synced).unwrap();
-        for role in [AgentRole::Standard, AgentRole::Director, AgentRole::Supervisor, AgentRole::Worker] {
+        for role in [
+            AgentRole::Standard,
+            AgentRole::Director,
+            AgentRole::Supervisor,
+            AgentRole::Worker,
+        ] {
             let mut actor = beta.clone();
             actor.role = role;
             core.open_agent_store().unwrap().update(&actor).unwrap();
@@ -5841,25 +6568,63 @@ mod related_recall_response_tests {
                 // A supervisor can start epics; ordinary execution remains worker-only.
                 synced.task_type = if role == AgentRole::Supervisor && entry == "start" {
                     crate::types::TaskType::Epic
-                } else { crate::types::TaskType::Task };
+                } else {
+                    crate::types::TaskType::Task
+                };
                 tasks.update(&synced).unwrap();
                 let result = match entry {
                     "create" => {
-                        let mut req = described_task_request("Investigate independent scheduler regression", "Fix the failing callback path.");
+                        let mut req = described_task_request(
+                            "Investigate independent scheduler regression",
+                            "Fix the failing callback path.",
+                        );
                         req.external_ref = Some(source.into());
                         core.cas_task_create(Parameters(req)).await
                     }
-                    "assign" => core.cas_task_update(Parameters(serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(serde_json::json!({"id":synced.id,"assignee":"new-worker"})).unwrap())).await,
-                    "start" => core.cas_task_start(Parameters(IdRequest { id: synced.id.clone() })).await,
-                    "claim" => core.cas_task_claim(Parameters(crate::mcp::tools::TaskClaimRequest {task_id:synced.id.clone(),duration_secs:600,reason:None})).await,
-                    _ => core.cas_task_transfer(Parameters(serde_json::from_value::<crate::mcp::tools::TaskTransferRequest>(serde_json::json!({"task_id":synced.id,"to_agent":"new-worker"})).unwrap())).await,
+                    "assign" => {
+                        core.cas_task_update(Parameters(
+                            serde_json::from_value::<crate::mcp::tools::TaskUpdateRequest>(
+                                serde_json::json!({"id":synced.id,"assignee":"new-worker"}),
+                            )
+                            .unwrap(),
+                        ))
+                        .await
+                    }
+                    "start" => {
+                        core.cas_task_start(Parameters(IdRequest {
+                            id: synced.id.clone(),
+                        }))
+                        .await
+                    }
+                    "claim" => {
+                        core.cas_task_claim(Parameters(crate::mcp::tools::TaskClaimRequest {
+                            task_id: synced.id.clone(),
+                            duration_secs: 600,
+                            reason: None,
+                        }))
+                        .await
+                    }
+                    _ => {
+                        core.cas_task_transfer(Parameters(
+                            serde_json::from_value::<crate::mcp::tools::TaskTransferRequest>(
+                                serde_json::json!({"task_id":synced.id,"to_agent":"new-worker"}),
+                            )
+                            .unwrap(),
+                        ))
+                        .await
+                    }
                 };
-                let response = result.map(text).unwrap_or_else(|error| error.message.to_string());
+                let response = result
+                    .map(text)
+                    .unwrap_or_else(|error| error.message.to_string());
                 assert!(response.contains(&owner), "{role}/{entry}: {response}");
                 // pin: the ownership warning must identify the caller's source.
                 assert!(response.contains(source), "{role}/{entry}: {response}");
                 assert_eq!(tasks.list(None).unwrap().len(), 1);
-                assert_eq!(tasks.get(&synced.id).unwrap().status, crate::types::TaskStatus::Open);
+                assert_eq!(
+                    tasks.get(&synced.id).unwrap().status,
+                    crate::types::TaskStatus::Open
+                );
                 assert!(tasks.get(&synced.id).unwrap().assignee.is_none());
             }
         }
@@ -5899,7 +6664,11 @@ mod related_recall_response_tests {
                 .as_deref(),
             Some("https://github.com/Richards-LLC/cassy/issues/1216")
         );
-        assert!(response.contains("external_ref set to https://github.com/Richards-LLC/cassy/issues/1216"), "{response}");
+        assert!(
+            response
+                .contains("external_ref set to https://github.com/Richards-LLC/cassy/issues/1216"),
+            "{response}"
+        );
 
         let response = text(
             core.cas_task_create(Parameters(described_task_request(
@@ -5909,20 +6678,26 @@ mod related_recall_response_tests {
             .await
             .expect("create prose task"),
         );
-        assert_eq!(find("Render scheduler caps output frames").external_ref, None);
+        assert_eq!(
+            find("Render scheduler caps output frames").external_ref,
+            None
+        );
         assert!(
             response.contains("cites Richards-LLC/cassy#1210 but has no external_ref"),
             "{response}"
         );
 
-        let mut explicit = described_task_request(
-            "Richards-LLC/cassy#1171: explicit ref wins",
-            "",
-        );
+        let mut explicit = described_task_request("Richards-LLC/cassy#1171: explicit ref wins", "");
         explicit.external_ref = Some("https://example.test/ticket/7".into());
-        let response = text(core.cas_task_create(Parameters(explicit)).await.expect("create"));
+        let response = text(
+            core.cas_task_create(Parameters(explicit))
+                .await
+                .expect("create"),
+        );
         assert_eq!(
-            find("Richards-LLC/cassy#1171: explicit ref wins").external_ref.as_deref(),
+            find("Richards-LLC/cassy#1171: explicit ref wins")
+                .external_ref
+                .as_deref(),
             Some("https://example.test/ticket/7")
         );
         assert!(!response.contains("🔗"), "{response}");
@@ -5968,21 +6743,30 @@ mod related_recall_response_tests {
         use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
             ("CAS_SESSION_ID", Some("proud-cheetah-76")),
             ("CAS_AGENT_NAME", Some("proud-cheetah-76")),
         ]);
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"gabber-studio\"\n",
+        )
+        .unwrap();
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
         let server = MockServer::start().await;
         crate::cloud::CloudConfig {
-            endpoint: server.uri(), token: Some("fixture-token".into()),
-            team_id: Some("team-1".into()), ..Default::default()
-        }.save_to_cas_dir(root).unwrap();
+            endpoint: server.uri(),
+            token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(root)
+        .unwrap();
         let scope = "Map the live product and retire superseded legacy flows flags and code paths using 38 removal decisions from the live-product map.";
         let title = "EPIC: Legacy out — the current flow is the product; map every legacy flow, flag and code path it superseded, then retire them";
         let mut epic = Task::new("cas-e88d".into(), "EPIC: Live-product cleanup — 10 live problems + removal decisions from the live-product map".into());
@@ -5990,7 +6774,10 @@ mod related_recall_response_tests {
         epic.origin_project = Some("gabber-studio".into());
         epic.description = scope.into();
         epic.epic_verification_owner = Some("patient-badger-31".into());
-        let mut child = Task::new("cas-open-child".into(), "Retire superseded legacy routes".into());
+        let mut child = Task::new(
+            "cas-open-child".into(),
+            "Retire superseded legacy routes".into(),
+        );
         child.origin_project = Some("gabber-studio".into());
         let mut closed = child.clone();
         closed.id = "cas-closed-child".into();
@@ -6003,45 +6790,103 @@ mod related_recall_response_tests {
         foreign.id = "cas-foreign-plan".into();
         foreign.title = title.into();
         foreign.origin_project = Some("another-project".into());
-        let tasks: Vec<_> = [epic.clone(), child.clone(), closed.clone(), completed.clone(), foreign.clone()].into_iter().map(|task| {
+        let tasks: Vec<_> = [
+            epic.clone(),
+            child.clone(),
+            closed.clone(),
+            completed.clone(),
+            foreign.clone(),
+        ]
+        .into_iter()
+        .map(|task| {
             let mut raw = serde_json::to_value(task).unwrap();
             raw["project_id"] = serde_json::json!("gabber-studio");
             raw
-        }).collect();
-        let edges: Vec<_> = [child.id.clone(), closed.id.clone()].into_iter().map(|id| {
-            let edge = crate::types::Dependency::new(id, epic.id.clone(), crate::types::DependencyType::ParentChild);
-            let mut raw = serde_json::to_value(edge).unwrap();
-            raw["project_id"] = serde_json::json!("gabber-studio");
-            raw
-        }).collect();
-        for (collection, rows) in [("tasks", serde_json::json!(tasks)), ("task_dependencies", serde_json::json!(edges))] {
-            Mock::given(method("GET")).and(path("/api/teams/team-1/sync/pull"))
-                .and(query_param("project_id", "gabber-studio")).and(query_param("types", collection))
-                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({(collection):rows})))
+        })
+        .collect();
+        let edges: Vec<_> = [child.id.clone(), closed.id.clone()]
+            .into_iter()
+            .map(|id| {
+                let edge = crate::types::Dependency::new(
+                    id,
+                    epic.id.clone(),
+                    crate::types::DependencyType::ParentChild,
+                );
+                let mut raw = serde_json::to_value(edge).unwrap();
+                raw["project_id"] = serde_json::json!("gabber-studio");
+                raw
+            })
+            .collect();
+        for (collection, rows) in [
+            ("tasks", serde_json::json!(tasks)),
+            ("task_dependencies", serde_json::json!(edges)),
+        ] {
+            Mock::given(method("GET"))
+                .and(path("/api/teams/team-1/sync/pull"))
+                .and(query_param("project_id", "gabber-studio"))
+                .and(query_param("types", collection))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({(collection):rows})),
+                )
                 .expect(1)
-                .mount(&server).await;
+                .mount(&server)
+                .await;
         }
-        let request = epic_request(
-            title,
-            &format!("The current flow is the product. {scope}"),
-        );
-        let warning = core.cas_task_create(Parameters(request.clone())).await
+        let request = epic_request(title, &format!("The current flow is the product. {scope}"));
+        let warning = core
+            .cas_task_create(Parameters(request.clone()))
+            .await
             .expect_err("the peer's reworded open epic must warn before writing");
-        for required in ["EPIC", "cas-e88d", "patient-badger-31", "cas-open-child", "Retire superseded legacy routes", "confirm_warning=true"] {
-            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+        for required in [
+            "EPIC",
+            "cas-e88d",
+            "patient-badger-31",
+            "cas-open-child",
+            "Retire superseded legacy routes",
+            "confirm_warning=true",
+        ] {
+            assert!(
+                warning.message.contains(required),
+                "missing {required}: {warning:?}"
+            );
         }
         assert!(!warning.message.contains("cas-closed-child"), "{warning:?}");
-        assert!(store.list(None).unwrap().is_empty(), "warning must not persist the new epic or pulled inventory");
+        assert!(
+            store.list(None).unwrap().is_empty(),
+            "warning must not persist the new epic or pulled inventory"
+        );
         // The same check also works offline against the local inventory.
-        crate::cloud::CloudConfig::default().save_to_cas_dir(root).unwrap();
+        crate::cloud::CloudConfig::default()
+            .save_to_cas_dir(root)
+            .unwrap();
         for task in [&epic, &child, &closed, &completed, &foreign] {
             store.add(task).unwrap();
         }
-        store.add_dependency(&crate::types::Dependency::new(child.id.clone(), epic.id.clone(), crate::types::DependencyType::ParentChild)).unwrap();
-        let local_warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
-        assert!(local_warning.message.contains("cas-e88d") && local_warning.message.contains("cas-open-child"), "{local_warning:?}");
-        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
-        assert_eq!(store.list(None).unwrap().len(), 6, "explicit confirmation permits the intentional epic");
+        store
+            .add_dependency(&crate::types::Dependency::new(
+                child.id.clone(),
+                epic.id.clone(),
+                crate::types::DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let local_warning = core
+            .cas_task_create(Parameters(request.clone()))
+            .await
+            .unwrap_err();
+        assert!(
+            local_warning.message.contains("cas-e88d")
+                && local_warning.message.contains("cas-open-child"),
+            "{local_warning:?}"
+        );
+        core.cas_task_create_with_target(request, None, None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list(None).unwrap().len(),
+            6,
+            "explicit confirmation permits the intentional epic"
+        );
         // Terminal plans and foreign scopes do not block a new plan.
         for mut task in store.list(None).unwrap() {
             if task.id != foreign.id {
@@ -6049,25 +6894,37 @@ mod related_recall_response_tests {
                 store.update(&task).unwrap();
             }
         }
-        core.cas_task_create(Parameters(epic_request(title, scope))).await.unwrap();
+        core.cas_task_create(Parameters(epic_request(title, scope)))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn epic_create_preserves_open_feature_duplicate_warning_cas_dea7() {
         let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
         ]);
         let temp = TempDir::new().unwrap();
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         let scope = "Migrate refund readers in payments.service.ts:412 and refunds.controller.ts:88 to read paymentIntentId from the payments table";
-        let mut feature = described_task_request("Consolidate paymentIntentId refund readers", scope);
+        let mut feature =
+            described_task_request("Consolidate paymentIntentId refund readers", scope);
         feature.task_type = "feature".into();
         core.cas_task_create(Parameters(feature)).await.unwrap();
-        let warning = core.cas_task_create(Parameters(epic_request(
-            "EPIC: unify refund payment lookup", scope,
-        ))).await.expect_err("epic creation must still check open features");
+        let warning = core
+            .cas_task_create(Parameters(epic_request(
+                "EPIC: unify refund payment lookup",
+                scope,
+            )))
+            .await
+            .expect_err("epic creation must still check open features");
 
-        assert_eq!(core.open_task_store().unwrap().list(None).unwrap().len(), 1, "refusal must not create the epic");
+        assert_eq!(
+            core.open_task_store().unwrap().list(None).unwrap().len(),
+            1,
+            "refusal must not create the epic"
+        );
     }
 
     #[tokio::test]
@@ -6075,32 +6932,68 @@ mod related_recall_response_tests {
         use wiremock::matchers::method;
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_FACTORY_MODE", None), ("CAS_FACTORY_SESSION", None),
+            ("CAS_FACTORY_MODE", None),
+            ("CAS_FACTORY_SESSION", None),
         ]);
         let temp = TempDir::new().unwrap();
         let root = temp.path();
-        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"gabber-studio\"\n").unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"gabber-studio\"\n",
+        )
+        .unwrap();
         let core = CasCore::with_daemon(root.to_path_buf(), None, None);
         let store = core.open_task_store().unwrap();
         store.init().unwrap();
-        let mut local = Task::new("cas-local-search".into(), "Restore the product search index".into());
+        let mut local = Task::new(
+            "cas-local-search".into(),
+            "Restore the product search index".into(),
+        );
         local.task_type = TaskType::Epic;
         local.epic_verification_owner = Some("search-supervisor".into());
         store.add(&local).unwrap();
         let server = MockServer::start().await;
         crate::cloud::CloudConfig {
-            endpoint: server.uri(), token: Some("fixture-token".into()),
-            team_id: Some("team-1".into()), ..Default::default()
-        }.save_to_cas_dir(root).unwrap();
-        Mock::given(method("GET")).respond_with(ResponseTemplate::new(503))
-            .expect(1).mount(&server).await;
-        let request = epic_request("Restore the product search index", "Rebuild missing conversation search documents.");
-        let warning = core.cas_task_create(Parameters(request.clone())).await.unwrap_err();
-        for required in ["EPIC INVENTORY WARNING", "DUPLICATE EPIC WARNING", "cas-local-search", "search-supervisor", "confirm_warning=true"] {
-            assert!(warning.message.contains(required), "missing {required}: {warning:?}");
+            endpoint: server.uri(),
+            token: Some("fixture-token".into()),
+            team_id: Some("team-1".into()),
+            ..Default::default()
         }
-        assert_eq!(store.list(None).unwrap().len(), 1, "outage and local overlap must both be reported before writing");
-        core.cas_task_create_with_target(request, None, None, true).await.unwrap();
+        .save_to_cas_dir(root)
+        .unwrap();
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let request = epic_request(
+            "Restore the product search index",
+            "Rebuild missing conversation search documents.",
+        );
+        let warning = core
+            .cas_task_create(Parameters(request.clone()))
+            .await
+            .unwrap_err();
+        for required in [
+            "EPIC INVENTORY WARNING",
+            "DUPLICATE EPIC WARNING",
+            "cas-local-search",
+            "search-supervisor",
+            "confirm_warning=true",
+        ] {
+            assert!(
+                warning.message.contains(required),
+                "missing {required}: {warning:?}"
+            );
+        }
+        assert_eq!(
+            store.list(None).unwrap().len(),
+            1,
+            "outage and local overlap must both be reported before writing"
+        );
+        core.cas_task_create_with_target(request, None, None, true)
+            .await
+            .unwrap();
         assert_eq!(store.list(None).unwrap().len(), 2);
     }
 
@@ -6139,29 +7032,63 @@ mod related_recall_response_tests {
         for method in ["update", "dep_add"] {
             let store = first.open_task_store().unwrap();
             let id = format!("cas-own-{method}");
-            store.add(&Task::new(id.clone(), format!("Existing repair {method}"))).unwrap();
+            store
+                .add(&Task::new(id.clone(), format!("Existing repair {method}")))
+                .unwrap();
             if method == "update" {
-                let update = serde_json::from_value(serde_json::json!({"id": id, "epic": epic_id})).unwrap();
+                let update =
+                    serde_json::from_value(serde_json::json!({"id": id, "epic": epic_id})).unwrap();
                 first.cas_task_update(Parameters(update)).await.unwrap();
             } else {
-                first.cas_task_dep_add(Parameters(DependencyRequest { from_id: id, to_id: epic_id.clone(), dep_type: "parent-child".into() })).await.unwrap();
+                first
+                    .cas_task_dep_add(Parameters(DependencyRequest {
+                        from_id: id,
+                        to_id: epic_id.clone(),
+                        dep_type: "parent-child".into(),
+                    }))
+                    .await
+                    .unwrap();
             }
-            first.cas_task_create(Parameters(child_request(format!("Own subsequent plan {method}").as_str(), epic_id.clone())))
-                .await.expect("the caller's own binding update must not trigger a planning race");
+            first
+                .cas_task_create(Parameters(child_request(
+                    format!("Own subsequent plan {method}").as_str(),
+                    epic_id.clone(),
+                )))
+                .await
+                .expect("the caller's own binding update must not trigger a planning race");
         }
 
         let store = first.open_task_store().unwrap();
-        store.add(&Task::new("cas-anonymous-old".into(), "Historical parent link".into())).unwrap();
-        let mut legacy = Dependency::new("cas-anonymous-old".into(), epic_id.clone(), DependencyType::ParentChild);
+        store
+            .add(&Task::new(
+                "cas-anonymous-old".into(),
+                "Historical parent link".into(),
+            ))
+            .unwrap();
+        let mut legacy = Dependency::new(
+            "cas-anonymous-old".into(),
+            epic_id.clone(),
+            DependencyType::ParentChild,
+        );
         legacy.created_by = Some("mcp".into());
         store.add_dependency(&legacy).unwrap();
-        first.cas_task_create(Parameters(child_request("Current supervisor followup", epic_id.clone())))
-            .await.expect("anonymous historical metadata is not evidence of another planner");
+        first
+            .cas_task_create(Parameters(child_request(
+                "Current supervisor followup",
+                epic_id.clone(),
+            )))
+            .await
+            .expect("anonymous historical metadata is not evidence of another planner");
 
         // A parallel MCP instance resolves the same registered caller.
         let parallel = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
-        parallel.cas_task_create(Parameters(child_request("Own parallel child", epic_id.clone())))
-            .await.expect("the same supervisor's other MCP instance is not a competitor");
+        parallel
+            .cas_task_create(Parameters(child_request(
+                "Own parallel child",
+                epic_id.clone(),
+            )))
+            .await
+            .expect("the same supervisor's other MCP instance is not a competitor");
 
         env.set("CAS_SESSION_ID", "planning-supervisor-two");
         env.set("CAS_AGENT_NAME", "planning-supervisor-two");
@@ -6173,7 +7100,11 @@ mod related_recall_response_tests {
             )))
             .await
             .expect_err("recent competing plan must require confirmation");
-        assert!(warning.message.contains("planning-supervisor-one"), "{}", warning.message);
+        assert!(
+            warning.message.contains("planning-supervisor-one"),
+            "{}",
+            warning.message
+        );
 
         let mut duplicate_request = child_request("First supervisor child", epic_id.clone());
         duplicate_request.epic = None;
@@ -6207,8 +7138,16 @@ mod related_recall_response_tests {
             );
         }
 
-        add_memory(&core, "m-weak-match", "Incidental keyword", "Keyword belongs to an unrelated outage.");
-        assert!(core.related_recall("unrelated bounded").is_none(), "single incidental matches stay quiet");
+        add_memory(
+            &core,
+            "m-weak-match",
+            "Incidental keyword",
+            "Keyword belongs to an unrelated outage.",
+        );
+        assert!(
+            core.related_recall("unrelated bounded").is_none(),
+            "single incidental matches stay quiet"
+        );
         let response = core
             .related_recall("bounded recall shared keyword")
             .expect("matching recall");
@@ -6441,7 +7380,10 @@ mod preassigned_start_message_order_tests {
             vec![policy],
             "the stale broadcast is not in a late worker's inbox at all"
         );
-        assert_eq!(task_store.get("cas-p37a").unwrap().status, TaskStatus::InProgress);
+        assert_eq!(
+            task_store.get("cas-p37a").unwrap().status,
+            TaskStatus::InProgress
+        );
     }
 }
 

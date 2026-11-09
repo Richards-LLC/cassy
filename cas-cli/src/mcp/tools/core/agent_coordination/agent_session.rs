@@ -86,7 +86,7 @@ mod tests {
         let mut env = TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
-        for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Standard] {
+        for role in [AgentRole::Supervisor, AgentRole::Director, AgentRole::Worker, AgentRole::Standard] {
             let parent_id = format!("parent-{role}");
             let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
             let agents = core.open_agent_store().unwrap();

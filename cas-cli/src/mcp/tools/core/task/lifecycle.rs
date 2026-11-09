@@ -4261,8 +4261,8 @@ mod related_recall_response_tests {
         assert_eq!(refreshed, 1, "only the updated task document is rewritten");
 
         let before = store.list(None).expect("list tasks before duplicate").len();
-        let mut duplicate = child_request(&peer_task.title, epic.id.clone());
-        duplicate.description = Some(peer_task.description.clone());
+        let mut duplicate = child_request(&changed_task.title, epic.id.clone());
+        duplicate.description = Some(changed_task.description.clone());
         let error = core
             .cas_task_create(Parameters(duplicate))
             .await

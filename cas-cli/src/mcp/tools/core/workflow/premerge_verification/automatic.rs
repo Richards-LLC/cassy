@@ -23,7 +23,7 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         .transpose()?
         .unwrap_or_else(|| "none".into());
     Ok(format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Missing evidence requires supervisor_call.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Use qa.mode in the structured review context below. In batch mode, approve when the only open evidence is a NOT EXERCISED journey assigned solely to release batch QA and every other criterion is VERIFIED; record each deferred row and its owner. Other missing evidence, per_task unexercised journeys and any question beyond that policy still require supervisor_call. Never waive rejection conditions or treat a deferred walk as PASS.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\nReview context:\n{}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
@@ -37,6 +37,7 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
         serde_json::to_string(task).map_err(|e| e.to_string())?,
         serde_json::to_string(&parent).map_err(|e| e.to_string())?,
         serde_json::to_string(dispatch).map_err(|e| e.to_string())?,
+        serde_json::json!({"qa": {"mode": core.load_config().qa().mode}}),
     ))
 }
 
@@ -445,6 +446,34 @@ pub(super) async fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_context_carries_configured_qa_mode_cas_8f8b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-8f8b-context".into(), "Review context".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "owner", "owner",
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        for mode in [crate::config::QaMode::Batch, crate::config::QaMode::PerTask] {
+            std::fs::write(root.join("config.toml"), format!("[qa]\nmode = '{mode}'\n")).unwrap();
+            // Each configured server loads its mode once; this is not a
+            // hot-reload contract for an already-running server.
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            let input = prompt(&core, &task, &dispatch).unwrap();
+            let context = input.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|value| value.get("qa").is_some())
+                .unwrap_or(serde_json::Value::Null);
+            assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
+        }
+    }
 
     #[test]
     fn cas_ce3e_launched_verifier_survives_attention_failure() {

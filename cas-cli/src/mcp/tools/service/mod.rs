@@ -861,13 +861,14 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch");
+            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch" | "revoke");
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
                 "fetch" => this.inner.artifact_fetch(Parameters(req)).await,
+                "revoke" => this.inner.artifact_revoke(Parameters(req)).await,
                 #[cfg(feature = "mcp-proxy")]
                 "post" => this.artifact_post(req).await,
                 #[cfg(not(feature = "mcp-proxy"))]
@@ -877,7 +878,7 @@ impl CasService {
                 )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post, revoke"),
                 )),
             };
 

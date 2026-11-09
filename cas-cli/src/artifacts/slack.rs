@@ -119,6 +119,7 @@ pub fn fetch_verified(
 
 fn resolve_error(error: ViewError) -> PostError {
     match error {
+        ViewError::Revoked(error) => PostError::new("artifact_revoked", error.to_string()),
         ViewError::Unknown(id) => PostError::new(
             "artifact_not_found",
             format!(
@@ -168,6 +169,7 @@ pub(crate) fn safe_url(raw: &str) -> bool {
 
 pub(crate) fn download(view: &SignedView) -> Result<Vec<u8>, PostError> {
     let artifact = &view.artifact;
+    super::require_available(artifact).map_err(|error| PostError::new("artifact_revoked", error.to_string()))?;
     if artifact.size_bytes == 0 || artifact.size_bytes > ARTIFACT_MAX_BYTES {
         return Err(PostError::new(
             "artifact_size_invalid",

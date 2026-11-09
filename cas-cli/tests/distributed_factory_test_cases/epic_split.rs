@@ -734,6 +734,99 @@ async fn epic_split_one_sided_grant() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn standalone_source_work_split_keeps_reply_owner_cas_ad2c() {
+    use cas::coordination::external_work::SqliteRequestJournal;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::matchers::{body_partial_json, method, path};
+
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let cloud = FakeCloud::start();
+    let owner = side(&cloud, "machine-soundwave", "sw", "soundwave");
+    let builder = side(&cloud, "machine-prowl", "pr", "prowl");
+    let task_id = "cas-ad2c-work";
+    let source = "https://acme.slack.com/archives/C08COORD01/p1760616000123456";
+    let resource = "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d";
+    for side in [&owner, &builder] {
+        let mut task = Task::new(task_id.into(), "delegated standalone build".into());
+        task.external_ref = Some(source.into());
+        open_task_store(&side.machine.cas_dir).unwrap().add(&task).unwrap();
+        // The authenticated claim receipt is shared source identity, not a
+        // grant to reply. Both databases observe A as the current owner.
+        let journal = SqliteRequestJournal::open(&side.machine.cas_dir).unwrap();
+        let request = uuid::Uuid::new_v4().to_string();
+        journal.prepare(&request, "claim", &json!({
+            "project_id": WIDGETS, "external_ref": source,
+        })).unwrap();
+        journal.record_result(&request, &json!({
+            "code": "acquired", "receipt": {
+                "resource": {"id": resource, "state": "claimed"},
+                "visible_owner": {"registration_id": owner.id},
+                "expires_at": (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
+            },
+        }), None).unwrap();
+    }
+    assert!(builder.start(task_id, false).await.is_err());
+    assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "mine": task_id})).await.is_err());
+    assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "theirs": task_id})).await.is_err());
+
+    let offered = owner.factory(json!({"id": task_id, "target": "prowl", "theirs": task_id})).await.unwrap();
+    let id = split_id(&offered);
+    assert_eq!(builder.tick().await.delivered, 1);
+    assert!(builder.start(task_id, false).await.is_err());
+    builder.factory(json!({"id": id, "decision": "accept"})).await.unwrap();
+    assert_eq!(owner.tick().await.delivered, 1);
+    builder.task(json!({"action": "update", "id": task_id, "assignee": "pr-w"})).await.unwrap();
+    assert!(builder.task(json!({"action": "update", "id": task_id,
+        "external_ref": "https://acme.slack.com/archives/C08COORD01/p1760616000123457"})).await.is_err());
+    // A third supervisor in the same database cannot consume B's share.
+    let mut stranger = Agent::new("other-supervisor".into(), "other-supervisor".into());
+    stranger.role = AgentRole::Supervisor;
+    open_agent_store(&builder.machine.cas_dir).unwrap().register(&stranger).unwrap();
+    let foreign_core = cas::mcp::CasCore::with_daemon(builder.machine.cas_dir.clone(), None, None);
+    foreign_core.set_agent_id_for_testing(stranger.id);
+    let foreign = cas::mcp::CasService::new(foreign_core, None);
+    assert!(foreign.task(Parameters(serde_json::from_value(json!({
+        "action": "update", "id": task_id, "external_ref": source,
+    })).unwrap())).await.is_err());
+    let stored = open_task_store(&builder.machine.cas_dir).unwrap().get(task_id).unwrap();
+    assert_eq!(stored.external_ref.as_deref(), Some(source));
+    assert_eq!(stored.assignee.as_deref(), Some("pr-w"));
+    builder.start(task_id, false).await.unwrap();
+    assert!(builder.factory(json!({"id": id, "decision": "release", "task_id": task_id})).await.is_err());
+    // Keeping a standalone task parentless must not retire its live split.
+    builder.task(json!({"action": "update", "id": task_id, "epic": ""})).await.unwrap();
+    assert!(!cas_store::list_epic_split_child_releases(&builder.machine.cas_dir).unwrap()
+        .contains(&(id.clone(), task_id.into())));
+
+    // Drive the real reply-intent handler against the recorded Cloud contract.
+    // The work split never substitutes for the claim's authenticated actor.
+    let replies = MockServer::start().await;
+    let contract: Value = serde_json::from_str(include_str!(
+        "../fixtures/coordination_contract/v1/external_work--reply_intents.json"
+    )).unwrap();
+    for (side, case, expected_code) in [(&owner, 0, "completed"), (&builder, 1, "stale_generation")] {
+        let mut response = contract["cases"][case]["response"]["payload"].clone();
+        response["receipt"]["visible_owner"]["registration_id"] = json!(owner.id);
+        response["receipt"]["expires_at"] = json!((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        Mock::given(method("POST"))
+            .and(path(format!("/api/coordination/external-work/{resource}/reply-intents")))
+            .and(body_partial_json(json!({"actor": {"registration_id": side.id}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1)
+            .mount(&replies).await;
+        let mut config = cas::cloud::CloudConfig::load_from_cas_dir(&side.machine.cas_dir).unwrap();
+        config.endpoint = replies.uri();
+        config.save_to_cas_dir(&side.machine.cas_dir).unwrap();
+        let answer: Value = serde_json::from_str(&side.factory(json!({
+            "action": "reply_intent", "resource_id": resource, "expected_generation": 1,
+        })).await.unwrap()).unwrap();
+        assert_eq!(answer["code"], expected_code);
+        assert_eq!(answer.get("violet_post").is_some(), side.id == owner.id);
+        assert_eq!(answer["receipt"]["visible_owner"]["registration_id"], owner.id);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn epic_split_reject_notifies_and_releases_requester_cas_ae81() {
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let cloud = FakeCloud::start();

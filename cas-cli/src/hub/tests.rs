@@ -6146,6 +6146,10 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let artifact = first.unwrap();
     let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
     assert_eq!(store.get(artifact["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, "text/plain");
+    store.revoke(image_id, "supervisor", "Harmless preview cleanup").unwrap();
+    assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let old_ticket = Request::get(format!("/v1/sessions/factory-a/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap()));
+    assert_eq!(app.oneshot(old_ticket.body(Body::empty()).unwrap()).await.unwrap().status(), StatusCode::NOT_FOUND);
 }
 
 /// cas-3aff: a visual reply page opens only through a DPoP-minted ticket for
@@ -6477,6 +6481,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+    artifacts.revoke("art-pdf", "supervisor", "Harmless media cleanup").unwrap();
+    let before_revoke = upstream.received_requests().await.unwrap().len();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-pdf/content?t={}", tickets["art-pdf"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(upstream.received_requests().await.unwrap().len(), before_revoke);
     let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-video", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();

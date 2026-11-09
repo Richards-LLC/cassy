@@ -1272,6 +1272,8 @@ enum FleetOperation {
     FreezeTrain { epic_id: String },
     /// The operator's lift of a train freeze; no supervisor action lifts it.
     LiftTrainFreeze { epic_id: String },
+    /// The operator's pause or resume of a train's auto-cut (cas-e060).
+    SetAutoCutPaused { epic_id: String, paused: bool },
 }
 
 impl FleetOperation {
@@ -1286,6 +1288,7 @@ impl FleetOperation {
             Self::AssignTask { .. } => "operation:assign_task",
             Self::FreezeTrain { .. } => "operation:freeze_train",
             Self::LiftTrainFreeze { .. } => "operation:lift_train_freeze",
+            Self::SetAutoCutPaused { .. } => "operation:set_auto_cut_paused",
         }
     }
 
@@ -1299,7 +1302,8 @@ impl FleetOperation {
             | Self::SpawnWorkers { .. }
             | Self::SetWorkerHold { .. }
             | Self::AssignTask { .. }
-            | Self::FreezeTrain { .. } => Scope::FactoryOperate,
+            | Self::FreezeTrain { .. }
+            | Self::SetAutoCutPaused { .. } => Scope::FactoryOperate,
             Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } | Self::LiftTrainFreeze { .. } => {
                 Scope::FactoryManage
             }
@@ -1328,6 +1332,7 @@ impl FleetOperation {
                 assignee.as_deref().unwrap_or("<none>")
             ),
             Self::FreezeTrain { epic_id } | Self::LiftTrainFreeze { epic_id } => format!("epic={epic_id}"),
+            Self::SetAutoCutPaused { epic_id, paused } => format!("epic={epic_id} paused={paused}"),
         }
     }
 }
@@ -1844,6 +1849,12 @@ fn run_store_operation(
             let detail = crate::mcp::tools::core::workflow::release_freeze::lift(cas_dir, &epic_id, &actor)
                 .map_err(|error| OperationError::Invalid(error.to_string()))?;
             Ok(serde_json::json!({"kind": "lift_train_freeze", "epic_id": epic_id, "detail": detail}))
+        }
+        FleetOperation::SetAutoCutPaused { epic_id, paused } => {
+            let actor = format!("operator {}", attribution.operator_label.as_deref().unwrap_or("via Commander"));
+            let detail = crate::mcp::tools::core::workflow::release_auto_cut::set_paused(cas_dir, &epic_id, &actor, paused)
+                .map_err(|error| OperationError::Invalid(error.to_string()))?;
+            Ok(serde_json::json!({"kind": "set_auto_cut_paused", "epic_id": epic_id, "paused": paused, "detail": detail}))
         }
         worker => Err(OperationError::Failed(format!(
             "{} is a worker operation, not a store operation",

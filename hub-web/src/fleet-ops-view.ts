@@ -12,6 +12,7 @@ import {
   assignAction,
   awaitingMerge,
   focusEpicAction,
+  autoCutAction,
   freezeTrainAction,
   liftFreezeAction,
   gatedItems,
@@ -262,19 +263,22 @@ export function agentControls(document: Document, context: FleetOpsViewContext, 
   return wrap;
 }
 
-/** cas-2f4d: the release card's one-tap Freeze, or Lift while frozen. */
-export function trainControls(document: Document, context: FleetOpsViewContext, train: { readonly id: string; readonly freeze?: unknown }): HTMLElement {
+/** cas-2f4d: the release card's one-tap Freeze, or Lift while frozen; cas-e060: Pause or Resume auto-cut. */
+export function trainControls(document: Document, context: FleetOpsViewContext, train: { readonly id: string; readonly freeze?: unknown; readonly auto_cut_paused?: boolean }): HTMLElement {
   const rowKey = `train:${train.id}`;
-  const action = train.freeze ? liftFreezeAction(train.id) : freezeTrainAction(train.id);
   const wrap = document.createElement("div");
   wrap.className = "fleet-ops release-freeze-controls";
-  const node = button(document, action.label, "fleet-ops-ask", `${rowKey}:freeze`, () => context.on.choose(rowKey, action));
-  const gate = fleetControlGate(context.scopes, action.operation, context.origin);
-  const reasonId = `fleet-reason-${safeId(rowKey)}-freeze`;
-  gateDisabled(node, gate, reasonId);
-  wrap.append(node);
-  const reason = reasonLine(document, gate, reasonId);
-  if (reason) wrap.append(reason);
+  const actions: [string, FleetAction][] = [["freeze", train.freeze ? liftFreezeAction(train.id) : freezeTrainAction(train.id)]];
+  if (train.auto_cut_paused !== undefined) actions.push(["auto-cut", autoCutAction(train.id, train.auto_cut_paused)]);
+  for (const [slot, action] of actions) {
+    const node = button(document, action.label, "fleet-ops-ask", `${rowKey}:${slot}`, () => context.on.choose(rowKey, action));
+    const gate = fleetControlGate(context.scopes, action.operation, context.origin);
+    const reasonId = `fleet-reason-${safeId(rowKey)}-${slot}`;
+    gateDisabled(node, gate, reasonId);
+    wrap.append(node);
+    const reason = reasonLine(document, gate, reasonId);
+    if (reason) wrap.append(reason);
+  }
   const note = noteLine(document, context, rowKey);
   if (note) wrap.append(note);
   return wrap;

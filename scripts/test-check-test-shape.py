@@ -28,35 +28,55 @@ class Shapes(unittest.TestCase):
             'expect(detail(0).textContent).toBe("cached");', 'work-picture.test.ts'),
             [(1, 'TEST_ASSERTION_PROSE')])
 
-    def test_inline_caller_payload_preservation_cas_0bdc(self):
+    def test_named_caller_payload_preservation_cas_0bdc(self):
         source = '''import { WorkPicture } from "./work-picture"; it("preserves supplied detail", () => { const picture = new WorkPicture();
-    picture.detail("m", "s", { event_id: "cached", detail: "cached source" });
-    picture.detail("m", "s", { event_id: "edit", detail: "Recovered edit" });
-    expect(detail(0).textContent).toContain("cached source");
-    expect(detail(1).textContent).not.toContain("cached source");
+    const cached = "cached source";
+    const recovered = "Recovered edit";
+    picture.detail("m", "s", { event_id: "cached", detail: cached });
+    picture.detail("m", "s", { event_id: "edit", detail: recovered });
+    expect(detail(0).textContent).toContain(cached);
+    expect(detail(1).textContent).not.toContain(cached);
+    expect(detail(1).textContent).toBe(recovered);
     expect(detail(1).textContent).toContain("Recovered edit");
-    expect(detail(1).textContent).toContain("Please try again when the connection to the remote service becomes available.");
+    const expected = "expected only";
+    expect(detail(1).textContent).toContain(expected);
 });
 it("keeps unrelated copy checked", () => {
-    const expected = { detail: "expected only" };
-    expect(detail(1).textContent).toContain("cached source");
-    expect(detail(1).textContent).toContain("expected only");
+    const cached = "cached source";
+    expect(detail(0).textContent).toContain(cached);
 });'''
         for payload in ('Recovered edit', 'Caller data can contain full sentences whose exact bytes must survive rendering.'):
             with self.subTest(payload=payload):
                 replay = source.replace('Recovered edit', payload)
                 self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts'),
-                                 [(7, 'TEST_ASSERTION_PROSE'), (11, 'TEST_ASSERTION_PROSE'),
-                                  (12, 'TEST_ASSERTION_PROSE')])
-                self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(7, 'exact-text pin')])
+                                 [(9, 'TEST_ASSERTION_PROSE'), (10, 'TEST_ASSERTION_PROSE'),
+                                  (14, 'TEST_ASSERTION_PROSE')])
+                self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'),
+                                 [] if payload == 'Recovered edit' else [(9, 'exact-text pin')])
+                self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts', changed_lines={15}),
+                                 [(14, 'TEST_ASSERTION_PROSE')])
         copy = 'Please try again when the connection to the remote service becomes available.'
-        for preparation in ('screen.getByText("{copy}");', 'const expected = String("{copy}");'):
+        for preparation in ('screen.getByText("{copy}");', 'const expected = String("{copy}");',
+                            'import {{ getByText as locate }} from "./test-utils"; locate("{copy}");',
+                            'picture.detail("m", "s", {{ detail: "{copy}" }});'):
             with self.subTest(preparation=preparation):
                 replay = 'import { WorkPicture } from "./work-picture"; it("checks real copy", () => { const picture = new WorkPicture();\n' + preparation.format(copy=copy) + '\n' + (
                     f'expect(detail.textContent).toBe("{copy}");\n' + '});')
                 self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts'),
                                  [(3, 'TEST_ASSERTION_PROSE')])
                 self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(3, 'exact-text pin')])
+        for preparation in ('const expected = String(copied);', 'locate(copied);'):
+            with self.subTest(named_preparation=preparation):
+                replay = 'import { getByText as locate } from "@testing-library/dom";\n' + (
+                    f'const copied = "{copy}";\n{preparation}\nexpect(detail.textContent).toBe(copied);')
+                self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts'),
+                                 [(2, 'TEST_ASSERTION_PROSE')])
+                self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(2, 'exact-text pin')])
+        render_prop = ('import App from "./app"; import { render as mountView } from "@testing-library/svelte";\n'
+                       f'const copied = "{copy}";\nmountView(App, {{ props: {{ detail: copied }} }});\n'
+                       'expect(detail.textContent).toBe(copied);')
+        self.assertFalse(shape.message_assertions(render_prop, 'work-picture.test.ts'))
+        self.assertFalse(shape.lint_text_pins(render_prop, 'work-picture.test.ts'))
 
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [

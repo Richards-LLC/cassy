@@ -4150,10 +4150,11 @@ error/rule IDs), never human-message wording.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain
-valid. For JS/TS inline literals, payload readbacks must match bytes supplied to
-locally imported application code (or its constructed instances) in the same
-block; test titles, sibling tests, UI text queries and expected-value
-construction do not establish payload provenance.
+valid. For JS/TS payload readbacks, bind the value to an identifier, pass that
+identifier into imported application code (or a render/mount prop for an
+imported component), and compare against the same identifier. Retyped assertion
+literals remain checked even when their bytes were supplied earlier. Test
+library queries and expected-value construction do not establish provenance.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

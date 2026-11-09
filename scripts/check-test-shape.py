@@ -175,69 +175,75 @@ def javascript_bindings(source):
     return bound
 
 
-def javascript_payload_offsets(source, path):
-    """Literal readbacks of data supplied to application code in the same block.
+def javascript_asserted_bindings(source, path):
+    """Resolve named expected operands and prove which bindings are SUT inputs.
 
-    A callback body starts a new block: test titles, assertions and data in a
-    sibling test cannot establish payload provenance. Object literals do not
-    start blocks, so inline call arguments retain their caller's scope. Only
-    local application imports and their constructed instances establish input
-    provenance; querying UI text or constructing an expectation does not.
+    Only the same binding passed into imported application code grants an
+    exemption. Retyping its bytes as an assertion literal never does.
     """
     if Path(path).suffix not in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
-        return set()
-    literals = {start: (end, value) for start, end, value in text_literals(source, path)
-                if re.fullmatch(JS_LITERAL, source[start:end])}
+        return
+    literals = {start: value for start, _, value in text_literals(source, path)}
     masked = list(source)
     for start, end, _ in text_literals(source, path):
         masked[start:end] = ' ' * (end - start)
-        if start in literals:
-            masked[start] = '\0'
+        masked[start] = '\0'
     code = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', lambda m: ' ' * len(m[0]), ''.join(masked))
-    application = set()
+    application, renderers = set(), set()
     for imported in re.finditer(r'\bimport\s+([^;]+?)\s+from\s+\0', code):
-        if not literals[imported.end() - 1][1].startswith('.'):
-            continue
+        module = literals[imported.end() - 1]
+        test_library = re.search(r'(?:^|[/@:-])(?:testing|test|vitest|jest|chai|assert|expect|playwright)(?:[/.-]|$)', module)
         for binding in re.finditer(r'(?:^|[,{])\s*(?!type\s)(\w+)(?:\s+as\s+(\w+))?', imported[1]):
-            application.add(binding[2] or binding[1])
+            if not test_library:
+                application.add(binding[2] or binding[1])
+            elif binding[1] in ('render', 'mount'):
+                renderers.add(binding[2] or binding[1])
         namespace = re.search(r'\*\s+as\s+(\w+)', imported[1])
-        if namespace:
+        if namespace and not test_library:
             application.add(namespace[1])
     for instance in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*new\s+(\w+)\s*\(', code):
         if instance[2] in application:
             application.add(instance[1])
-    stack, observed, supplied = [], {}, set()
-    excluded = (r'(?:expect|assert|it|test|describe)(?:\.|$)|(?:^|\.)to[A-Z]'
-                r'|(?:.*\.)?(?:get|query|find)(?:All)?By[A-Z]')
-    for token in re.finditer(r'[\w$.]+\s*\(|[()[\]{}\0]', code):
+    stack, scopes, inputs = [], {}, []
+    def input_call(frame, offset):
+        call = frame[1]
+        if call.split('.')[0] in application:
+            return True
+        if call in renderers:
+            component = re.match(r'\s*(?:<\s*)?(\w+)', code[code.find('(', frame[3]) + 1:offset])
+            return component is not None and component[1] in application
+        return False
+    for token in re.finditer(r'[\w$.]+\s*\(|[A-Za-z_$][\w$]*|[()[\]{}\0]', code):
         value = token[0]
-        if value == '\0':
-            block = max((i for i, frame in enumerate(stack) if frame[2]), default=-1)
-            scope = stack[block][3] if block >= 0 else 0
-            key = (scope, literals[token.start()][1])
-            observed[token.start()] = key
-            calls = [frame[1] for frame in stack[block + 1:] if frame[1]]
-            if (any(call.split('.')[0] in application for call in calls)
-                    and not any(re.match(excluded, call) for call in calls)):
-                supplied.add(key)
-        elif value[-1] in '([{':
+        scope = tuple(frame[3] for frame in stack if frame[2])
+        scopes[token.start()] = scope
+        if value[-1] in '([{':
             char = value[-1]
             call = value[:-1].strip() if char == '(' else ''
-            if call in ('if', 'for', 'while', 'switch', 'catch', 'with', 'function'):
-                call = ''
             block = char == '{' and bool(re.search(r'(?:=>|\)|\belse|\btry|\bfinally|\bdo)\s*$', code[:token.start()]))
             stack.append((char, call, block, token.start()))
-        elif stack and stack[-1][0] == {')': '(', ']': '[', '}': '{'}[value]:
-            stack.pop()
-    return {offset for offset, key in observed.items() if key in supplied}
+        elif value in ')]}' and stack:
+            if stack[-1][0] == {')': '(', ']': '[', '}': '{'}[value]:
+                stack.pop()
+        elif re.fullmatch(r'[A-Za-z_$][\w$]*', value) and not code[token.end():].lstrip().startswith(':'):
+            block = max((i for i, frame in enumerate(stack) if frame[2]), default=-1)
+            if any(input_call(frame, token.start()) for frame in stack[block + 1:] if frame[1]):
+                inputs.append((value, token.start()))
+    bindings = javascript_bindings(source)
+    def resolve(name, offset):
+        scope = scopes.get(offset, ())
+        candidates = [(value, start) for value, start in bindings.get(name, [])
+                      if start < offset and scope[:len(scopes.get(start, ()))] == scopes.get(start, ())]
+        depth = max((len(scopes.get(start, ())) for _, start in candidates), default=-1)
+        return [(value, start) for value, start in candidates if len(scopes.get(start, ())) == depth]
+    supplied = {start for name, offset in inputs for _, start in resolve(name, offset)}
+    for use in re.finditer(r'\.(?:includes|toContain|toMatch|toThrow|toBe|toEqual|toStrictEqual)\(\s*([A-Za-z_$][\w$]*)\s*\)', code):
+        for value, start in resolve(use[1], use.start(1)):
+            yield use.start(1), value, start, start in supplied
 
 
 def message_assertions(source, path, changed_lines=None):
     """Reject prose operands on error channels, never diagnostic arguments."""
-    if changed_lines is not None:
-        lines = source.splitlines()
-        if not any(0 < line <= len(lines) and re.search(r'[\"\'`]', lines[line - 1]) for line in changed_lines):
-            return []
     hits = []
     channels = r'(?:\b|_)(?:error|err|exc|exception|stderr|stdout|refusal|detail|remediation|warning|reason)(?:\b|_)|\.(?:message|rejects)\b|\.(?:unwrap_err|expect_err)\('
     if Path(path).suffix in ('.py', '.pyi'):
@@ -406,25 +412,15 @@ def message_assertions(source, path, changed_lines=None):
                 and re.search(r'\b(?:message|reason|remediation|warning)\s*:\s*$', context))
             or (re.search(r'\bexpect\(', context) and re.search(channels, context)
                 and re.search(r'\.to(?:Be|Equal|Contain|Match)\(\s*$', context)))
-    # A substring operand naming a local resolves to the literals it holds.
-    for name, values in javascript_bindings(source).items():
-        occurrences = len(re.findall(r'(?<![\w.$])' + re.escape(name) + r'(?![\w$])', source))
-        uses = re.findall(r'(?:\.includes|\.toContain|\.toMatch|\.toThrow)\(\s*' + re.escape(name) + r'\s*\)', source)
-        if occurrences > len(uses) + 1:
-            continue  # The test passes it in; asserting it back is payload preservation.
-        for use in re.finditer(r'(?:\.includes|\.toContain|\.toMatch|\.toThrow)\(\s*(' + re.escape(name) + r')\s*\)', source):
-            context = assertion_context(use.start(1))
-            if context is None or not message_operand(context):
-                continue
-            use_line = source.count('\n', 0, use.start(1)) + 1
-            for value, offset in values:
-                line = source.count('\n', 0, offset) + 1
-                if human_message_literal(value) and (changed_lines is None or line in changed_lines or use_line in changed_lines):
-                    hits.append((line, 'TEST_ASSERTION_PROSE'))
-    payloads = javascript_payload_offsets(source, path)
-    for start, end, value in text_literals(source, path):
-        if start in payloads:
+    for use, value, offset, supplied in javascript_asserted_bindings(source, path):
+        context = assertion_context(use)
+        if supplied or context is None or not message_operand(context):
             continue
+        use_line = source.count('\n', 0, use) + 1
+        line = source.count('\n', 0, offset) + 1
+        if human_message_literal(value) and (changed_lines is None or line in changed_lines or use_line in changed_lines):
+            hits.append((line, 'TEST_ASSERTION_PROSE'))
+    for start, end, value in text_literals(source, path):
         line = source.count('\n', 0, start) + 1
         if source[start:start + 1] == '/':
             literal_parts = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
@@ -664,12 +660,9 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
     diagnostics = (list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs'
                    else list(js_assertion_diagnostics(source, path)) if Path(path).suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs') else [])
     inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
-    payloads = javascript_payload_offsets(source, path)
     if Path(path).suffix in ('.py', '.pyi'):
         inputs = list(python_runtime_inputs(source))
     for start, end, body in literals:
-        if start in payloads:
-            continue
         if any(left <= start < right for left, right in diagnostics):
             continue
         if ranges and not any(left <= start < right for left, right in ranges):
@@ -698,6 +691,15 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
         context = ''.join(context_chars)
         if is_exact_text_pin(body, context):
             hits.append((changed_literal_lines[0] if changed_literal_lines else start_line, 'exact-text pin'))
+    for use, value, offset, supplied in javascript_asserted_bindings(source, path):
+        line = source.count('\n', 0, offset) + 1
+        use_line = source.count('\n', 0, use) + 1
+        if supplied or (changed_lines is not None and line not in changed_lines and use_line not in changed_lines):
+            continue
+        beginning = source.rfind('\n', 0, use) + 1
+        end = source.find('\n', use)
+        if is_exact_text_pin(value, source[beginning:end if end >= 0 else len(source)]):
+            hits.append((line, 'exact-text pin'))
     return sorted(set(hits))
 
 

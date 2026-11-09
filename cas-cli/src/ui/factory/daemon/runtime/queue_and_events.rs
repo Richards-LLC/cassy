@@ -3195,6 +3195,13 @@ pub(crate) fn run_queue_select(
         // claim is taken here: the loop claims each row just before its
         // transport handoff (review round 1, H1/H2).
         selection.rows = queue.select_for_targets(&targets, Some(session), request.limit)?;
+        selection.rows.retain(|row| {
+            crate::qa_post_release::batch_notice_deliverable(&request.cas_dir, queue.as_ref(), row)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(prompt_id = row.id, %error, "batch notice revalidation deferred");
+                    false
+                })
+        });
         // cas-786a6 (H3): the decision reads for each row, here, so control
         // decides without a store.
         let tasks = super::prompt_queue_jobs::job_thread_store("task_local", &request.cas_dir, |dir| {

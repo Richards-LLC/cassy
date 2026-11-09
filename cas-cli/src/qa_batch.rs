@@ -475,13 +475,7 @@ pub(crate) fn prepare_release_tag_receipt(
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
             .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
-        if !matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                &repo, &anchor, &candidate, &task.id,
-            ),
-            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-        ) {
+        if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
             return Err(format!("release tag {tag} does not contain task {id}'s delivery tree effect"));
         }
         heads.insert(id.clone(), anchor);
@@ -504,6 +498,19 @@ pub(crate) fn prepare_release_tag_receipt(
         author_overrides: BTreeMap::new(),
         imported: false,
     })
+}
+
+/// A release tag contains a delivery when it carries the delivery commit or
+/// preserves the delivery's tree effect, including a later edit to its files.
+pub(crate) fn release_tag_ships_delivery(repo: &Path, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
+    ancestor(repo, anchor, tag_sha) == Some(true)
+        || matches!(
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                repo, anchor, tag_sha, task_id,
+            ),
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
+        )
 }
 
 /// The QA receipt covering this delivery.
@@ -650,13 +657,7 @@ fn covering_receipt(
             if !known
                 || ![anchor.as_str(), head].contains(&reviewed.as_str())
                 || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
-                || !matches!(
-                    crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                        repo, reviewed, &receipt.staging_sha, &task.id,
-                    ),
-                    crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                        | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-                )
+                || !release_tag_ships_delivery(repo, reviewed, &receipt.staging_sha, &task.id)
             {
                 continue;
             }

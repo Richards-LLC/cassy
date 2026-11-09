@@ -452,14 +452,7 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     let Some(anchor) = child.deliverables.factory_branch_anchor.as_deref() else {
         return false;
     };
-    git(repo, &["merge-base", "--is-ancestor", anchor, tag_sha]).is_ok()
-        || matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                repo, anchor, tag_sha, &child.id,
-            ),
-            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-        )
+    crate::qa_batch::release_tag_ships_delivery(repo, anchor, tag_sha, &child.id)
 }
 
 fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
@@ -553,6 +546,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     }
 
     let mut closed_count = 0;
+    let mut receipt_failed = Vec::new();
     if !included.is_empty() {
         let closing_ids: Vec<_> = included.iter().filter(|id| {
             store.get(id).is_ok_and(|task| task.status != TaskStatus::Closed)
@@ -566,29 +560,44 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
                     receipt.task_heads.get(id).is_some_and(|head| {
                         store.get(id).ok().and_then(|task| task.deliverables.factory_branch_anchor)
                             .as_deref() == Some(head.as_str())
+                            && crate::qa_batch::release_tag_ships_delivery(&repo, head, &tag_sha, id)
                     })
                 })
         });
         let receipt = if let Some(receipt) = reusable {
-            receipt
+            Some(receipt)
+        } else if dry_run {
+            for id in &included {
+                if let Err(error) = crate::qa_batch::prepare_release_tag_receipt(root, std::slice::from_ref(id), tag) {
+                    receipt_failed.push(id.clone());
+                    let prefix = format!("{id}: ");
+                    let line = format!("{id}: ERROR (release receipt prep: {error}); gate verdict N/A");
+                    if let Some(existing) = report.iter_mut().find(|entry| entry.starts_with(&prefix)) {
+                        *existing = line;
+                    } else {
+                        report.push(line);
+                    }
+                }
+            }
+            None
         } else {
             let receipt = crate::qa_batch::prepare_release_tag_receipt(root, &included, tag)
                 .map_err(anyhow::Error::msg)?;
-            if !dry_run {
-                cas_store::record_qa_batch_receipt(root, &receipt)?;
-                receipt_recorded = true;
-            }
-            receipt
+            cas_store::record_qa_batch_receipt(root, &receipt)?;
+            receipt_recorded = true;
+            Some(receipt)
         };
-        if !dry_run {
-            crate::qa_pass::sync::record_batch(root, &receipt)?;
-        }
-        if !dry_run && !closing_ids.is_empty() {
-            let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let close_report = runtime.block_on(core.close_release_covered_deliveries(&receipt));
-            if !close_report.trim().is_empty() {
-                report.push(close_report.trim().to_string());
+        if let Some(receipt) = receipt {
+            if !dry_run {
+                crate::qa_pass::sync::record_batch(root, &receipt)?;
+            }
+            if !dry_run && !closing_ids.is_empty() {
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                let close_report = runtime.block_on(core.close_release_covered_deliveries(&receipt));
+                if !close_report.trim().is_empty() {
+                    report.push(close_report.trim().to_string());
+                }
             }
         }
         closed_count = closing_ids.iter().filter(|id| {
@@ -599,9 +608,11 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let refreshed = store.get_subtasks(train_id)?;
     let mut train_closed = false;
     let train_will_close = refreshed.iter().all(|child| {
-        child.is_terminal() || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
+        child.is_terminal()
+            || (unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
+                && !receipt_failed.contains(&child.id))
     });
-    if train_will_close && !dry_run {
+    if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) {
         let mut closed = store.get(train_id)?;
         if !closed.is_terminal() {
             let now = chrono::Utc::now();
@@ -1082,6 +1093,12 @@ mod tests {
         assert!(preview.contains("Train verdict: STAY OPEN (unmerged children remain open)"), "{preview}");
         assert!(!preview.contains("remains"), "{preview}");
         assert!(preview.contains("no writes"), "{preview}");
+        let tag_receipt = crate::qa_batch::prepare_release_tag_receipt(
+            &root,
+            std::slice::from_ref(&shipped_child.id),
+            "v4.3.0",
+        ).unwrap();
+        assert_eq!(tag_receipt.task_heads.get(&shipped_child.id), shipped_child.deliverables.factory_branch_anchor.as_ref());
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
         assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);

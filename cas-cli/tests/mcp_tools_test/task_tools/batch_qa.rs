@@ -528,6 +528,59 @@ struct Fx {
     ledger: PathBuf,
 }
 
+/// GH #1447 / #1427: shipped cas-3575/cas-13f3 had neither a usable
+/// anchor nor an implementer. Recovery must precede independent attestation.
+#[tokio::test]
+async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    let mut heads = Vec::new();
+    for id in ["cas-bq01", "cas-bq02"] {
+        let mut task = tasks.get(id).unwrap();
+        heads.push(task.deliverables.factory_branch_anchor.take().unwrap());
+        task.assignee = None;
+        task.status = TaskStatus::Blocked; // Keep recording separate from auto-close.
+        if id == "cas-bq01" {
+            task.deliverables.historical_factory_branch_anchors.push("f".repeat(40));
+        }
+        tasks.update(&task).unwrap();
+        cas_store::record_qa_batch_deferral(&root, id, "fixture").unwrap();
+    }
+    assert!(fx.supervisor.verification(Parameters(fx.request())).await.is_err());
+    let recovery = |id: &str, head: &str, reason: &str| serde_json::from_value(serde_json::json!({
+        "action":"recover_delivery", "id":id, "commit_receipt":head, "reason":reason,
+    })).unwrap();
+    // A real integrated sibling commit is still not this task's delivery.
+    let before = tasks.get("cas-bq01").unwrap();
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[1], "Reviewed release"))).await.is_err());
+    assert_eq!(tasks.get("cas-bq01").unwrap(), before);
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], " "))).await.is_err());
+    for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
+        fx.supervisor.task(Parameters(recovery(id, head, "Reviewed shipped task identity"))).await.unwrap();
+        let task = tasks.get(id).unwrap();
+        assert_eq!(task.deliverables.factory_branch_anchor.as_ref(), Some(head));
+        assert_eq!(task.status, TaskStatus::Blocked);
+        assert_eq!(task.assignee, None);
+        assert!(task.notes.contains(head)); // Immutable audit data, not prose.
+        assert!(cas_store::has_qa_batch_deferral(&root, id).unwrap());
+    }
+    // Git actors recovered with the identity cannot become the independent author.
+    let actor = git(&fx.repo, &["show", "-s", "--format=%an", &heads[0]]);
+    let mut own = fx.request();
+    own.ledger_author = Some(actor);
+    assert!(fx.supervisor.verification(Parameters(own)).await.is_err());
+    assert!(cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap().is_empty());
+    fx.record().await;
+    let receipts = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap();
+    for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
+        assert_eq!(receipts[0].task_heads.get(id), Some(head));
+        let closed = fx.close(id).await;
+        assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed, "{closed}");
+    }
+}
+
 fn fixture(env: &mut TestEnvGuard) -> Fx {
     let (temp, core) = setup_cas(env);
     let repo = temp.path().to_path_buf();

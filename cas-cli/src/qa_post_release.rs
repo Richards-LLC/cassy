@@ -390,7 +390,8 @@ mod tests {
                     }));
                 }
                 assert!(queue.queued_prompt(row.id).unwrap().is_some());
-                assert!(crate::store::open_supervisor_queue_store(&root).unwrap().list_pending(&owner.id).unwrap().is_empty());
+                let pending = crate::store::open_supervisor_queue_store(&root).unwrap().list_pending(&owner.id).unwrap();
+                assert!(pending.is_empty(), "hook={hook} delivered={delivered}: {pending:?}");
             }
         }
     }

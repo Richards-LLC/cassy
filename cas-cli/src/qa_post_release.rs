@@ -224,10 +224,17 @@ mod tests {
         fs::write(cas.join("config.toml"), "[project]\ncanonical_id='batch-offer-fixture'\n[verification]\nenabled=true\n[qa]\nmode='batch'\n").unwrap();
         let supervisor = cas_types::Agent::new_with_role("sup-4b22".into(), "release-sup".into(), cas_types::AgentRole::Supervisor);
         crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+        let mut unrelated = cas_types::Agent::new_with_role("unrelated".into(), "other-supervisor".into(), cas_types::AgentRole::Supervisor);
+        unrelated.registered_at = supervisor.registered_at + chrono::Duration::seconds(1);
+        crate::store::open_agent_store(&cas).unwrap().register(&unrelated).unwrap();
         let worker = cas_types::Agent::new_with_role("delivery-worker".into(), "delivery-worker".into(), cas_types::AgentRole::Worker);
         crate::store::open_agent_store(&cas).unwrap().register(&worker).unwrap();
         git(&["branch", "factory/delivery-worker", &live]);
         let tasks = crate::store::open_task_store(&cas).unwrap();
+        let mut epic = Task::new("cas-offer-epic".into(), "Offer owner".into());
+        epic.task_type = TaskType::Epic;
+        epic.epic_verification_owner = Some(supervisor.id.clone());
+        tasks.add(&epic).unwrap();
         for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed)] {
             let mut task = Task::new(id.into(), id.into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
@@ -239,6 +246,7 @@ mod tests {
                 assignee: worker.id.clone(), branch: "factory/delivery-worker".into(), base_sha: base.clone(),
             });
             tasks.add(&task).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(id.into(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
             cas_store::defer_qa_batch_evidence(&cas, id, head).unwrap();
         }
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
@@ -259,6 +267,7 @@ mod tests {
         late.status = cas_types::TaskStatus::AwaitingMerge;
         late.deliverables.factory_branch_anchor = Some(base.clone());
         tasks.add(&late).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(late.id.clone(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
         cas_store::defer_qa_batch_evidence(&cas, "cas-late", &base).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);

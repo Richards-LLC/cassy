@@ -592,7 +592,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
             );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-            assert!(owns(&root, &claimed));
+            if matches!(status, "harness_failed" | "malformed") {
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
+                assert!(!owns(&root, &claimed));
+            } else {
+                assert!(owns(&root, &claimed));
+            }
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
             if matches!(status, "malformed" | "harness_failed" | "late_error") {
                 assert!(verdict.is_none(), "failed transport cannot approve");

@@ -268,29 +268,24 @@ impl SqliteTaskStore {
                 }
                 // A replica can upload a stale Open/assignee with a newer
                 // whole-row clock. That clock does not authorize undoing a
-                // live local start. Check lease authority in this transaction:
-                // claiming/renewing a lease need not change the task clock.
-                // Terminal owner updates and ordinary local reset/release
-                // writes remain permitted.
+                // a live owner's assigned execution. A supervisor may restore status
+                // after a blocked yield without reclaiming the lease. Protect
+                // that intent in this transaction independently of the lease.
+                // Stale/shutdown or absent owners remain recoverable by peers.
+                // Terminal owner updates and ordinary local resets remain
+                // permitted.
                 if from_sync && expected.status == TaskStatus::InProgress
+                    && expected.assignee.as_deref().is_some_and(|name| !name.trim().is_empty())
                     && !task.is_terminal()
                     && (task.status == TaskStatus::Open || task.assignee != expected.assignee)
                 {
-                    let expires_at: Option<String> = tx
-                        .query_row(
-                            "SELECT l.expires_at FROM task_leases l
-                             JOIN agents a ON a.id = l.agent_id
-                             WHERE l.task_id = ?1 AND l.status = 'active'
-                               AND (a.id = ?2 OR a.name = ?2)",
-                            params![task.id, expected.assignee.as_deref()],
-                            |row| row.get(0),
-                        )
-                        .optional()?;
-                    if expires_at
-                        .as_deref()
-                        .and_then(Self::parse_datetime)
-                        .is_some_and(|expires| expires > Utc::now())
-                    {
+                    let owner_alive: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM agents
+                         WHERE (id = ?1 OR name = ?1) AND status IN ('active', 'idle'))",
+                        params![expected.assignee.as_deref()],
+                        |row| row.get(0),
+                    )?;
+                    if owner_alive {
                         return Ok(None);
                     }
                 }

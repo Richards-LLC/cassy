@@ -2243,6 +2243,93 @@ async fn team_pull_preserves_live_started_owner_cas_c4a52() {
 }
 
 #[tokio::test]
+async fn team_pull_status_only_resume_preserves_assigned_execution_cas_45e7() {
+    use cas_store::AgentStore;
+    use crate::store::{open_rule_store_local, open_skill_store_local, open_store_local, open_task_store_local};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let project = "resume-without-lease";
+    let team = "team-cas-45e7";
+    let server = MockServer::start().await;
+    let temp = tempfile::TempDir::new().unwrap();
+    std::fs::write(temp.path().join("config.toml"), format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let tasks = open_task_store_local(temp.path()).unwrap();
+    let entries = open_store_local(temp.path()).unwrap();
+    let rules = open_rule_store_local(temp.path()).unwrap();
+    let skills = open_skill_store_local(temp.path()).unwrap();
+    let agents = cas_store::SqliteAgentStore::open(temp.path()).unwrap();
+    agents.init().unwrap();
+    let owner = cas_types::Agent::new_with_role("worker-45e7-id".into(), "worker-45e7".into(), cas_types::AgentRole::Worker);
+    agents.register(&owner).unwrap();
+    let mut local = Task::new("cas-45e7-live".into(), "resume work".into());
+    local.origin_project = Some(project.into());
+    local.assignee = Some(owner.name.clone());
+    local.status = TaskStatus::InProgress;
+    tasks.add(&local).unwrap();
+    assert!(matches!(agents.try_claim(&local.id, &owner.id, 600, None).unwrap(), cas_types::ClaimResult::Success { .. }));
+    local.status = TaskStatus::Blocked;
+    tasks.update(&local).unwrap();
+    agents.release_lease(&local.id, &owner.id).unwrap();
+    // The supervisor's status-only update writes the task without claiming it.
+    local.status = TaskStatus::InProgress;
+    local.updated_at = tasks.update(&local).unwrap();
+    assert!(agents.get_lease(&local.id).unwrap().is_none());
+    let syncer = CloudSyncer::new(queue, CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default());
+
+    for (offset, remote_status, applies, reassign) in [
+        (-60, TaskStatus::Open, false, false),
+        (60, TaskStatus::Open, false, false),
+        (120, TaskStatus::Blocked, true, false),
+        (180, TaskStatus::InProgress, true, true),
+    ] {
+        if reassign {
+            // Restore assigned intent without a lease, then lose its owner.
+            local.status = TaskStatus::InProgress;
+            local.updated_at = tasks.update(&local).unwrap();
+            let mut departed = owner.clone();
+            departed.status = cas_types::AgentStatus::Shutdown;
+            agents.update(&departed).unwrap();
+        }
+        let before = tasks.get(&local.id).unwrap();
+        let mut remote = local.clone();
+        remote.status = remote_status;
+        if reassign {
+            remote.assignee = Some("peer-worker".into());
+        }
+        remote.updated_at += chrono::Duration::seconds(offset);
+        let mut raw = serde_json::to_value(&remote).unwrap();
+        raw["project_id"] = serde_json::json!(project);
+        server.reset().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/api/teams/{team}/sync/pull")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "tasks": [raw], "rules": [], "skills": [],
+                "pulled_at": remote.updated_at, "team_id": team, "status": "ok",
+            })))
+            .mount(&server).await;
+        let result = syncer.pull_team(team, project, entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let stored = tasks.get(&local.id).unwrap();
+        assert_eq!(stored.status, if applies { remote_status } else { before.status }, "offset={offset}");
+        assert_eq!(stored.assignee, if applies { remote.assignee.clone() } else { before.assignee.clone() });
+        if !applies {
+            assert_eq!(stored.updated_at, before.updated_at);
+            assert_eq!(result.pulled_tasks, 0);
+            assert!(result.task_status_transitions.is_empty());
+        } else {
+            assert_eq!(stored.updated_at, remote.updated_at);
+            assert_eq!(result.pulled_tasks, 1);
+            assert_eq!(result.task_status_transitions.len(), usize::from(before.status != remote_status));
+        }
+    }
+}
+
+#[tokio::test]
 async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
     use crate::mcp::tools::core::task::audit;
     let actor = cas_types::Agent::new("remote-supervisor-id".into(), "remote-supervisor".into());

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  release-freeze-explicit-confirmation:
+    title: MCP release freeze requires an explicit reason prefix before mutation and names the operator/publication lift policy
+    tasks: [cas-0a5d8]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   train-delivery-contract-integration:
     title: Current recovery receipts and renamed epic targets coexist with recorded squash delivery identity
     tasks: [cas-e7a8]
@@ -66,6 +71,11 @@ bug_families:
     tasks: [cas-bdda]
     invariants: [HUB-J27-CARD-RELOAD]
     journeys: [HUB-J27]
+  automatic-verifier-crash-retry:
+    title: A crashed automatic verifier releases only its own claim so one merge retry starts one replacement without accepting a stale verdict
+    tasks: [cas-4271]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+    journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
     title: Approved dispatch and batch receipt recovery accept the first landed reviewed tree while retaining exact delivery and dedicated review gates
     tasks: [cas-abb0, cas-e06c]
@@ -315,6 +325,10 @@ invariants:
     statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
     check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
     bug: {task: cas-d853}
+  FACTORY-VERIFIER-CRASH-RETRY:
+    statement: A harness exit without a verdict returns its exact dispatch to a retryable audited state; one replacement owns the retry, stale children cannot publish, and the stderr reason remains readable after success.
+    check: Run automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f through the real merge preparation and automatic handoff, plus failed_verifier_release_fences_claims_and_preserves_audit_cas_4271. Batch QA forces a disposable verifier harness to exit 1, retries the same merge once and checks one replacement, unchanged proof, stale-child refusal, preserved stderr and exact candidate landing.
+    bug: {task: cas-4271}
   FACTORY-QA-NOTICE-OWNER:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
@@ -512,6 +526,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-RECONNECT-ANSWER:
+    statement: After a supervisor /clear and a later Cassy MCP reconnect, its pane answer to a verified Commander send still appears as an answer to that send on the paired device.
+    check: Run commander_mirror::tests::mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3; on a real candidate, /clear a supervisor, run /mcp reconnect cas, send from Commander and read back kind=answer, reply_to and the device id in conversation history.
+    bug: {task: cas-bfe3}
   HUB-J5-UNREAD-SUCCESSION:
     statement: Unread Commander and daemon-stamped Violet messages survive supervisor exit with their content and routing intact; a same-name replacement in a new session can read each once, while live recipients and received or unrelated mail stay protected.
     check: Run supervisor_handoff_tests::gated_operator_and_violet_messages_survive_supervisor_exit through SessionEnd, SessionStart and normal inbox polling, plus violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims for the alias liveness and receipt guards.
@@ -916,7 +934,8 @@ journeys:
   - cas-cli/src/mcp/tools/service/server_handler.rs
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-QUESTION]
+  - crates/cas-store/src/verification_store.rs
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE
@@ -1415,6 +1434,7 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
+  - HUB-J5-RECONNECT-ANSWER
   - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE
@@ -2854,6 +2874,8 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - crates/cas-store/src/task_store.rs
+  - cas-cli/src/cloud/syncer/pull.rs
   - cas-cli/src/supervisor_auto_clear.rs
   - cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs
   - cas-cli/src/ui/factory/daemon/runtime/supervisor_auto_clear_tests.rs

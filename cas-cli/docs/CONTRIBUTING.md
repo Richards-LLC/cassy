@@ -302,11 +302,17 @@ receipt. A train queue reservation retains control of that continuation.
 Rejection, a supervisor question, timeout or a failed review transport wakes
 the owning supervisor with findings; none grants a merge override. Review
 prompts, verdict output and harness diagnostics live under
-`.cas/verification-runs/<dispatch>/`. Automatic reviews use the existing
+`.cas/verification-runs/<dispatch>/<attempt>/`. Automatic reviews use the existing
 account-aware launch resolver, including registered named profiles when the
 default home is logged out. Failed harness notices include up to eight stderr
-lines from the final 2 KiB and the full diagnostic log path. A manually claimed dispatch remains
-with its verifier. Non-daemon callers retain the existing manual handoff.
+lines from the final 2 KiB and the full diagnostic log path. If a harness stops
+without a verdict before expiry, one transaction consumes its sealed authority,
+returns only that child's exact current claim to Pending, and records the
+redacted reason in a structured verification retry event. Retry the same
+`factory action=worktree_merge` once: one replacement claims the same dispatch
+and candidate. Earlier attempts keep separate output/log paths. A stale child,
+settled task, completed verdict or expired/reassigned claim cannot be reset.
+A manually claimed dispatch remains with its verifier. Non-daemon callers retain the existing manual handoff.
 
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
@@ -2660,7 +2666,17 @@ An omitted target selects `--lib`; `--test` must name one explicit harness from
 `scripts/cas-test-targets.py`. Select exactly one package and a mandatory
 positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
 Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
-environment prefixes, compound commands, repeated packages and broader flags.
+unapproved environment prefixes, compound commands, repeated packages and broader flags.
+Named tests may carry literal assignments for `HOME`, `CARGO_HOME`, `RUSTUP_HOME`,
+`CI`, Git author/committer name/email and Git global/system configuration inputs.
+`env -u NAME` (also `--unset`) removes those same allowed inputs. Quoted literal
+paths are supported; shell expansions are not. The hook transports these as
+child-only metadata through the capped runner and detached execution. Admission,
+tool discovery and receipt ownership keep the inherited environment; only the
+final test child receives the requested values. Identity, PATH, target-directory,
+compiler and builder-limit overrides remain refused. This does not admit
+environment prefixes on compile-only checks.
+
 For a credential-free CI reproduction, first create a private config directory.
 The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):
@@ -4485,8 +4501,12 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
 ## Release freeze
 
-`factory action=train_freeze id=<train> [reason=...]` needs a live registered
-supervisor. Commander's `freeze_train` operation (factory:operate) does the
+`factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
+needs a live registered supervisor and a nonempty reason after that explicit
+confirmation prefix. Without it the call refuses before freezing. This is a
+release freeze, not a temporary CI hold: only the operator can lift it in
+Commander, or a published release covering its tip ends it.
+Commander's `freeze_train` operation (factory:operate) does the
 same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
 label on the train epic, which syncs to peer machines with the task row. One
 gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
@@ -4499,6 +4519,16 @@ frozen train to the next train. The freeze ends when a published release covers 
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
+### Temporary CI merge hold follow-up
+
+A supervisor-reversible, peer-synced merge hold tied to a CI run is a separate
+follow-up, not an existing `train_freeze` mode. That route should let the owner
+clear the hold and end it when the named CI run completes, without freezing
+staffing or CI retries. Until available, leave the train unfrozen, record the
+CI wait on the train, and coordinate peer supervisors to defer `train_merge`
+and `worktree_merge`; resume those calls after the run. This manual wait does
+not enforce a shared hold across machines.
 
 Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
 poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip

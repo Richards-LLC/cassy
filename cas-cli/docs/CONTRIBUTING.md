@@ -4430,6 +4430,24 @@ frozen train to the next train. The freeze ends when a published release covers 
 contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
 
+Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
+poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
+has a green train-suite receipt, it acts when the tip holds `changelog.d/`
+fragments, no merge-queue run is in flight, the operator has not paused it
+(Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
+label), the train's supervisor is registered on this machine and the cadence
+allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
+frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
+(default 2) ago. It freezes the train, then waits for the supervisor's
+`release-notes.md` in the train's artifact directory, waking the supervisor
+once per tip with a deadline. With the draft present it runs the
+repository's `scripts/release.sh --notes <draft>` once per tip in a dedicated
+lane worktree and logs to `auto-cut.log` beside it; a nonzero exit wakes the
+supervisor once. `release.sh` arms landing and publication reminders, and the
+post-publish notice has the supervisor post the approved notes. Cassy never
+writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
+which names the reason.
+
 ## Ordered train merge queue
 
 A registered supervisor can submit `factory action=train_merge id=<epic>` to

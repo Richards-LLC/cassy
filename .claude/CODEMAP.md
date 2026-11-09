@@ -67,7 +67,7 @@
 
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
-- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices.
+- `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices, which first offer each green tip to auto-cut.
 - `docs/design/cli/design-review-lift.brief.md` - operator lift receipt and JSON output contract.
 - `cas-cli/src/ui/factory/app/` - TUI state, provisioning, worker actions and delivery/assignment evidence.
 - `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` - checkout-grouped cleanup intents, persisted readiness and immutable retirement snapshots.
@@ -90,6 +90,7 @@
 - `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - off-loop reservation of isolated MCP worker names against the actual target repository's local/origin refs, registered identities and pending spawn names before queue/task binding.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - typed requests, runner ownership, bounded sandbox probes and daemon-managed candidate builds.
 - `cas-cli/src/factory_ci_retry.rs` - exact-SHA merge retries, terminal CI notices, expiry and corrupt-intent quarantine.
+- `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` - release freeze state, merge/staffing refusals and measured ETA; auto-cut of a green train with fragments under cadence guards, the Commander pause and the supervisor's notes draft.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs` - durable ordered train merges, target reservation, exact parked anchors and daemon continuation through the existing merge path.
 - `cas-cli/src/train_ci.rs`, `scripts/train-ci.py` - existing CI suite receipts, complete logs, red-tip supervisor wakes, queue holds and starting-tip release admission.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs` - capped proof admission, builder guards, short owned temporary roots and durable capacity waits.

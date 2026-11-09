@@ -249,7 +249,13 @@ impl CasCore {
         .with_session(agent_id)
         .with_metadata(metadata);
 
-        event_store.record(&event)?;
+        let event_id = event_store.record(&event)?;
+        if note_type.eq_ignore_ascii_case("decision")
+            && let Ok(supervisor) = self.resolve_live_supervisor_authority()
+        {
+            super::block_hold::record_supervisor_decision(&self.cas_root, &supervisor, task_id, event_id)
+                .map_err(anyhow::Error::msg)?;
+        }
         Ok(())
     }
 }

@@ -12369,6 +12369,11 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
     let store = env.task_store();
     let mut started_on = Vec::new();
     for id in ["cas-bbbb", "cas-cccc"] {
+        // cas-ce0d / GH #1677: the supervisor preserves the held delivery
+        // and hands the successor a clean detached target checkout.
+        if id == "cas-cccc" {
+            git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
+        }
         let mut task = Task::new(id.into(), format!("independent hotfix {id}"));
         task.assignee = Some(worker.into());
         task.deliverables.work_target = Some(WorkTarget {

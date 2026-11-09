@@ -4,7 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cas_types::{RepositoryProofBoundary, Task, VerificationDispatch, VerificationStatus};
+use cas_types::{
+    RepositoryProofBoundary, Task, Verification, VerificationDispatch, VerificationProvenance,
+    VerificationStatus,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -24,6 +27,29 @@ pub(crate) struct Candidate {
     pub context_digest: String,
     pub proof: RepositoryProofBoundary,
     pub preparation_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct InheritedSupervisorCall {
+    pub prior_dispatch_id: String,
+    pub question_verification_id: String,
+    pub answer_verification_id: String,
+    pub question: String,
+    pub answer: String,
+    pub answer_status: VerificationStatus,
+    pub source_sha: String,
+    pub prior_target_sha: String,
+    pub target_sha: String,
+}
+
+fn inherited_supervisor_call_for_candidate(
+    _task: &Task,
+    _prior_dispatch: &VerificationDispatch,
+    _prior_candidate: &Candidate,
+    _candidate: &Candidate,
+    _verifications: &[Verification],
+) -> Option<InheritedSupervisorCall> {
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -1324,6 +1350,153 @@ impl CasCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn inheritance_candidate(task_id: &str, source: &str, target: &str) -> Candidate {
+        let repository = PathBuf::from("/repo");
+        let proof = RepositoryProofBoundary {
+            peer_premerge: None,
+            repository_root: repository.display().to_string(),
+            worktree_root: "/repo/candidate".into(),
+            head_commit: "candidate-head".into(),
+            state_digest: "state-digest".into(),
+            target_branch: Some("epic/train".into()),
+            anchor_commits: vec![source.into()],
+        };
+        Candidate {
+            cas_root: PathBuf::from("/repo/.cas"),
+            task_id: task_id.into(),
+            repository,
+            source_branch: "factory/worker".into(),
+            source_sha: source.into(),
+            target_branch: "epic/train".into(),
+            target_sha: target.into(),
+            tree: "candidate-tree".into(),
+            context_digest: "context-digest".into(),
+            proof,
+            preparation_ms: 0,
+        }
+    }
+
+    #[test]
+    fn carries_an_answer_for_unchanged_delivery_after_target_movement() {
+        let now = chrono::Utc::now();
+        let mut task = Task::new("cas-inherit-call".into(), "Review".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let prior_candidate = inheritance_candidate(&task.id, &"a".repeat(40), &"b".repeat(40));
+        let candidate = inheritance_candidate(&task.id, &"a".repeat(40), &"c".repeat(40));
+        let prior_dispatch = VerificationDispatch {
+            id: "vdispatch-prior".into(),
+            task_id: task.id.clone(),
+            receipt_id: None,
+            delivery_transaction_id: None,
+            repository: Some(prior_candidate.proof.clone()),
+            requester_agent_id: "worker".into(),
+            owner_agent_id: "supervisor".into(),
+            verifier_agent_id: Some("verifier".into()),
+            capability_id: None,
+            state: cas_types::VerificationDispatchState::Resolved,
+            requested_at: now - chrono::Duration::minutes(2),
+            deadline_at: now + chrono::Duration::minutes(8),
+            resolved_at: Some(now - chrono::Duration::minutes(1)),
+            recovery_action: Default::default(),
+        };
+        let mut question = Verification::new("ver-question".into(), task.id.clone());
+        question.status = VerificationStatus::SupervisorCall;
+        question.provenance = VerificationProvenance::TaskVerifier;
+        question.agent_id = Some("verifier".into());
+        question.dispatch_id = Some(prior_dispatch.id.clone());
+        question.summary = "SUPERVISOR CALL: 1 NOT EXERCISED row: HUB-J26".into();
+        question.created_at = now - chrono::Duration::minutes(2);
+        let mut answer = Verification::new("ver-answer".into(), task.id.clone());
+        answer.status = VerificationStatus::Approved;
+        answer.provenance = VerificationProvenance::SupervisorDirect;
+        answer.issuer_agent_id = Some(prior_dispatch.owner_agent_id.clone());
+        answer.dispatch_id = Some(prior_dispatch.id.clone());
+        answer.summary = "Supervisor answer payload".into();
+        answer.created_at = now - chrono::Duration::minutes(1);
+
+        let inherited = inherited_supervisor_call_for_candidate(
+            &task,
+            &prior_dispatch,
+            &prior_candidate,
+            &candidate,
+            &[question.clone(), answer.clone()],
+        )
+        .expect("target-only movement should carry the same row's answer");
+        assert_eq!(inherited.prior_dispatch_id, prior_dispatch.id);
+        assert_eq!(inherited.question_verification_id, question.id);
+        assert_eq!(inherited.answer_verification_id, answer.id);
+        assert_eq!(inherited.question, question.summary);
+        assert_eq!(inherited.answer, answer.summary);
+
+        let provenances = [
+            VerificationProvenance::Legacy,
+            VerificationProvenance::TaskVerifier,
+            VerificationProvenance::SupervisorDirect,
+            VerificationProvenance::System,
+            VerificationProvenance::PeerAttested,
+        ];
+        for call_provenance in provenances {
+            for answer_provenance in provenances {
+                let mut pair = [question.clone(), answer.clone()];
+                pair[0].provenance = call_provenance;
+                pair[1].provenance = answer_provenance;
+                assert_eq!(
+                    inherited_supervisor_call_for_candidate(
+                        &task,
+                        &prior_dispatch,
+                        &prior_candidate,
+                        &candidate,
+                        &pair,
+                    )
+                    .is_some(),
+                    call_provenance == VerificationProvenance::TaskVerifier
+                        && answer_provenance == VerificationProvenance::SupervisorDirect,
+                    "call={call_provenance:?}, answer={answer_provenance:?}",
+                );
+            }
+        }
+
+        let statuses = [
+            VerificationStatus::Approved,
+            VerificationStatus::Rejected,
+            VerificationStatus::SupervisorCall,
+            VerificationStatus::Pending,
+            VerificationStatus::Skipped,
+            VerificationStatus::Error,
+        ];
+        for question_status in statuses {
+            for answer_status in statuses {
+                let mut pair = [question.clone(), answer.clone()];
+                pair[0].status = question_status;
+                pair[1].status = answer_status;
+                assert_eq!(
+                    inherited_supervisor_call_for_candidate(
+                        &task,
+                        &prior_dispatch,
+                        &prior_candidate,
+                        &candidate,
+                        &pair,
+                    )
+                    .is_some(),
+                    question_status == VerificationStatus::SupervisorCall
+                        && matches!(answer_status, VerificationStatus::Approved | VerificationStatus::Rejected),
+                    "question={question_status:?}, answer={answer_status:?}",
+                );
+            }
+        }
+
+        let changed_candidate = inheritance_candidate(&task.id, &"d".repeat(40), &"c".repeat(40));
+        task.deliverables.factory_branch_anchor = Some(changed_candidate.source_sha.clone());
+        assert!(inherited_supervisor_call_for_candidate(
+            &task,
+            &prior_dispatch,
+            &prior_candidate,
+            &changed_candidate,
+            &[question, answer],
+        )
+        .is_none(), "changed delivery content must require a fresh supervisor decision");
+    }
 
     pub(super) fn run(repo: &Path, args: &[&str]) -> String {
         git(repo, &["-c", "user.name=t", "-c", "user.email=t@example.invalid"].iter().chain(args).copied().collect::<Vec<_>>()).unwrap()

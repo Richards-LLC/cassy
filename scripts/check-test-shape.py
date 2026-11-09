@@ -188,7 +188,7 @@ def rust_cli_payload_preserved(ts, ps, assertion, literal, end, value):
         rhs = ts[eq + 1:finish]
         payload = None
         projection = ''.join(t.value for t in rhs)
-        if not any(t.string for t in rhs) and re.fullmatch(r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*', projection):
+        if not any(t.string for t in rhs) and re.fullmatch(r'[A-Za-z_]\w*(?:\.command)?', projection):
             payload = bound.get(rhs[0].value)
         method = next((k for k in range(eq + 1, finish)
                        if ts[k].value in ('try_parse_from', 'parse_from') and not ts[k].string), None)

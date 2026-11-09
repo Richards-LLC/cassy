@@ -106,7 +106,7 @@ fn cli_round_trip() {
         # must not make generated prose look like the parser's returned field.
         assertion = 'assert_eq!(args.reason, "Harmless fixture cleanup");'
         parser_bindings = source[source.index('    let parsed'):source.index('    ASSERTION')]
-        for extra in ['let args = render(parsed.command);',
+        for extra in ['let args = parsed.warning;', 'let args = render(parsed.command);',
                       'let args = render(parsed.command); {' + parser_bindings + '}']:
             code = source.replace('ASSERTION', extra + '\n    ' + assertion)
             self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))

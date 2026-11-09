@@ -56,7 +56,10 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const request = frames[0]!.body as { client_ref: string; command: string };
         expect(request.command).toBe("mcp");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
-        await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/mcp" })).toHaveAttribute("data-phase", "observed");
+        // A finished command leaves a self-clearing toast, not a card (cas-95ea).
+        await expect(page.getByRole("status").filter({ hasText: "Cassy reloaded: PID 2202" })).toBeVisible();
+        await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+        await expect(page.locator("#toast")).toBeEmpty({ timeout: 5_000 });
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Dismiss a stuck queued Finish through the daemon before Exit (cas-f1a2)", async () => {
@@ -109,12 +112,13 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(page.locator(".supervisor-version")).toContainText("9.99.1");
         machine.sessions[0]!.mcp_version = "9.99.2";
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2 (previous PID 1101).", output: "", interactive: false } } });
-        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(page.locator("#toast")).toContainText("Cassy reloaded: PID 2202");
+        await expect(receipt).toHaveCount(0);
+        await captureReload(page, "reloaded-toast", viewport.width);
         // In step with its machine the row shows no version (cas-da546).
         await expect(page.locator(".supervisor-version")).toHaveCount(0);
         await expect(page.locator('[data-reload-cassy="direct"]')).toBeHidden();
         expect(hub.sends).toHaveLength(0);
-        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
       });
       await journey.stage("Open the header dropdown beside its button, then submit typed mcp without chat", async () => {
         const toggle = page.locator("#conversation-commands");
@@ -142,8 +146,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const receipt = page.locator(".supervisor-command-receipt");
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 3303, version 9.99.2 (previous PID 2202).", output: "", interactive: false } } });
-        await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await expect(receipt).toContainText("PID 3303, version 9.99.2");
+        await expect(page.locator("#toast")).toContainText("PID 3303, version 9.99.2");
+        await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(2);
       });
     });
@@ -174,9 +178,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "queued", detail: "Reload queued for the end of this turn.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "mcp", phase: "observed", detail: "Cassy reloaded: PID 2202, version 9.99.2.", output: "", interactive: false } } });
-        await expect(receipt).toHaveAttribute("data-phase", "observed");
-        await expect(receipt).not.toContainText("busy");
-        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect(page.locator("#toast")).toContainText("Cassy reloaded: PID 2202");
         await expect(receipt).toHaveCount(0);
         expect(hub.sends).toHaveLength(0);
       });
@@ -294,7 +296,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
         await expect(page.locator('.thread [role="log"]')).toContainText("Handoff saved and background monitor stopped.");
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "The harness completed the Finish request. Review its reply for the wrap-up result; this does not imply the session exited.", output: "", interactive: false } } });
-        await expect(receipt).toHaveAttribute("data-phase", "observed");
+        await expect(page.locator("#toast")).toContainText("The harness completed the Finish request.");
+        await expect(receipt).toHaveCount(0);
         expect(mutations()).toHaveLength(3);
       });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {

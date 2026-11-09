@@ -12013,7 +12013,8 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
             .get(&task_id)
             .expect("task")
             .status,
-        TaskStatus::Closed
+        TaskStatus::Closed,
+        "sanitized verdict close response: {close_text}"
     );
 
     // JSON + diagnostic projections.

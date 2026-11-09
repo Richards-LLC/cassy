@@ -1112,9 +1112,16 @@ impl CasCore {
                 message: Cow::from(format!("Failed to commit verification transaction: {e}")),
                 data: None,
             })?;
+            crate::mcp::tools::service::mutation_receipt::verification_add_committed(
+                &req.task_id,
+                &verification.id,
+            );
         }
 
         if verification.status != VerificationStatus::SupervisorCall {
+            let _phase = crate::mcp::tools::service::mutation_receipt::phase(
+                "verification_reclaim_targets",
+            );
             crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
         }
 
@@ -1169,6 +1176,9 @@ impl CasCore {
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let close_retry = if candidate.is_some() {
+            let _phase = crate::mcp::tools::service::mutation_receipt::phase(
+                "verification_continuation",
+            );
             self.continue_premerge_after_verdict(&proof_dispatch, verification.status).await.unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
         } else if verification.status == VerificationStatus::SupervisorCall {
             format!(

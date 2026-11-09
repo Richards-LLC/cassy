@@ -900,7 +900,17 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: worktree_merge}
   steps: [Select the parked delivery, Review the candidate, Merge and read the landing receipt]
-  owners: [cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs, cas-cli/src/cli/factory/worktree_ops.rs, cas-cli/src/finding_triage.rs]
+  owners:
+  - cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs
+  - cas-cli/src/cli/factory/worktree_ops.rs
+  - cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs
+  - cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs
+  - cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs
+  - cas-cli/src/mcp/tools/core/workflow/verification_tools.rs
+  - cas-cli/src/mcp/tools/service/mutation_receipt.rs
+  - cas-cli/src/mcp/tools/service/server_handler.rs
+  - cas-cli/src/builtins/agents/task-verifier.body.md
+  - cas-cli/src/finding_triage.rs
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

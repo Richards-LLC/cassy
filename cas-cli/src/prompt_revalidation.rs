@@ -98,6 +98,11 @@ pub(crate) fn is_assignment_prompt(prompt: &str) -> bool {
 /// transport. Spawn briefs use the same imperative shape and therefore belong
 /// to this contract too.
 pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
+    // Quiet delivery can prefix the server envelope after ingress framing.
+    let prompt = prompt
+        .strip_prefix(cas_store::QUIET_MESSAGE_MARKER)
+        .map(str::trim_start)
+        .unwrap_or(prompt);
     if prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN) || prompt.starts_with("<cas-assignment/>") {
         let tag = prompt.get(..prompt.find('>')?)?;
         if xml_attribute(tag, "intent") == Some("followup") {

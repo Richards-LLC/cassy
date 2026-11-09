@@ -4194,6 +4194,70 @@ mod related_recall_response_tests {
     }
 
     #[tokio::test]
+    async fn peer_created_task_searches_by_id_and_blocks_identical_sibling_recreation() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+
+        let mut epic = Task::new("cas-ep16".into(), "Search freshness epic".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).expect("add epic");
+        let peer_task = Task::new(
+            "cas-1668".into(),
+            "Quasar marigold dependency reconciliation".into(),
+        );
+        store
+            .create_atomic(
+                &peer_task,
+                &[],
+                Some(&epic.id),
+                Some("peer-session"),
+            )
+            .expect("persist peer-created task and parent edge");
+
+        let id_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: peer_task.id.clone(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search by canonical task ID");
+        let id_results = text(id_results);
+        assert!(id_results.contains(&peer_task.id), "{id_results}");
+
+        let semantic_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: "quasar marigold dependency".to_string(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search peer-created task by content");
+        let semantic_results = text(semantic_results);
+        assert!(semantic_results.contains(&peer_task.id), "{semantic_results}");
+
+        let before = store.list(None).expect("list tasks before duplicate").len();
+        let mut duplicate = child_request(&peer_task.title, epic.id.clone());
+        duplicate.description = Some(peer_task.description.clone());
+        let error = core
+            .cas_task_create(Parameters(duplicate))
+            .await
+            .expect_err("identical sibling work must offer reuse before writing");
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains(&peer_task.id), "{}", error.message);
+        assert_eq!(
+            store.list(None).expect("list tasks after duplicate").len(),
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn sibling_safety_block_does_not_hide_distinct_scope_cas_8bcb() {
         let mut env = TestEnvGuard::temp_home();
         env.set("CAS_SESSION_ID", "boilerplate-planner");

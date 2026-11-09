@@ -1481,10 +1481,12 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
     // recovers the release verdict of a QA record, never product self-review.
     for (path, waiver, kind, author, accepted) in [
         ("docs/qa/cas-bq01/LEDGER.md", "matching", "release", "test-agent", true),
+        ("docs/qa/batch-evaluations/walk.md", "matching", "release", "test-agent", true),
         ("docs/qa/cas-bq01/LEDGER.md", "missing", "release", "test-agent", false),
         ("docs/qa/cas-bq01/LEDGER.md", "stale", "release", "test-agent", false),
         ("docs/qa/cas-bq01/LEDGER.md", "matching", "task", "test-agent", false),
         ("product.rs", "matching", "release", "test-agent", false),
+        ("docs/qa/cas-bq01/LEDGER.md+product.rs", "matching", "release", "test-agent", false),
         ("docs/qa/journeys.md", "matching", "release", "test-agent", false),
         ("docs/qa/cas-bq01/LEDGER.md", "matching", "release", "batch-supervisor", false),
     ] {
@@ -1492,10 +1494,12 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
         let fx = fixture(&mut env);
         let root = fx.repo.join(".cas");
         let tasks = open_task_store(&root).unwrap();
-        let file = fx.repo.join(path);
-        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, "# QA record\n").unwrap();
-        git(&fx.repo, &["add", path]);
+        for changed in path.split('+') {
+            let file = fx.repo.join(changed);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "# QA record\n").unwrap();
+            git(&fx.repo, &["add", changed]);
+        }
         git(&fx.repo, &["commit", "-qm", "cas-bq01: QA write-up"]);
         let head = git(&fx.repo, &["rev-parse", "HEAD"]);
         git(&fx.repo, &["branch", "-f", "main", &head]);
@@ -1508,6 +1512,9 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
             branch: "factory/test-agent".into(),
             base_sha: fx.staging.clone(),
         });
+        if path.contains("product.rs") {
+            task.execution_note = Some("no-code".into());
+        }
         // The recorder can never authorize its own work, even with a waiver.
         if author == "batch-supervisor" {
             task.deliverables.handoff_branches.push("factory/batch-supervisor-cas-bq01".into());

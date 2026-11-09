@@ -1300,7 +1300,7 @@ mod tests {
         let report = close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
         let outcome = report.split(&format!("{}: ", child.id)).nth(1).unwrap();
         // HOLD and CI_OVERRIDE are machine outcome/refusal codes.
-        assert_eq!(outcome.split_whitespace().next(), Some("HOLD"), "{report}");
+        assert_eq!(outcome.split(|c: char| c.is_whitespace() || c == ';').next(), Some("HOLD"), "{report}");
         assert!(outcome.contains("CI_OVERRIDE"), "{report}");
         assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::AwaitingMerge);
         assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);

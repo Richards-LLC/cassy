@@ -2324,7 +2324,7 @@ async fn team_pull_status_only_resume_preserves_assigned_execution_cas_45e7() {
         } else {
             assert_eq!(stored.updated_at, remote.updated_at);
             assert_eq!(result.pulled_tasks, 1);
-            assert_eq!(result.task_status_transitions.len(), 1);
+            assert_eq!(result.task_status_transitions.len(), usize::from(before.status != remote_status));
         }
     }
 }

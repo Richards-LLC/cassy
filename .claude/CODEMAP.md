@@ -23,7 +23,7 @@
 - `cas-cli/` - Rust executable `cas` and composed application library.
 - `crates/cas-types/` - task, agent, delivery, event and wire types.
 - `crates/cas-store/` - SQLite task, agent, verification, prompt, QA and knowledge stores.
-- `crates/cas-store/src/task_store.rs`, `cas-cli/src/cloud/syncer/pull.rs` - conditional sync writes, lifecycle timestamp ordering and atomic protection of assigned InProgress intent, including status-only resumes without leases.
+- `crates/cas-store/src/task_store.rs`, `cas-cli/src/cloud/syncer/pull.rs` - conditional sync writes, lifecycle timestamp ordering and atomic live-owner protection of assigned InProgress intent without leases; stale/shutdown owners remain recoverable by peers.
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.

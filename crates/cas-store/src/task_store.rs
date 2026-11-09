@@ -268,9 +268,10 @@ impl SqliteTaskStore {
                 }
                 // A replica can upload a stale Open/assignee with a newer
                 // whole-row clock. That clock does not authorize undoing a
-                // assigned local execution. A supervisor may restore status
+                // a live owner's assigned execution. A supervisor may restore status
                 // after a blocked yield without reclaiming the lease. Protect
                 // that intent in this transaction independently of the lease.
+                // Stale/shutdown or absent owners remain recoverable by peers.
                 // Terminal owner updates and ordinary local resets remain
                 // permitted.
                 if from_sync && expected.status == TaskStatus::InProgress
@@ -278,7 +279,15 @@ impl SqliteTaskStore {
                     && !task.is_terminal()
                     && (task.status == TaskStatus::Open || task.assignee != expected.assignee)
                 {
-                    return Ok(None);
+                    let owner_alive: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM agents
+                         WHERE (id = ?1 OR name = ?1) AND status IN ('active', 'idle'))",
+                        params![expected.assignee.as_deref()],
+                        |row| row.get(0),
+                    )?;
+                    if owner_alive {
+                        return Ok(None);
+                    }
                 }
             }
 

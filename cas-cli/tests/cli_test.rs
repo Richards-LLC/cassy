@@ -3244,14 +3244,36 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let mut task = cas::types::Task::new("cas-ledger-cli".into(), "Review src/flow.ts".into());
     task.execution_note = Some("no-code".into());
     cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
-    let output = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--json"]).output().unwrap();
+    let output = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--covers", "cas-delivery-a,cas-delivery-b", "--json"]).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(init["ok"], true);
+    assert_eq!(init["covers"], serde_json::json!(["cas-delivery-a", "cas-delivery-b"]));
     assert_eq!(init["rows"][0]["verdict"], "NOT A ROUTE");
     assert_eq!(init["rows"][0]["id"], "FLOW-J1");
     let path = std::path::Path::new(init["path"].as_str().unwrap());
     let original = std::fs::read(path).unwrap();
+    // cas-6354: catch missing or wrong coverage before publishing the report.
+    let original_text = String::from_utf8(original.clone()).unwrap();
+    let without_coverage = original_text.lines().filter(|line| !line.starts_with("covers:"))
+        .collect::<Vec<_>>().join("\n");
+    for (body, expected, diagnostic) in [
+        (original_text.clone(), "cas-delivery-a,cas-delivery-b", None),
+        (without_coverage, "cas-delivery-a", Some("coverage_missing")),
+        (original_text.clone(), "cas-delivery", Some("coverage_missing")),
+        (original_text.replace("cas-delivery-b", "cas-other"), "cas-delivery-b", Some("coverage_missing")),
+    ] {
+        std::fs::write(path, body).unwrap();
+        let checked = cas_cmd(root).current_dir(root).args([
+            "qa", "ledger", "check", path.to_str().unwrap(), "--covers", expected, "--json",
+        ]).output().unwrap();
+        assert_eq!(checked.status.success(), diagnostic.is_none());
+        let report: serde_json::Value = serde_json::from_slice(&checked.stdout).unwrap();
+        if let Some(code) = diagnostic {
+            assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == code));
+        }
+    }
+    std::fs::write(path, &original).unwrap();
     let primary_head = git(&["rev-parse", "HEAD"]);
     assert!(String::from_utf8_lossy(&original).contains(&format!("build: {primary_head}")));
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();

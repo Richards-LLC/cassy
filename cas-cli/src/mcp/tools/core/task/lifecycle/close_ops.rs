@@ -29665,7 +29665,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29677,6 +29677,9 @@ mod merge_state_gate_tests {
             git(p, &["checkout", "-q", "main"]);
             std::fs::write(p.join("seed.txt"), "old\nmiddle\nbase\n").unwrap();
             git(p, &["commit", "-qam", "shared context before delivery"]);
+            if matches!(row, "released-train" | "partial-patch") {
+                git(p, &["branch", "release-parent"]);
+            }
             git(p, &["checkout", "-q", "factory/worker"]);
             git(p, &["merge", "-q", "main", "--no-edit"]);
             std::fs::write(p.join("seed.txt"), "new\nmiddle\nbase\n").unwrap();
@@ -29699,6 +29702,13 @@ mod merge_state_gate_tests {
             git(p, &["push", "-q", "origin", "main"]);
             let wt = tempfile::tempdir().unwrap();
             git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
+            let source = if row == "released-train" {
+                // The incident's source already includes the reviewed target;
+                // the synthetic candidate adds no file changes over the anchor.
+                git(wt.path(), &["merge", "-q", "main", "--no-edit"]);
+                git(wt.path(), &["push", "-q", "origin", "factory/worker"]);
+                head_sha(wt.path())
+            } else { source };
             let root = p.join(".cas");
             std::fs::create_dir_all(&root).unwrap();
             env.set("CAS_ROOT", &root);
@@ -29739,6 +29749,9 @@ mod merge_state_gate_tests {
                 reviewed_task.id = "cas-other".into(); tasks.add(&reviewed_task).unwrap();
             }
             let candidate = core.build_completion_candidate(&reviewed_task, p, "factory/worker", "main").unwrap();
+            if row == "released-train" {
+                assert_eq!(resolve_branch_sha(p, &format!("{source}^{{tree}}")).unwrap(), candidate.tree);
+            }
             let mut dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
             let recorded = core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
                 task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed premerge candidate before queue publication".into(), confidence: Some(1.0),
@@ -29770,6 +29783,10 @@ mod merge_state_gate_tests {
             }
             git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
             let landed = head_sha(p);
+            if matches!(row, "released-train" | "partial-patch") {
+                task.deliverables.green_merge_commit = Some(landed.clone());
+                tasks.update(&task).unwrap();
+            }
             assert_ne!(landed, candidate.proof.head_commit);
             if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
@@ -29781,7 +29798,7 @@ mod merge_state_gate_tests {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "released-train" | "same-line-evolved" | "batch-target-proof") {
                 // Publication records the reviewed mapping before sibling work
                 // evolves the same file. Close must reuse that immutable map.
                 git(p, &["push", "-q", "origin", "main"]);
@@ -29805,14 +29822,30 @@ mod merge_state_gate_tests {
             std::fs::write(p.join("later.txt"), "unrelated target progress\n").unwrap();
             git(p, &["add", "later.txt"]); git(p, &["commit", "-q", "-m", "advance target after queue publication"]);
             git(p, &["push", "-q", "origin", "main"]);
+            if matches!(row, "released-train" | "partial-patch") {
+                // cas-3806 / cas-abb0: after release, the published lane points
+                // at main's merge, with the original train on its second parent.
+                git(p, &["checkout", "-q", "release-parent"]);
+                git(p, &["merge", "-q", "--no-ff", "main", "-m", "publish released train"]);
+                git(p, &["push", "-q", "origin", "HEAD:main"]);
+                assert!(git_commit_is_ancestor(p, &source, "origin/main"));
+                assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
+            }
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
                 Err(_) if row == "foreign-candidate" => {},
-                Ok(Some(reviewed)) => assert_eq!(
-                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
-                ),
+                Ok(Some(reviewed)) => {
+                    if row == "released-train" {
+                        let mut unpublished = task.clone();
+                        unpublished.deliverables.green_merge_commit = Some(candidate.proof.head_commit.clone());
+                        assert!(reviewed.merge_refusal(p, &unpublished, "main", None).is_some());
+                    }
+                    assert_eq!(
+                        reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
+                    );
+                },
                 _ => panic!("missing task-bound review: {row}"),
             }
             if matches!(row, "same-line-evolved" | "batch-target-proof") {
@@ -29836,7 +29869,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }

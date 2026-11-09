@@ -172,14 +172,23 @@ impl ReviewedDelivery {
         let Some(base) = git_merge_base(repo, &candidate.target_sha, &candidate.source_sha) else {
             return false;
         };
+        // A released train can sit on the live target's second-parent history.
+        // Retain its recorded landing as the traversal boundary, but only when
+        // that merge contains this source and is itself on the live target.
+        let landing_tip = task.deliverables.green_merge_commit.as_deref()
+            .filter(|merge| {
+                git_commit_is_ancestor(repo, &candidate.source_sha, merge)
+                    && git_commit_is_ancestor(repo, merge, &landed)
+            })
+            .unwrap_or(&landed);
         // The first first-parent descendant of the source is its queue
         // landing. If that descendant's first parent IS the source, the source
         // itself landed by fast-forward. Never search for a later matching
         // patch: that could excuse a dropping merge followed by a repair.
-        let landing = if landed == candidate.source_sha {
-            landed.clone()
+        let landing = if landing_tip == candidate.source_sha {
+            candidate.source_sha.clone()
         } else {
-            let range = format!("{}..{landed}", candidate.source_sha);
+            let range = format!("{}..{landing_tip}", candidate.source_sha);
             let Some(first) = git_stdout_lines(
                 repo,
                 &[

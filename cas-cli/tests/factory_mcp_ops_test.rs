@@ -12711,8 +12711,10 @@ async fn test_review_hold_resume_preserves_own_commits_refuses_foreign_cas_5eb1a
                 TaskStatus::InProgress
             );
         } else {
-            let error = result
-                .expect_err("unsafe start must refuse without losing committed or dirty work");
+            let error = match result {
+                Err(error) => error,
+                Ok(result) => panic!("unsafe start must refuse ({message}, {anchor:?}, {prior}, {after}): {result:?}"),
+            };
             if after == "behind-dirty" {
             } else {
                 let commit =

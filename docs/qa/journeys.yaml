@@ -32,6 +32,10 @@ bug_families:
     tasks: [cas-20ab]
     invariants: [HUB-J22-GOAL]
     journeys: [HUB-J22]
+  native-codex-shared-verifier-identity:
+    title: Shared MCP child registration refuses before mutation; separate dispatch-bound reviewers and supervisor-owned provenance remain distinct
+    tasks: [cas-0d38]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]

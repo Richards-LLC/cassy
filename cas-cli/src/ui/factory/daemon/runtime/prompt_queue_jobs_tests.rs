@@ -100,7 +100,7 @@ fn stale_blocked_relay_escalates_once_cas_f66d() {
     let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
     let occurrence = chrono::DateTime::parse_from_rfc3339("2026-11-02T12:00:00Z")
         .unwrap().with_timezone(&chrono::Utc);
-    let body = format!("<task-lifecycle transition=\"task_blocked\" task_id=\"cas-f66d\" old=\"in_progress\" new=\"blocked\" actor=\"worker-a\" notification_id=\"42\" occurrence=\"{occurrence}\">\nWaiting\n</task-lifecycle>");
+    let body = format!("<task-lifecycle transition=\"task_blocked\" task_id=\"cas-f66d\" old=\"in_progress\" new=\"blocked\" actor=\"worker-a\" notification_id=\"42\" occurrence=\"{}\">\nWaiting\n</task-lifecycle>", occurrence.to_rfc3339());
     let row = queue.enqueue_with_session("lifecycle-wake:42", "lead", &body, "s").unwrap();
     let decision = crate::prompt_revalidation::revalidate_lifecycle_prompt(
         &body, cas_types::TaskStatus::InProgress, occurrence + chrono::Duration::seconds(1),

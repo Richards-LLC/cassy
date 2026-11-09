@@ -32,12 +32,6 @@ pub(crate) fn enqueue_queued(cas_dir: &Path, task: &Task, occurrence: u64, initi
 }
 
 fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option<u64>, initial: bool) -> crate::Result<Option<i64>> {
-    let prompts = crate::config::Config::load(cas_dir)?
-        .orchestration()
-        .auto_prompt;
-    if occurrence.is_none() && (!prompts.enabled || !prompts.on_task_assigned) {
-        return Ok(None);
-    }
     if !matches!(task.status, TaskStatus::Open | TaskStatus::InProgress)
         || matches!(task.task_type, TaskType::Epic | TaskType::Gate)
     {
@@ -47,7 +41,7 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
         return Ok(None);
     };
     let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
-    let Some(worker) = agents
+    let worker = agents
         .iter()
         .filter(|agent| {
             agent.name.eq_ignore_ascii_case(assignee) || agent.id.eq_ignore_ascii_case(assignee)
@@ -60,8 +54,19 @@ fn enqueue_with_queue_occurrence(cas_dir: &Path, task: &Task, occurrence: Option
                     .signed_duration_since(agent.last_heartbeat)
                     .num_seconds()
                     <= cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS
-        })
-    else {
+        });
+    // Queue admission precedes registration and optional prompt policy. A tail
+    // is delivered by the ordered handoff, never as an immediate start prompt.
+    if occurrence.is_none()
+        && crate::worker_task_queue::admit_assignment(cas_dir, task, worker)?
+    {
+        return Ok(None);
+    }
+    let prompts = crate::config::Config::load(cas_dir)?.orchestration().auto_prompt;
+    if occurrence.is_none() && (!prompts.enabled || !prompts.on_task_assigned) {
+        return Ok(None);
+    }
+    let Some(worker) = worker else {
         return Ok(None);
     };
     let Some(session) = worker.factory_session.as_deref() else {

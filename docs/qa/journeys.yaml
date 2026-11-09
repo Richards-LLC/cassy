@@ -14,7 +14,7 @@ seeded_from:
 bug_families:
   peer-release-wait-progress-watchdog:
     title: Contained deliveries, binding peer handoffs and operator-owned blocked checks do not page the operator while genuine local stalls still do
-    tasks: [cas-c1fb, cas-e239]
+    tasks: [cas-c1fb, cas-e239, cas-8391]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
   train-rust-red-feedback:

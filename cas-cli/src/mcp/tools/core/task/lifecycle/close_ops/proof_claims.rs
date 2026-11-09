@@ -10,11 +10,11 @@ use std::sync::OnceLock;
 
 struct Grammar {
     clauses: Regex,
+    tokens: Regex,
     proof: Regex,
     passed: Regex,
     external: Regex,
     future: Regex,
-    execution: Regex,
     receipt: Regex,
     receipt_heading: Regex,
     negated: Regex,
@@ -25,14 +25,20 @@ fn grammar() -> &'static Grammar {
     static GRAMMAR: OnceLock<Grammar> = OnceLock::new();
     GRAMMAR.get_or_init(|| {
         let re = |pattern| Regex::new(pattern).expect("constant close proof grammar");
+        let proof = r"(?:tests?|suites?|journeys?|checks?|validation|verification|proof|ci|playwright|builds?)";
+        let external = r"(?:supervisor|reviewer|qa|operator|merge[- ]queue|assembly|ci)";
+        let status = r"(?:pass(?:ed|es|ing)?|green|success(?:ful|fully)?|succeed(?:ed|s)?|verified|validated|proved|proven|complete[ds]?)";
+        let subject = format!(r"{proof}(?:\s+runs?)?(?:\s+(?:in|on|by|at)\s+(?:the\s+)?{external})?");
         Grammar {
             // Do not split inside URLs or artifact names.
             clauses: re(r"[;\n]|[.!?](?:\s+|$)"),
-            proof: re(r"\b(tests?|suites?|journeys?|checks?|validation|verification|proof|ci|playwright|builds?)\b"),
-            passed: re(r"\b(pass(?:ed|es|ing)?|green|success(?:ful|fully)?|succeed(?:ed|s)?|verified|validated|proved|proven|complete[ds]?)\b"),
-            external: re(r"\b(supervisor|reviewer|qa|operator|merge[- ]queue|assembly|ci)\b"),
-            future: re(r"\b(will|shall|going to|expected to|scheduled to)\b"),
-            execution: re(r"\b(run|execute[ds]?|prove[ds]?|validate[ds]?|verify|check|test)\b"),
+            tokens: re(r"`[^`]*`|\S+"),
+            proof: re(&format!(r"\b{proof}\b")),
+            // Require a proof subject/status or a completion verb/object,
+            // rather than an adjective elsewhere in the clause.
+            passed: re(&format!(r"\b{subject}(?:\s+(?:has|have|had|is|are|was|were|been|now|all|already|successfully))*\s+{status}\b|\b{external}(?:\s+(?:has|have|had|already|successfully))*\s+(?:passed|verified|validated|proved|completed)\s+(?:(?:the|all|a|an)\s+)?{proof}\b")),
+            external: re(&format!(r"\b{external}\b")),
+            future: re(&format!(r"\b(?:will|shall|going to|expected to|scheduled to)\s+(?:(?:be|have|been|successfully)\s+)*(?:{status}|run|execute[ds]?|prove[ds]?|validate[ds]?|verify|check|test)\b")),
             // Plain run/CI numbers need enough digits to distinguish them
             // from test counts. Published artifact IDs are opaque hex IDs.
             receipt: re(r"(?i)\b(?:run|ci)\s*[:=#]?\s+[1-9][0-9]{5,}\b|\brun[ _-]?id\s*[:=#]?\s*[1-9][0-9]*\b|\brun\s*[:=#]\s*[1-9][0-9]*\b|/actions/runs/[1-9][0-9]*\b|\bart-[a-f0-9]{8,}\b"),
@@ -60,7 +66,7 @@ pub(super) fn validate_claims(
         .filter(|s| !s.trim().is_empty())
         .collect();
     for (index, clause) in clauses.iter().enumerate() {
-        let lower = clause.to_ascii_lowercase();
+        let lower = assertion_words(clause);
         // Remove only the negated assertion, not other positive assertions
         // in the same clause ("tests passed, build not verified").
         let assertion = g.negated.replace_all(&lower, "");
@@ -68,15 +74,26 @@ pub(super) fn validate_claims(
             continue;
         }
         let completed = g.passed.is_match(&assertion);
-        let future =
-            g.future.is_match(&assertion) && (completed || g.execution.is_match(&assertion));
+        let future = g.future.is_match(&assertion);
         let claim = (completed && g.external.is_match(&assertion)) || future;
         if !claim || (!completed && lower.contains("deferred to ")) {
             continue;
         }
+        let classification = if future {
+            "future-proof"
+        } else {
+            "external-completion"
+        };
+        let with_claim = |error: String| {
+            format!(
+                "{error}\nClassification: {classification}\nClause: {}",
+                clause.trim()
+            )
+        };
         let adjacent_receipt = clauses.get(index + 1).filter(|next| {
-            let lower = next.to_ascii_lowercase();
-            (g.receipt_heading.is_match(&lower) || !local_paths(next).is_empty())
+            let lower = assertion_words(next);
+            (g.receipt_heading.is_match(&next.to_ascii_lowercase())
+                || !local_paths(next).is_empty())
                 && (g.receipt.is_match(next) || !local_paths(next).is_empty())
                 && !g.passed.is_match(&lower)
                 && !g.future.is_match(&lower)
@@ -96,23 +113,50 @@ pub(super) fn validate_claims(
             {
                 let found = cas_store::SqliteArtifactStore::open(cas_root)
                     .and_then(|store| store.get(&id.to_ascii_lowercase()))
-                    .map_err(|error| receipt_error(id, &error.to_string()))?;
+                    .map_err(|error| with_claim(receipt_error(id, &error.to_string())))?;
                 if found.is_none() {
-                    return Err(receipt_error(id, "no artifact record in this project"));
+                    return Err(with_claim(receipt_error(
+                        id,
+                        "no artifact record in this project",
+                    )));
                 }
             }
             for path in paths {
                 let expanded = crate::qa_evidence::expand_home(path);
                 if !receipt_root.join(expanded).is_file() {
-                    return Err(receipt_error(path, "no file at the cited path"));
+                    return Err(with_claim(receipt_error(path, "no file at the cited path")));
                 }
             }
         }
         if !receipted {
-            return Err("PROOF CLAIM RECEIPT REQUIRED\nCite a run id, artifact id or local receipt path beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass.".to_string());
+            return Err(with_claim("PROOF CLAIM RECEIPT REQUIRED\nCite a run id, artifact id or local receipt path beside each third-party or future proof claim.\nIf it has not run, write \"deferred to <stage>\" instead of claiming a pass.".to_string()));
         }
     }
     Ok(())
+}
+
+/// Identifiers, filenames, paths and inline code are data, not prose actors or
+/// predicates. Keep a barrier so removing one cannot join unrelated words.
+fn assertion_words(clause: &str) -> String {
+    let lower = clause.to_ascii_lowercase();
+    grammar()
+        .tokens
+        .find_iter(&lower)
+        .map(|token| {
+            let word = token
+                .as_str()
+                .trim_matches(|c| "()[]{},:;.!?\"'*".contains(c));
+            if !word.is_empty()
+                && (word == "merge-queue"
+                    || word.chars().all(|c| c.is_ascii_alphabetic() || c == '\''))
+            {
+                word
+            } else {
+                "_"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn receipt_error(citation: &str, detail: &str) -> String {
@@ -179,6 +223,12 @@ mod tests {
             receipt_root.path(),
         )
         .expect_err("an unsupported CI claim still requires a receipt");
+        assert!(error.starts_with("PROOF CLAIM RECEIPT REQUIRED"), "{error}");
+        assert!(error.contains("external-completion"), "{error}");
+        assert!(
+            error.contains("CI reported 10312 tests passed / 1 failed"),
+            "{error}"
+        );
 
         validate_claims(
             "CI tests passed ./receipt.log",

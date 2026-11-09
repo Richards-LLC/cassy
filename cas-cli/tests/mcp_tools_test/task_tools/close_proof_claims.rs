@@ -46,6 +46,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "The merge queue will run the journeys after close",
     ];
     let accepted = [
+        "Only journeys.yaml manually resolved: supervisor-handoff-machine-lineage, both complete blocks verbatim.",
         "Implementation complete; merge-queue journeys deferred to merge queue",
         "Supervisor reports the journeys passed; run id 123456789",
         "Supervisor reports journeys passed (artifact://art-1234abcd)",

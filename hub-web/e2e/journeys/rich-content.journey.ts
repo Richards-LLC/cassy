@@ -286,11 +286,16 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "The recording and audio are attached.", { attachments: [file("art-inline-video", "Evidence video.webm", "video/webm"), file("art-inline-audio", "Evidence audio.wav", "audio/wav"), file("art-local-preview", "Local screenshot.png", "image/png")] });
         for (const tag of ["video", "audio"]) {
           const attachment = log.locator(`.rich-attachment:has(a[data-artifact-id="art-inline-${tag}"])`);
-          // Reader focus owns this destination before a pending resize can
-          // restore the previous anchor and leave the lazy preview offscreen.
-          await attachment.getByRole("link").focus();
           const preview = attachment.locator(".rich-media");
-          await preview.scrollIntoViewIfNeeded();
+          // Exercise an unfocused reader's scroll while the preview is lazy.
+          const thread = page.locator(".conversation-reading.thread");
+          const box = (await thread.boundingBox())!;
+          const delta = await preview.evaluate(node => {
+            const thread = node.closest<HTMLElement>(".thread")!;
+            return node.getBoundingClientRect().top - thread.getBoundingClientRect().top - thread.clientHeight / 4;
+          });
+          await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+          await page.mouse.wheel(0, delta);
           await expect(preview).toHaveAttribute("data-preview-state", "ready");
           const player = log.locator(tag);
           await expect(player).toBeVisible();

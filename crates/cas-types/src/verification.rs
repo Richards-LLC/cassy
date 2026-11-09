@@ -1526,6 +1526,15 @@ mod tests {
                 "embedded absolute path was not redacted: {value:?}"
             );
         }
+        // cas-ef5e8: preserve caller-authored question bytes around a private
+        // path, rather than replacing the entire supervisor_call summary.
+        let path = "/Users/operator/private-proof.json";
+        let question = "Can this exception be accepted, or is another run required?";
+        let summary = format!("Révision `{path}`: {question}");
+        assert_eq!(
+            sanitize_verifier_text(&summary, VERIFIER_SUMMARY_MAX_BYTES),
+            summary.replace(path, REDACTED_VERIFIER_PATH),
+        );
     }
 
     /// cas-da92: auth markers must survive separator obfuscation across every

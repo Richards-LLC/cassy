@@ -805,8 +805,8 @@ impl Quarantine for FileQuarantine {
     }
 }
 
-/// One managed-binding tick for the daemon. `None` until Cloud has answered
-/// for a managed binding, so the caller keeps the legacy v1 claim and sweep.
+/// One managed-binding tick for the daemon. Only an explicit unmanaged
+/// answer before any managed observation permits the legacy v1 claim and sweep.
 pub(crate) fn read_managed(
     reader: &Mutex<VioletReader>,
     cloud: &crate::cloud::CloudConfig,
@@ -835,7 +835,7 @@ fn read_managed_on(
 ) -> Option<PollReport> {
     let mut reader = reader.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let outcome = reader.tick(port, registration_id, io, now);
-    if !reader.managed() {
+    if matches!(&outcome, ClaimOutcome::Unmanaged) && !reader.managed() {
         return None;
     }
     if let Some(receipt) = ClaimReceipt::of(registration_id, &outcome, now)

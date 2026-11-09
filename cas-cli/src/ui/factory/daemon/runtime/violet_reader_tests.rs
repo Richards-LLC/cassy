@@ -632,6 +632,8 @@ fn strict_activation_refusal_is_named_and_unmanaged_keeps_legacy() {
         assert!(held.is_some_and(|report| report.wakes == 0 && report.errors.len() == 1), "{code}: uncertain routing must hold the legacy lane");
         assert_eq!(body.0.load(Ordering::Relaxed), 0);
         assert!(queue.peek_all(10).unwrap().is_empty());
+        let receipts = read_claim_receipts(&claim_receipts_path(temp.path())).unwrap();
+        assert_eq!(receipts.last().unwrap().code, code);
     }
     // A positive managed observation stays fenced even if a later response
     // says unmanaged. A fresh reader may use that explicit legacy answer.

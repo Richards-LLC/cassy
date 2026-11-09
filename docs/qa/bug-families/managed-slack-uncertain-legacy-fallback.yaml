@@ -1,0 +1,4 @@
+title: An uncertain managed Slack claim cannot enable legacy intake on a fresh non-owner reader
+tasks: [cas-30b0]
+invariants: [HUB-J26-GOAL]
+journeys: [HUB-J26]

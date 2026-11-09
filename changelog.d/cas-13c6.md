@@ -1,3 +1,3 @@
-### Captured exit-status checks in workspace commands
+### Fixed — Workspace shell analysis
 
-The workspace shell analyzer now recognizes variables assigned from `$?` as numeric inputs to `test -eq` comparisons, while retaining conservative handling for other unresolved operands.
+- **Captured exit-status comparisons** — The workspace shell analyzer recognizes variables assigned from `$?` as numeric `test -eq` inputs while keeping unresolved operands guarded.

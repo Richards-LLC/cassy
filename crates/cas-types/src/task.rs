@@ -934,7 +934,11 @@ pub struct TaskAnsweredBlocker {
     pub supervisor: String,
     pub reason: String,
     pub ask: Option<String>,
+    #[serde(default)]
     pub message_id: i64,
+    /// A supervisor task decision can own the wait without a queued message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_event_id: Option<i64>,
 }
 
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
@@ -1103,8 +1107,10 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
         "answered_blocker" => {
             let receipt: TaskAnsweredBlocker = serde_json::from_value(value.clone())
                 .map_err(|e| format!("invalid answered_blocker: {e}"))?;
-            if receipt.message_id <= 0 || receipt.worker.is_empty() || receipt.supervisor.is_empty() || receipt.reason.is_empty() {
-                return Err("answered_blocker requires worker, supervisor, reason and a positive message_id".into());
+            let message = receipt.message_id > 0 && receipt.decision_event_id.is_none();
+            let decision = receipt.message_id == 0 && receipt.decision_event_id.is_some_and(|id| id > 0);
+            if !(message || decision) || receipt.worker.is_empty() || receipt.supervisor.is_empty() || receipt.reason.is_empty() {
+                return Err("answered_blocker requires worker, supervisor, reason and exactly one positive message_id or decision_event_id".into());
             }
             for (field, text) in [("worker", receipt.worker), ("supervisor", receipt.supervisor),
                 ("reason", receipt.reason), ("ask", receipt.ask.unwrap_or_default())] {
@@ -1734,6 +1740,16 @@ mod tests {
         assert!(merge_task_execution_state_patch(&answered, &serde_json::json!({
             "answered_blocker": {"message_id": 0}
         })).is_err());
+        for (message_id, decision_event_id, valid) in [
+            (0, 73, true), (42, 73, false), (0, 0, false), (0, -1, false), (-1, 73, false),
+        ] {
+            let mut receipt = answered["answered_blocker"].clone();
+            receipt["message_id"] = serde_json::json!(message_id);
+            receipt["decision_event_id"] = serde_json::json!(decision_event_id);
+            assert_eq!(merge_task_execution_state_patch(&state, &serde_json::json!({
+                "answered_blocker": receipt
+            })).is_ok(), valid);
+        }
 
         let mut future = answered.clone();
         future["future_resume"] = serde_json::json!({"checkpoint": "newer-runtime"});

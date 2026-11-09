@@ -425,6 +425,102 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
 }
 
 #[tokio::test]
+async fn answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e() {
+    use crate::mcp::tools::core::task::{block_hold, lifecycle::supervisor_push::{
+        is_lifecycle_wake_source, reconcile_blocked_task_alert,
+    }};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    use rmcp::handler::server::wrapper::Parameters;
+
+    for decision in [false, true] {
+        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        fixture._env.set("CAS_AGENT_NAME", fixture.app.supervisor_name());
+        let root = fixture.app.cas_dir().to_path_buf();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+        agents.register(&lead).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = tasks.get("cas-9efb-test").unwrap();
+        let start = chrono::Utc::now();
+        task.status = TaskStatus::Blocked;
+        tasks.update(&task).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Start refused after requested rebase", "who": "merge-w", "when": start
+        }})).unwrap();
+        let mut other = Task::new("cas-unrelated".into(), "Another task on the same worker".into());
+        other.assignee = task.assignee.clone();
+        other.status = TaskStatus::Blocked;
+        tasks.add(&other).unwrap();
+        tasks.patch_execution_state(&other.id, &serde_json::json!({"blocked_hold": {
+            "reason": "Another question", "who": "merge-w", "when": start
+        }})).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(lead.id.clone());
+        let service = crate::mcp::CasService::new(core, None);
+        let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        worker_core.set_agent_id_for_testing("merge-w".into());
+        let worker_service = crate::mcp::CasService::new(worker_core, None);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        reconcile_blocked_task_alert(&root, &task.id, start).unwrap();
+        let initial = queue.peek_all(30).unwrap().into_iter()
+            .find(|row| is_lifecycle_wake_source(&row.source)).unwrap();
+        let worker_note = worker_service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "notes", "id": task.id, "note_type": "decision",
+            "notes": "The worker has picked a recovery approach."
+        })).unwrap())).await.unwrap();
+        assert!(!worker_note.is_error.unwrap_or(false), "{worker_note:?}");
+        assert!(!block_hold::answered_blocker_alert(&root, &initial), "a worker decision is not a supervisor answer");
+        // Same recipient, wrong task: neither kind of answer may swallow this blocker.
+        for id in [&other.id, &task.id] {
+            let request = if decision {
+                serde_json::json!({"action": "notes", "id": id, "note_type": "decision",
+                    "notes": "The rebase is accepted; resume this task."})
+            } else {
+                serde_json::json!({"action": "message", "target": "merge-w", "task_id": id,
+                    "summary": "Rebase accepted", "message": "The rebase is accepted; resume this task."})
+            };
+            let result = if decision {
+                service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap()
+            } else {
+                service.coordination(Parameters(serde_json::from_value(request).unwrap())).await.unwrap()
+            };
+            assert!(!result.is_error.unwrap_or(false), "{result:?}");
+            assert_eq!(block_hold::answered_blocker_alert(&root, &initial), id == &task.id,
+                "only an answer to this task retires its queued wake (decision={decision})");
+        }
+        let count = queue.peek_all(100).unwrap().len();
+        for minutes in 6..=26 {
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(minutes)).unwrap();
+        }
+        assert_eq!(queue.peek_all(100).unwrap().len(), count, "answered episode must not escalate");
+        // A different question re-arms the same hold without waiting for a status write.
+        let question = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
+            "summary": "New blocker", "message": "A new credential is required."
+        })).unwrap())).await.unwrap();
+        assert!(!question.is_error.unwrap_or(false), "{question:?}");
+        assert!(!block_hold::answered_blocker_alert(&root, &initial));
+        let before = queue.peek_all(100).unwrap().len();
+        let next_start = block_hold::read(tasks.as_ref(), &task.id).unwrap().unwrap().when;
+        for minutes in [0, 4] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().len(), before + 1, "new question gets its own deadline");
+        }
+        for minutes in [5, 6, 7] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
+        }
+        assert_eq!(queue.peek_all(100).unwrap().len(), before + 2,
+            "one initial notice and one deadline escalation for the new question");
+        for status in [TaskStatus::AwaitingMerge, TaskStatus::Closed] {
+            task.status = status;
+            tasks.update(&task).unwrap();
+            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(30)).unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().len(), before + 2, "terminal episode stays retired");
+        }
+    }
+}
+
+#[tokio::test]
 async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8e() {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
     use cas_types::{Agent, AgentRole, TaskStatus, Verification, VerificationStatus};
@@ -472,10 +568,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(!status.is_error.unwrap_or(false), "{status:?}");
     let status_id = queue.peek_all(30).unwrap().into_iter()
         .filter(|row| row.source == "merge-w").max_by_key(|row| row.id).unwrap().id;
-    // Neither an unrelated direct ping nor a reply to ordinary status owns the blocker.
+    // Neither a typed status ping nor a reply to ordinary status owns the blocker.
     for reply_to in [None, Some(status_id)] {
         let ping = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action": "message", "target": "merge-w", "task_id": task.id, "in_reply_to": reply_to,
+            "kind": "status",
             "summary": "Status query", "message": "Are your checks complete?"
         })).unwrap())).await.unwrap();
         assert!(!ping.is_error.unwrap_or(false), "{ping:?}");

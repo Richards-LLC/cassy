@@ -1590,8 +1590,10 @@ pub(super) fn enqueue_worker_attention_relay_detail_with_key(
     occurrence: &str,
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
+    // An operator-held notice has no worker to recover.
+    let needs_recovery = kind != "progress_operator_held";
     enqueue_worker_attention_relay_inner(
-        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[], true,
+        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[], needs_recovery,
     )
     .0
 }

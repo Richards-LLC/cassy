@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-08'
+updated: '2026-11-09'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -17,6 +17,26 @@ bug_families:
     tasks: [cas-bf13]
     invariants: [FACTORY-EXACT-TIMEOUT-RECOVERY]
     journeys: [FACTORY-CLOSE]
+  historical-image-pair-schema:
+    title: Close reads historical PNG-sealed pairs without recapture while new captures require both image digests
+    tasks: [cas-f499]
+    invariants: [FACTORY-CLOSE-PAIR-SCHEMA]
+    journeys: [FACTORY-CLOSE]
+  refused-close-owned-correction:
+    title: Refused validation leaves no parked candidate and corrected owned lineage survives supervisor change requests
+    tasks: [cas-56f1]
+    invariants: [FACTORY-REFUSED-CLOSE-CORRECTION]
+    journeys: [FACTORY-CLOSE]
+  batch-ledger-declared-coverage:
+    title: Generated batch ledgers declare receipt deliveries and preflight rejects missing coverage before publishing
+    tasks: [cas-6354]
+    invariants: [FACTORY-QA-LEDGER-COVERAGE]
+    journeys: [FACTORY-QA-RECEIPT]
+  release-freeze-explicit-confirmation:
+    title: MCP release freeze requires an explicit reason prefix before mutation and names the operator/publication lift policy
+    tasks: [cas-0a5d8]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   train-delivery-contract-integration:
     title: Current recovery receipts and renamed epic targets coexist with recorded squash delivery identity
     tasks: [cas-e7a8]
@@ -51,6 +71,11 @@ bug_families:
     title: Shared MCP child registration refuses before mutation; separate dispatch-bound reviewers and supervisor-owned provenance remain distinct
     tasks: [cas-0d38]
     journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  configured-codex-worker-account:
+    title: Default worker spawns honor the local configured Codex account before inherited accounts and recommendations
+    tasks: [cas-8c58]
+    invariants: [FACTORY-SPAWN-ACCOUNT-PREFERENCE]
+    journeys: [FACTORY-SPAWN]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]
@@ -71,11 +96,16 @@ bug_families:
     tasks: [cas-bdda]
     invariants: [HUB-J27-CARD-RELOAD]
     journeys: [HUB-J27]
+  automatic-verifier-crash-retry:
+    title: A crashed automatic verifier releases only its own claim so one merge retry starts one replacement without accepting a stale verdict
+    tasks: [cas-4271]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+    journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
-    title: Approved dispatch and batch receipt recovery accept the first landed reviewed tree while retaining exact delivery and dedicated review gates
-    tasks: [cas-abb0, cas-e06c]
+    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication, exact delivery and dedicated review gates
+    tasks: [cas-abb0, cas-e06c, cas-3806]
     invariants: [HUB-J26-GOAL]
-    journeys: [HUB-J26]
+    journeys: [HUB-J26, FACTORY-CLOSE]
   unread-supervisor-mail-succession:
     title: Gated Commander and Violet mail reaches the next project supervisor once after its recipient ends
     tasks: [cas-f575]
@@ -121,6 +151,11 @@ bug_families:
     tasks: [cas-f8c7]
     invariants: [FACTORY-RECORDED-BLOCKER-WAIT]
     journeys: [HUB-J5]
+  answered-worker-blocker-episode:
+    title: Supervisor direct answers and task decisions retire blocker notices while new questions get their own deadline
+    tasks: [cas-9e1e]
+    invariants: [FACTORY-ANSWERED-BLOCKER-EPISODE]
+    journeys: [HUB-J5]
   supervisor-clock-drift:
     title: Delayed wakes, reminders, digests and peer messages show the current local clock without inferred turn timing
     tasks: [cas-06eb]
@@ -155,6 +190,11 @@ bug_families:
     title: Same-name spawn and recycle replace dead workers while retaining their checkout and unpublished work
     tasks: [cas-35f6]
     invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  detached-capped-run-recycle:
+    title: Worker recycle settles detached producers and inherited target leases before scope teardown
+    tasks: [cas-9f7b]
+    invariants: [HUB-J26-DETACHED-RECYCLE]
     journeys: [HUB-J26]
   private-worker-startup-briefs:
     title: Worker briefs stay private and readable inside the worktree on initial launch and continuation
@@ -316,17 +356,52 @@ invariants:
   FACTORY-EXACT-TIMEOUT-RECOVERY:
     statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
     check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
+  FACTORY-QA-EVIDENCE-IDENTITY:
+    statement: Distinct independent QA heads and passes have separate stable evidence directories; prior bytes survive correction and verdict evidence cannot name another head or pass.
+    check: Run independent_pass_paths_preserve_prior_evidence_cas_6813 and round_bundle_must_name_the_reviewed_tip_and_producer; verify generated web/API ledger paths, old capture bytes, explicit-path compatibility and wrong-head/pass refusals. Batch QA walks corrected-head dispatch and recording.
+    bug: {task: cas-6813}
+  FACTORY-UNDELIVERED-RELAY-ACTION:
+    statement: A stale undelivered lifecycle relay queues one supervisor action before retiring its obsolete payload; failed escalation keeps the original pending and retries never duplicate the action.
+    check: Run stale_blocked_relay_escalates_once_cas_f66d and failed_relay_escalation_keeps_original_pending_cas_f66d against the real prompt store; batch QA checks a supervisor receives the failure action without replaying the obsolete blocker.
+    bug: {task: cas-f66d}
   FACTORY-CAPACITY-NOTICES:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
+  FACTORY-CLI-PAYLOAD-SHAPE:
+    statement: Exact CLI flag payload round trips are data-integrity checks; generated prose and unrelated fields remain rejected by the test-shape gate.
+    check: Run scripts/test-check-test-shape.py, including test_cli_parser_payload_round_trip_cas_5442; pass exact parser argv values through immutable let-else command routing in both equality orders and changed-line mode, while rejecting different values, unrelated fields, unknown transformations, expired inner bindings, inequalities and substrings. Replay the changed-lane guard with a caller payload and a generated-prose control.
+    bug: {task: cas-5442}
+  FACTORY-REFUSED-CLOSE-CORRECTION:
+    statement: A validation refusal does not park stale delivery A; corrected pushed B parks as B, and supervisor request_changes preserves owned restart lineage while foreign descendants remain refused.
+    check: Run refused_registry_close_keeps_correction_tip_and_restart_cas_56f1 through worker and supervisor MCP on a shared factory lane. Refuse duplicate inline/file journey metadata at A, remove only the duplicate and push B, verify exact B park, seed a historical stale A park and request changes, then verify owned restart and foreign-descendant refusal without moving refs.
+    bug: {task: cas-56f1}
   FACTORY-RECOVER-SHIPPED-IDENTITY:
     statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
     check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
     bug: {task: cas-d853}
+  FACTORY-VERIFIER-CRASH-RETRY:
+    statement: A harness exit without a verdict returns its exact dispatch to a retryable audited state; one replacement owns the retry, stale children cannot publish, and the stderr reason remains readable after success.
+    check: Run automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f through the real merge preparation and automatic handoff, plus failed_verifier_release_fences_claims_and_preserves_audit_cas_4271. Batch QA forces a disposable verifier harness to exit 1, retries the same merge once and checks one replacement, unchanged proof, stale-child refusal, preserved stderr and exact candidate landing.
+    bug: {task: cas-4271}
+  FACTORY-CLOSE-PAIR-SCHEMA:
+    statement: Close interprets historical image-pair evidence by schema without rewriting it; modern manifests require both image seals and unknown versions refuse explicitly.
+    check: Run visual_pairs_validate_sides_hashes_and_status_cas_4f82 through full bundle validation and the cited-pairs close probe, verifying original manifest bytes, historical PNG integrity, schema2 JPG requirements, tampering and unsupported versions. Run deliverable_pairs_excludes_one_sided_and_tampered_captures through the real CLI for modern pair selection.
+    bug: {task: cas-f499}
+  FACTORY-QA-LEDGER-COVERAGE:
+    statement: Batch scaffold and brief name every intended receipt delivery; preflight rejects missing coverage and published declared coverage cannot be extended by prose mentions.
+    check: Run qa_ledger_init_check_and_no_overwrite through the CLI, then batch_qa_receipt_closes_listed_deliveries_cas_d697 and release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e through supervisor MCP. Generate coverage, check before publication, accept both declared deliveries, reject an unlisted ID mentioned in prose, and retain legacy receipt behavior.
+    bug: {task: cas-6354}
   FACTORY-QA-NOTICE-OWNER:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
     bug: {task: cas-0f7b}
+  FACTORY-VERIFIER-QUESTION:
+    statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
+    check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
+    bug: {task: cas-ef5e8}
+  FACTORY-SPAWN-ACCOUNT-PREFERENCE:
+    statement: Codex workers use factory.codex_home when config_dir is omitted; explicit account overrides win and spawn receipts identify the configured source.
+    check: Run configured_worker_account_overrides_recommendation_cas_8c58 for local config persistence, direct and lane spawns, inherited and explicit accounts, other harnesses and cleared preferences; run recommended_spawn_accounts_preserve_explicit_and_override_inherited for unconfigured recommendation behavior. Walk actual worker startup on the batch candidate.
   FACTORY-FINDING-PRIORITY:
     statement: Reproduced primary factory and CLI findings retain severity times main reach priority; correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
     check: Run independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
@@ -516,6 +591,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-RECONNECT-ANSWER:
+    statement: After a supervisor /clear and a later Cassy MCP reconnect, its pane answer to a verified Commander send still appears as an answer to that send on the paired device.
+    check: Run commander_mirror::tests::mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3; on a real candidate, /clear a supervisor, run /mcp reconnect cas, send from Commander and read back kind=answer, reply_to and the device id in conversation history.
+    bug: {task: cas-bfe3}
   HUB-J5-UNREAD-SUCCESSION:
     statement: Unread Commander and daemon-stamped Violet messages survive supervisor exit with their content and routing intact; a same-name replacement in a new session can read each once, while live recipients and received or unrelated mail stay protected.
     check: Run supervisor_handoff_tests::gated_operator_and_violet_messages_survive_supervisor_exit through SessionEnd, SessionStart and normal inbox polling, plus violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims for the alias liveness and receipt guards.
@@ -544,6 +623,10 @@ invariants:
     statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
     check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'
     bug: {task: cas-f8c7}
+  FACTORY-ANSWERED-BLOCKER-EPISODE:
+    statement: A supervisor direct answer or decision note retires the current task's blocker notices before status catches up; unrelated tasks and worker decisions cannot clear it, and a changed question gets one initial notice and one deadline escalation.
+    check: 'Run answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e through coordination, task notes, real stores and injected reconciliation time. In batch QA answer a blocked worker by direct message and by a decision note, then leave it blocked past the deadline; require no repeated wake, and verify a fresh question re-arms normal escalation.'
+    bug: {task: cas-9e1e}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
@@ -833,6 +916,10 @@ invariants:
     statement: Tasks & progress shows the selected session's project's live epics only, joined across paired machines by epic id, after the release header; each row and the train header show the TUI's open / in progress / merged split with a segmented bar, untitled epics and placeholder counts never render, and nothing sits between the conversation tabs and the conversation. Phone reads the same section in the Tasks & progress sheet with focus return.
     check: Run the HUB-J26 project epics cases in team.journey.ts at 1280x800 and 390x844 in light and dark; confirm the foreign project's epic is absent from this list (its status is read only for its own project card), expand the peer epic, observe a merge event update its split, and inspect forced colors, reduced motion and overflow.
     bug: {task: cas-9b99}
+  HUB-J26-DETACHED-RECYCLE:
+    statement: Worker recycle stops its fingerprinted detached capped producer and verifies the inherited target lease is free before retiring the worker; surviving guards or Cargo refuse recycle, and lease diagnostics exclude the contender.
+    check: 'Run recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b through detached producer launch, real worker recycle, target ownership and retry. In batch QA recycle a worker during a capped build; require the complete build tree to settle or recycle to refuse before teardown, then retry successfully.'
+    bug: {task: cas-9f7b}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -898,8 +985,8 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE
@@ -914,12 +1001,14 @@ journeys:
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs
+  - crates/cas-types/src/verification.rs
   - cas-cli/src/mcp/tools/core/workflow/verification_tools.rs
   - cas-cli/src/mcp/tools/service/mutation_receipt.rs
   - cas-cli/src/mcp/tools/service/server_handler.rs
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
-  invariants: [FACTORY-FINDING-PRIORITY]
+  - crates/cas-store/src/verification_store.rs
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE
@@ -928,8 +1017,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
+  owners: [cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-EXACT-TIMEOUT-RECOVERY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE
@@ -949,7 +1038,7 @@ journeys:
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
   owners: [cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT
@@ -958,8 +1047,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/qa_ledger.rs, cas-cli/src/cli/qa_ledger.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-LEDGER-COVERAGE, FACTORY-QA-EVIDENCE-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
@@ -1415,9 +1504,11 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - FACTORY-RECORDED-BLOCKER-WAIT
+  - FACTORY-ANSWERED-BLOCKER-EPISODE
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
+  - HUB-J5-RECONNECT-ANSWER
   - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE
@@ -2857,6 +2948,8 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - crates/cas-store/src/task_store.rs
+  - cas-cli/src/cloud/syncer/pull.rs
   - cas-cli/src/supervisor_auto_clear.rs
   - cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs
   - cas-cli/src/ui/factory/daemon/runtime/supervisor_auto_clear_tests.rs
@@ -2868,7 +2961,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

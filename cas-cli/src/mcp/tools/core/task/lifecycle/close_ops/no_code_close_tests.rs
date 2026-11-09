@@ -289,6 +289,98 @@ fn assigned(id: &str, task_type: TaskType, target: &str) -> Task {
     task
 }
 
+/// GH #1577/#1430: losing an implementer cannot waive a task's review,
+/// and an explicit waiver cannot replace an outstanding proof cycle.
+#[tokio::test]
+async fn retired_assignee_keeps_required_verification_cas_8826() {
+    use cas_store::VerificationStore;
+    use cas_types::{Verification, VerificationProvenance, VerificationStatus};
+    let mut env = TestEnvGuard::temp_home();
+    for identity in ["unregistered", "inactive", "unassigned", "active"] {
+        for (prior, override_requested) in [("none", false), ("none", true), ("pending", true), ("error", true), ("legacy-error", true)] {
+            let f = fixture(&mut env, "main");
+            let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+            config.set("verification.enabled", "true").unwrap();
+            config.save(&f.cas_dir()).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let id = "cas-8826";
+            let mut task = assigned(id, TaskType::Bug, "main");
+            task.priority = cas_types::Priority(0);
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some(PROOF.into());
+            f.put(&task);
+            let verifications = cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap();
+            if prior == "legacy-error" {
+                let mut error = Verification::new("ver-prior-error".into(), id.into());
+                error.status = VerificationStatus::Error;
+                error.summary = "Legacy verifier requires supervisor recovery".into();
+                error.provenance = VerificationProvenance::System;
+                cas_store::add_system_verification(&f.cas_dir(), &error).unwrap();
+            } else if prior != "none" {
+                let dispatch = cas_store::create_verification_dispatch_bound(
+                    &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
+                    &cas_types::VerificationProofBoundary::task(),
+                    chrono::Utc::now() + chrono::Duration::minutes(10), false,
+                ).unwrap();
+                if prior == "error" {
+                    let mut error = Verification::new("ver-prior-error".into(), id.into());
+                    error.status = VerificationStatus::Error;
+                    error.summary = "Verifier could not establish the delivery boundary".into();
+                    error.provenance = VerificationProvenance::SupervisorDirect;
+                    error.agent_id = Some("nocode-supervisor-session".into());
+                    error.issuer_agent_id = error.agent_id.clone();
+                    error.dispatch_id = Some(dispatch.id.clone());
+                    verifications.add(&error).unwrap();
+                    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+                    cas_store::resolve_verification_dispatch_with_conn(
+                        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+                    ).unwrap();
+                }
+            }
+            let agents = open_agent_store(&f.cas_dir()).unwrap();
+            match identity {
+                "unregistered" => agents.unregister("nocode-worker-session").unwrap(),
+                "inactive" => {
+                    let mut worker = agents.get("nocode-worker-session").unwrap();
+                    worker.status = cas_types::AgentStatus::Shutdown;
+                    agents.update(&worker).unwrap();
+                }
+                "unassigned" => { task.assignee = None; f.put(&task); }
+                _ => {}
+            }
+            let identity_request = serde_json::from_value(serde_json::json!({"id": id})).unwrap();
+            let state = f.supervisor.inner.compute_verification_skip_reason(&task, &identity_request);
+            match identity {
+                "unregistered" => assert_eq!(state, VerificationSkipReason::AssigneeUnregistered { assignee: WORKER.into() }),
+                "inactive" => assert!(matches!(state, VerificationSkipReason::AssigneeInactive { minutes_stale: Some(_) })),
+                "unassigned" => assert_eq!(state, VerificationSkipReason::NoAssignee),
+                _ => assert_eq!(state, VerificationSkipReason::None),
+            }
+            assert!(!state.is_skip(), "identity alone is not waiver authority: {state:?}");
+            let response = call(&f.supervisor, serde_json::json!({
+                "action":"close", "id":id, "reason":"External repair measured",
+                "supervisor_override":override_requested,
+            })).await;
+            let closed = f.task(id);
+            let latest = verifications.get_latest_for_task(id).unwrap();
+            let waived = override_requested && prior == "none";
+            assert_eq!(closed.status == TaskStatus::Closed, waived,
+                "identity={identity} prior={prior} override={override_requested}: {response}");
+            if waived {
+                let row = latest.expect("explicit waiver is durable");
+                assert_eq!(row.status, VerificationStatus::Skipped);
+                assert_eq!(row.agent_id.as_deref(), Some("nocode-supervisor-session"));
+            } else {
+                assert!(latest.is_none_or(|row| row.status != VerificationStatus::Skipped), "{response}");
+                assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{response}");
+            }
+            if prior == "error" || prior == "legacy-error" {
+                assert_eq!(verifications.get("ver-prior-error").unwrap().status, VerificationStatus::Error);
+            }
+        }
+    }
+}
+
 fn claim(f: &Fixture, id: &str) {
     open_agent_store(&f.cas_dir())
         .unwrap()
@@ -1553,6 +1645,86 @@ async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
     assert!(dispatch.repository.unwrap().anchor_commits.is_empty());
 }
 
+/// GH #1673: retargeting an unmodified task lane must allow a supervisor to
+/// bind its clean replacement before the worker has to commit any delivery.
+#[tokio::test]
+async fn retarget_empty_branch_rebind_then_start_gh1673() {
+    for obstruction in ["old-commit", "historical-anchor", "dirty", "stale-target", "none"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let id = "cas-a4a7";
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        let original = f.task(id).deliverables.factory_branch_start.unwrap();
+        if obstruction == "old-commit" {
+            std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&checkout, &["add", "own.rs"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-a4a7): existing work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "new-target"]);
+        std::fs::write(repo.join("target.rs"), "pub fn target() {}\n").unwrap();
+        git(repo, &["add", "target.rs"]);
+        git(repo, &["commit", "-qm", "target history"]);
+        git(repo, &["push", "-q", "origin", "new-target"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let updated = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "proof_scope_fix":true,
+            "target_branch":"new-target", "reason":"Move the task to its new release train",
+        })).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{updated}");
+        let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{restarted}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&original));
+
+        let replacement = format!("{lane}-retarget");
+        let base = if obstruction == "stale-target" { "main" } else { "new-target" };
+        git(&checkout, &["checkout", "-q", "-b", &replacement, base]);
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("target.rs"), "uncommitted work\n").unwrap();
+        }
+        if obstruction == "historical-anchor" {
+            let mut task = f.task(id);
+            task.deliverables.historical_factory_branch_anchors.push(old_tip.clone());
+            f.put(&task);
+        }
+        let before = f.task(id);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"rebind_branch", "id":id, "branch":replacement,
+            "reason":"Approve the empty replacement from the new target",
+        })).unwrap())).await;
+        if obstruction != "none" {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(before.deliverables).unwrap(), "{obstruction}");
+        } else {
+            assert!(rebound.is_ok(), "{rebound:?}");
+            let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let task = f.task(id);
+            assert_eq!(task.status, TaskStatus::InProgress, "{restarted}");
+            let start = task.deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.branch, replacement);
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(Some(start.work_target), task.deliverables.work_target);
+            assert_eq!(start.assignee, WORKER);
+            assert!(task.deliverables.factory_branch_anchor.is_none());
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "{obstruction}");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
@@ -2689,4 +2861,88 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
     let queue = queues.get("queue-session", WORKER).unwrap();
     assert!(queue.notes.iter().any(|note| note.contains("cas-8488-three: status blocked")), "{queue:?}");
     assert!(!queue.starting);
+}
+
+/// GH #1596/#1597: refusing A must leave B editable and preserve its owner
+/// across the supervisor's correction round; a foreign descendant is refused.
+#[tokio::test]
+async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
+    for foreign in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        // Integrate the fixture's previous delivery before this task starts,
+        // keeping every subsequent task push a fast-forward.
+        git(f.dir.path(), &["merge", "-q", "--ff-only", LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
+            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+            config.set(key, value).unwrap();
+        }
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let id = "cas-56f1";
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        let start = f.task(id).deliverables.factory_branch_start.unwrap();
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(checkout.join("docs/qa/bug-families")).unwrap();
+        std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/bug-families/correction.yaml"), "title: Flow correction\ntasks: [cas-56f1]\ninvariants: [INV]\njourneys: [FLOW]\n").unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "fix: repair flow"]);
+        let a = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        // The commit hook may retain A as work-cycle identity. It is not a park.
+        let mut task = f.task(id);
+        task.deliverables.factory_branch_anchor = Some(a.clone());
+        f.put(&task);
+        let close = |tip: &str| serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")});
+        let refused = call(&f.worker, close(&a)).await;
+        let after = f.task(id);
+        assert_eq!(after.status, TaskStatus::InProgress, "{refused}");
+        assert!(after.deliverables.parked_branch.is_none(), "{refused}");
+        assert!(!after.pending_verification);
+        assert!(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap().is_none());
+        git(&checkout, &["rm", "docs/qa/bug-families/correction.yaml"]);
+        git(&checkout, &["commit", "-qm", "docs: keep one canonical flow family"]);
+        let b = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        let parked = call(&f.worker, close(&b)).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{parked}");
+        // Reproduce recovery of an old runtime's stale A park while B is
+        // already pushed; request_changes must retain this task's start graph.
+        let mut legacy = f.task(id);
+        legacy.deliverables.factory_branch_anchor = Some(a.clone());
+        f.put(&legacy);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Resume the owned corrected delivery"})).await;
+        env.set("CAS_AGENT_ROLE", "worker");
+        if foreign {
+            std::fs::write(checkout.join("foreign.ts"), "foreign work\n").unwrap();
+            git(&checkout, &["add", "foreign.ts"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-dead): another task's work"]);
+            git(&checkout, &["push", "-q", "origin", LANE]);
+        }
+        let before = git(&checkout, &["rev-parse", "HEAD"]);
+        let request = || Parameters(serde_json::from_value(serde_json::json!({"action":"start", "id":id})).unwrap());
+        if foreign {
+            assert!(f.worker.task(request()).await.is_err());
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+        } else {
+            let resumed = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{resumed}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&start));
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), before);
+    }
 }

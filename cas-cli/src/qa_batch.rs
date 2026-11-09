@@ -396,6 +396,14 @@ pub(crate) fn prepare_receipt(
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let (artifact, ledger) = validate_ledger(root, artifact_id, ledger)?;
+    let body = std::fs::read_to_string(&ledger).map_err(|e| e.to_string())?;
+    // Declared coverage is authoritative for both QA and release receipts.
+    // Historical ledgers keep their existing whole-ID and row checks.
+    let mut coverage = crate::qa_ledger::coverage(&body);
+    if coverage.covers.is_some() {
+        coverage.require_coverage(task_ids);
+        if !coverage.ok { return Err(coverage.refusal()); }
+    }
     // A QA receipt is only as good as the ledger the close gate will read, so
     // run that gate's validator (`cas qa ledger check --task <owner>`) first and
     // refuse with its diagnostics before anything is recorded.
@@ -410,8 +418,7 @@ pub(crate) fn prepare_receipt(
         }
     }
     if schema == cas_store::RELEASE_VERDICT_SCHEMA {
-        let report = std::fs::read_to_string(&ledger).map_err(|e| e.to_string())?;
-        if let Some(id) = task_ids.iter().find(|id| !report_names(&report, id)) {
+        if let Some(id) = task_ids.iter().find(|id| !report_names(&body, id)) {
             return Err(format!("the published report does not name {id}; one verdict must name every delivery it covers"));
         }
     }

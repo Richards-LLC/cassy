@@ -14,7 +14,20 @@ pub(crate) fn record_blocker_ask(
     { return Ok(()); }
     use sha2::{Digest, Sha256};
     let fingerprint = format!("{:x}", Sha256::digest(ask.as_bytes()));
-    tasks.patch_execution_state(task_id, &serde_json::json!({"blocker_ask": fingerprint}))
+    let state = tasks.get_execution_state(task_id).map_err(|e| e.to_string())?.unwrap_or_default();
+    let previous = state.get("blocker_ask").and_then(serde_json::Value::as_str);
+    let mut patch = serde_json::json!({"blocker_ask": fingerprint});
+    if task.status == cas_types::TaskStatus::Blocked
+        && previous != Some(fingerprint.as_str())
+        && (previous.is_some() || state.get("answered_blocker").is_some())
+        && let Some(mut hold) = read(tasks.as_ref(), task_id)?
+    {
+        // A changed question starts its own five-minute deadline; repeating
+        // the same question keeps the durable episode and its answer intact.
+        hold.when = chrono::Utc::now();
+        patch["blocked_hold"] = serde_json::to_value(hold).map_err(|e| e.to_string())?;
+    }
+    tasks.patch_execution_state(task_id, &patch)
         .map(|_| ()).map_err(|e| e.to_string())
 }
 
@@ -23,6 +36,25 @@ pub(crate) fn record_blocker_ask(
 pub(crate) fn record_supervisor_answer(
     cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
     task_id: Option<&str>, message_id: i64,
+) -> Result<(), String> {
+    record_supervisor_answer_evidence(cas_dir, supervisor, worker, task_id, message_id, None)
+}
+
+/// Bind an authenticated decision note to this task's current blocker only.
+pub(crate) fn record_supervisor_decision(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, task_id: &str, event_id: i64,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    let Some(assignee) = task.assignee.as_deref() else { return Ok(()); };
+    let agents = crate::store::open_agent_store(cas_dir).map_err(|e| e.to_string())?;
+    let Some(worker) = super::resolve_agent_identity(agents.as_ref(), assignee) else { return Ok(()); };
+    record_supervisor_answer_evidence(cas_dir, supervisor, &worker, Some(task_id), 0, Some(event_id))
+}
+
+fn record_supervisor_answer_evidence(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
+    task_id: Option<&str>, message_id: i64, decision_event_id: Option<i64>,
 ) -> Result<(), String> {
     if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
         || supervisor.factory_session != worker.factory_session
@@ -39,6 +71,7 @@ pub(crate) fn record_supervisor_answer(
     let receipt = AnsweredBlocker {
         worker: worker.id.clone(), supervisor: supervisor.id.clone(), reason: hold.reason,
         ask: state.get("blocker_ask").and_then(serde_json::Value::as_str).map(str::to_owned), message_id,
+        decision_event_id,
     };
     tasks.patch_execution_state(&task.id, &serde_json::json!({"answered_blocker": receipt}))
         .map(|_| ()).map_err(|e| e.to_string())
@@ -60,7 +93,7 @@ pub(crate) fn recorded_dependency_wait(
 /// owners and non-blocked task states retain their normal wake policy.
 pub(crate) fn answered_blocker_wait(
     cas_dir: &std::path::Path, task_id: &str, recipient: &str,
-) -> Option<i64> {
+) -> Option<()> {
     let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
     let task = tasks.get(task_id).ok()?;
     if task.status != cas_types::TaskStatus::Blocked || !tasks.get_blockers(task_id).ok()?.is_empty()
@@ -83,7 +116,7 @@ pub(crate) fn answered_blocker_wait(
         || hold.reason != receipt.reason
         || state.get("blocker_ask").and_then(serde_json::Value::as_str) != receipt.ask.as_deref()
     { return None; }
-    Some(receipt.message_id)
+    Some(())
 }
 
 pub(crate) fn worker_has_answered_blocker(

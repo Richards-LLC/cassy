@@ -235,36 +235,94 @@ fn is_verifier_drive_letter(chars: &[char], index: usize) -> bool {
         && matches!(chars.get(index + 2), Some('/') | Some('\\'))
 }
 
-fn verifier_text_contains_absolute_path(value: &str) -> bool {
+fn is_verifier_absolute_path_start(chars: &[char], index: usize) -> bool {
+    let ch = chars[index];
+    let prev = index.checked_sub(1).map(|prev_index| chars[prev_index]);
+
+    if ch == '/'
+        && is_verifier_unix_root_boundary(prev)
+        && chars
+            .get(index + 1)
+            .copied()
+            .is_some_and(is_verifier_path_body_char)
+    {
+        return true;
+    }
+
+    if ch == '~' && chars.get(index + 1) == Some(&'/') && at_verifier_token_boundary(chars, index) {
+        return true;
+    }
+
+    if is_verifier_unc_share(chars, index) || is_verifier_drive_letter(chars, index) {
+        return true;
+    }
+
+    at_verifier_token_boundary(chars, index) && verifier_matches_at(chars, index, "file:/")
+}
+
+/// Replace host path spans while retaining the caller's surrounding question.
+/// Quoted paths may contain spaces; unquoted paths stop at prose/Markdown
+/// delimiters. Scan normalized characters but slice the original UTF-8 bytes.
+fn redact_verifier_paths(value: &str) -> String {
     let chars = verifier_scan_chars(value);
-
-    (0..chars.len()).any(|index| {
-        let ch = chars[index];
-        let prev = index.checked_sub(1).map(|prev_index| chars[prev_index]);
-
-        if ch == '/'
-            && is_verifier_unix_root_boundary(prev)
-            && chars
-                .get(index + 1)
-                .copied()
-                .is_some_and(is_verifier_path_body_char)
-        {
-            return true;
+    let offsets: Vec<usize> = value
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let mut redacted = String::new();
+    let mut copied = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        if !is_verifier_absolute_path_start(&chars, index) {
+            index += 1;
+            continue;
         }
-
-        if ch == '~'
-            && chars.get(index + 1) == Some(&'/')
-            && at_verifier_token_boundary(&chars, index)
-        {
-            return true;
+        let quote = index
+            .checked_sub(1)
+            .map(|prev| chars[prev])
+            .filter(|ch| matches!(ch, '\'' | '"' | '`'));
+        let mut end = index + 1;
+        while end < chars.len() {
+            let ch = chars[end];
+            let boundary = match quote {
+                Some(quote) => ch == quote,
+                None => {
+                    ch.is_whitespace()
+                        || matches!(
+                            ch,
+                            '\'' | '"'
+                                | '`'
+                                | '<'
+                                | '>'
+                                | '('
+                                | ')'
+                                | '['
+                                | ']'
+                                | '{'
+                                | '}'
+                                | ','
+                                | ';'
+                        )
+                }
+            };
+            if boundary {
+                break;
+            }
+            end += 1;
         }
-
-        if is_verifier_unc_share(&chars, index) || is_verifier_drive_letter(&chars, index) {
-            return true;
+        if quote.is_none() {
+            while end > index + 1 && matches!(chars[end - 1], '.' | ':' | '!' | '?') {
+                end -= 1;
+            }
         }
-
-        at_verifier_token_boundary(&chars, index) && verifier_matches_at(&chars, index, "file:/")
-    })
+        redacted.push_str(&value[copied..offsets[index]]);
+        redacted.push_str(REDACTED_VERIFIER_PATH);
+        copied = offsets[end];
+        index = end;
+    }
+    redacted.push_str(&value[copied..]);
+    redacted
 }
 
 fn verifier_text_contains_unsafe_control(value: &str) -> bool {
@@ -298,12 +356,10 @@ fn truncate_verifier_text(value: &str, max_bytes: usize) -> String {
 fn sanitize_verifier_text(value: &str, max_bytes: usize) -> String {
     if verifier_text_contains_secret(value) {
         REDACTED_VERIFIER_SECRET.to_string()
-    } else if verifier_text_contains_absolute_path(value) {
-        REDACTED_VERIFIER_PATH.to_string()
     } else if verifier_text_contains_unsafe_control(value) {
         REDACTED_VERIFIER_CONTROL.to_string()
     } else {
-        truncate_verifier_text(value, max_bytes)
+        truncate_verifier_text(&redact_verifier_paths(value), max_bytes)
     }
 }
 
@@ -1464,7 +1520,7 @@ mod tests {
         let mut verification = Verification::approved(
             "ver-bounded".to_string(),
             "cas-bounded".to_string(),
-            "é".repeat(VERIFIER_SUMMARY_MAX_BYTES),
+            format!("/private/proof {}", "é".repeat(VERIFIER_SUMMARY_MAX_BYTES)),
         );
         verification.issues = (0..VERIFIER_ISSUES_MAX + 10)
             .map(|index| {
@@ -1505,27 +1561,64 @@ mod tests {
     /// only when they begin a whitespace-delimited token.
     #[test]
     fn verifier_embedded_absolute_paths_are_redacted() {
-        for value in [
-            "at=/home/operator/private.rs",
-            "proof at=/home/operator/private.rs line 12",
-            "see [proof](/home/operator/private.rs) for detail",
-            "<file:///etc/shadow>",
-            "evidence=file:///etc/shadow",
-            "FILE:///etc/shadow",
-            r"at=C:\Users\operator\private.rs",
-            r"[proof](C:/Users/operator/private.rs)",
-            r"share=\\build-host\proofs\private.rs",
-            "home=~/private/proof.json",
-            "path:/etc/passwd",
-            "\"/home/operator/private.rs\"",
-            "{'file': '/home/operator/private.rs'}",
+        for (value, path) in [
+            ("at=/home/operator/private.rs", "/home/operator/private.rs"),
+            (
+                "proof at=/home/operator/private.rs line 12",
+                "/home/operator/private.rs",
+            ),
+            (
+                "see [proof](/home/operator/private.rs) for detail",
+                "/home/operator/private.rs",
+            ),
+            ("<file:///etc/shadow>", "file:///etc/shadow"),
+            ("evidence=file:///etc/shadow", "file:///etc/shadow"),
+            ("FILE:///etc/shadow", "FILE:///etc/shadow"),
+            (
+                r"at=C:\Users\operator\private.rs",
+                r"C:\Users\operator\private.rs",
+            ),
+            (
+                r"[proof](C:/Users/operator/private.rs)",
+                "C:/Users/operator/private.rs",
+            ),
+            (
+                r"share=\\build-host\proofs\private.rs",
+                r"\\build-host\proofs\private.rs",
+            ),
+            ("home=~/private/proof.json", "~/private/proof.json"),
+            ("path:/etc/passwd", "/etc/passwd"),
+            ("\"/home/operator/private.rs\"", "/home/operator/private.rs"),
+            (
+                "{'file': '/home/operator/private.rs'}",
+                "/home/operator/private.rs",
+            ),
+            (
+                "Révision `/Users/operator/mes preuves/épreuve (1).json`: suite?",
+                "/Users/operator/mes preuves/épreuve (1).json",
+            ),
+            ("/tmp/proof; puis /tmp/proof?", "/tmp/proof"),
         ] {
+            let sanitized = sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES);
             assert_eq!(
-                sanitize_verifier_text(value, VERIFIER_ISSUE_TEXT_MAX_BYTES),
-                REDACTED_VERIFIER_PATH,
+                sanitized,
+                value.replace(path, REDACTED_VERIFIER_PATH),
                 "embedded absolute path was not redacted: {value:?}"
             );
+            assert_eq!(
+                sanitize_verifier_text(&sanitized, VERIFIER_ISSUE_TEXT_MAX_BYTES),
+                sanitized
+            );
         }
+        // cas-ef5e8: preserve caller-authored question bytes around a private
+        // path, rather than replacing the entire supervisor_call summary.
+        let path = "/Users/operator/private-proof.json";
+        let question = "Can this exception be accepted, or is another run required?";
+        let summary = format!("Révision `{path}`: {question}");
+        assert_eq!(
+            sanitize_verifier_text(&summary, VERIFIER_SUMMARY_MAX_BYTES),
+            summary.replace(path, REDACTED_VERIFIER_PATH),
+        );
     }
 
     /// cas-da92: auth markers must survive separator obfuscation across every
@@ -1610,24 +1703,25 @@ mod tests {
             "src/lib.rs".to_string(),
         ];
 
+        let expected_summary = verification.summary.replace("/home/operator/private.rs", REDACTED_VERIFIER_PATH);
+        let expected_file = verification.issues[0].file.replace("/home/operator/private.rs", REDACTED_VERIFIER_PATH);
+        let expected_suggestion = verification.issues[0].suggestion.as_ref().unwrap().replace(r"\\build-host\proofs\private.rs", REDACTED_VERIFIER_PATH);
+        let expected_files = vec![
+            verification.files_reviewed[0].replace("file:///etc/shadow", REDACTED_VERIFIER_PATH),
+            verification.files_reviewed[1].replace(r"C:\Users\operator\private.rs", REDACTED_VERIFIER_PATH),
+            verification.files_reviewed[2].clone(),
+        ];
         verification.sanitize_verifier_authored_content();
 
-        assert_eq!(verification.summary, REDACTED_VERIFIER_PATH);
-        assert_eq!(verification.issues[0].file, REDACTED_VERIFIER_PATH);
+        assert_eq!(verification.summary, expected_summary);
+        assert_eq!(verification.issues[0].file, expected_file);
         assert_eq!(verification.issues[0].code, REDACTED_VERIFIER_SECRET);
         assert_eq!(verification.issues[0].problem, REDACTED_VERIFIER_SECRET);
         assert_eq!(
             verification.issues[0].suggestion.as_deref(),
-            Some(REDACTED_VERIFIER_PATH)
+            Some(expected_suggestion.as_str())
         );
-        assert_eq!(
-            verification.files_reviewed,
-            vec![
-                REDACTED_VERIFIER_PATH.to_string(),
-                REDACTED_VERIFIER_PATH.to_string(),
-                "src/lib.rs".to_string(),
-            ]
-        );
+        assert_eq!(verification.files_reviewed, expected_files);
 
         let serialized = serde_json::to_string(&verification).expect("serialize");
         for unsafe_value in [

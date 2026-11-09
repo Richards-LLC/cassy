@@ -7,6 +7,134 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.9.0] - 2026-11-09
+
+### Fixed — Factory
+
+- **Remote target park checks** — The test assertion gate now resolves local and origin target refs before checking a delivery. Missing targets and checker failures report unavailable proof instead of a prose violation; actual prose pins remain blocked.
+- **Batch QA notices follow current ownership** — Receipt offers go to the epic's current verification owner and refresh after ownership transfers. Delivery and inbox reads withhold obsolete hourly overdue notices and covered QA waits while retaining notification history.
+- **Target-only verifier re-dispatch** — Reuse an answered supervisor decision when a merge candidate changes only because its target moved, and return verification writes promptly while recording slow merge continuation timings.
+- **Retained branch identity** — Task-start branch-cut receipts now identify the retained branch's current tip and commit subject separately from older unattributed work, so held deliveries remain identifiable.
+- **Released fragment audit** — Closing a delivery after its changelog fragment moves into a release again records the task and fragment path in the close audit trail, including epic accounting.
+- **Task queues distinguish running and held work** — Queue inspection and worker status show the worker's task in progress as Current and blocked tasks separately as Held, preserving the held task's queue position and pending order.
+- **Primary workflow finding priorities** — Factory supervision, merge, close, release, spawn and QA receipt now have declared main journeys, allowing reproduced findings to retain their severity × reach priority. Label corrections replace stale triage axes; clearing labels retains finding provenance and resets triage to theoretical. Manual priority requests still cannot override finding policy. Fixes #1636 and #1502.
+- **Explain the changelog revision checked at close** — A refused changelog check now identifies its inspected commit, target and task delivery ranges, making a stale malformed snapshot distinguishable from a corrected pushed fragment. Regression coverage follows a corrected fragment through fresh park anchor selection and task attribution.
+- **Check the final worker delivery at first park** — A fresh close now uses the pushed tip identified by the task's recorded start, so an earlier failing-test commit cannot hide the final changelog or passing test receipt. Previously parked deliveries keep their ownership and anchor protections.
+- **Supervisor stall notices respect operator-blocked worker tasks** — An open operator ask prevents workers with externally owned blockers from counting as idle; taskless workers remain eligible.
+- **Resolve lane models for the chosen account** — Codex lanes now check the selected account before queueing and warn when choosing its supported registered fallback. Missing or stale catalogue evidence refuses the lane before creating a worker or worktree; explicit unsupported recipes still refuse. Workers with a terminal authentication or model failure are excluded from idle staffing until they recover.
+- **Restart an empty retargeted task** — Supervisors can approve a clean replacement branch at the new target before the worker commits, when the original branch still matches its recorded start and has no delivery anchors. Existing work and normal delivery checks remain protected.
+- **Supervisor clears follow live context pressure** — Repeated cached calls no longer exhaust the auto-clear budget. The latest call is measured against the reported model window, with a configured per-call cap when the window is unavailable. Auto-clear handoffs retain active work and readable pending summaries instead of task histories and raw JSON. Fixes #1665.
+- **Tasks assigned during worker startup stay queued** — Assigning later lane tasks before a worker registers now preserves their order and delivers the next task after the current delivery. Repeated dispatch does not duplicate work, and canceled or reassigned tasks are skipped.
+- **Recover shipped delivery identity** — Supervisors can restore a proven integrated task anchor before recording independent batch evidence when historical or conflict recovery lost the original anchor or implementer. Recovery audits the binding and retains ordinary QA and close gates.
+- **Report batch close holds after worker retirement** — Covered deliveries still use ordinary close gates, and any remaining gate now queues a durable supervisor action. Replayed evidence avoids duplicate outcome notes and hold notices.
+- **Keep approvals through shared upkeep** — Generated codemap and builtin history updates no longer invalidate sibling delivery reviews. Clean overview merges retain approval when the delivery's full-context patch is unchanged; reviewed code and changed overview context still require review.
+- **Preserve current delivery identity during recovery** — Historical parked branches no longer displace a worker's current delivery receipt or a renamed epic target. Completed and squash-integrated deliveries retain their recorded source identity.
+- **Staff swept tasks across machines** — A live same-account peer supervisor can staff the same synced task without a separate GitHub source release. Source ownership follows that task, while independent cards, foreign-account claims and concurrent owners remain protected.
+- **Supervisor handoff ownership** — Saving or restoring a supervisor handoff now stays within its machine, project and role. Local successors retain context when their names or sessions change; newer handoffs from another machine cannot replace that context or inject its production approvals. Owner/session stamps remain audit information, and unstamped legacy handoffs stay available through memory tools.
+
+### Fixed — Factory close
+
+- **Close the recorded delivery after lane reuse** — Close checks the parked branch and its declared target before inferring the assignee's current lane or epic. Project-scoped QA evidence wins over colliding historical task directories, while ownership and proof checks remain required.
+
+### Fixed — Verification
+
+- **Native Codex reviewer identity** — Shared MCP connections now reject child registration before changing caller or session state. Dispatches and verifier instructions explain how to use a separately authenticated reviewer or an honest supervisor-owned verdict.
+- **Recover after a verifier exits** — A verifier whose recorded process has exited no longer blocks supervisor verdicts or replacement verifier spawns. A failed follow-up notice is logged without reporting a successful verifier launch as failed.
+
+### Fixed — Task management
+
+- **Carry the delivery target when moving epics** — A task corrected to its previous epic's lane now follows an explicit move to a new epic. A distinct target stays in place and is named in the update reply.
+
+### Fixed — Task planning
+
+- **Reproduction commit references** — Bug reports can cite reproduction SHAs and temporary verifier candidates without being told that their epic must contain that code. The existing missing-code warning applies to explicit dependencies and bases reachable from repository refs.
+
+### Fixed — Commander edit evidence
+
+- **Bind offline edit checks to the selected source** — The edit-detail journey follows the selected file's retrieval state through offline recovery while checking that previously loaded evidence stays available. It no longer mistakes a sibling's cached diff for the current result.
+
+### Fixed — Session cleanup
+
+- **Finish stops session background work** — Finish now inventories and stops its own harness shells, monitors, tasks and registered servers, then verifies none remain before handing back. Claude Code, Codex, Grok and OpenCode share the cleanup instructions, with ownership checks that protect other sessions and factory workers.
+
+### Fixed — Memory
+
+- **Rename memories through MCP** — Memory updates now save a supplied title, alone or with content, preserve omitted fields and return the updated field names in a structured receipt.
+
+### Fixed — Workspace shell analysis
+
+- **Captured exit-status comparisons** — The workspace shell analyzer recognizes variables assigned from `$?` as numeric `test -eq` inputs while keeping unresolved operands guarded.
+
+### Fixed — Accounts
+
+- **Keep Claude Keychain logins in place** — On macOS, account linking checks Claude's native authentication status and preserves active or unverified profile paths. Shared configuration still links normally, and authenticated defaults no longer appear as retired folders or link drift.
+
+### Fixed — Factory verification
+
+- **Retry crashed automatic verifiers** — A verifier harness that exits without a verdict releases its exact claim with an audit and retained diagnostics. Retrying the same merge starts one replacement on the same candidate; the failed child's authority cannot publish a competing verdict.
+
+### Fixed — Tasks
+
+- **Dependency removal receipt** — Removing a dependency now identifies the removed edge and says it no longer applies, instead of repeating the active relationship. MCP callers also receive the removed edge and type as structured data.
+- **Unsupported dependency types** — Dependency add/remove now reject `duplicate` and other unsupported types with the valid choices instead of silently treating them as blocking edges. Both MCP schemas now list the supported relations.
+
+### Fixed — Commander
+
+- **Recover command status after failed cancellation** — A refused or timed-out Cancel resumes outcome polling, so a queued Finish can resolve and later supervisor commands become available.
+- **Finished commands clear themselves** — A supervisor command that finishes, such as Reload Cassy (`/mcp`), now shows its one-line outcome as a short toast that disappears on its own, instead of leaving a result card that needs Dismiss. Failed, refused or unconfirmed commands keep their card and readable error until dismissed, and Usage keeps its card so its readout stays available.
+- **Project card names clear the avatar** — Supervisor rows with a provider mark no longer hide the first letters of the name under the avatar. The card row's avatar column now sizes to the avatar, so the name starts one spacing step after it at desktop and phone widths.
+- **Supervisor answers keep reaching Commander after an MCP reconnect** — Reconnecting a supervisor's Cassy tools after a `/clear` no longer points it back at its pre-clear transcript. Before, every later pane answer and status update was silently missing from Commander until the next session start.
+- **Project card names fit narrow cards** — On a phone-width project card, a supervisor row with a long name no longer runs past the card edge. The machine name and the unused space reserved for the Most recent marker give way first, so the full supervisor name stays readable and still starts after the avatar; only a name wider than the whole line ends in an ellipsis.
+
+### Fixed — Task search
+
+- **Search the current task store** — Task searches refresh the shared index from canonical task rows, so peer-created tasks appear by ID and content; exact duplicate siblings are stopped with the existing task ID before a second row is written.
+
+### Fixed — Factory workers
+
+- **Resume blocked work** — A worker's unnamed WIP commit in a linked checkout retains its recorded task ownership when the project identity lives in the primary checkout. Foreign task commits remain refused.
+- **Checkpoint ownership during resume** — Inherited project identity recovers linked-checkout WIP without treating an unnamed, unrecorded empty checkpoint as task-owned. Empty checkpoints still require their own task attribution.
+
+### Fixed — Task close diagnostics
+
+- **Missing close evidence names its location** — Close refusals now identify the missing candidate manifest, its dispatch and candidate key. Related candidate, receipt and scoped-log filesystem errors also name the path and gate, so a database-only scratch clone no longer reports only an operating-system error.
+
+### Fixed — CI
+
+- **Reuse the proven preflight executable** — Identical-tree merge queues restore the train's source-built CLI and keep smoke checks, with source compilation when proof or a runnable artifact is unavailable.
+
+### Fixed — Factory QA
+
+- **Waived QA write-up closeout** — A supervisor can record a release verdict for a QA-ledger-only delivery authored by its walker when the latest waiver covers that exact delivery. The independent recorder and product-code author checks remain enforced; missing or stale waivers cannot release the wait.
+
+### Added — Releases
+
+- **Green trains cut themselves** — Was: a green release train waited for the
+  supervisor to notice and run `scripts/release.sh`. Now: when the exact train
+  tip has a green full-suite receipt and changelog fragments, Cassy freezes the
+  train and runs `scripts/release.sh` with the supervisor's notes draft, at
+  most `release.auto_cut_max_per_day` (default 4) times a day and
+  `release.auto_cut_min_interval_hours` (default 2) apart, never while a
+  merge-queue run is in flight or the tip is red. A missing draft wakes the
+  supervisor once with a deadline; Cassy never writes or posts notes. The
+  release card in Commander has **Pause auto-cut** and **Resume auto-cut**.
+
+### Fixed — Developer tools
+
+- **Keep release-train contracts aligned** — Task recovery appears in shipped action documentation, tools/list stays within its payload budget, and integration fixtures follow canonical task search, scoped QA artifacts and archive-portable source embedding.
+
+### Fixed — Release automation
+
+- **Backfill respects frozen trains and close holds** — Historical work skips frozen successor trains. Dry-runs evaluate release receipt admission, report dedicated-review, CI-override and retired-park holds, and mark remaining ordinary close gates as pending. Apply reports use each actual close result and retain refusal codes. A delivery published in a later release is reconciled under that tag instead of being counted as unmerged work.
+
+### Fixed — Task delivery
+
+- **Local close summaries** — Filenames, identifiers and descriptive adjectives no longer count as external proof completion claims. Receipt refusals identify the offending clause and its classification.
+
+### Fixed — Build capacity notices
+
+- **Quiet priority queues and group disk waits** — Workers queued behind higher-priority builds no longer wake the supervisor. Disk-pressure waits share one notice per factory session after 20 minutes, listing waiting workers and reclaimable target caches. Later notices require a changed waiting set or reclaimable-byte total, with durable deduplication across daemon restarts.
+
 ## [4.8.0] - 2026-11-09
 
 ### Fixed — Release close gate

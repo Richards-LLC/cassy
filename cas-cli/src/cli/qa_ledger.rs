@@ -20,11 +20,17 @@ enum LedgerCommand {
         /// Apply this task's demo breadth policy
         #[arg(long)]
         task: Option<String>,
+        /// Require every intended receipt delivery in the covers header
+        #[arg(long, value_delimiter = ',', value_parser = crate::qa_ledger::covered_task_id)]
+        covers: Vec<String>,
     },
     /// Create an honest ledger scaffold without overwriting evidence
     Init {
         #[arg(long)]
         task: String,
+        /// Delivery IDs covered by the batch receipt (defaults to --task)
+        #[arg(long, value_delimiter = ',', value_parser = crate::qa_ledger::covered_task_id)]
+        covers: Vec<String>,
     },
 }
 
@@ -34,7 +40,7 @@ pub(crate) fn check(path: &Path, task: Option<&cas_types::Task>) -> crate::qa_le
 
 pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<()> {
     match &args.command {
-        LedgerCommand::Check { path, task } => {
+        LedgerCommand::Check { path, task, covers } => {
             let task = task
                 .as_ref()
                 .map(|id| -> Result<_> {
@@ -44,7 +50,8 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                     .get(id)?)
                 })
                 .transpose()?;
-            let report = check(path, task.as_ref());
+            let mut report = check(path, task.as_ref());
+            report.require_coverage(covers);
             if cli.json {
                 let mut json = serde_json::to_value(&report)?;
                 json["path"] = serde_json::json!(path);
@@ -86,7 +93,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 });
             }
         }
-        LedgerCommand::Init { task: id } => {
+        LedgerCommand::Init { task: id, covers } => {
             let cas_root = cas_root.context("ledger init requires a Cassy project")?;
             let store = crate::store::open_task_store(cas_root)?;
             let task = store.get(id)?;
@@ -125,7 +132,10 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 }
                 None => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
             };
-            let body = crate::qa_ledger::scaffold(&task, &journeys, revision.trim());
+            let mut covers = if covers.is_empty() { vec![id.clone()] } else { covers.clone() };
+            covers.sort_unstable();
+            covers.dedup();
+            let body = crate::qa_ledger::scaffold_with_coverage(&task, &journeys, revision.trim(), &covers);
             let paths = crate::config::resolved_factory_artifact_paths(
                 cas_root,
                 config.factory().artifacts_root.as_deref(),
@@ -168,7 +178,9 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 })?
                 .write_all(body.as_bytes())?;
             if cli.json {
-                let mut json = serde_json::to_value(check(&path, Some(&task)))?;
+                let mut report = check(&path, Some(&task));
+                report.require_coverage(&covers);
+                let mut json = serde_json::to_value(report)?;
                 json["path"] = serde_json::json!(path);
                 json["task"] = serde_json::json!(id);
                 println!("{}", serde_json::to_string_pretty(&json)?);
@@ -177,7 +189,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                     "Created ledger: {} rows",
                     crate::qa_ledger::parse(&body, 1).rows.len()
                 );
-                println!("Check: cas qa ledger check <path> --task {id}");
+                println!("Check: cas qa ledger check <path> --task {id} --covers <ids>");
                 println!(
                     "Path: {}",
                     crate::ui::widgets::truncate(&path.display().to_string(), 74)

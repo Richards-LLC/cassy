@@ -1,0 +1,4 @@
+title: Host paths do not erase the verifier supervisor question
+tasks: [cas-ef5e8]
+invariants: [FACTORY-VERIFIER-QUESTION]
+journeys: [FACTORY-MERGE]

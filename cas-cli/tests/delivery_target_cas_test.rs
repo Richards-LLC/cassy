@@ -2039,6 +2039,27 @@ cat "$CAS_CI_RETRY_TEST_RESPONSE"
             assert!(cas_git_is_ancestor(&fixture.repo.root, &fixture.receipt.commit_sha, "main"),
                 "{outcome}: {notices:?}");
             assert!(notices.is_empty(), "green retries must not wake a model: {notices:?}");
+            // cas-5d8d8: landing is delivered quietly to its owning supervisor,
+            // including a replay after merge committed but before intent cleanup.
+            let landed = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
+            let queue = cas::store::open_prompt_queue_store(&fixture.cas_root).unwrap();
+            for replay in [false, true] {
+                if replay {
+                    std::fs::write(&request, serde_json::to_vec(&saved).unwrap()).unwrap();
+                    cas::factory_ci_retry::retry_pending(&fixture.cas_root, &session).await.unwrap();
+                    assert!(!request.exists());
+                }
+                let receipts: Vec<_> = queue.peek_all(100).unwrap().into_iter()
+                    .filter(|row| row.source.starts_with("merge-ci-retry-landed:")).collect();
+                assert_eq!(receipts.len(), 1, "{outcome}, replay={replay}: {receipts:?}");
+                let receipt = &receipts[0];
+                assert_eq!(receipt.target, format!("{slug}-supervisor"));
+                assert_eq!(receipt.factory_session.as_deref(), Some(session.as_str()));
+                assert!(receipt.prompt.starts_with(cas_store::QUIET_MESSAGE_MARKER));
+                for value in [&fixture.task_id, &landed, &fixture.receipt.target_branch] {
+                    assert!(receipt.prompt.contains(value), "missing receipt value {value}: {receipt:?}");
+                }
+            }
         } else {
             assert_eq!(git_stdout(&fixture.repo.root, &["rev-parse", "main"]), fixture.receipt.target_sha);
             assert_eq!(notices.len(), 1, "{outcome}: stopped lanes each send one notice");

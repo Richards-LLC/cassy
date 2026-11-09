@@ -92,6 +92,11 @@ bug_families:
     tasks: [cas-f8c7]
     invariants: [FACTORY-RECORDED-BLOCKER-WAIT]
     journeys: [HUB-J5]
+  answered-worker-blocker-episode:
+    title: Supervisor direct answers and task decisions retire blocker notices while new questions get their own deadline
+    tasks: [cas-9e1e]
+    invariants: [FACTORY-ANSWERED-BLOCKER-EPISODE]
+    journeys: [HUB-J5]
   supervisor-clock-drift:
     title: Delayed wakes, reminders, digests and peer messages show the current local clock without inferred turn timing
     tasks: [cas-06eb]
@@ -497,6 +502,10 @@ invariants:
     statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
     check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'
     bug: {task: cas-f8c7}
+  FACTORY-ANSWERED-BLOCKER-EPISODE:
+    statement: A supervisor direct answer or decision note retires the current task's blocker notices before status catches up; unrelated tasks and worker decisions cannot clear it, and a changed question gets one initial notice and one deadline escalation.
+    check: 'Run answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e through coordination, task notes, real stores and injected reconciliation time. In batch QA answer a blocked worker by direct message and by a decision note, then leave it blocked past the deadline; require no repeated wake, and verify a fresh question re-arms normal escalation.'
+    bug: {task: cas-9e1e}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
@@ -1358,6 +1367,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - FACTORY-RECORDED-BLOCKER-WAIT
+  - FACTORY-ANSWERED-BLOCKER-EPISODE
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER

@@ -3181,9 +3181,10 @@ impl CasService {
         ) {
             record_worker_ready_contract(&self.inner.cas_root, sender, task_id, contract);
         }
-        // Only an explicit answer or a direct reply to the worker's blocker
-        // owns that wait. Status pings and replies elsewhere in the thread do
-        // not answer it. Automatic verdict/merge notices bypass this path.
+        // Legacy direct replies also own a blocked worker's wait. Typed status
+        // pings and replies elsewhere in the thread do not answer it. An
+        // unbound reply must identify a single blocked task for that worker.
+        // Automatic verdict/merge notices bypass this path.
         let wait_receipt = if duplicate_suppressed { Ok(()) } else if let (Some(sender), Some(recipient)) =
             (agent_from_store.as_ref(), resolved_target_agent.as_ref())
         {
@@ -3193,7 +3194,9 @@ impl CasService {
                         &self.inner.cas_root, sender, task, blocker_question.as_deref().unwrap_or(&message),
                     )
                 }).transpose().map(|_| ())
-            } else if req.kind.as_deref() == Some("answer") || replied_blocker.is_some() {
+            } else if req.kind.as_deref() == Some("answer") || replied_blocker.is_some()
+                || (req.kind.is_none() && req.in_reply_to.is_none())
+            {
                 let task_id = req.task_id.as_deref().or_else(|| {
                     replied_blocker.as_ref().and_then(|blocker| blocker.task_id.as_deref())
                 });

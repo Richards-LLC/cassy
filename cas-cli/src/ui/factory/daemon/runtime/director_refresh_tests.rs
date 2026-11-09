@@ -464,6 +464,12 @@ async fn answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e() {
         reconcile_blocked_task_alert(&root, &task.id, start).unwrap();
         let initial = queue.peek_all(30).unwrap().into_iter()
             .find(|row| is_lifecycle_wake_source(&row.source)).unwrap();
+        let worker_note = worker_service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "notes", "id": task.id, "note_type": "decision",
+            "notes": "The worker has picked a recovery approach."
+        })).unwrap())).await.unwrap();
+        assert!(!worker_note.is_error.unwrap_or(false), "{worker_note:?}");
+        assert!(!block_hold::answered_blocker_alert(&root, &initial), "a worker decision is not a supervisor answer");
         // Same recipient, wrong task: neither kind of answer may swallow this blocker.
         for id in [&other.id, &task.id] {
             let request = if decision {
@@ -495,8 +501,13 @@ async fn answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e() {
         assert!(!question.is_error.unwrap_or(false), "{question:?}");
         assert!(!block_hold::answered_blocker_alert(&root, &initial));
         let before = queue.peek_all(100).unwrap().len();
-        for minutes in [27, 28, 29] {
-            reconcile_blocked_task_alert(&root, &task.id, start + chrono::Duration::minutes(minutes)).unwrap();
+        let next_start = block_hold::read(tasks.as_ref(), &task.id).unwrap().unwrap().when;
+        for minutes in [0, 4] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
+            assert_eq!(queue.peek_all(100).unwrap().len(), before + 1, "new question gets its own deadline");
+        }
+        for minutes in [5, 6, 7] {
+            reconcile_blocked_task_alert(&root, &task.id, next_start + chrono::Duration::minutes(minutes)).unwrap();
         }
         assert_eq!(queue.peek_all(100).unwrap().len(), before + 2,
             "one initial notice and one deadline escalation for the new question");
@@ -557,10 +568,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(!status.is_error.unwrap_or(false), "{status:?}");
     let status_id = queue.peek_all(30).unwrap().into_iter()
         .filter(|row| row.source == "merge-w").max_by_key(|row| row.id).unwrap().id;
-    // Neither an unrelated direct ping nor a reply to ordinary status owns the blocker.
+    // Neither a typed status ping nor a reply to ordinary status owns the blocker.
     for reply_to in [None, Some(status_id)] {
         let ping = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
             "action": "message", "target": "merge-w", "task_id": task.id, "in_reply_to": reply_to,
+            "kind": "status",
             "summary": "Status query", "message": "Are your checks complete?"
         })).unwrap())).await.unwrap();
         assert!(!ping.is_error.unwrap_or(false), "{ping:?}");

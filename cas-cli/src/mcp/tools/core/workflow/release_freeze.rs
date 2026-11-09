@@ -129,45 +129,52 @@ fn red_evidence(root: &Path, train: &Task, freeze: &Freeze) -> Option<String> {
 
 fn refusal(train: &Task, freeze: &Freeze, subject: &str) -> String {
     format!(
-        "TRAIN FROZEN: train frozen for release, parked for the next train. {} has been frozen since {} at tip {}; {subject}. \
+        "TRAIN FROZEN: train frozen for release, parked for the next train. {}; {subject}. \
          No merge was attempted. Only a `{REPAIR_LABEL}` task merges while the train is red. \
          The freeze ends when the release is published or the operator lifts it in Commander.",
-        train.id,
-        eastern(freeze.at),
-        short(&freeze.tip),
+        frozen_since(train, freeze),
     )
+}
+
+/// The train whose standing freeze holds merges into `target`, an effective
+/// epic ref, among `tasks`.
+pub(crate) fn frozen_target(root: &Path, tasks: &[Task], target: &str) -> Option<(Task, Freeze)> {
+    tasks.iter().filter(|train| freeze_of(train).is_some()).find_map(|train| {
+        let lane = train.effective_epic_branch()?;
+        if crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, lane) != target {
+            return None;
+        }
+        let freeze = active(root, train)?;
+        Some((train.clone(), freeze))
+    })
+}
+
+/// "cas-tr has been frozen since 2:58 AM ET at tip 0123456789ab".
+pub(crate) fn frozen_since(train: &Task, freeze: &Freeze) -> String {
+    format!("{} has been frozen since {} at tip {}", train.id, eastern(freeze.at), short(&freeze.tip))
 }
 
 /// The merge gate: worktree_merge (before and under the target lock) and CI
 /// retry arming. A repair admitted under a red is noted on the train once.
 pub(crate) fn check_merge(root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(root).map_err(|error| error.to_string())?;
-    for train in store.list(None).map_err(|error| error.to_string())? {
-        if freeze_of(&train).is_none() {
-            continue;
-        }
-        let Some(lane) = train.effective_epic_branch() else { continue };
-        if crate::mcp::tools::core::task::repo_context::effective_epic_ref(root, lane) != target {
-            continue;
-        }
-        let Some(freeze) = active(root, &train) else { continue };
-        let task = task_id.and_then(|id| store.get(id).ok());
-        let Some(task) = task.filter(is_repair) else {
-            let subject = task_id.map_or("this merge names no task".to_string(), |id| format!("{id} stays parked"));
-            return Err(refusal(&train, &freeze, &subject));
-        };
-        let Some(red) = red_evidence(root, &train, &freeze) else {
-            return Err(refusal(
-                &train,
-                &freeze,
-                &format!("{} is marked {REPAIR_LABEL}, but no red is recorded at or after the frozen tip", task.id),
-            ));
-        };
-        let line = format!("FREEZE REPAIR: {} admitted into frozen {} under {red}", task.id, train.id);
-        if !train.notes.contains(&line) {
-            store.append_note(&train.id, &line).map_err(|error| error.to_string())?;
-        }
-        return Ok(());
+    let tasks = store.list(None).map_err(|error| error.to_string())?;
+    let Some((train, freeze)) = frozen_target(root, &tasks, target) else { return Ok(()) };
+    let task = task_id.and_then(|id| store.get(id).ok());
+    let Some(task) = task.filter(is_repair) else {
+        let subject = task_id.map_or("this merge names no task".to_string(), |id| format!("{id} stays parked"));
+        return Err(refusal(&train, &freeze, &subject));
+    };
+    let Some(red) = red_evidence(root, &train, &freeze) else {
+        return Err(refusal(
+            &train,
+            &freeze,
+            &format!("{} is marked {REPAIR_LABEL}, but no red is recorded at or after the frozen tip", task.id),
+        ));
+    };
+    let line = format!("FREEZE REPAIR: {} admitted into frozen {} under {red}", task.id, train.id);
+    if !train.notes.contains(&line) {
+        store.append_note(&train.id, &line).map_err(|error| error.to_string())?;
     }
     Ok(())
 }

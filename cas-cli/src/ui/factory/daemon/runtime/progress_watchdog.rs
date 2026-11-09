@@ -3,8 +3,10 @@
 //! its supervisor once with what is waiting on whom; still nothing after
 //! another 45, it pages the operator once. Heartbeats and liveness never
 //! count, nor do the daemon's own rows (relays, fired reminders).
+//! A delivery parked for a frozen release train waits on the operator's
+//! lift, not on anyone here: it is reported once per freeze, never chased.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -16,10 +18,18 @@ const QUIET_SECS: i64 = 45 * 60;
 /// whether this episode already woke the supervisor or paged the operator.
 static EPISODES: Mutex<Option<HashMap<String, (String, DateTime<Utc>, bool, bool)>>> = Mutex::new(None);
 
+/// Freeze notices already relayed by this daemon; the relay key also
+/// dedupes them durably across restarts.
+static HELD_REPORTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Parked deliveries held by a train freeze, by train: when the freeze
+/// started and since when it holds, then the held task ids.
+type FreezeHeld = BTreeMap<String, (i64, String, Vec<String>)>;
+
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -42,6 +52,8 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let peer_branches: HashSet<_> = peer_tasks.iter().filter_map(|id| store.get(id).ok())
         .filter(|task| task.task_type == cas_types::TaskType::Epic)
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
+    let mut all_tasks = None;
+    let mut freeze_held = FreezeHeld::new();
     tasks.retain(|task| {
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
@@ -79,8 +91,22 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             .or(task.branch.as_deref()).filter(|target| !target.trim().is_empty())
             .or_else(|| parent.as_ref().and_then(|epic| epic.effective_epic_branch()));
         let Some(target) = target else { return true };
-        !peer_branches.contains(target) && !cas_dir.parent()
-            .is_some_and(|repo| delivery_is_contained(repo, task, target))
+        if peer_branches.contains(target) || cas_dir.parent().is_some_and(|repo| delivery_is_contained(repo, task, target)) {
+            return false;
+        }
+        // cas-1f65: only the operator lifts a release freeze; a repair may
+        // still merge under a red, so it stays actionable here.
+        use crate::mcp::tools::core::workflow::release_freeze;
+        if task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL) {
+            return true;
+        }
+        let trains = all_tasks.get_or_insert_with(|| store.list(None).unwrap_or_default());
+        let target = crate::mcp::tools::core::task::repo_context::effective_epic_ref(cas_dir, target);
+        let Some((train, freeze)) = release_freeze::frozen_target(cas_dir, trains, &target) else { return true };
+        freeze_held.entry(train.id.clone())
+            .or_insert_with(|| (freeze.at.timestamp(), release_freeze::frozen_since(&train, &freeze), Vec::new()))
+            .2.push(task.id.clone());
+        false
     });
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     let mut fingerprint: Vec<String> = tasks.iter()
@@ -103,7 +129,32 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor))
+    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held))
+}
+
+/// Tell the supervisor once per freeze which deliveries it holds and who
+/// lifts it, so a frozen train is never reported as a stall.
+fn report_freeze_held(cas_dir: &Path, held: FreezeHeld) {
+    let mut reported = HELD_REPORTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reported = reported.get_or_insert_with(HashSet::new);
+    for (train, (at, since, mut ids)) in held {
+        let key = format!("train-freeze-held:{train}:{at}");
+        if reported.contains(&key) {
+            continue;
+        }
+        ids.sort();
+        let detail = format!(
+            "Parked for a frozen release train, so not a stall: {}. {since}. Only the operator can lift it, with Lift freeze on the {train} train card in Commander; publishing the release also ends it. The progress watchdog will not chase these deliveries or page the operator for them.",
+            ids.join(", ")
+        );
+        if matches!(
+            super::lifecycle::enqueue_worker_attention_relay_detail_with_key(cas_dir, "progress_operator_held", "supervisor",
+                None, None, |_| detail.clone(), &key, Some(&key)),
+            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+        ) {
+            reported.insert(key);
+        }
+    }
 }
 
 /// Whether the newest decision in `notes` is a `DECISION HOLD`; any later
@@ -131,7 +182,8 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor)) = observe(cas_dir, session, now) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held)) = observe(cas_dir, session, now) else { return };
+    report_freeze_held(cas_dir, freeze_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let episodes = episodes.get_or_insert_with(HashMap::new);
     // A project hold is the operator's own stop, not a stall.
@@ -360,6 +412,76 @@ mod tests {
         }
         assert_eq!(queue.peek_all(100).unwrap().iter()
             .filter(|row| row.target == "operator" && row.prompt.contains("cas-c1fb-peer-handoff")).count(), 1);
+    }
+
+    /// cas-1f65: the Nov 9 overnight. A train frozen for release (lift is
+    /// operator-only) holds two parked children. The supervisor hears once
+    /// that the freeze holds them and who lifts it; nothing is chased as a
+    /// stall or paged. After the lift they are local work again.
+    #[test]
+    fn deliveries_held_by_a_train_freeze_are_reported_once_not_paged_cas_1f65() {
+        use crate::mcp::tools::core::workflow::release_freeze;
+        const SESSION: &str = "frozen-train-1f65";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let repo = env.home().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        let lane = "epic/release-train-vnext-cas-db63";
+        git(&["branch", lane]);
+        git(&["checkout", "-q", "-b", "factory/delivery"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        for (name, role) in [("ready-cobra-72", AgentRole::Supervisor), ("bright-hound-47", AgentRole::Worker)] {
+            let mut agent = Agent::new(format!("{name}-id"), name.into());
+            (agent.role, agent.factory_session) = (role, Some(SESSION.into()));
+            agents.register(&agent).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut train = Task::new("cas-db63".into(), "Release train vNEXT".into());
+        (train.task_type, train.labels, train.branch) =
+            (cas_types::TaskType::Epic, vec!["release-train".into()], Some(lane.into()));
+        tasks.add(&train).unwrap();
+        for id in ["cas-0f47", "cas-1d99"] {
+            let mut task = Task::new(id.into(), "Parked train child".into());
+            (task.status, task.assignee) = (TaskStatus::AwaitingMerge, Some("bright-hound-47".into()));
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: lane.into(),
+            });
+            tasks.add(&task).unwrap();
+        }
+        release_freeze::freeze(&cas_dir, "cas-db63", "operator", None).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135, 180] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert!(rows.iter().all(|row| row.target != "operator" && !row.prompt.contains("progress_stalled")),
+            "a frozen train is not a stall: {rows:?}");
+        let held: Vec<_> = rows.iter().filter(|row| row.prompt.contains("kind=\"progress_operator_held\"")).collect();
+        assert_eq!(held.len(), 1, "one notice per freeze: {rows:?}");
+        assert_eq!(held[0].target, "ready-cobra-72");
+        assert!(["cas-0f47", "cas-1d99", "cas-db63"].iter().all(|id| held[0].prompt.contains(id)), "{}", held[0].prompt);
+
+        // The lift makes them mergeable here again: an ordinary stall.
+        release_freeze::lift(&cas_dir, "cas-db63", "operator").unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.prompt.contains("progress_stalled")).count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
     }
 
     /// GH #1500 / #1302: an overnight with a live, heartbeating but silent

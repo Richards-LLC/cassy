@@ -948,6 +948,7 @@ mod tests {
         let script = repo.path().join("scripts/check-test-shape.py");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, GUARD).unwrap();
+        std::fs::write(script.with_file_name("rust_test_source.py"), include_str!("../../../../../../../../scripts/rust_test_source.py")).unwrap();
         let head = commit_changelog_fixture(repo.path(), "install actual guard");
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();

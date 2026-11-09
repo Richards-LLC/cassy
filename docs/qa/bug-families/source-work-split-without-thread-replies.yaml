@@ -1,4 +1,4 @@
 title: The Slack claim owner delegates a standalone task through an accepted split while retaining reply authority and its source link
-tasks: [cas-ad2c]
+tasks: [cas-ad2c, cas-7bb4]
 invariants: [FACTORY-SOURCE-WORK-DELEGATION]
 journeys: [FACTORY-SPAWN]

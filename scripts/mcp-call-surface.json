@@ -6,6 +6,7 @@
         "list",
         "post",
         "publish",
+        "revoke",
         "show"
       ],
       "fields": [
@@ -16,6 +17,7 @@
         "note_type",
         "notes",
         "path",
+        "reason",
         "reply_to",
         "task_id",
         "title"

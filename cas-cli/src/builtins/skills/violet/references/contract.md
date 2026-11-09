@@ -274,6 +274,7 @@ verified.
 | --- | --- |
 | `artifact_id_missing` / `artifact_channel_missing` | `id` or `channel` was not given |
 | `artifact_not_found` | no published artifact by that ID in this project or Cloud account |
+| `artifact_revoked` | the artifact was revoked; retrieval and new shares are disabled |
 | `artifact_not_in_cloud` | the record is not committed to Cloud; publish it again while logged in |
 | `cloud_auth_missing` | not logged in to Cassy Cloud; run `cas login` |
 | `cloud_resolve_failed` / `artifact_store_failed` | Cloud or the local artifact store could not be read |

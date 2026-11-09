@@ -36,14 +36,16 @@ impl CasCore {
     /// An accepted owner-issued share grants work to its local supervisor
     /// and workers. Keep the task's source link intact; this grants no reply.
     pub(crate) fn source_split(&self, id: &str, source: Option<&str>) -> Option<String> {
-        let actor = self.source_claim_actor()?;
         let task = self.open_task_store().ok()?.get(id).ok()?;
         if task.external_ref.as_deref() != source { return None; }
         crate::cloud::epic_split::current_epic_splits(&self.cas_root).ok()?
             .into_iter().find(|split| {
                 split.state == cas_store::SplitState::Accepted
-                    && split.local_agent_id == actor.id
                     && split.mine.iter().any(|child| child == id)
+                    // Resolving the actor may register it. A task without a
+                    // matching split must leave the caller's identity alone.
+                    && self.source_claim_actor()
+                        .is_some_and(|actor| split.local_agent_id == actor.id)
             }).map(|split| split.id)
     }
 

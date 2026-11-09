@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
-use cas_types::{Agent, AgentRole, Task};
+use cas_types::{Agent, AgentRole, Task, TaskStatus};
 use serde_json::json;
 
 use super::commander_mirror::{MirrorScanState, scan_supervisor_replies};
@@ -33,7 +33,7 @@ impl Lane {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            "[factory]\ncommander_mirror_enabled = false\nsupervisor_wake_input_budget = 1000\n",
+            "[factory]\ncommander_mirror_enabled = false\nsupervisor_wake_input_budget = 1000000\n",
         )
         .unwrap();
         let queue = SqlitePromptQueueStore::open(&root).unwrap();
@@ -50,6 +50,7 @@ impl Lane {
         let tasks = crate::store::open_task_store(&root).unwrap();
         let mut epic = Task::new("cas-train".into(), "Release train v9.99.1".into());
         epic.epic_verification_owner = Some(supervisor.id.clone());
+        epic.status = TaskStatus::InProgress;
         tasks.add(&epic).unwrap();
         tasks.append_note("cas-train", APPROVAL).unwrap();
         let transcript = account
@@ -194,4 +195,85 @@ fn over_budget_wake_waits_for_idle_and_never_clears_mid_turn() {
     lane.turn(20_000, true);
     lane.scan();
     assert_eq!(lane.rows(CONTEXT_RESET_CONTROL).len(), 1, "clear queued at the idle boundary");
+}
+
+/// GH #1665: repeated cache reads measure billing, not live context pressure.
+#[test]
+fn cached_wake_replay_uses_latest_call_and_reported_window() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut lane = Lane::new();
+    lane.turn(0, false);
+    let at = chrono::Utc::now().to_rfc3339();
+    let mut file = std::fs::OpenOptions::new().append(true).open(&lane.transcript).unwrap();
+    // 78 calls, first 62,490, peak 116,844, cumulative 7,627,334.
+    for call in 0..78 {
+        let input = match call { 0 => 62_490, 77 => 116_844, _ => 98_000 };
+        writeln!(file, "{}", json!({"type":"assistant","timestamp":at,"message":{
+            "id":format!("cached-{call}"),"role":"assistant",
+            "usage":{"input_tokens":100,"cache_read_input_tokens":input - 200,
+                "cache_creation_input_tokens":100,"output_tokens":5},
+            "content":[{"type":"text","text":"ok"}],
+            "stop_reason":if call == 77 { "end_turn" } else { "tool_use" }
+        }})).unwrap();
+    }
+    lane.scan();
+    assert!(lane.handoffs().is_empty());
+    assert!(lane.rows(CONTEXT_RESET_CONTROL).is_empty());
+
+    // A Codex prompt at 85% of its reported 200K window must trigger even
+    // though the lifetime counter is unrelated and the absolute cap is 1M.
+    std::fs::write(&lane.transcript, format!("{}\n", json!({"type":"event_msg","payload":{
+        "type":"token_count","info":{"last_token_usage":{"input_tokens":170_000,
+            "cached_input_tokens":160_000},"total_token_usage":{"input_tokens":7_627_334},
+            "model_context_window":200_000}
+    }}))).unwrap();
+    let step = crate::supervisor_auto_clear::on_turn_end(&lane.root, &lane.queue,
+        &crate::supervisor_auto_clear::TurnEnd {
+            agent:&lane.agents[0], cli:cas_mux::SupervisorCli::Codex, factory_session:SESSION,
+            harness_session:"codex-session", transcript:&lane.transcript,
+            input_tokens:Some(170_000), at:chrono::Utc::now(), mid_turn:false,
+        }).unwrap();
+    assert!(matches!(step, crate::supervisor_auto_clear::Step::HandoffSaved(_)));
+}
+
+#[test]
+fn handoff_receipt_and_injection_keep_only_live_work_and_readable_pending_rows() {
+    use cas_store::{SqliteSupervisorQueueStore, SupervisorQueueStore};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut lane = Lane::new();
+    let tasks = crate::store::open_task_store(&lane.root).unwrap();
+    for index in 0..150 {
+        let mut task = Task::new(format!("cas-stale-{index}"), "old task".into());
+        task.assignee = Some(lane.agents[0].id.clone());
+        task.notes = "old history ".repeat(1000);
+        tasks.add(&task).unwrap();
+    }
+    let mut parked = Task::new("cas-parked".into(), "delivery".into());
+    parked.assignee = Some(lane.agents[0].id.clone());
+    parked.status = TaskStatus::AwaitingMerge;
+    tasks.add(&parked).unwrap();
+    let pending = SqliteSupervisorQueueStore::open(&lane.root).unwrap();
+    pending.init().unwrap();
+    for _ in 0..89 {
+        pending.notify(&lane.agents[0].id, "task_blocked", &json!({
+            "actor":"nimble-badger-37", "task_id":"cas-parked",
+            "message":"unneeded payload ".repeat(100)
+        }).to_string(), cas_store::NotificationPriority::Normal).unwrap();
+    }
+    lane.turn(1_300_000, true);
+    lane.scan();
+    let receipt_path = std::fs::read_dir(lane.root.join("supervisor-handoffs")).unwrap()
+        .next().unwrap().unwrap().path();
+    let bytes = std::fs::read(receipt_path).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
+    assert!(bytes.len() < 30_000, "receipt bytes: {}", bytes.len());
+    let content = lane.current_handoff().content;
+    assert!(content.len() < 8_000, "injection bytes: {}", content.len());
+    assert!(!content.contains("cas-stale-"));
+    let row = content.lines().find(|line| line.contains("nimble-badger-37")).unwrap();
+    for data in ["task_blocked", "cas-parked"] { assert!(row.contains(data)); }
+    assert!(!row.contains('{'));
+    assert!(!row.contains('\n'));
+    assert!(content.contains(APPROVAL));
 }

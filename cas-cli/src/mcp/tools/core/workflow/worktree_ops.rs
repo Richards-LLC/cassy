@@ -1937,7 +1937,7 @@ enum StartedMergeSource {
     AlreadyMerged { branch: String, tip: String, target: String, target_tip: String },
 }
 
-/// A task-recorded delivery fetched from origin, without claiming a local worker.
+/// A task-recorded delivery recovered without claiming a local worker.
 struct RemoteMergeSource {
     assignee: String,
     branch: String,
@@ -2107,14 +2107,17 @@ fn contained_merge_receipt(
     git: &crate::worktree::GitOperations,
     source: &str,
     target: &str,
+    local_merge: bool,
 ) -> Containment {
     let Some(source_tip) = git.resolve_commit(source) else {
         return Containment::NotContained;
     };
-    // A failed refresh never lets stale local history claim publication.
+    // LocalMerge's declared local target is authoritative. For pushed
+    // deliveries, a failed refresh cannot let stale history claim publication.
     // Tracking refs refresh here; local target advancement remains behind CI,
     // unless this source is already integrated and no merge is needed.
-    let (target_tip, authority, origin_verified) = match git.fetch_merge_target(target) {
+    let refreshed = if local_merge { Ok(None) } else { git.fetch_merge_target(target) };
+    let (target_tip, authority, origin_verified) = match refreshed {
         Ok(Some(sha)) => (sha, format!("origin/{target}"), true),
         Ok(None) => match git.resolve_commit(target) {
             Some(local) => (local, target.to_string(), false),
@@ -4054,6 +4057,7 @@ impl CasCore {
             });
         }
         let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
         let recorded = task.deliverables.parked_branch.as_deref().filter(|b| !b.trim().is_empty());
         if let Some(branch) = recorded {
             if !task_delivery_branch_matches(branch, &assignee, &task.id)
@@ -4068,7 +4072,7 @@ impl CasCore {
                 });
             }
             if git.resolve_commit(&format!("refs/heads/{branch}")).is_some()
-                || (git.has_origin_remote() && !merge_source_refs(repo, &[
+                || (!local_merge && git.has_origin_remote() && !merge_source_refs(repo, &[
                     "ls-remote", "--heads", "origin", &format!("refs/heads/{branch}"),
                 ])?.is_empty())
             {
@@ -4078,7 +4082,7 @@ impl CasCore {
             }
         }
         let mut branches = merge_source_refs(repo, &["for-each-ref", "--format=%(refname)", "refs/heads/factory/"])?;
-        if git.has_origin_remote() {
+        if !local_merge && git.has_origin_remote() {
             branches.extend(merge_source_refs(repo, &[
                 "ls-remote", "--heads", "origin", &format!("refs/heads/factory/{assignee}*"),
             ])?);
@@ -4105,9 +4109,9 @@ impl CasCore {
         }))
     }
 
-    /// Resolve a remote-only delivery through task and supervisor authority.
-    /// The real pushed branch is materialized locally for the existing CI/QA
-    /// gates; divergent local refs are never overwritten.
+    /// Recover a retired delivery through task and supervisor authority.
+    /// Local deliveries use their local ref; pushed branches are materialized
+    /// for the existing CI/QA gates without overwriting divergent local refs.
     fn prepare_remote_merge_source(
         &self,
         manager: &crate::worktree::WorktreeManager,
@@ -4164,6 +4168,18 @@ impl CasCore {
         })?;
         authorize_explicit_task_for_system_b_worker(task, &assignee, agents.as_ref())?;
         let git = manager.git();
+        if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            if git.resolve_commit(&format!("refs/heads/{branch}")).is_none() {
+                return Err(refuse(format!("local delivery branch {branch} is missing")));
+            }
+            // The ordinary parked-source guard validates this local ref and
+            // anchor after independent QA; recovery grants no merge verdict.
+            return Ok(Some(RemoteMergeSource {
+                assignee,
+                branch: branch.into(),
+                anchor: recorded_anchor.into(),
+            }));
+        }
         let pushed_ref = format!("refs/remotes/origin/{branch}");
         git.fetch_branch(&format!("+refs/heads/{branch}:{pushed_ref}"))
             .map_err(|error| refuse(format!("cannot fetch recorded origin/{branch}: {error}")))?;
@@ -4995,7 +5011,9 @@ impl CasCore {
         // A queued content conflict must return its worker before candidate
         // preparation can fail on that same conflict and strand the queue.
         if train_queue.is_some() {
-            let remote = manager.git().fetch_merge_target(&worktree.parent_branch)
+            let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
+                Ok(None)
+            } else { manager.git().fetch_merge_target(&worktree.parent_branch) }
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
             let local = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train target missing"))?;
@@ -5038,7 +5056,8 @@ impl CasCore {
                 None => false,
             };
             let remote = format!("origin/{}", worktree.parent_branch);
-            let target = if manager.git().has_origin_remote() && manager.git().resolve_commit(&remote).is_some() {
+            let target = if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+                && manager.git().has_origin_remote() && manager.git().resolve_commit(&remote).is_some() {
                 remote.as_str()
             } else { worktree.parent_branch.as_str() };
             !bound && manager.git().is_ancestor(&worktree.branch, target)
@@ -5090,10 +5109,12 @@ impl CasCore {
             false
         };
 
-        // An unpublished local merge is not a no-op. Only a fresh origin
-        // snapshot (or a repository with no origin) can prove containment.
+        // LocalMerge uses its local target. Pushed deliveries need fresh
+        // origin containment, or the existing fallback when origin is absent.
         if transactional_delivery.is_none() {
-            match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch) {
+            let local_merge = scoped_task.as_deref()
+                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
+            match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, local_merge) {
                 Containment::Contained { receipt, origin_verified } => {
                     // Preserve the existing behind-local checkout repair, but only
                     // after origin has proved that this source needs no CI/merge.

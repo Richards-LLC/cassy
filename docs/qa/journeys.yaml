@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  local-parked-delivery-recovery:
+    title: Integrated local_merge deliveries recover after worker retirement without origin while preserving QA and verification authority
+    tasks: [cas-3a4b]
+    journeys: [FACTORY-MERGE]
   batch-ledger-declared-coverage:
     title: Generated batch ledgers declare receipt deliveries and preflight rejects missing coverage before publishing
     tasks: [cas-6354]

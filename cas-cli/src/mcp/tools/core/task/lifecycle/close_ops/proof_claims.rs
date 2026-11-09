@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 struct Grammar {
     clauses: Regex,
     tokens: Regex,
+    quantifier: Regex,
     proof: Regex,
     passed: Regex,
     external: Regex,
@@ -28,15 +29,17 @@ fn grammar() -> &'static Grammar {
         let proof = r"(?:tests?|suites?|journeys?|checks?|validation|verification|proof|ci|playwright|builds?)";
         let external = r"(?:supervisor|reviewer|qa|operator|merge[- ]queue|assembly|ci)";
         let status = r"(?:pass(?:ed|es|ing)?|green|success(?:ful|fully)?|succeed(?:ed|s)?|verified|validated|proved|proven|complete[ds]?)";
+        let quantity = r"[0-9]+(?:/[0-9]+)?";
         let subject = format!(r"{proof}(?:\s+runs?)?(?:\s+(?:in|on|by|at)\s+(?:the\s+)?{external})?");
         Grammar {
             // Do not split inside URLs or artifact names.
             clauses: re(r"[;\n]|[.!?](?:\s+|$)"),
             tokens: re(r"`[^`]*`|\S+"),
+            quantifier: re(&format!(r"^{quantity}$")),
             proof: re(&format!(r"\b{proof}\b")),
             // Require a proof subject/status or a completion verb/object,
             // rather than an adjective elsewhere in the clause.
-            passed: re(&format!(r"\b{subject}(?:\s+(?:has|have|had|is|are|was|were|been|now|all|already|successfully))*\s+{status}\b|\b{external}(?:\s+(?:has|have|had|already|successfully))*\s+(?:passed|verified|validated|proved|completed)\s+(?:(?:the|all|a|an)\s+)?{proof}\b")),
+            passed: re(&format!(r"\b{subject}(?:\s+(?:has|have|had|is|are|was|were|been|now|all|already|successfully))*\s+{status}\b|\b{external}(?:\s+(?:has|have|had|already|successfully))*\s+(?:passed|verified|validated|proved|completed)\s+(?:(?:the|all|a|an)\s+)?(?:{quantity}\s+)?{proof}\b")),
             external: re(&format!(r"\b{external}\b")),
             future: re(&format!(r"\b(?:will|shall|going to|expected to|scheduled to)\s+(?:(?:be|have|been|successfully)\s+)*(?:{status}|run|execute[ds]?|prove[ds]?|validate[ds]?|verify|check|test)\b")),
             // Plain run/CI numbers need enough digits to distinguish them
@@ -139,8 +142,8 @@ pub(super) fn validate_claims(
 /// predicates. Keep a barrier so removing one cannot join unrelated words.
 fn assertion_words(clause: &str) -> String {
     let lower = clause.to_ascii_lowercase();
-    grammar()
-        .tokens
+    let g = grammar();
+    g.tokens
         .find_iter(&lower)
         .map(|token| {
             let word = token
@@ -148,6 +151,7 @@ fn assertion_words(clause: &str) -> String {
                 .trim_matches(|c| "()[]{},:;.!?\"'*".contains(c));
             if !word.is_empty()
                 && (word == "merge-queue"
+                    || g.quantifier.is_match(word)
                     || word.chars().all(|c| c.is_ascii_alphabetic() || c == '\''))
             {
                 word

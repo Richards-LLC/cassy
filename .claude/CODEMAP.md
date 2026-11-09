@@ -99,7 +99,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs`, `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - peer approvals and durable portable proof boundaries.
 - `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - guarded delivery publication, unpublished-merge restoration and exact-source protected default-branch PR routing.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` - ordered train merges, freeze and automatic cut admission.
-- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs`, `cas-cli/src/mcp/tools/core/task/block_hold.rs` - audited branch/delivery recovery and task holds.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs`, `cas-cli/src/mcp/tools/core/task/block_hold.rs` - audited branch/delivery recovery, empty retargeted-lane replacement and task holds.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs` - stakeholder source admission, same-task peer staffing transfer, heartbeat retirement and fenced release.
 - `cas-cli/src/finding_triage.rs`, `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` - journey severity labels and default release-train assignment.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.

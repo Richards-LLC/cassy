@@ -1553,6 +1553,86 @@ async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
     assert!(dispatch.repository.unwrap().anchor_commits.is_empty());
 }
 
+/// GH #1673: retargeting an unmodified task lane must allow a supervisor to
+/// bind its clean replacement before the worker has to commit any delivery.
+#[tokio::test]
+async fn retarget_empty_branch_rebind_then_start_gh1673() {
+    for obstruction in ["old-commit", "historical-anchor", "dirty", "stale-target", "none"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let id = "cas-a4a7";
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        let original = f.task(id).deliverables.factory_branch_start.unwrap();
+        if obstruction == "old-commit" {
+            std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&checkout, &["add", "own.rs"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-a4a7): existing work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "new-target"]);
+        std::fs::write(repo.join("target.rs"), "pub fn target() {}\n").unwrap();
+        git(repo, &["add", "target.rs"]);
+        git(repo, &["commit", "-qm", "target history"]);
+        git(repo, &["push", "-q", "origin", "new-target"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let updated = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "proof_scope_fix":true,
+            "target_branch":"new-target", "reason":"Move the task to its new release train",
+        })).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{updated}");
+        let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{restarted}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&original));
+
+        let replacement = format!("{lane}-retarget");
+        let base = if obstruction == "stale-target" { "main" } else { "new-target" };
+        git(&checkout, &["checkout", "-q", "-b", &replacement, base]);
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("target.rs"), "uncommitted work\n").unwrap();
+        }
+        if obstruction == "historical-anchor" {
+            let mut task = f.task(id);
+            task.deliverables.historical_factory_branch_anchors.push(old_tip.clone());
+            f.put(&task);
+        }
+        let before = f.task(id);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"rebind_branch", "id":id, "branch":replacement,
+            "reason":"Approve the empty replacement from the new target",
+        })).unwrap())).await;
+        if obstruction != "none" {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(before.deliverables).unwrap(), "{obstruction}");
+        } else {
+            assert!(rebound.is_ok(), "{rebound:?}");
+            let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let task = f.task(id);
+            assert_eq!(task.status, TaskStatus::InProgress, "{restarted}");
+            let start = task.deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.branch, replacement);
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(Some(start.work_target), task.deliverables.work_target);
+            assert_eq!(start.assignee, WORKER);
+            assert!(task.deliverables.factory_branch_anchor.is_none());
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "{obstruction}");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {

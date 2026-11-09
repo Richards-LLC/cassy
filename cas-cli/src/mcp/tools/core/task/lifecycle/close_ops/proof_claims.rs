@@ -80,9 +80,9 @@ pub(super) fn validate_claims(
             continue;
         }
         let classification = if future {
-            "future-proof"
+            "FUTURE_PROOF"
         } else {
-            "external-completion"
+            "EXTERNAL_COMPLETION"
         };
         let with_claim = |error: String| {
             format!(
@@ -217,18 +217,12 @@ mod tests {
         )
         .expect("local documentation integrity is not an external completion claim");
 
-        let error = validate_claims(
-            "CI reported 10312 tests passed / 1 failed",
-            cas_root.path(),
-            receipt_root.path(),
-        )
-        .expect_err("an unsupported CI claim still requires a receipt");
+        let reason = "CI reported 10312 tests passed / 1 failed";
+        let error = validate_claims(reason, cas_root.path(), receipt_root.path())
+            .expect_err("an unsupported CI claim still requires a receipt");
         assert!(error.starts_with("PROOF CLAIM RECEIPT REQUIRED"), "{error}");
-        assert!(error.contains("external-completion"), "{error}");
-        assert!(
-            error.contains("CI reported 10312 tests passed / 1 failed"),
-            "{error}"
-        );
+        assert!(error.contains("EXTERNAL_COMPLETION"), "{error}");
+        assert!(error.contains(reason), "{error}");
 
         validate_claims(
             "CI tests passed ./receipt.log",

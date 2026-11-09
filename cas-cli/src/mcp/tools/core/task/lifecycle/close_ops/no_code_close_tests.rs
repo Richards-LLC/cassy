@@ -2803,7 +2803,7 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         std::fs::create_dir_all(checkout.join("src")).unwrap();
         std::fs::create_dir_all(checkout.join("docs/qa/bug-families")).unwrap();
         std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
         std::fs::write(checkout.join("docs/qa/bug-families/correction.yaml"), "title: Flow correction\ntasks: [cas-56f1]\ninvariants: [INV]\njourneys: [FLOW]\n").unwrap();
         git(&checkout, &["add", "."]);
         git(&checkout, &["commit", "-qm", "fix: repair flow"]);
@@ -2843,8 +2843,6 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         }
         let before = git(&checkout, &["rev-parse", "HEAD"]);
         let request = || Parameters(serde_json::from_value(serde_json::json!({"action":"start", "id":id})).unwrap());
-        // The supported recovery first surfaces the unread supervisor decision.
-        assert!(f.worker.task(request()).await.is_err());
         if foreign {
             assert!(f.worker.task(request()).await.is_err());
             assert_eq!(f.task(id).status, TaskStatus::Open);

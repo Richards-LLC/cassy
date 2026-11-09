@@ -2333,7 +2333,8 @@ mod tests {
         if let Some(root) = std::env::var_os(CHILD) {
             let root = PathBuf::from(root);
             let repo = root.join("worktrees/respawn-worker");
-            std::env::set_current_dir(&repo).unwrap();
+            let mut env = crate::test_support::TestEnvGuard::new();
+            env.set_current_dir(&repo);
             let id = std::fs::read_to_string(root.join("run-id")).unwrap();
             let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(respawn)"].map(str::to_owned);
             let result = crate::factory_worker_runs::monitor(&root, &id, || {

@@ -3161,6 +3161,7 @@ async fn handle_client_message(
     if let ClientMessage::SendMessage { attribution, .. }
         | ClientMessage::SupervisorCommand { attribution, .. }
         | ClientMessage::SupervisorCommandStatus { attribution, .. }
+        | ClientMessage::SupervisorCommandCancel { attribution, .. }
         | ClientMessage::SupervisorCommandStep { attribution, .. } = &mut message {
         // cas-e8df: identity comes from the authenticated device session, never
         // from what the client put in the frame. Whatever labels arrived are
@@ -3805,6 +3806,7 @@ pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRef
         .or_else(|| match serde_json::from_slice::<ClientMessage>(bytes).ok()? {
             ClientMessage::SupervisorCommand { client_ref, .. }
             | ClientMessage::SupervisorCommandStatus { client_ref, .. }
+            | ClientMessage::SupervisorCommandCancel { client_ref, .. }
             | ClientMessage::SupervisorCommandStep { client_ref, .. } => Some((client_ref, PendingRefKind::SupervisorCommand)),
             _ => None,
         })
@@ -3932,6 +3934,7 @@ pub(crate) fn admit_correlated_daemon_frame(
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Observed => "observed",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Refused => "denied",
             crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Unconfirmed => "unconfirmed",
+            crate::ui::factory::supervisor_commands::SupervisorCommandPhase::Cancelled => "cancelled",
         }, "supervisor_command_receipt", Scope::PaneRead, session, Some(detail), chrono::Utc::now()).is_err() { return false; }
     }
     match correlate_daemon_frame(pending, session, bytes) {
@@ -5141,7 +5144,12 @@ mod upstream_unavailable_tests {
         })).unwrap();
         let no_lease = handle_client_message(&connector, "command-session", &trusted, &command("compact", false)).await.unwrap_err();
         assert!(!is_upstream_unavailable(&no_lease), "a command without control reached the daemon boundary");
+        let cancel = serde_json::to_vec(&serde_json::json!({"SupervisorCommandCancel":{"client_ref":"cmd-test"}})).unwrap();
+        let no_lease = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        assert!(!is_upstream_unavailable(&no_lease));
         auth.acquire_lease(&context, "command-session", now).unwrap();
+        let allowed_cancel = handle_client_message(&connector, "command-session", &trusted, &cancel).await.unwrap_err();
+        assert!(is_upstream_unavailable(&allowed_cancel));
         let unconfirmed = handle_client_message(&connector, "command-session", &trusted, &command("clear", false)).await.unwrap_err();
         assert!(unconfirmed.to_string().contains("confirmation"));
         let arbitrary = handle_client_message(&connector, "command-session", &trusted, &command("/compact; whoami", true)).await.unwrap_err();

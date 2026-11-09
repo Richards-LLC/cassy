@@ -82,6 +82,8 @@ export interface ConversationRow {
   statusLine?: ProjectStatusLine;
   /** Another session of this project runs on the same machine: the row names its codename. */
   showCodename?: boolean;
+  /** Project cards identify their supervisor by name before the machine. */
+  showSupervisorName?: boolean;
 }
 
 /** The badge follows whole-minute activity, tied by stable identity (cas-6faf).
@@ -295,9 +297,12 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // Two sessions of one project on one machine read apart by their codename.
   // cas-6faf: such siblings reserve the same Most recent slot; inactive slots have no spoken name.
   const mark = row.showCodename && row.group ? `<span class="conversation-session-slot"${row.group.active ? "" : ' aria-hidden="true"'}><span class="conversation-session-mark">Most recent</span></span>` : "";
-  const codename = row.showCodename ? `<span class="conversation-supervisor-name codename">${escapeHtml(row.supervisor)}</span>${mark}` : "";
+  const name = row.supervisor.trim();
+  const hasName = name && name.toLowerCase() !== "supervisor";
+  const supervisorLabel = row.showSupervisorName && hasName ? name : "Supervisor";
+  const codename = row.showCodename ? `${row.showSupervisorName ? "" : `<span class="conversation-supervisor-name codename">${escapeHtml(name)}</span>`}${mark}` : "";
   return providerAvatarMarkup({ harness: row.harness, fallback: machineMonogram(row.host), state: row.supervisorState, className: "conversation-avatar" })
-    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">Supervisor</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
+    + `<span class="conversation-who" title="${escapeHtml(row.supervisor)}"><span class="conversation-role">${escapeHtml(supervisorLabel)}</span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span>${codename}${badge}</span>`
     + time
     + marks
     + (note ? `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : draft ? " draft" : ""}">${emojiMarkup(note)}</span>` : "")

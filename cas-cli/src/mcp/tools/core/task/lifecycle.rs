@@ -2449,6 +2449,7 @@ impl CasCore {
         })?;
 
         let mut queued_start_snapshot = queued_start.then(|| task.clone());
+        let branch_start_snapshot = task.clone();
 
         // cas-a0d2: an unattributed row is adopted into this project here. The
         // in-progress write below persists it, so the repair survives and every
@@ -2678,6 +2679,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut reassigned_branch = None;
         let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
@@ -2909,28 +2911,40 @@ impl CasCore {
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    if (task.deliverables.factory_branch_start.is_none() || reset_start_base)
-                        && crate::factory_isolation::branch_at(worker_checkout).as_deref()
-                            == Some(worker_branch.as_str())
+                    // Reassignment may replace a boundary only after all old
+                    // tips are proven inherited. Inspect immediately before the
+                    // successful start write, through the shared rebind audit.
+                    let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                            start.assignee != worker.name && start.branch != worker_branch
+                        })
+                        && task.assignee.as_deref().is_none_or(|assignee| assignee == worker.name);
+                    if crate::factory_isolation::branch_at(worker_checkout).as_deref()
+                        == Some(worker_branch.as_str())
                     {
-                        let base_sha = GitOperations::new(worker_repo_root)
-                            .ref_sha(&worker_branch)
-                            .map_err(|error| {
-                                Self::error(
-                                    ErrorCode::INVALID_PARAMS,
-                                    format!("Cannot record task start base: {error}"),
-                                )
-                            })?;
-                        factory_branch_start = Some(cas_types::FactoryBranchStart {
-                            work_target: task
-                                .deliverables
-                                .work_target
-                                .clone()
-                                .expect("declared target"),
-                            assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
-                            branch: worker_branch,
-                            base_sha,
-                        });
+                        if reassigned {
+                            reassigned_branch = Some((
+                                worker_checkout.to_path_buf(), worker.clone(), worker_branch,
+                            ));
+                        } else if task.deliverables.factory_branch_start.is_none() || reset_start_base {
+                            let base_sha = GitOperations::new(worker_repo_root)
+                                .ref_sha(&worker_branch)
+                                .map_err(|error| {
+                                    Self::error(
+                                        ErrorCode::INVALID_PARAMS,
+                                        format!("Cannot record task start base: {error}"),
+                                    )
+                                })?;
+                            factory_branch_start = Some(cas_types::FactoryBranchStart {
+                                work_target: task
+                                    .deliverables
+                                    .work_target
+                                    .clone()
+                                    .expect("declared target"),
+                                assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
+                                branch: worker_branch,
+                                base_sha,
+                            });
+                        }
                     }
                     parked_branch_note.or(beside_note).or(reset_note)
                 } else {
@@ -3544,6 +3558,12 @@ impl CasCore {
         if let Some(start) = factory_branch_start {
             task.deliverables.factory_branch_start = Some(start);
         }
+        let automatic_rebind = reassigned_branch.and_then(|(checkout, worker, branch)| {
+            super::rebind::reassigned_branch_start(&checkout, &task, &worker, &branch)
+        });
+        if let Some((start, _)) = automatic_rebind.as_ref() {
+            task.deliverables.factory_branch_start = Some(start.clone());
+        }
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store
@@ -3552,9 +3572,19 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        let start_update = match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
-            Some(expected) => task_store.update_if_current(&task, expected),
-            None => task_store.update(&task),
+        let start_update = if let Some((_, audit)) = automatic_rebind.as_ref() {
+            audit.persist(
+                &self.cas_root,
+                task_store.as_ref(),
+                queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref())
+                    .unwrap_or(&branch_start_snapshot),
+                &mut task,
+            )
+        } else {
+            match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
+                Some(expected) => task_store.update_if_current(&task, expected),
+                None => task_store.update(&task),
+            }
         };
         task.updated_at = match start_update {
             Ok(updated_at) => updated_at,

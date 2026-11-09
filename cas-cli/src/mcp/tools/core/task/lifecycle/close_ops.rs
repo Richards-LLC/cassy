@@ -30828,6 +30828,111 @@ esac
         assert!(closed.notes.contains(&format!("passed timed-out verification dispatch {}", dispatch.id)), "{}", closed.notes);
     }
 
+    /// Execute the machine calls in the epic timeout refusal, including every
+    /// advertised alternative, so guidance cannot offer an unusable escape.
+    #[tokio::test]
+    async fn epic_timeout_recovery_commands_execute_cas_bf13() {
+        use crate::mcp::CasService;
+        use cas_types::{Agent, AgentRole, VerificationProofBoundary};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        git(p, &["branch", "epic/timeout"]);
+        git(p, &["push", "-q", "origin", "epic/timeout"]);
+        let receipt = rev_parse_local(p, "origin/main");
+        let cas_dir = crate::store::init_cas_dir(p).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        let actor = "cas-bf13-supervisor";
+        core.open_agent_store().unwrap().register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        core.set_agent_id_for_testing(actor.into());
+        let store = core.open_task_store().unwrap();
+        let mut epic = Task::new("cas-bf13-epic".into(), "Timed-out epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::InProgress;
+        epic.branch = Some("epic/timeout".into());
+        epic.epic_verification_owner = Some(actor.into());
+        epic.risk = vec![TaskRisk::None];
+        store.add(&epic).unwrap();
+        let service = CasService::new(core, None);
+        let create_dispatch = |deadline| cas_store::create_verification_dispatch_bound(
+            &cas_dir, &epic.id, "task-verifier", actor,
+            &VerificationProofBoundary::task(), deadline, false,
+        ).unwrap();
+        let stale = create_dispatch(chrono::Utc::now() - chrono::Duration::minutes(1));
+        cas_store::timeout_verification_dispatch(&cas_dir, &epic.id, chrono::Utc::now()).unwrap();
+        let current = create_dispatch(chrono::Utc::now() + chrono::Duration::minutes(1));
+        let stale_verdict = serde_json::from_value(serde_json::json!({
+            "action": "add", "task_id": epic.id, "dispatch_id": stale.id,
+            "status": "approved", "verification_type": "epic", "summary": "Reviewed old epic",
+        })).unwrap();
+        assert!(service.verification(Parameters(stale_verdict)).await.is_err());
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &current.id).unwrap().state,
+            cas_types::VerificationDispatchState::Pending);
+        cas_store::timeout_verification_dispatch(
+            &cas_dir, &epic.id, chrono::Utc::now() + chrono::Duration::minutes(2),
+        ).unwrap();
+        let request = serde_json::json!({
+            "action": "close", "id": epic.id, "supervisor_override": true,
+            "commit_receipt": receipt,
+            "reason": format!("shipped; verifier dispatch {} timed out", current.id),
+        });
+        let response = service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+        assert_eq!(response.is_error, Some(true), "an unshipped epic cannot waive review");
+        let text = response.content.iter().filter_map(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // Backtick-delimited MCP payloads are the refusal's copyable interface.
+        // Consume parameters, not prose; fill only the documented placeholders.
+        let fields = regex::Regex::new(r#"(\w+)=("[^"]*"|<[^>]*>|[^\s]+)"#).unwrap();
+        let commands: Vec<_> = text.split('`').skip(1).step_by(2).filter_map(|command| {
+            let tool = command.split_whitespace().next()?;
+            (tool.ends_with("verification") || tool.ends_with("task")).then(|| {
+                let mut args = serde_json::Map::new();
+                for capture in fields.captures_iter(command) {
+                    let key = &capture[1];
+                    let value = capture[2].trim_matches('"');
+                    args.insert(key.into(), match key {
+                        "supervisor_override" => serde_json::json!(value == "true"),
+                        "commit_receipt" => serde_json::json!(receipt),
+                        "summary" => serde_json::json!("Reviewed assembled epic"),
+                        _ => serde_json::json!(value),
+                    });
+                }
+                (tool.ends_with("verification"), serde_json::Value::Object(args))
+            })
+        }).collect();
+        // Try every advertised alternate escape before recording the verdict.
+        for (_, args) in commands.iter().filter(|(verification, args)| !verification && args.get("supervisor_override").is_some()) {
+            let result = service.task(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "advertised recovery failed: {result:?}");
+        }
+        let verdicts: Vec<_> = commands.iter().filter(|(verification, _)| *verification).collect();
+        assert_eq!(verdicts.len(), 1, "one exact-dispatch recovery command");
+        for (_, args) in verdicts {
+            assert_eq!(args["dispatch_id"], current.id);
+            let result = service.verification(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        let verdict = cas_store::get_verification_for_dispatch(&cas_dir, &current.id).unwrap().unwrap();
+        assert_eq!(verdict.verification_type, VerificationType::Epic);
+        assert_eq!(verdict.provenance, cas_types::VerificationProvenance::SupervisorDirect);
+        for (_, args) in commands.iter().filter(|(verification, args)| !verification && args.get("supervisor_override").is_none()) {
+            let result = service.task(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        assert_eq!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &stale.id).unwrap().state,
+            cas_types::VerificationDispatchState::TimedOut);
+    }
+
     /// cas-f01b (GH #1068): the gabber-studio cas-cfd8 sequence through the
     /// real handler. A worker delivers on its recorded System-A branch, the
     /// delivery lands on the target by squash, and the worker starts its next

@@ -769,7 +769,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     const composer = page.getByRole("textbox", { name: "Your message", exact: true });
     await composer.fill("/exit");
     await composer.press("Enter");
-    const confirmation = page.getByRole("alertdialog", { name: /Exit/ });
+    const confirmation = page.getByRole("alertdialog").filter({ has: page.locator('[data-command-confirm="exit"]') });
     await expect(confirmation).toBeVisible();
     await confirmation.getByRole("button", { name: "Exit", exact: true }).click();
     const exitReceipt = page.locator(".supervisor-command-receipt");
@@ -842,7 +842,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await context.tracing.start({ screenshots: false, snapshots: { dom: true, aria: true, screen: true }, sources: true });
     const rows = page.locator("#conversation-list .conversation-row");
     await expect(rows).toHaveCount(1);
-    await expect(rows).toContainText("journey-supervisor");
+    await expect(rows).toHaveAttribute("data-thread-key", /:real-hub-journey$/);
     await expect(page.getByRole("button", { name: /Dismiss ended|Clear ended/ })).toHaveCount(0);
     for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
@@ -886,7 +886,7 @@ test("HUB-J14 real hub hides stopped sessions and recovers running sessions", {
     await page.screenshot({ path: join(directory, "stopped-message.png") });
     await command("daemon-start");
     await expect(rows).toHaveCount(1);
-    await expect(rows).toContainText("journey-supervisor");
+    await expect(rows).toHaveAttribute("data-thread-key", /:real-hub-journey$/);
     passed = true;
   } finally {
     try {

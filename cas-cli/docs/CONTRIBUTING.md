@@ -1,5 +1,12 @@
 # Contributing to Cassy
 
+## Memory update receipts
+
+`memory action=update id=<id> title=<title>` saves the title alone or together
+with `content`. Omitted fields retain their stored values. A successful edit
+returns `structured_content` with `id` and `changes` (the updated field names),
+alongside the existing text receipt.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to

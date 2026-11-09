@@ -1,0 +1,4 @@
+title: Dismiss cancels a queued Finish or interactive receipt without typing; closed native choosers release command admission
+tasks: [cas-f1a2]
+invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-ALLOWLIST]
+journeys: [HUB-J27]

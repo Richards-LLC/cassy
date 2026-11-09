@@ -41,7 +41,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Read the completed turn and a native command receipt without XML", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.locator(".working-turn .phase-line")).toBeVisible();
+        await expect(page.locator(".working-turn .phase-line")).toHaveAttribute("data-active", "false");
         const receipt = page.locator(".native-command-receipt");
         await expect(receipt).toContainText("/mcp reconnect cas");
         await expect(page.locator('.thread [role="log"]')).not.toContainText("<command-name>");
@@ -59,14 +59,32 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(page.locator(".supervisor-command-receipt").filter({ hasText: "/mcp" })).toHaveAttribute("data-phase", "observed");
         expect(hub.sends).toHaveLength(0);
       });
+      await journey.stage("Dismiss a stuck queued Finish through the daemon before Exit (cas-f1a2)", async () => {
+        const input = page.locator("#message-text");
+        await input.fill("/finish"); await input.press("Enter");
+        await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        const request = hub.frames.filter(frame => frame.kind === "SupervisorCommand")[1]!.body as { client_ref: string; command: string };
+        expect(request.command).toBe("finish");
+        const receipt = page.locator(`[data-command-ref="${request.client_ref}"]`);
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "queued", detail: "Waiting for an empty prompt", output: "", interactive: false } } });
+        await expect(receipt).toHaveAttribute("data-phase", "queued");
+        await receipt.getByRole("button", { name: "Dismiss command status", exact: true }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
+        expect(hub.frames.find(frame => frame.kind === "SupervisorCommandCancel")!.body).toEqual({ client_ref: request.client_ref });
+        await expect(receipt).toBeVisible();
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "cancelled", detail: "Cancelled before submission", output: "", interactive: false } } });
+        await expect(receipt).toHaveCount(0);
+        expect(hub.sends).toHaveLength(0);
+      });
       await journey.stage("Exit once after the native turn has completed", async () => {
         const input = page.locator("#message-text");
         await input.fill("/exit"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Exit", exact: true }).click();
-        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(2);
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommand").length).toBe(3);
         const frames = hub.frames.filter(frame => frame.kind === "SupervisorCommand");
-        expect(frames).toHaveLength(2);
-        expect(frames[1]!.body).toMatchObject({ command: "exit", confirmed: true });
+        expect(frames).toHaveLength(3);
+        expect(frames[2]!.body).toMatchObject({ command: "exit", confirmed: true });
         expect(hub.sends).toHaveLength(0);
       });
     });
@@ -251,7 +269,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await input.fill("");
         expect(mutations()).toHaveLength(2);
       });
-      await journey.stage("Finish waits for the active turn, then its reply reaches the conversation", async () => {
+      await journey.stage("Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)", async () => {
         await input.fill("/finish"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(3);
@@ -262,6 +280,15 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await expect(receipt).toContainText("Nothing has been typed yet");
         expect(mutations()).toHaveLength(3);
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
+        const cancelFailure = "supervisor command failed: already submitted";
+        hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: cancelFailure } });
+        // The daemon's error payload must reach the row before counting polls.
+        await expect(receipt.locator("p")).toHaveText(cancelFailure);
+        const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
+        const before = statusReads();
+        await expect.poll(statusReads).toBeGreaterThan(before);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });
@@ -275,11 +302,20 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await page.locator('[data-supervisor-command="clear"]').click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");
+        const clearConsequence = await page.locator("#supervisor-command-palette-consequence").innerText();
+        expect(clearConsequence).toMatch(/\S/);
         await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
         expect(mutations()).toHaveLength(3);
         await expect(input).toBeFocused();
         await input.fill("/exit"); await input.press("Enter");
         await expect(dialog).toBeVisible();
+        // Exit states its own consequence (not Clear's), and the dialog is described by it.
+        const exitConsequence = page.locator("#supervisor-command-palette-consequence");
+        await expect(exitConsequence).toHaveText(/\S/);
+        expect(await exitConsequence.innerText()).not.toBe(clearConsequence);
+        await expect(dialog).toHaveAccessibleDescription(await exitConsequence.innerText());
+        await expect(dialog).toContainText("cas-src");
+        await expect(dialog.locator('[data-command-confirm="exit"]')).toBeVisible();
         await expect(dialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("ArrowRight");
         await expect(dialog.getByRole("button", { name: "Exit", exact: true })).toBeFocused();
@@ -314,7 +350,10 @@ test("HUB-J27 explain commands without control rights and keep Raw output usable
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
-    await expect(page.locator("#supervisor-command-palette")).toBeVisible();
+    // Without command control the palette explains why and offers no command to run.
+    const palette = page.locator("#supervisor-command-palette");
+    await expect(palette.getByRole("status")).toHaveText(/\S/);
+    await expect(palette.locator("[data-supervisor-command]")).toHaveCount(0);
     expect(hub.frames.filter(frame => frame.kind === "SupervisorCommand")).toHaveLength(0);
     await page.keyboard.press("Escape");
   });

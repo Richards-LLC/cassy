@@ -1,0 +1,4 @@
+title: Refused or timed-out Cancel keeps polling the original command until its actual outcome
+tasks: [cas-5b23]
+invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-OBSERVED-OUTCOME]
+journeys: [HUB-J27]

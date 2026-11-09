@@ -637,7 +637,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // says Retry will go through once this reads live (cas-d15c).
       sessionLive: () => conversationConnection(threadMachineId, threadSession)?.phase === "live",
       commandReceipts: () => supervisorCommandSession(threadMachineId, threadSession).visibleReceipts,
-      commandDismiss: ref => supervisorCommandSession(threadMachineId, threadSession).dismiss(ref),
+      commandDismiss: ref => { void supervisorCommandSession(threadMachineId, threadSession).dismiss(ref).catch(error => toast(String(error), { thread: threadKey })); },
       commandStep: (ref, key) => { void supervisorCommandSession(threadMachineId, threadSession).step(ref, key).catch(error => toast(String(error), { thread: threadKey })); },
       // cas-1730 (cas-008f N01): while another device holds control and this
       // one cannot force a takeover, the refused message names that device

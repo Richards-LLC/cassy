@@ -2,7 +2,7 @@
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use cas_types::{Dependency, DependencyType, TaskStatus, TaskTerminalOutcome};
+use cas_types::{Dependency, DependencyType, TaskStatus, TaskTerminalOutcome, TaskType};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -442,6 +442,26 @@ fn unmerged_factory_commit_count(repo: &Path, child: &cas_types::Task, tag_sha: 
         .unwrap_or(0)
 }
 
+fn is_release_train_task(task: &cas_types::Task) -> bool {
+    task.task_type == TaskType::Epic
+        && (crate::mcp::tools::core::task::release_train::is_release_train(task)
+            || task.effective_epic_branch().is_some_and(|lane| lane.starts_with("epic/release-train-")))
+}
+
+fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
+    let Some(anchor) = child.deliverables.factory_branch_anchor.as_deref() else {
+        return false;
+    };
+    git(repo, &["merge-base", "--is-ancestor", anchor, tag_sha]).is_ok()
+        || matches!(
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                repo, anchor, tag_sha, &child.id,
+            ),
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
+        )
+}
+
 fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
     let (repo, _integration) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("release train has no integration branch")?;
@@ -449,7 +469,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let store = open_task_store(root)?;
     let train = store.get(train_id)?;
     ensure!(
-        crate::mcp::tools::core::task::release_train::is_release_train(&train),
+        is_release_train_task(&train),
         "{train_id} is not a release train"
     );
     let lane = train.effective_epic_branch().context("release train has no lane")?;
@@ -468,18 +488,13 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         child.status != TaskStatus::Cancelled
             && !child.is_terminal()
             && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
-            && !child.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| matches!(
-                crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                    &repo, anchor, &tag_sha, &child.id,
-                ),
-                crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                    | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-            ))
+            && !delivery_is_shipped(&repo, child, &tag_sha)
     });
     let successor = if needs_migration {
         crate::mcp::tools::core::task::release_train::open_trains(store.as_ref(), &_integration)
             .into_iter()
-            .find(|candidate| candidate.id != train_id)
+            .filter(|candidate| candidate.id != train_id)
+            .min_by(|left, right| left.created_at.cmp(&right.created_at).then_with(|| left.id.cmp(&right.id)))
             .context("unfinished children need migration, but no successor release train is open")?
             .into()
     } else {
@@ -488,6 +503,10 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let next_lane = successor.as_ref().and_then(cas_types::Task::effective_epic_branch).map(str::to_string);
     let mut included = Vec::new();
     let mut report = Vec::new();
+    if let Some(successor) = &successor {
+        let lane = next_lane.as_deref().context("successor train has no lane")?;
+        report.push(format!("Successor: {} ({lane})", successor.id));
+    }
     let mut moved_count = 0;
     let mut receipt_recorded = false;
     for child in &children {
@@ -504,14 +523,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             report.push(format!("{}: SKIP ({unmerged_commits} unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)", child.id));
             continue;
         }
-        let anchor = child.deliverables.factory_branch_anchor.as_deref();
-        let shipped = anchor.is_some_and(|anchor| matches!(
-            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
-                &repo, anchor, &tag_sha, &child.id,
-            ),
-            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
-                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
-        ));
+        let shipped = delivery_is_shipped(&repo, child, &tag_sha);
         if shipped {
             included.push(child.id.clone());
             if child.status == TaskStatus::Closed {
@@ -586,7 +598,10 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
 
     let refreshed = store.get_subtasks(train_id)?;
     let mut train_closed = false;
-    if refreshed.iter().all(cas_types::Task::is_terminal) && !dry_run {
+    let train_will_close = refreshed.iter().all(|child| {
+        child.is_terminal() || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
+    });
+    if train_will_close && !dry_run {
         let mut closed = store.get(train_id)?;
         if !closed.is_terminal() {
             let now = chrono::Utc::now();
@@ -598,10 +613,6 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             store.update(&closed)?;
             train_closed = true;
         }
-    } else {
-        report.extend(refreshed.iter().filter(|child| !child.is_terminal()).map(|child| {
-            format!("{}: remains {} under shipped train", child.id, child.status)
-        }));
     }
     if dry_run {
         let mut preview = format!("{train_id} ({tag}) dry-run: no writes");
@@ -609,12 +620,12 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             preview.push_str("\n  ");
             preview.push_str(line);
         }
-        let train_action = if refreshed.iter().all(cas_types::Task::is_terminal) {
+        let train_action = if train_will_close {
             "CLOSE"
         } else {
-            "KEEP OPEN"
+            "STAY OPEN (unmerged children remain open)"
         };
-        preview.push_str(&format!("\n  Train: {train_action}"));
+        preview.push_str(&format!("\n  Train verdict: {train_action}"));
         return Ok(preview);
     }
     let changed = closed_count > 0 || moved_count > 0 || train_closed || receipt_recorded;
@@ -683,19 +694,27 @@ fn move_to_next_train(
 }
 
 pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
+    let mut failures = Vec::new();
     for (train, tag) in [
         ("cas-c4a0", "v4.3.0"),
         ("cas-baf5", "v4.4.0"),
         ("cas-dcb3", "v4.5.0"),
         ("cas-d7c7", "v4.6.0"),
     ] {
-        let report = if args.dry_run {
-            preview_shipped_train(root, train, tag)?
+        let result = if args.dry_run {
+            preview_shipped_train(root, train, tag)
         } else {
-            close_shipped_train(root, train, tag)?
+            close_shipped_train(root, train, tag)
         };
-        println!("{report}");
+        match result {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("[ERROR] {train} ({tag}): {error:#}");
+                failures.push(train);
+            }
+        }
     }
+    ensure!(failures.is_empty(), "release backfill failed for {}", failures.join(", "));
     Ok(())
 }
 
@@ -971,6 +990,10 @@ mod tests {
         let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
         git(repo, &["checkout", "main"]).unwrap();
         git(repo, &["merge", "--no-ff", &old_lane, "-m", "merge release train"]).unwrap();
+        fs::write(repo.join("src/released.rs"), "pub fn released() { /* shipped edit */ }\n").unwrap();
+        git(repo, &["add", "src/released.rs"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "edit shipped file after merge"])
+            .unwrap();
         fs::write(repo.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [4.3.0] - 2026-11-08\n\n- Shipped.\n").unwrap();
         git(repo, &["add", "CHANGELOG.md"]).unwrap();
         git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "release: v4.3.0"])
@@ -1055,6 +1078,9 @@ mod tests {
         assert!(preview.contains("cas-a100: CLOSE; gate verdict PASS"), "{preview}");
         assert!(preview.contains("cas-a102: SKIP (2 unmerged commits; left open; parent and target unchanged); gate verdict N/A"), "{preview}");
         assert!(preview.contains("cas-a101: MOVE -> cas-next001"), "{preview}");
+        assert!(preview.contains("Successor: cas-next001"), "{preview}");
+        assert!(preview.contains("Train verdict: STAY OPEN (unmerged children remain open)"), "{preview}");
+        assert!(!preview.contains("remains"), "{preview}");
         assert!(preview.contains("no writes"), "{preview}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
         assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
@@ -1085,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_closes_the_four_published_train_lanes_idempotently() {
+    fn backfill_continues_after_bad_train_and_accepts_legacy_train_lane() {
         let (temp, root, _, _, _) = fixture();
         let repo = temp.path();
         let bare = temp.path().join("origin.git");
@@ -1115,34 +1141,47 @@ mod tests {
         ];
         let main = git(repo, &["rev-parse", "main"]).unwrap();
         for (id, tag) in trains {
-            let lane = format!("epic/release-train-{id}");
+            let lane = if id == "cas-d7c7" {
+                "epic/release-train-v4-5-1-cas-d7c7".to_string()
+            } else {
+                format!("epic/release-train-{id}")
+            };
             git(repo, &["branch", &lane, &main]).unwrap();
             let mut train = Task::new(id.into(), format!("Release train {id}").into());
-            train.task_type = TaskType::Epic;
-            train.labels.push("release-train".into());
+            train.task_type = if id == "cas-c4a0" { TaskType::Task } else { TaskType::Epic };
+            if id != "cas-d7c7" {
+                train.labels.push("release-train".into());
+            }
             train.branch = Some(lane);
             train.deliverables.work_target = Some(target.clone());
             store.add(&train).unwrap();
             git(repo, &["tag", "-a", tag, "-m", tag]).unwrap();
         }
         let mut push = vec!["push", "origin", "main"];
-        let lanes = trains.iter().map(|(id, _)| format!("epic/release-train-{id}")).collect::<Vec<_>>();
+        let lanes = trains.iter().map(|(id, _)| {
+            if *id == "cas-d7c7" {
+                "epic/release-train-v4-5-1-cas-d7c7".to_string()
+            } else {
+                format!("epic/release-train-{id}")
+            }
+        }).collect::<Vec<_>>();
         push.extend(lanes.iter().map(String::as_str));
         push.push("--tags");
         git(repo, &push).unwrap();
 
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let _cwd = env.enter_dir(repo);
-        backfill(&BackfillArgs { dry_run: true }, &root).unwrap();
+        assert!(backfill(&BackfillArgs { dry_run: true }, &root).is_err());
         for (id, _) in trains {
             assert_eq!(store.get(id).unwrap().status, TaskStatus::Open, "dry-run mutated {id}");
         }
-        backfill(&BackfillArgs { dry_run: false }, &root).unwrap();
-        for (id, _) in trains {
+        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
+        assert_eq!(store.get("cas-c4a0").unwrap().status, TaskStatus::Open);
+        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
             assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
         }
-        backfill(&BackfillArgs { dry_run: false }, &root).unwrap();
-        for (id, _) in trains {
+        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
+        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
             assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
         }
     }

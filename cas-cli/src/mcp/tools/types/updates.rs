@@ -10,6 +10,11 @@ pub struct EntryUpdateRequest {
     #[schemars(description = "ID of the entry to update")]
     pub id: String,
 
+    /// New title (optional)
+    #[schemars(description = "New title for the entry")]
+    #[serde(default)]
+    pub title: Option<String>,
+
     /// New content (optional)
     #[schemars(description = "New content for the entry")]
     #[serde(default)]

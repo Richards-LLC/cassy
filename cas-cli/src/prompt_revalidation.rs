@@ -1386,6 +1386,8 @@ pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionE
     })
 }
 
+const VERIFIER_CALLER_GUIDANCE: &str = "Native Codex children share the parent's MCP caller and cannot independently record this verdict. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to this exact dispatch. If no separate reviewer is available, the registered supervisor may review the evidence and submit directly; provenance remains supervisor_direct. Do not register a native child on the shared connection.";
+
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor
 /// when a worker's close creates a dispatch (cas-8725).
 pub(crate) fn verification_dispatch_envelope(
@@ -1415,6 +1417,7 @@ pub(crate) fn verification_dispatch_envelope(
          Task {task} is ready to close and is parked on verification dispatch {dispatch}, \
          delivered by {worker}.\n\
          {reason}\
+         {VERIFIER_CALLER_GUIDANCE}\n\
          Hand the verifier dispatch_id={dispatch}. Record with verification action=add task_id={task} dispatch_id={dispatch}. \
          Do not message {worker} to close: a PASS closes an eligible merged delivery (otherwise its supervisor owns ordinary close recovery), \
          and a FAIL on a merged delivery returns it to {worker} with the findings.\n\
@@ -1441,6 +1444,7 @@ pub(crate) fn candidate_verification_dispatch_envelope(
         "{VERIFICATION_DISPATCH_ENVELOPE_OPEN}dispatch_id=\"{id}\" task_id=\"{task}\" owner=\"{owner}\" deadline=\"{deadline}\" bound_head=\"{head}\">\n\
          Task {task}, delivered by {worker}, awaits its required pre-merge candidate review.\n\
          {reason}\n\
+         {VERIFIER_CALLER_GUIDANCE}\n\
          Hand the verifier dispatch_id={id}. Record with verification action=add task_id={task} dispatch_id={id}. \
          A PASS continues the merge; a FAIL or unresolved verdict holds this delivery.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",

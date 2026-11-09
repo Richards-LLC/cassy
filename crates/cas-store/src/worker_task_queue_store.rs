@@ -106,6 +106,44 @@ impl SqliteWorkerTaskQueueStore {
         Ok(())
     }
 
+    /// Append a mutation assignment without waiting for a long-running queue
+    /// start. Concurrent cursor writers use save's revision fence and retry
+    /// through normal daemon repair, preserving this newly admitted tail.
+    pub fn admit_assignment(
+        &self, session: &str, worker: &str, task: &str, head: Option<(&str, bool)>,
+    ) -> Result<bool> {
+        let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let state: Option<String> = tx.query_row(
+            "SELECT state FROM worker_task_queues WHERE factory_session=? AND worker_name=?",
+            params![session, worker], |row| row.get(0),
+        ).optional()?;
+        let mut state: WorkerTaskQueue = state.map(|json| serde_json::from_str(&json))
+            .transpose().map_err(|e| StoreError::Other(e.to_string()))?.unwrap_or_default();
+        if state.revision == 0 {
+            let Some((head, started)) = head.filter(|(head, _)| *head != task) else {
+                return Ok(false);
+            };
+            state.current_task = Some(head.into());
+            state.current_started = started;
+        }
+        if state.current_task.as_deref() == Some(task) { return Ok(false); }
+        if !state.pending.iter().any(|id| id == task) {
+            state.pending.push(task.into());
+            state.revision = state.revision.checked_add(1)
+                .ok_or_else(|| StoreError::Other("Worker queue revision overflow".into()))?;
+            let revision = i64::try_from(state.revision).map_err(|e| StoreError::Other(e.to_string()))?;
+            let json = serde_json::to_string(&state).map_err(|e| StoreError::Other(e.to_string()))?;
+            tx.execute(
+                "INSERT INTO worker_task_queues(factory_session,worker_name,revision,state) VALUES(?,?,?,?) \
+                 ON CONFLICT(factory_session,worker_name) DO UPDATE SET revision=excluded.revision,state=excluded.state",
+                params![session, worker, revision, json],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Bind a durable spawn payload once, after the worker name is known.
     pub fn bind_spawn(&self, request: i64, session: &str, worker: &str) -> Result<()> {
         let mut conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -171,6 +209,15 @@ mod tests {
         stale.pending = vec!["cas-lost".into()];
         assert!(store.save("session", "worker", &mut stale).is_err());
         let reopened = SqliteWorkerTaskQueueStore::open(root.path()).unwrap();
+        assert_eq!(reopened.get("session", "worker").unwrap(), first);
+        // Admission while a cursor writer holds an old revision preserves the
+        // cursor and fences its stale replacement; replay appends only once.
+        assert!(reopened.admit_assignment("session", "worker", "cas-tail", None).unwrap());
+        assert!(reopened.admit_assignment("session", "worker", "cas-tail", None).unwrap());
+        assert!(!reopened.admit_assignment("session", "worker", "cas-running", None).unwrap());
+        assert!(store.save("session", "worker", &mut first).is_err());
+        first.pending.push("cas-tail".into());
+        first.revision += 1;
         assert_eq!(reopened.get("session", "worker").unwrap(), first);
         assert!(
             reopened

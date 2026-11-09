@@ -80,3 +80,10 @@ In `finally`, call the project's existing cleanup adapter and stop only the
 servers or PIDs this walk started. Keep captures and read cleanup results back.
 Run `cas qa ledger check <path> --task <id>` before submission. Mark unrun cells
 `NOT EXERCISED: <reason>` and retain automation errors in Honesty.
+
+## Isolated candidate serve
+
+To drive a candidate build's MCP surface, run `cas serve --sandbox <scratch-dir>` from a scratch project
+initialized with `cas init` inside that directory. The server refuses a store outside the sandbox (for
+example an inherited live `CAS_ROOT`) before it opens, registers or syncs anything, and keeps cloud sync
+off, so the walk cannot add an agent, queue rows or a cloud sync to the live store.

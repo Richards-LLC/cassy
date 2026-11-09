@@ -2,6 +2,86 @@
 use super::*;
 use crate::mcp::tools::core::workflow::premerge_verification::{self, Candidate};
 
+#[cfg(test)]
+mod missing_manifest_tests {
+    use super::*;
+
+    #[test]
+    fn verified_delivery_missing_candidate_names_path_and_dispatch_cas_97b0() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C").arg(repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        run(&["init", "-q", "-b", "main"]);
+        // Candidate preparation runs git independently of the fixture helper.
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@example.invalid"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        run(&["add", ".gitignore"]);
+        run(&["commit", "-qm", "base"]);
+        run(&["switch", "-qc", "factory/worker"]);
+        std::fs::write(repo.join("delivery.txt"), "delivery\n").unwrap();
+        run(&["add", "delivery.txt"]);
+        run(&["commit", "-qm", "delivery"]);
+        run(&["switch", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_CLONE_PATH", repo);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-97b0-fixture".into(), "Verified delivery".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let candidate = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "supervisor", "supervisor",
+            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let mut verdict = cas_types::Verification::new("ver-97b0".into(), task.id.clone());
+        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.dispatch_id = Some(dispatch.id.clone());
+        cas_store::add_system_verification(&root, &verdict).unwrap();
+        let connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        cas_store::resolve_verification_dispatch_with_conn(
+            &connection, &dispatch.id, "supervisor", None, true,
+        ).unwrap();
+        assert!(current(&root, &task).unwrap().is_some());
+        let manifest = std::fs::read_dir(root.join("verification-candidates")).unwrap()
+            .next().unwrap().unwrap().path().join("candidate.json");
+        std::fs::remove_file(&manifest).unwrap();
+        let refusal = match current(&root, &task) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("missing candidate must hold the verified delivery"),
+        };
+        assert!(refusal.contains(manifest.to_str().unwrap()), "{refusal}");
+        assert!(refusal.contains(&dispatch.id), "{refusal}");
+        assert!(refusal.contains("VERIFIED_DELIVERY_CANDIDATE_READ"), "{refusal}");
+
+        // Completion-receipt close also prepares/reuses this candidate.
+        // Missing metadata and filesystem failures must retain its location.
+        let missing = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(missing.code, ErrorCode::INVALID_PARAMS);
+        assert!(missing.message.contains(manifest.to_str().unwrap()), "{missing}");
+        assert!(missing.message.contains(&dispatch.id), "{missing}");
+        std::fs::create_dir(&manifest).unwrap();
+        let unreadable = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(unreadable.code, ErrorCode::INVALID_PARAMS);
+        assert!(unreadable.message.contains(manifest.to_str().unwrap()), "{unreadable}");
+        std::fs::remove_dir(&manifest).unwrap();
+        let directory = manifest.parent().unwrap();
+        std::fs::remove_dir(directory).unwrap();
+        std::fs::write(directory, "blocks candidate directory creation").unwrap();
+        let blocked = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(blocked.code, ErrorCode::INVALID_PARAMS);
+        assert!(blocked.message.contains(directory.to_str().unwrap()), "{blocked}");
+    }
+}
+
 pub(super) struct ReviewedDelivery {
     pub(super) dispatch: String,
     pub(super) repository: cas_types::RepositoryProofBoundary,

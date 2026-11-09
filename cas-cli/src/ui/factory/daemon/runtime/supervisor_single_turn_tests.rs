@@ -401,6 +401,8 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
         "startup-handoff".into(), cas_mux::claude_supervisor_contract("(none)"),
     );
     handoff.tags = vec!["handoff".into(), "role:supervisor".into()];
+    let author = cas_types::Agent::new_with_role(name.clone(), name.clone(), cas_types::AgentRole::Supervisor);
+    cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut handoff);
     crate::store::open_store(&cas).unwrap().add(&handoff).unwrap();
     crate::ui::factory::queue_supervisor_intro_prompt(
         &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,

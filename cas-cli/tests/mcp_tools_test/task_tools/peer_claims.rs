@@ -45,6 +45,8 @@ struct FakeState {
     renew_after_lock_reads: Option<(usize, bool)>,
     change_after_lock_read: Option<(usize, Option<String>)>,
     return_released_rows: bool,
+    // Account-private reads omit teammate locks; project lists still expose them.
+    foreign_locks: std::collections::HashSet<String>,
     // Apply a late release/competing claim in the claim-to-renew gap.
     change_before_renew: Option<Option<String>>,
     fail_renew: bool,
@@ -286,6 +288,9 @@ impl FakeCloud {
                 _ => (404, serde_json::json!({"error": "No active lock found"})),
             },
             ("GET", "lock") => {
+                if state.foreign_locks.contains(&key) {
+                    return (200, serde_json::json!({"lock":null}));
+                }
                 if let Some(holder) = state.revive_on_lock.take() {
                     state.statuses.insert(holder, "active".into());
                 }
@@ -633,15 +638,17 @@ async fn github_source_handoff_allows_peer_assignment_without_override() {
     })).unwrap())).await.unwrap();
     let task = open_task_store(&alpha.cas_dir).unwrap().list(None).unwrap()
         .into_iter().find(|task| task.external_ref.as_deref() == Some(source)).unwrap();
-    bravo.put_task(&task.id, TaskType::Task);
+    // A distinct card still needs an explicit source release.
+    let receiver_id = "cas-independent-handoff";
+    bravo.put_task(receiver_id, TaskType::Task);
     let tasks = open_task_store(&bravo.cas_dir).unwrap();
-    let mut received = tasks.get(&task.id).unwrap();
+    let mut received = tasks.get(receiver_id).unwrap();
     received.external_ref = Some("https://github.com/acme/widget/pull/1565/files".into());
     tasks.update(&received).unwrap();
     let assign = || serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({
-        "id":task.id, "assignee":"receiver-worker",
+        "id":receiver_id, "assignee":"receiver-worker",
     })).unwrap();
-    let refusal = bravo.core.cas_task_update(Parameters(assign())).await.unwrap_err();
+    bravo.core.cas_task_update(Parameters(assign())).await.unwrap_err();
 
     let agents = open_agent_store(&alpha.cas_dir).unwrap();
     let keys: Vec<String> = serde_json::from_str(
@@ -670,10 +677,63 @@ async fn github_source_handoff_allows_peer_assignment_without_override() {
     let heartbeat = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
     assert_eq!(heartbeat.renewed, 0, "the old open card must not reclaim its source: {heartbeat:?}");
     bravo.core.cas_task_update(Parameters(assign())).await.expect("the receiver assigns without an override");
-    let received = tasks.get(&task.id).unwrap();
+    let received = tasks.get(receiver_id).unwrap();
     assert_eq!(received.assignee.as_deref(), Some("receiver-worker"));
     assert!(received.deliverables.source_claim_override.is_none());
     assert_eq!(cloud.active_lock(&keys[0]).unwrap().1.agent_id, bravo.agent_id);
+}
+
+/// A sweep's source follows its synced card when a peer supervisor staffs it.
+#[tokio::test]
+async fn same_task_source_claim_moves_with_peer_staffing_cas_f668() {
+    for mode in ["supervisor", "standard", "director", "worker", "foreign", "race"] {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let cloud = FakeCloud::start();
+        let alpha = machine(&cloud.url, PROJECT, "sweep-owner");
+        let bravo = machine(&cloud.url, PROJECT, "staffing-peer");
+        for machine in [&alpha, &bravo] {
+            let agents = open_agent_store(&machine.cas_dir).unwrap();
+            let mut actor = agents.get(&machine.agent_id).unwrap();
+            actor.role = match (machine.agent_id == bravo.agent_id, mode) {
+                (true, "standard") => AgentRole::Standard,
+                (true, "director") => AgentRole::Director,
+                (true, "worker") => AgentRole::Worker,
+                _ => AgentRole::Supervisor,
+            };
+            agents.update(&actor).unwrap();
+            cloud.live(machine, &actor.name);
+        }
+        alpha.core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
+            "title":"Staff the sweep repair", "description":"Repair the issue swept on the peer machine.",
+            "task_type":"task", "risk":"none", "external_ref":"https://github.com/acme/widget/issues/1675",
+        })).unwrap())).await.unwrap();
+        let task = open_task_store(&alpha.cas_dir).unwrap().list(None).unwrap().pop().unwrap();
+        let tasks = open_task_store(&bravo.cas_dir).unwrap();
+        tasks.add(&task).unwrap();
+        let key = cloud.keys().into_iter().find(|key| key.starts_with("ask-")).unwrap();
+        {
+            let mut state = cloud.state.lock().unwrap();
+            if mode == "foreign" { state.foreign_locks.insert(key.clone()); }
+            if mode == "race" { state.replace_on_release = Some("concurrent-owner".into()); }
+        }
+        let result = bravo.core.cas_task_update(Parameters(serde_json::from_value::<TaskUpdateRequest>(serde_json::json!({
+            "id":task.id, "assignee":"receiver-worker",
+        })).unwrap())).await;
+        if mode == "supervisor" {
+            result.expect("same-account supervisor can staff the sweep's synced task without release_claim");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some("receiver-worker"));
+            assert_eq!(cloud.state.lock().unwrap().locks[&key].agent_id, bravo.agent_id);
+            let old_heartbeat = cas::cloud::peer_claims::renew_agent_claims(&alpha.cas_dir, &alpha.agent_id);
+            assert!(old_heartbeat.conflicts.is_empty(), "a task handoff must not raise a lost-work alarm");
+            assert_eq!(cloud.state.lock().unwrap().locks[&key].agent_id, bravo.agent_id);
+        } else {
+            assert!(result.is_err(), "{mode} must not authorize a source handoff");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
+            assert_eq!(cloud.state.lock().unwrap().locks[&key].agent_id,
+                if mode == "race" { "concurrent-owner" } else { &alpha.agent_id });
+        }
+    }
 }
 
 /// Acceptance: B's start of a task A holds is refused with A's identity; once

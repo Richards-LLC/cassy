@@ -735,9 +735,17 @@ class FastRows(unittest.TestCase):
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
         # The historical draft predates the User-reply wording check (cas-c5af);
         # drop its one config-key mention and posting receipt so this remains
-        # an unposted draft with only the punch length under test.
-        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
-            "factory.write_roots", "write_roots").partition("\n## POSTED\n")[0]
+        # an unposted draft with only the punch length under test. It also
+        # predates the hub's unattached-file check (cas-a72d), so each file name
+        # the hub refuses is replaced by the lint's own pattern.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "announce", ROOT / "scripts/release-train-announce.py")
+        announce = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(announce)
+        draft = announce.HUB_FILE_REFERENCE.sub("the file", (
+            ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
+            "factory.write_roots", "write_roots").partition("\n## POSTED\n")[0])
         # The Dev top-level punch: the second line of the third fenced body.
         punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)

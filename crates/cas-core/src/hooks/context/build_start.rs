@@ -377,7 +377,7 @@ pub fn build_context_with_stores(
         }
     }
 
-    // The current handoff for this project and role (GH #992, cas-0339): only
+    // The current handoff for this project, role and local lineage (GH #1661): only
     // the newest handoff of the session's role, never an older or superseded
     // one. Handoffs are left out of Helpful Memories, so a stale "CURRENT
     // handoff" cannot rank there either. Shown in minimal mode too: it is the
@@ -388,9 +388,18 @@ pub fn build_context_with_stores(
         .filter(|role| !role.trim().is_empty())
         .or_else(|| crate::env_overlay::var("CAS_AGENT_ROLE").ok());
     let session_role = handoff::normalize_role(role_hint.as_deref());
+    let handoff_agent = stores.agent_store.and_then(|store| {
+        stores.agent_id.as_deref()
+            .and_then(|id| store.get(id).ok())
+            .or_else(|| store.get(&input.session_id).ok())
+            .or_else(|| store.get_by_cc_session_id(&input.session_id).ok().flatten())
+    });
+    let lineage = handoff_agent.as_ref()
+        .map(handoff::HandoffLineage::for_agent)
+        .unwrap_or_else(handoff::HandoffLineage::for_local_machine);
     if let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()
-        && let Some(current) = handoff::current_handoff(&project_entries, &session_role)
+        && let Some(current) = handoff::current_handoff(&project_entries, &session_role, Some(&lineage))
     {
         if !context_parts.is_empty() {
             context_parts.push(String::new());

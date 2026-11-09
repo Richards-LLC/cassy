@@ -164,6 +164,38 @@ describe("supervisor command receipts", () => {
       }
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
+  it("resumes outcome polling after a refused or timed-out Cancel (cas-5b23)", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const cancellation of ["refused", "timed-out"] as const) {
+        const send = vi.fn().mockReturnValue(true);
+        const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+        await commands.run("finish", true);
+        const ref = [...commands.receipts.keys()][0]!;
+        const receipt: CommandReceipt = { client_ref: ref, command: "finish", phase: "queued", detail: "Pending", output: "", interactive: false };
+        commands.receive(receipt);
+        await commands.dismiss(ref);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommandCancel: { client_ref: ref } });
+        // The daemon advanced Finish before Cancel reached it, but its
+        // submitted receipt has not reached the client yet.
+        if (cancellation === "refused") commands.reject(ref, `${COMMAND_ERROR_PREFIX} already submitted`);
+        else await vi.advanceTimersByTimeAsync(96_000);
+        await expect(commands.run("exit", true)).rejects.toThrow(Error);
+        send.mockClear();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledExactlyOnceWith({ SupervisorCommandStatus: { client_ref: ref } });
+        commands.receive({ ...receipt, phase: "submitted" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledTimes(2);
+        commands.receive({ ...receipt, phase: "observed" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledTimes(2);
+        await commands.run("exit", true);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "exit", confirmed: true } });
+        vi.clearAllTimers();
+      }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
   it("keeps output open and keyboard focus through receipt updates", () => {
     const parent = document.createElement("section"); document.body.replaceChildren(parent);
     const receipt: CommandReceipt = { client_ref: "cmd-1", command: "usage", phase: "observed", detail: "Usage shown", output: "Usage", interactive: false };

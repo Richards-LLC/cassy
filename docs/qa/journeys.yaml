@@ -2835,7 +2835,7 @@ journeys:
   - In Claude, reload from a skewed supervisor card or type /mcp; read the replacement server PID and version. Session actions retains reload; other harnesses name Claude Code.
   - Open the header command dropdown beside its button; dismiss terminal receipts without replaying commands.
   - Read submission separately from an observed native outcome without repeating a mutation.
-  - Finish waits for the active turn, then its reply reaches the conversation
+  - Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
   - Without pane input, read the permission reason; adjacent Raw output stays usable.
   goal: The operator runs only supported supervisor controls and sees truthful harness outcomes.

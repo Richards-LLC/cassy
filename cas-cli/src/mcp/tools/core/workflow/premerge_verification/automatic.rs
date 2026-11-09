@@ -447,6 +447,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn automatic_context_carries_configured_qa_mode_cas_8f8b() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-8f8b-context".into(), "Review context".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, "owner", "owner",
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        for mode in [crate::config::QaMode::Batch, crate::config::QaMode::PerTask] {
+            std::fs::write(root.join("config.toml"), format!("[qa]\nmode = '{mode}'\n")).unwrap();
+            let input = prompt(&core, &task, &dispatch).unwrap();
+            let context = input.lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|value| value.get("qa").is_some())
+                .unwrap_or(serde_json::Value::Null);
+            assert_eq!(context["qa"]["mode"], serde_json::to_value(mode).unwrap());
+        }
+    }
+
+    #[test]
     fn cas_ce3e_launched_verifier_survives_attention_failure() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();

@@ -480,8 +480,8 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let needs_migration = children.iter().any(|child| {
         child.status != TaskStatus::Cancelled
             && !child.is_terminal()
-            && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
             && !delivery_is_shipped(&repo, child, &tag_sha)
+            && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
     });
     let successor = if needs_migration {
         crate::mcp::tools::core::task::release_train::open_trains(store.as_ref(), &_integration)
@@ -507,15 +507,6 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             report.push(format!("{}: SKIP (cancelled); gate verdict N/A", child.id));
             continue;
         }
-        let unmerged_commits = if child.is_terminal() {
-            0
-        } else {
-            unmerged_factory_commit_count(&repo, child, &tag_sha)
-        };
-        if unmerged_commits > 0 {
-            report.push(format!("{}: SKIP ({unmerged_commits} unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)", child.id));
-            continue;
-        }
         let shipped = delivery_is_shipped(&repo, child, &tag_sha);
         if shipped {
             included.push(child.id.clone());
@@ -527,6 +518,15 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             if child.status != TaskStatus::AwaitingMerge && child.status != TaskStatus::Closed {
                 report.push(format!("{}: shipped tree is present; status {} needs its ordinary close", child.id, child.status));
             }
+            continue;
+        }
+        let unmerged_commits = if child.is_terminal() {
+            0
+        } else {
+            unmerged_factory_commit_count(&repo, child, &tag_sha)
+        };
+        if unmerged_commits > 0 {
+            report.push(format!("{}: SKIP ({unmerged_commits} unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)", child.id));
             continue;
         }
         if child.is_terminal() {
@@ -609,8 +609,9 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let mut train_closed = false;
     let train_will_close = refreshed.iter().all(|child| {
         child.is_terminal()
-            || (unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
-                && !receipt_failed.contains(&child.id))
+            || (!receipt_failed.contains(&child.id)
+                && (delivery_is_shipped(&repo, child, &tag_sha)
+                    || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0))
     });
     if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) {
         let mut closed = store.get(train_id)?;
@@ -1014,8 +1015,13 @@ mod tests {
         git(repo, &["push", "origin", "main", &old_lane, next_lane, "--tags"]).unwrap();
         // This tag exists only locally. Publication checks must reject it.
         git(repo, &["tag", "-a", "v4.3.1", "-m", "local-only release"]).unwrap();
-        let unmerged_branch = "factory/unmerged-delivery";
         let release_sha = git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap();
+        let reused_branch = "factory/reused-shipped-lane";
+        git(repo, &["checkout", "-b", reused_branch, "v4.3.0"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "post-tag next-train work"])
+            .unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        let unmerged_branch = "factory/unmerged-delivery";
         git(repo, &["checkout", "-b", unmerged_branch, "v4.3.0"]).unwrap();
         for message in ["unmerged one", "unmerged two"] {
             git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", message]).unwrap();
@@ -1040,7 +1046,6 @@ mod tests {
         shipped_child.origin_project = Some("release-fixture".into());
         shipped_child.assignee = Some(owner.id.clone());
         shipped_child.status = TaskStatus::AwaitingMerge;
-        let start_base = git(repo, &["rev-parse", &format!("{anchor}^")]).unwrap();
         shipped_child.deliverables.factory_branch_anchor = Some(anchor);
         let shipped_target = WorkTarget {
             repo_selector: "project:release-fixture".into(),
@@ -1049,10 +1054,11 @@ mod tests {
         shipped_child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
             work_target: shipped_target.clone(),
             assignee: owner.id.clone(),
-            branch: old_lane.clone(),
-            base_sha: start_base,
+            branch: reused_branch.into(),
+            base_sha: release_sha.clone(),
         });
         shipped_child.deliverables.work_target = Some(shipped_target);
+        assert_eq!(unmerged_factory_commit_count(repo, &shipped_child, &release_sha), 1);
         store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
         let mut unmerged_child = Task::new("cas-a102".into(), "Unmerged release child".into());
         unmerged_child.origin_project = Some("release-fixture".into());

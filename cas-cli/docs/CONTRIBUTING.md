@@ -4252,7 +4252,10 @@ Tests assert behavior or stable error/rule IDs, never human-message wording.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain
-valid.
+valid. Exact CLI flag values passed in literal `try_parse_from` / `parse_from`
+argument arrays can be asserted on their immutable parsed fields, including
+let-else command routing. Unrelated fields, generated values and substring or
+inequality prose checks retain the ordinary rejection rules.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

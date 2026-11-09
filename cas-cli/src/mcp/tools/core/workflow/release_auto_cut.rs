@@ -151,7 +151,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             root,
             &train.id,
             "Cassy auto-cut",
-            Some(&format!("auto-cut: green train suite at {tip}, {count} changelog fragments")),
+            Some(format!("auto-cut: green train suite at {tip}, {count} changelog fragments").as_str()),
         )?;
     }
     let draft = notes_draft(root, &train.id)?;

@@ -342,6 +342,8 @@ impl Config {
             "history.github_repo" => Some(history.github_repo.unwrap_or_default()),
             // Release section
             "release.claude_account_allowlist" => Some(release.claude_account_allowlist.join(",")),
+            "release.auto_cut_max_per_day" => Some(release.auto_cut_max_per_day.to_string()),
+            "release.auto_cut_min_interval_hours" => Some(release.auto_cut_min_interval_hours.to_string()),
             // Notifications section
             "notifications.enabled" => Some(notifications.enabled.to_string()),
             "notifications.on_permission_prompt" => {

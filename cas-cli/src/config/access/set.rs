@@ -1325,6 +1325,19 @@ impl Config {
                     .filter(|entry| !entry.is_empty())
                     .collect();
             }
+            "release.auto_cut_max_per_day" | "release.auto_cut_min_interval_hours" => {
+                let number: u32 = value.trim().parse().map_err(|_| MemError::Parse(format!("Invalid integer for {key}: {value}")))?;
+                let (minimum, maximum) = if key == "release.auto_cut_max_per_day" { (0, 24) } else { (1, 168) };
+                if !(minimum..=maximum).contains(&number) {
+                    return Err(MemError::Parse(format!("{key} must be between {minimum} and {maximum}")));
+                }
+                let release = self.release.get_or_insert_with(ReleaseConfig::default);
+                if key == "release.auto_cut_max_per_day" {
+                    release.auto_cut_max_per_day = number;
+                } else {
+                    release.auto_cut_min_interval_hours = number;
+                }
+            }
             // Notifications section
             "notifications.enabled" => {
                 let notifications = self

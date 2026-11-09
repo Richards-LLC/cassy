@@ -1393,6 +1393,12 @@ mod large_artifact_staging_tests {
                 permission_mode: Some("default".to_string()),
                 ..HookInput::default()
             };
+            // The fixture represents this reader's saved handoff, rather than
+            // an unowned role-wide memory from another session.
+            let saved_role = role.unwrap_or("supervisor");
+            let mut handoff = store.get(&format!("budget-handoff-{saved_role}")).unwrap();
+            cas_core::memory::handoff::HandoffLineage::for_local_machine().stamp(&mut handoff);
+            store.update(&handoff).unwrap();
             let context =
                 additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
             // pin: supported invocation must survive the aggregate context budget,

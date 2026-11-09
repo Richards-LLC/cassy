@@ -17,6 +17,11 @@ bug_families:
     tasks: [cas-d033]
     invariants: [FACTORY-BOOT-ASSIGNMENT]
     journeys: [FACTORY-SPAWN]
+  supervisor-handoff-machine-lineage:
+    title: Supervisor startup and automatic clears restore only their machine and project-role context, including renamed local successors
+    tasks: [cas-fb21]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   tool-edit-offline-result-binding:
     title: Offline source edit detail names its own retrieval result while cached sibling evidence remains available
     tasks: [cas-103c]

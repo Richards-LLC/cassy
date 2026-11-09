@@ -599,6 +599,8 @@ mod tests {
         // The saved handoff must survive each harness's delivery channel.
         sentinel.entry_type = crate::types::EntryType::Learning;
         sentinel.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = Agent::new_with_role("parity-session".into(), "parity-supervisor".into(), AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut sentinel);
         sentinel.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&sentinel).unwrap();
 

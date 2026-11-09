@@ -51,6 +51,39 @@ async fn memory(service: &CasService, request: Value) -> String {
         .join("\n")
 }
 
+#[tokio::test]
+async fn memory_update_persists_titles_through_dispatch_cas_13b1() {
+    for markdown in [false, true] {
+        let (_dir, service, store, _queue) = service(markdown);
+        let mut entry = Entry::new("title-update".into(), "Original body".into());
+        entry.title = Some("Original title".into());
+        entry.tags = vec!["audit".into()];
+        entry.importance = 0.75;
+        entry.domain = Some("memory".into());
+        entry.source_ids = vec!["source-observation".into()];
+        entry.helpful_count = 3;
+        store.add(&entry).unwrap();
+
+        for (patch, fields) in [
+            (json!({"title": "Historical policy"}), json!(["title"])),
+            (json!({"title": "Corrected policy", "content": "Corrected body"}), json!(["title", "content"])),
+            (json!({"content": "Content-only correction"}), json!(["content"])),
+        ] {
+            let mut expected = store.get(&entry.id).unwrap();
+            if let Some(title) = patch["title"].as_str() { expected.title = Some(title.into()); }
+            if let Some(content) = patch["content"].as_str() { expected.content = content.into(); }
+            let mut request = json!({"action": "update", "id": entry.id});
+            request.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+            let result = service.memory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+            assert_eq!(result.is_error, Some(false));
+            // Compare the entire persisted record: omitted fields and metadata
+            // must survive the same public dispatch as the supplied edits.
+            assert_eq!(serde_json::to_value(store.get(&entry.id).unwrap()).unwrap(), serde_json::to_value(expected).unwrap());
+            assert_eq!(result.structured_content, Some(json!({"id": entry.id, "changes": fields})));
+        }
+    }
+}
+
 async fn archive_lifecycle(markdown: bool) {
     let (_dir, service, store, queue) = service(markdown);
     let entry = Entry::new("archive-lifecycle".into(), "Lifecycle fixture".into());

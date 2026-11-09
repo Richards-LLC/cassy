@@ -29783,6 +29783,10 @@ mod merge_state_gate_tests {
             }
             git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
             let landed = head_sha(p);
+            if matches!(row, "released-train" | "partial-patch") {
+                task.deliverables.green_merge_commit = Some(landed.clone());
+                tasks.update(&task).unwrap();
+            }
             assert_ne!(landed, candidate.proof.head_commit);
             if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
@@ -29831,10 +29835,17 @@ mod merge_state_gate_tests {
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
                 Err(_) if row == "foreign-candidate" => {},
-                Ok(Some(reviewed)) => assert_eq!(
-                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
-                ),
+                Ok(Some(reviewed)) => {
+                    if row == "released-train" {
+                        let mut unpublished = task.clone();
+                        unpublished.deliverables.green_merge_commit = Some(candidate.proof.head_commit.clone());
+                        assert!(reviewed.merge_refusal(p, &unpublished, "main", None).is_some());
+                    }
+                    assert_eq!(
+                        reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
+                    );
+                },
                 _ => panic!("missing task-bound review: {row}"),
             }
             if matches!(row, "same-line-evolved" | "batch-target-proof") {

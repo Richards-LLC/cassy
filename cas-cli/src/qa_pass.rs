@@ -1087,6 +1087,14 @@ pub fn validate_round_bundle(
             field("head_sha")
         ));
     }
+    // New bundles identify their immutable pass as well as the head. Keep
+    // historical, untagged bundles readable at their recorded explicit paths.
+    if value.get("pass_id").is_some() && field("pass_id") != pass.id {
+        return Err(format!(
+            "{}: pass_id must be {} (found {:?})",
+            bundle.display(), pass.id, value["pass_id"]
+        ));
+    }
     // cas-a6a3 (GH #1007): a round that claims a visual-QA pass backs it with
     // the strict run's own report, generated after the round opened, against
     // a local build of the reviewed tip, never the production URL. cas-e371
@@ -1470,7 +1478,7 @@ pub fn qa_task_title(delivery: &Task, pass: &QaPass) -> String {
     )
 }
 
-/// Ledger directory for one round, under the delivery's artifacts dir.
+/// Ledger directory for one immutable pass, under the delivery's artifacts dir.
 ///
 /// Deliberately beside, not inside, the implementer's own cas-qa-craft
 /// bundle (`<task>/qa/`): the close-time evidence gate reads that directory
@@ -1480,6 +1488,8 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
     artifacts_root
         .join(&pass.task_id)
         .join("independent-qa")
+        .join(&pass.bound_head)
+        .join(&pass.id)
         .join(format!("round-{}", pass.round))
 }
 
@@ -1575,7 +1585,7 @@ pub fn qa_task_description(
          cites a trace action and a screenshot.\n\n\
          {bar}\n\n\
          Evidence: {ledger}/bundle.json with producer \"independent-qa\", task_id {task} and \
-         head_sha {head}, listing trace.zip, trace-actions.txt, receipt.webm, final.aria.yml/json, \
+         head_sha {head} and pass_id {pass_id}, listing trace.zip, trace-actions.txt, receipt.webm, final.aria.yml/json, \
          one F0N.png per finding, visual-qa/ and visual-qa.stdout, critique.md, and one \
          journeys/<ID>/ folder per journey. Run visual-qa.mjs --strict against your own local \
          serve of {head}, never the production URL: qa_record refuses a claimed visual-QA pass \
@@ -2102,25 +2112,79 @@ mod tests {
     }
 
     #[test]
+    fn independent_pass_paths_preserve_prior_evidence_cas_6813() {
+        let root = tempfile::TempDir::new().unwrap();
+        let old = pass("cb310b7be6deb4a4871f1c9e362be6cce16b47e0", cas_types::QaPassState::Passed);
+        let old_dir = round_dir(root.path(), &old);
+        let legacy = root.path().join(&old.task_id).join("independent-qa/round-1");
+        let files = [
+            ("LEDGER.md", b"accepted ledger".as_slice()),
+            ("bundle.json", b"accepted bundle".as_slice()),
+            ("trace.zip", b"accepted trace".as_slice()),
+        ];
+        for dir in [&old_dir, &legacy] {
+            std::fs::create_dir_all(dir).unwrap();
+            for (name, bytes) in files { std::fs::write(dir.join(name), bytes).unwrap(); }
+        }
+        assert_eq!(round_dir(root.path(), &old), old_dir);
+        // Corrected head with a reused round, and a fresh pass on the same
+        // head: neither may reuse a prior pass's local capture directory.
+        for (head, id) in [
+            ("69ffa4c84dd908f94474774aea02949e788ccbaa", "qapass-corrected"),
+            (old.bound_head.as_str(), "qapass-recheck"),
+            ("69ffa4c84dd908f94474774aea02949e788ccbaa", old.id.as_str()),
+        ] {
+            let mut next = old.clone();
+            next.bound_head = head.into();
+            next.id = id.into();
+            next.state = cas_types::QaPassState::Pending;
+            let dir = round_dir(root.path(), &next);
+            assert_ne!(dir, old_dir);
+            assert_ne!(dir, legacy);
+            assert_eq!(round_dir(root.path(), &next), dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, _) in files { std::fs::write(dir.join(name), b"new evidence").unwrap(); }
+            for reasons in [vec!["demo_statement".into()], vec!["api:server/**".into()]] {
+                let description = qa_task_description(&task(), &next, &reasons, &dir, "main");
+                assert!(description.contains(dir.join("LEDGER.md").to_str().unwrap()));
+                if !api_only_reasons(&reasons) {
+                    assert!(description.contains(dir.join("bundle.json").to_str().unwrap()));
+                }
+            }
+            for prior in [&old_dir, &legacy] {
+                for (name, bytes) in files {
+                    assert_eq!(std::fs::read(prior.join(name)).unwrap(), bytes);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn round_bundle_must_name_the_reviewed_tip_and_producer() {
         let dir = tempfile::TempDir::new().unwrap();
         let ledger = dir.path().join("LEDGER.md");
         std::fs::write(&ledger, "# ledger").unwrap();
         let round = pass("aaaa1111", cas_types::QaPassState::Claimed);
         let _ = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
-        let write = |producer: &str, head: &str| {
+        let write = |producer: &str, head: &str, pass_id: Option<&str>| {
+            let mut bundle = serde_json::json!({"schema":1,"task_id":"cas-ui1","producer":producer,"head_sha":head});
+            if let Some(id) = pass_id { bundle["pass_id"] = serde_json::json!(id); }
             std::fs::write(
                 dir.path().join("bundle.json"),
-                serde_json::json!({"schema":1,"task_id":"cas-ui1","producer":producer,"head_sha":head})
-                    .to_string(),
+                bundle.to_string(),
             )
             .unwrap();
         };
-        write("cas-qa-craft", "aaaa1111");
+        write("cas-qa-craft", "aaaa1111", None);
         let _ = validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err();
-        write("independent-qa", "bbbb2222");
+        write("independent-qa", "bbbb2222", None);
         assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).unwrap_err().contains("head_sha"));
-        write("independent-qa", "aaaa1111");
+        write("independent-qa", "aaaa1111", Some("qapass-another"));
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).is_err());
+        write("independent-qa", "aaaa1111", Some(&round.id));
+        assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).is_ok());
+        // Historical explicit evidence paths did not carry a pass_id.
+        write("independent-qa", "aaaa1111", None);
         assert!(validate_round_bundle(&ledger, &round, cas_types::QaVerdict::Approved).is_ok());
     }
 

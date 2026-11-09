@@ -140,6 +140,50 @@ fn notice(root: &Path, request: &Retry, detail: &str, red: bool) -> Result<()> {
     Ok(())
 }
 
+/// Recover the exact recorded landing, including after enqueue failed or the
+/// daemon exited before consuming its intent. Never substitute today's HEAD.
+fn landing_notice(root: &Path, request: &Retry, supervisor: &cas_types::Agent) -> Result<()> {
+    let transactional = cas_store::get_latest_worker_delivery(root, &request.task)?
+        .filter(|(receipt, transaction)| {
+            receipt.commit_sha == request.sha
+                && receipt.source_branch == request.branch
+                && receipt.target_branch == request.target
+                && matches!(transaction.state,
+                    cas_types::WorkerDeliveryState::Merged
+                    | cas_types::WorkerDeliveryState::CloseReady
+                    | cas_types::WorkerDeliveryState::Delivered)
+        })
+        .and_then(|(_, transaction)| transaction.merge_commit_sha);
+    let landed = match transactional {
+        Some(sha) => Some(sha),
+        None => cas_store::observed_delivery_merges_into(root, &request.target)?
+            .into_iter().rev()
+            .find(|merge| merge.task_id == request.task
+                && merge.source_branch == request.branch
+                && merge.source_commit_sha == request.sha)
+            .map(|merge| merge.merge_commit_sha),
+    };
+    let Some(landed) = landed else { return Ok(()); };
+    // A local merge record alone does not prove publication. The normal push
+    // updates this tracking ref; no notice is sent for an unpublished merge.
+    let git = crate::worktree::GitOperations::new(request.repo.clone());
+    if !git.is_ancestor(&landed, &format!("refs/remotes/origin/{}", request.target)) {
+        return Ok(());
+    }
+    let key = format!("merge-ci-retry-landed:{}:{}:{}:{}",
+        request.task, request.sha, request.target, request.supervisor);
+    let body = format!(
+        "{}\nAutomatic CI merge landed {} at {} on {}.",
+        cas_store::QUIET_MESSAGE_MARKER, request.task, landed, request.target,
+    );
+    crate::store::open_prompt_queue_store(root)?.enqueue_idempotent(
+        &key, &supervisor.name, &body, Some(&request.session),
+        Some("Automatic merge landed"), Some(cas_store::NotificationPriority::Normal),
+        &key, Some(&cas_store::QueueOrigin::Daemon),
+    )?;
+    Ok(())
+}
+
 /// Re-enter the real merge handler for one durable session's ready requests.
 /// Public only for the integration harness; this is not a stable library API.
 #[doc(hidden)]
@@ -246,6 +290,7 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
         Err(error) => return Err(error.into()),
     };
     if task.is_terminal() {
+        landing_notice(root, request, &supervisor)?;
         return Ok(true);
     }
     if let Some((receipt, transaction)) =
@@ -258,6 +303,7 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
                 | cas_types::WorkerDeliveryState::Delivered
         )
     {
+        landing_notice(root, request, &supervisor)?;
         return Ok(true);
     }
     if request
@@ -356,6 +402,7 @@ async fn attempt(root: &Path, request: &Retry) -> Result<bool> {
             Ok(true)
         }
         Ok(result) => {
+            landing_notice(root, request, &supervisor)?;
             let close_held = result.content.iter().any(|content| matches!(&content.raw,
                 rmcp::model::RawContent::Text(text) if text.text.contains("Merge landed; close held")));
             tasks

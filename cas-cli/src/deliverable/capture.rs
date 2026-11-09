@@ -136,9 +136,9 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     })?;
     let old = pairs::read_manifest(&dir.join("pairs.json"))
         .ok()
-        .filter(|m| m.schema == 1 && m.task_id == request.task);
+        .filter(|m| matches!(m.schema, 1 | 2) && m.task_id == request.task);
     let mut manifest = PairManifest {
-        schema: 1,
+        schema: 2,
         task_id: request.task.clone(),
         base_sha: base.clone(),
         head_sha: head.clone(),

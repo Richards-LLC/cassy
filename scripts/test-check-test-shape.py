@@ -75,6 +75,33 @@ class Shapes(unittest.TestCase):
             with self.subTest(path=path, source=source):
                 self.assertEqual(bool(shape.message_assertions(source, path)), rejected)
 
+    def test_cli_parser_payload_round_trip_cas_5442(self):
+        source = '''#[test]
+fn cli_round_trip() {
+    let parsed = crate::cli::Cli::try_parse_from([
+        "cas", "artifact", "revoke", "art-fixture", "--reason", "Harmless fixture cleanup",
+    ]).unwrap();
+    let Some(crate::cli::Commands::Artifact(ArtifactCommands::Revoke(args))) = parsed.command else {
+        panic!("unrouted command");
+    };
+    ASSERTION
+}
+'''
+        for assertion, rejected in [
+            ('assert_eq!(args.reason, "Harmless fixture cleanup");', False),
+            ('assert_eq!("Harmless fixture cleanup", args.reason);', False),
+            ('assert_eq!(args.reason, "Generated refusal wording");', True),
+            ('assert_eq!(generated.reason, "Harmless fixture cleanup");', True),
+            ('assert_eq!(args.warning, "Harmless fixture cleanup");', True),
+            ('assert_ne!(args.reason, "Harmless fixture cleanup");', True),
+            ('assert!(args.reason.contains("Harmless fixture cleanup"));', True),
+        ]:
+            code = source.replace('ASSERTION', assertion)
+            line = next(i for i, text in enumerate(code.splitlines(), 1) if text.strip() == assertion)
+            for changed in [None, {line}]:
+                with self.subTest(assertion=assertion, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'src/cli.rs', changed)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 

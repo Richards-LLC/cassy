@@ -220,9 +220,12 @@ async fn rapid_response_window_samples_close_verification() {
     git(&["add", "fix.rs"]);
     git(&["commit", "-q", "-m", "fix"]);
     let head = git(&["rev-parse", "HEAD"]);
-    let create = |req: TaskCreateRequest| {
+    let create = |mut req: TaskCreateRequest| {
         let core = &core;
         async move {
+            // cas-63b0 intentionally rejects identical sibling scopes. Each
+            // sampled delivery represents independent work in this fixture.
+            req.title = format!("{} {}", req.title, uuid::Uuid::new_v4());
             let text = extract_text(core.cas_task_create(Parameters(req)).await.unwrap());
             extract_task_id(&text).expect("task id").to_string()
         }

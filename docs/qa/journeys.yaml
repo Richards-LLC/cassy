@@ -12,6 +12,16 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  train-delivery-contract-integration:
+    title: Current recovery receipts and renamed epic targets coexist with recorded squash delivery identity
+    tasks: [cas-e7a8]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  capacity-notice-pressure-episodes:
+    title: Priority queues stay quiet and disk-pressure notices aggregate waiting workers with change-based deduplication
+    tasks: [cas-ed71]
+    invariants: [FACTORY-CAPACITY-NOTICES]
+    journeys: [FACTORY-SUPERVISE]
   booting-worker-task-admission:
     title: Tasks assigned during worker startup enter the ordered backlog once and continue after delivery
     tasks: [cas-d033]
@@ -32,6 +42,10 @@ bug_families:
     tasks: [cas-20ab]
     invariants: [HUB-J22-GOAL]
     journeys: [HUB-J22]
+  native-codex-shared-verifier-identity:
+    title: Shared MCP child registration refuses before mutation; separate dispatch-bound reviewers and supervisor-owned provenance remain distinct
+    tasks: [cas-0d38]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]
@@ -294,10 +308,17 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-CAPACITY-NOTICES:
+    statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
+    check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
   FACTORY-RECOVER-SHIPPED-IDENTITY:
     statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
     check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
     bug: {task: cas-d853}
+  FACTORY-QA-NOTICE-OWNER:
+    statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
+    check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
+    bug: {task: cas-0f7b}
   FACTORY-FINDING-PRIORITY:
     statement: Reproduced primary factory and CLI findings retain severity times main reach priority; correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
     check: Run independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
@@ -866,7 +887,7 @@ journeys:
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
   owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE
@@ -895,7 +916,7 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs]
   invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
@@ -925,8 +946,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

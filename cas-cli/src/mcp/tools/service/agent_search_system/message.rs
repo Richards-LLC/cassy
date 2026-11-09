@@ -3671,6 +3671,8 @@ impl CasService {
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
+        crate::qa_post_release::refresh_batch_notices(&self.inner.cas_root, queue.as_ref(), &recipient, factory_session.as_deref())
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("Batch notice revalidation deferred: {error}")))?;
         // The store records recipient-seen state in the same transaction that
         // selects the rows, before this MCP response is handed back. That
         // prevents concurrent duplicate delivery; a later poll does not replay
@@ -3806,6 +3808,17 @@ impl CasService {
         let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
+            match crate::qa_post_release::batch_notice_deliverable(&self.inner.cas_root, queue.as_ref(), message) {
+                Ok(true) => {}
+                Ok(false) => {
+                    withheld.push((message.id, "Batch notice superseded by current ownership or evidence".into()));
+                    continue;
+                }
+                Err(error) => {
+                    withheld.push((message.id, format!("Batch notice awaits revalidation: {error}")));
+                    continue;
+                }
+            }
             if message.reference_only {
                 body.push_str(&format!("**[{}] From: {}**\n{}\n\n", message.id, message.source, message.prompt));
                 rendered += 1;

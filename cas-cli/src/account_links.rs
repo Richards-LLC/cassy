@@ -335,6 +335,9 @@ fn retired(provider: Provider, home: &Path, folder: &Path) -> Option<Retired> {
         return None;
     }
     let label = folder.file_name()?.to_str()?;
+    if accounts::preserve_claude_auth_scope(provider, home, folder) {
+        return None;
+    }
     let has_login = folder.join(provider.credentials()).exists();
     let duplicate = |email: &str| {
         let canonical = home.join(format!("{}{email}", provider.prefix()));

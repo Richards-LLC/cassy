@@ -308,7 +308,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(list.getByRole("group", { name: "gabber-studio · 3 conversations on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(3);
     const rows = list.locator(".conversation-row");
     // cas-ade2: rows sort by supervisor name; Most recent marks the newest where it stands.
-    await expect(rows.locator(".conversation-supervisor-name")).toHaveText(["calm-puma-34", "noble-cheetah-84", "wild-shark-68"]);
+    const names = rows.locator(".conversation-role");
+    await expect(names).toContainText(["calm-puma-34", "noble-cheetah-84", "wild-shark-68"]);
     await expect(row("calm-puma-34").locator(".conversation-session-mark")).toBeVisible();
     await expect(row("noble-cheetah-84").locator(".conversation-session-mark")).toBeHidden();
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");

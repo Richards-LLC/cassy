@@ -230,6 +230,9 @@ pub(crate) struct TaskSummaryJson {
     /// (null when a stage is unmeasured) and the card's summary line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) freeze: Option<serde_json::Value>,
+    /// A release train's auto-cut pause (cas-e060); absent on other epics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) auto_cut_paused: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -1,6 +1,7 @@
 pub(crate) mod usage_limits;
 mod spawn_names;
 use crate::factory_target_cache::missing_gitdir_checkouts;
+use crate::factory_auth_health::{codex_home_path, installed_codex_version, resolve_lane_account_models};
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
 use crate::opencode_preflight::{
@@ -430,32 +431,6 @@ fn preflight_codex_model_support(
         }
     }
     Ok(())
-}
-
-/// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
-/// bounded by the preflight's own deadline (cas-c8de) so a hung binary
-/// cannot stall a spawn; `None` when it cannot be read in time.
-fn installed_codex_version(deadline: crate::bounded_process::Deadline) -> Option<String> {
-    let output = crate::bounded_process::run_command(
-        std::process::Command::new("codex").arg("--version"),
-        deadline,
-        std::time::Duration::from_secs(3),
-    )
-    .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (output.status.success() && !text.is_empty()).then_some(text)
-}
-
-/// The `CODEX_HOME` a Codex worker runs against: its account directory with
-/// `~` expanded, or the default `~/.codex` (spawns clear `CODEX_HOME`).
-fn codex_home_path(account_dir: Option<&str>) -> Option<std::path::PathBuf> {
-    match account_dir {
-        Some(dir) => match dir.strip_prefix('~') {
-            Some(suffix) => dirs::home_dir().map(|home| home.join(suffix.trim_start_matches('/'))),
-            None => Some(std::path::PathBuf::from(dir)),
-        },
-        None => dirs::home_dir().map(|home| home.join(".codex")),
-    }
 }
 
 /// What to call the account when the caller named no directory.
@@ -1327,7 +1302,8 @@ pub(crate) fn build_spawn_spec_json_with_project_config(
     serde_json::to_string(&spec).map_err(|e| format!("failed to serialize WorkerSpec: {e}"))
 }
 
-/// Resolve a registry lane into one immutable recipe decision per spawn slot.
+/// Resolve provisional lane specs so account selection can precede the final
+/// account-aware route decision.
 ///
 /// Lane mode may still carry per-worker identity/account metadata, but it may
 /// not smuggle in a partial explicit recipe through `workers=[...]`. Reject
@@ -1346,7 +1322,14 @@ fn build_lane_spawn_specs(
     }
     validate_lane_request(lane, false, false, false).map_err(|error| error.to_string())?;
 
-    let decisions = resolve_lane_specs(lane, slots, snapshot).map_err(|error| error.to_string())?;
+    // Bind Codex accounts before consulting model availability. A default or
+    // different account must not select or refuse this account's recipe.
+    let primary = resolve_lane_specs(lane, slots, &Default::default()).map_err(|error| error.to_string())?;
+    let decisions = if primary[0].spec.cli == cas_mux::SupervisorCli::Codex {
+        primary
+    } else {
+        resolve_lane_specs(lane, slots, snapshot).map_err(|error| error.to_string())?
+    };
     let recipe_id = decisions
         .first()
         .ok_or_else(|| "lane spawn has no worker slots".to_string())?
@@ -3184,7 +3167,8 @@ impl CasService {
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
         // remain the resolver defaults; `workers=[{...}]` is its final,
         // per-slot layer.
-        let (mut specs, lane_recipe, lane_warnings, default_sources_notice) =
+        let mut lane_snapshot = None;
+        let (mut specs, mut lane_recipe, mut lane_warnings, default_sources_notice) =
             if let Some(lane) = req.lane.as_deref() {
                 validate_lane_request(
                     lane,
@@ -3211,6 +3195,7 @@ impl CasService {
                     &snapshot,
                 )
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+                lane_snapshot = Some(snapshot);
                 (specs, recipe, warnings, String::new())
             } else {
                 let (specs, sources_notice) = resolve_spawn_specs_with_project_config(
@@ -3269,10 +3254,27 @@ impl CasService {
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
-        let account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &account_policy, chrono::Utc::now(), |provider| {
+        let mut account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &account_policy, chrono::Utc::now(), |provider| {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
+        if let (Some(lane), Some(snapshot)) = (req.lane.as_deref(), lane_snapshot.as_ref()) {
+            let previous_harnesses = specs.iter().map(|spec| spec.cli).collect::<Vec<_>>();
+            (lane_recipe, lane_warnings) = resolve_lane_account_models(lane, &mut specs, snapshot)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            if specs.iter().zip(&previous_harnesses).any(|(spec, previous)| spec.cli != *previous) {
+                for (spec, previous) in specs.iter_mut().zip(previous_harnesses) {
+                    if spec.cli != previous {
+                        spec.requester_config_dir = ctx.requester_from_env.then(|| requester_account_dir(spec.cli)).flatten();
+                        spec.requester_secure_storage_dir = ctx.requester_from_env.then(|| requester_secure_storage_dir(spec.cli)).flatten();
+                    }
+                }
+                account_selection_notice.push_str(&recommend_spawn_accounts(&mut specs, true, &account_policy, chrono::Utc::now(), |provider| {
+                    let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
+                    crate::account_registry::collect_for(provider, &home, false)
+                }));
+            }
+        }
         let account_error = |error: String| Self::error(ErrorCode::INVALID_PARAMS,
             format!("{error}{account_selection_notice}{default_sources_notice}"));
 
@@ -4705,7 +4707,12 @@ impl CasService {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
                 if let Some(session) = worker.factory_session.as_deref() {
                     let queue = queues.get(session, &worker.name).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-                    if queue.revision > 0 { binary_versions.push_str(&format!("\n{}", crate::worker_task_queue::render(&worker.name, &queue))); }
+                    if queue.revision > 0 {
+                        let tasks = self.inner.open_task_store()?;
+                        let report = crate::worker_task_queue::render(&worker, &queue, tasks.as_ref())
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                        binary_versions.push_str(&format!("\n{report}"));
+                    }
                 }
             },
             Err(error) => binary_versions.push_str(&format!("\nTask queues unavailable: {error}")),
@@ -13738,6 +13745,98 @@ mod spawn_lifecycle_tests {
         }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
         assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standard_lane_account_admission_cas_8f40() {
+        use cas_store::SpawnQueueStore;
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 99.0.0'; else echo 'Logged in using ChatGPT'; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let test_name = "mcp::tools::service::factory_ops::spawn_lifecycle_tests::standard_lane_account_admission_cas_8f40";
+        if std::env::var_os("CODEX_LANE_ADMISSION_CHILD").is_none() {
+            let paths = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env("PATH", paths).env("CODEX_LANE_FIXTURE_BIN", &bin).env("CODEX_LANE_ADMISSION_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test_name);
+            return;
+        }
+        env.set("CAS_TEST_HUB_PATH", std::env::var_os("CODEX_LANE_FIXTURE_BIN").unwrap());
+        env.remove("CODEX_HOME");
+        let project = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"]);
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = cas_types::Task::new("cas-lane-epic".into(), "Lane admission".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        let account = env.home().join(".codex-selected");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        // A different account's primary support must not authorize this account.
+        let other = env.home().join(".codex");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(other.join("models_cache.json"), serde_json::json!({
+            "fetched_at": chrono::Utc::now(), "client_version":"99.0.0", "models":[{"slug":"gpt-6.1-sol"}]
+        }).to_string()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let ctx = crate::ops::fleet::FleetContext::operator("lane-fixture");
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        for (case, age, models, explicit, expected) in [
+            ("stale", 8, vec!["gpt-6-sol"], false, None),
+            ("fallback", 0, vec!["gpt-6-sol"], false, Some("gpt-6-sol")),
+            ("unsupported", 0, vec!["gpt-5.6-sol"], false, None),
+            ("explicit", 0, vec!["gpt-6-sol"], true, None),
+            ("primary", 0, vec!["gpt-6.1-sol"], false, Some("gpt-6.1-sol")),
+        ] {
+            std::fs::write(account.join("models_cache.json"), serde_json::json!({
+                "fetched_at": chrono::Utc::now() - chrono::Duration::days(age),
+                "client_version":"99.0.0", "models":models.iter().map(|slug| serde_json::json!({"slug":slug})).collect::<Vec<_>>()
+            }).to_string()).unwrap();
+            let mut request = serde_json::json!({"action":"spawn_workers", "count":1, "isolate":true,
+                "worker_names":case, "config_dir":account});
+            if explicit { request["cli"] = "codex".into(); request["model"] = "gpt-6.1-sol".into(); }
+            else { request["lane"] = "standard".into(); }
+            let before = queue.peek(10).unwrap().len();
+            let result = service.factory_spawn_workers_in_with_name_source(&ctx, serde_json::from_value(request).unwrap(), None,
+                &mut || panic!("explicit identity")).await;
+            if let Some(model) = expected {
+                result.unwrap_or_else(|error| panic!("{case}: {error}"));
+                let rows = queue.peek(10).unwrap();
+                assert_eq!(rows.len(), before + 1);
+                let spec: cas_mux::WorkerSpec = serde_json::from_str(rows.last().unwrap().worker_spec.as_deref().unwrap()).unwrap();
+                assert_eq!(spec.model.as_deref(), Some(model));
+                assert_eq!(spec.config_dir.as_deref(), account.to_str());
+                if case == "fallback" {
+                    let mut resolved = vec![spec];
+                    let (recipe, warnings) = resolve_lane_account_models("standard", &mut resolved, &Default::default()).unwrap();
+                    assert_eq!(recipe, "codex_sol_6");
+                    assert!(!warnings.is_empty());
+                }
+            } else {
+                assert!(result.is_err(), "{case}: unverified or unsupported lane must refuse before queueing");
+                assert_eq!(queue.peek(10).unwrap().len(), before);
+            }
+            assert!(!root.join("worktrees").join(case).exists());
+        }
     }
 
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex

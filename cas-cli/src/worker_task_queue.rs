@@ -88,6 +88,76 @@ impl QueueStartPrincipal {
     }
 }
 
+/// Resolve booting names through their durable, session-scoped spawn receipt.
+/// A later failed spawn must not fall back to an older launch of the same name.
+fn assignment_worker(
+    root: &Path, assignee: &str, live: Option<&Agent>,
+) -> crate::Result<Option<(Agent, Option<cas_store::SpawnLifecycle>)>> {
+    let Some(session) = (match live {
+        Some(worker) => worker.factory_session.clone(),
+        None => std::env::var("CAS_FACTORY_SESSION").ok().filter(|s| !s.is_empty()),
+    })
+    else { return Ok(None); };
+    let name = live.map_or(assignee, |worker| worker.name.as_str());
+    let receipt = crate::store::open_spawn_queue_store(root)?
+        .recent_spawn_lifecycle(&session, 100)?
+        .into_iter()
+        .find(|r| r.worker_name.as_deref().is_some_and(|worker| worker.eq_ignore_ascii_case(name))
+            || (r.worker_name.is_none() && r.requested_names.len() == 1
+                && r.requested_names[0].eq_ignore_ascii_case(name)));
+    let worker = match live {
+        Some(worker) => worker.clone(),
+        None => {
+            let Some(receipt) = receipt.as_ref().filter(|r| !r.state.is_terminal()) else {
+                return Ok(None);
+            };
+            let name = receipt.worker_name.clone().unwrap_or_else(|| receipt.requested_names[0].clone());
+            let mut worker = Agent::new_with_role(String::new(), name, AgentRole::Worker);
+            worker.factory_session = Some(session);
+            worker
+        }
+    };
+    Ok(Some((worker, receipt)))
+}
+
+/// Admit mutation/director assignments once, including the pre-registration
+/// gap. Spawn binding happens first so it cannot overwrite an admitted tail.
+pub(crate) fn admit_assignment(root: &Path, task: &cas_types::Task, live: Option<&Agent>) -> crate::Result<bool> {
+    if task.status != TaskStatus::Open { return Ok(false); }
+    let Some(assignee) = task.assignee.as_deref() else { return Ok(false); };
+    let Some((worker, receipt)) = assignment_worker(root, assignee, live)? else { return Ok(false); };
+    let session = worker.factory_session.as_deref().expect("assignment session");
+    let queues = SqliteWorkerTaskQueueStore::open(root)?;
+    if let Some(receipt) = &receipt {
+        queues.bind_spawn(receipt.id, session, &worker.name)?;
+    }
+    let tasks = crate::store::open_task_store(root)?;
+    // A director snapshot may predate a cancellation or reassignment.
+    let current = tasks.get(&task.id)?;
+    if current.status != TaskStatus::Open || current.assignee != task.assignee {
+        return Ok(false);
+    }
+    let queue = queues.get(session, &worker.name)?;
+    let head = if queue.revision == 0 {
+        let active = if live.is_some() && worker.metadata.contains_key("clone_path") {
+            tasks.list(Some(TaskStatus::InProgress))?.into_iter().find(|t|
+                t.assignee.as_deref().is_some_and(|a| a == worker.name || a == worker.id))
+        } else { None };
+        let head = active.or_else(|| receipt.as_ref()
+            .filter(|r| !matches!(r.state, cas_store::SpawnLifecycleState::Failed | cas_store::SpawnLifecycleState::Stopped))
+            .and_then(|r| r.task_id.as_ref()).and_then(|id| tasks.get(id).ok()));
+        // A single-task spawn keeps its existing startup path until a tail is
+        // actually assigned. Ordinary independent assignments also stay plain.
+        head
+    } else { None };
+    let admitted = queues.admit_assignment(session, &worker.name, &task.id,
+        head.as_ref().map(|head| (head.id.as_str(), head.status == TaskStatus::InProgress)))?;
+    if admitted {
+        let _ = cas_factory::notify_daemon(root);
+    }
+    Ok(admitted)
+}
+
 impl CasCore {
     fn queue_worker(&self, name: &str, supervisor_only: bool) -> Result<Agent, McpError> {
         let agents = self.open_agent_store()?;
@@ -227,7 +297,8 @@ impl CasCore {
                 .await?;
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
-        Ok(format!("{}{source_notices}", render(&worker.name, &queue)))
+        let tasks = self.open_task_store()?;
+        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref()).map_err(error)?))
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -701,16 +772,29 @@ impl CasCore {
     }
 }
 
-pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
-    let current = queue.current_task.as_deref().unwrap_or("none");
+pub(crate) fn render(
+    worker: &Agent,
+    queue: &WorkerTaskQueue,
+    tasks: &dyn cas_store::TaskStore,
+) -> cas_store::Result<String> {
+    // The cursor retains held work for dispatch recovery; execution and holds
+    // come from current task state, without rewriting that durable position.
+    let owns = |task: &cas_types::Task| task.assignee.as_deref()
+        .is_some_and(|assignee| assignee == worker.name || assignee == worker.id);
+    let current = tasks.list(Some(TaskStatus::InProgress))?.into_iter()
+        .find(|task| owns(task)).map(|task| task.id).unwrap_or_else(|| "none".into());
+    let mut held = tasks.list(Some(TaskStatus::Blocked))?.into_iter()
+        .filter(|task| owns(task)).map(|task| task.id).collect::<Vec<_>>();
+    held.sort();
+    let held = if held.is_empty() { "none".into() } else { held.join(", ") };
     let pending = if queue.pending.is_empty() {
         "none".into()
     } else {
         queue.pending.join(" -> ")
     };
     let mut output = format!(
-        "Task queue for {worker} (revision {})\nCurrent: {current}\nPending: {pending}",
-        queue.revision
+        "Task queue for {} (revision {})\nCurrent: {current}\nHeld: {held}\nPending: {pending}",
+        worker.name, queue.revision
     );
     if queue.starting && queue.context_reset_from.is_some() {
         output.push_str(&format!("\nContext reset: waiting for fresh conversation (request {})",
@@ -719,7 +803,7 @@ pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
     if let Some(note) = queue.notes.last() {
         output.push_str(&format!("\n{note}"));
     }
-    output
+    Ok(output)
 }
 
 /// Recover durable cursors after lock contention, process loss or an invalid

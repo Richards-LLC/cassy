@@ -2053,6 +2053,90 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
     assert_eq!(parked.status, TaskStatus::AwaitingMerge);
     assert_eq!(parked.deliverables.factory_branch_anchor, parked_anchor);
 }
+/// GH #1620: replay the supervisor's spawn-then-update lane staffing before
+/// registration, then deliver through the ordinary park and daemon repair.
+#[tokio::test]
+async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("nocode-worker-session").unwrap();
+    worker.factory_session = Some("queue-session".into());
+    worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+    let mut supervisor = agents.get("nocode-supervisor-session").unwrap();
+    supervisor.factory_session = worker.factory_session.clone();
+    agents.update(&supervisor).unwrap();
+    agents.unregister(&worker.id).unwrap();
+    let mut first = assigned("cas-d033a", TaskType::Task, "main");
+    first.status = TaskStatus::Open;
+    f.put(&first);
+    let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+    let request = spawns.enqueue_spawn_with_task_queue(
+        1, &[WORKER.into()], true, None, Some("queue-session"), Some(&first.id),
+        None, None, &[],
+    ).unwrap();
+    spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Launched,
+        Some(WORKER), None).unwrap();
+    let pending = ["cas-d033b", "cas-d033c", "cas-d033d", "cas-d033e"];
+    for id in pending {
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        f.put(&task);
+        call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "assignee":WORKER,
+        })).await;
+    }
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let queued = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(queued.pending, pending);
+    // Replayed producers and later spawn binding cannot duplicate or erase work.
+    crate::task_assignment::enqueue(&f.cas_dir(), &f.task(pending[0])).unwrap();
+    queues.bind_spawn(request, "queue-session", WORKER).unwrap();
+    assert_eq!(queues.get("queue-session", WORKER).unwrap().pending, pending);
+    call(&f.supervisor, serde_json::json!({
+        "action":"cancel", "id":pending[1], "reason":"Withdrawn before registration",
+    })).await;
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "id":pending[2], "assignee":"another-worker",
+    })).await;
+    agents.register(&worker).unwrap();
+    spawns.mark_processed(request).unwrap();
+    spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
+        Some(WORKER), None).unwrap();
+    call(&f.worker, serde_json::json!({"action":"start", "id":first.id})).await;
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-d033a): first delivery"]);
+    git(&checkout, &["push", "-q", "origin", LANE]);
+    let response = call(&f.worker, serde_json::json!({
+        "action":"close", "id":first.id, "reason":"Delivered",
+    })).await;
+    assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{response}");
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(pending[0]).status, TaskStatus::InProgress);
+    let queued = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.current_task.as_deref(), Some(pending[0]));
+    let prompts = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+    let briefs = prompts.peek_for_targets(&[WORKER], Some("queue-session"), 100).unwrap();
+    assert_eq!(briefs.iter().filter(|row|
+        crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt).as_deref() == Some(pending[0])
+    ).count(), 1);
+    // Complete B at the durable handoff boundary to exercise stale-tail skipping.
+    let mut second = f.task(pending[0]);
+    second.status = TaskStatus::AwaitingMerge;
+    f.put(&second);
+    agents.release_lease(pending[0], &worker.id).unwrap();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(pending[1]).status, TaskStatus::Cancelled);
+    assert_eq!(f.task(pending[2]).assignee.as_deref(), Some("another-worker"));
+    assert_eq!(f.task(pending[3]).status, TaskStatus::InProgress);
+    assert!(queues.get("queue-session", WORKER).unwrap().pending.is_empty());
+}
+
 /// A queued successor uses its own target, while the delivery just parked or
 /// closed keeps its immutable ref. Replaying that close cannot consume C.
 #[tokio::test]
@@ -2386,6 +2470,42 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     let result = f.supervisor.factory(Parameters(request)).await.unwrap();
     result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
+}
+
+/// GH #1670: a held execution retains its queue cursor while another task
+/// runs. Display execution from task state without moving that durable cursor.
+#[tokio::test]
+async fn worker_queue_reports_execution_separately_from_held_cursor_cas_600b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let held_id = "cas-8488-current";
+    let pending_id = "cas-8488-one";
+    let _ = queue_control(&f, Some(vec![pending_id])).await;
+    let _ = call(&f.worker, serde_json::json!({
+        "action":"update", "id":held_id, "status":"blocked",
+    })).await;
+    assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+    let mut active = assigned("cas-600b-active", TaskType::Task, "main");
+    active.status = TaskStatus::Open;
+    active.execution_note = Some("no-code".into());
+    active.external_ref = Some(PROOF.into());
+    f.put(&active);
+    let _ = call(&f.worker, serde_json::json!({"action":"start", "id":active.id})).await;
+    assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    for ids in [None, Some(vec![pending_id])] {
+        let report = queue_control(&f, ids).await;
+        // Assert task identity and grouping order, independent of display prose.
+        let reported = report.split_whitespace().filter(|token| token.starts_with("cas-"))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, vec![active.id.as_str(), held_id, pending_id], "{report}");
+        let queue = queues.get("queue-session", WORKER).unwrap();
+        assert_eq!(queue.current_task.as_deref(), Some(held_id));
+        assert!(queue.current_started);
+        assert_eq!(queue.pending, vec![pending_id]);
+        assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+        assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    }
 }
 
 /// Queue edits are supervisor operations and only affect pending work.

@@ -317,6 +317,7 @@ async fn test_update_entry() {
     let update_req = EntryUpdateRequest {
         valid_until: None,
         id: id.to_string(),
+        title: None,
         content: Some("Updated content".to_string()),
         tags: Some("updated,test".to_string()),
         importance: Some(0.9),

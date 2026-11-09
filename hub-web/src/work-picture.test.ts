@@ -86,33 +86,50 @@ describe("work events (cas-ff22)", () => {
     node.remove();
   });
 
-  it("shows offline source edits once per connection and recovers after reconnect", () => {
-    let online = false;
-    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? "detail" : undefined) };
+  it("binds each source edit to its retrieval state while retaining cached success offline", () => {
+    let online = true, request = 0;
+    const cachedPayload = "cached source", recoveredPayload = "Recovered edit";
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => online ? `detail-${++request}` : undefined) };
     const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn() });
-    const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "edit" }], provenance: "successful_tool_calls", complete: false } })], has_earlier: false })!.events[0]!;
+    const event = workEventsPage({ request_id: "page", events: [wire("edit", 1, { turn: "one", changed_files: { files: [
+      { path: "cached.ts", operation: "edit", source_event_id: "cached" },
+      { path: "a.ts", operation: "edit", source_event_id: "edit" },
+    ], provenance: "successful_tool_calls", complete: false } })], has_earlier: false })!.events[0]!;
     const context = picture.rows("m", "s");
     const node = document.createElement("div"); document.body.append(node);
     const item = { type: "work" as const, key: "work:edit", events: [event], changedFiles: [event] };
     const paint = () => renderWork(node, item, context, "Supervisor");
+    const buttons = () => node.querySelectorAll<HTMLButtonElement>(".changed-file-toggle");
+    const detail = (index: number) => node.querySelectorAll<HTMLElement>(".changed-file")[index]!.querySelector<HTMLElement>(".changed-file-detail")!;
     paint();
     node.querySelector<HTMLButtonElement>(".changed-files-toggle")!.click();
-    node.querySelector<HTMLButtonElement>(".changed-file-toggle")!.click();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toBeTruthy();
+    buttons()[0]!.click();
+    picture.detail("m", "s", { request_id: "detail-1", event_id: "cached", detail: cachedPayload, truncated: false });
+    online = false; picture.disconnected("m", "s"); paint();
+    buttons()[1]!.click();
+    expect(detail(0).dataset).toMatchObject({ sourceEventId: "cached", retrievalState: "ready" });
+    expect(detail(0).textContent).toContain(cachedPayload);
+    expect(detail(1).dataset).toMatchObject({ sourceEventId: "edit", retrievalState: "offline" });
+    expect(detail(1).textContent).not.toContain(cachedPayload);
     expect(node.querySelector('[aria-busy="true"]')).toBeNull();
     paint(); paint();
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(1);
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
     online = true; picture.reattached("m", "s"); paint(); paint();
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
-    expect(node.querySelector(".changed-file-detail")!.textContent).toBeTruthy();
-    picture.disconnected("m", "s"); paint(); paint();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toBeTruthy();
-    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(2);
-    picture.reattached("m", "s"); paint();
     expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
-    picture.detail("m", "s", { request_id: "detail", event_id: "edit", detail: "Recovered edit", truncated: false });
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
+    picture.disconnected("m", "s"); paint(); paint();
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "offline" });
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(3);
+    picture.reattached("m", "s"); paint();
+    expect(transport.requestWorkEventDetail).toHaveBeenCalledTimes(4);
+    picture.detail("m", "s", { request_id: "detail-2", event_id: "edit", detail: "abandoned response", truncated: false });
     paint();
-    expect(node.querySelector(".changed-file-detail")!.textContent).toContain("Recovered edit");
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "loading" });
+    picture.detail("m", "s", { request_id: "detail-3", event_id: "edit", detail: recoveredPayload, truncated: false });
+    paint();
+    expect(detail(1).dataset).toMatchObject({ retrievalState: "ready" });
+    expect(detail(1).textContent).toContain(recoveredPayload);
+    expect(detail(0).textContent).toContain(cachedPayload);
     node.remove();
   });
   it("merges pages by id and reads back from a newest page that missed the loaded events", () => {

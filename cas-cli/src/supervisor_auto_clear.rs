@@ -334,13 +334,15 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
     out
 }
 
-fn add_handoff(root: &Path, title: &str, content: String) -> anyhow::Result<Entry> {
+fn add_handoff(root: &Path, title: &str, content: String, agent: &Agent) -> anyhow::Result<Entry> {
     use cas_core::memory::handoff;
     let store = crate::store::open_store(root)?;
     let mut entry = Entry::new(store.generate_id()?, content);
     entry.entry_type = EntryType::Context;
     entry.title = Some(title.to_string());
     entry.tags = vec![handoff::HANDOFF_TAG.into(), format!("{}{ROLE}", handoff::ROLE_TAG_PREFIX), SOURCE.into()];
+    entry.session_id = Some(agent.id.clone());
+    handoff::HandoffLineage::for_agent(agent).stamp(&mut entry);
     store.add(&entry)?;
     let now = Utc::now();
     for previous in handoff::handoffs_superseded_by(&store.list()?, &entry.id, ROLE) {
@@ -365,21 +367,21 @@ fn save_handoff(root: &Path, agent: &Agent, state: &State) -> anyhow::Result<Str
         agent.name,
         crate::cli::release_report::eastern_time(state.triggered_at)
     );
-    Ok(add_handoff(root, &title, render(&snapshot, state, &receipt))?.id)
+    Ok(add_handoff(root, &title, render(&snapshot, state, &receipt), agent)?.id)
 }
 
 /// Merge a handoff the supervisor saved after Cassy's facts under those facts.
-fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>) -> anyhow::Result<String> {
+fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>, agent: &Agent) -> anyhow::Result<String> {
     use cas_core::memory::handoff;
     let store = crate::store::open_store(root)?;
     let entries = store.list()?;
-    let Some(current) = handoff::current_handoff(&entries, ROLE).filter(|c| c.id != handoff_id && c.created >= saved_at) else {
+    let Some(current) = handoff::current_handoff(&entries, ROLE, Some(&handoff::HandoffLineage::for_agent(agent))).filter(|c| c.id != handoff_id && c.created >= saved_at) else {
         return Ok(handoff_id.to_string());
     };
     let facts = entries.iter().find(|e| e.id == handoff_id).map(|e| e.content.clone()).unwrap_or_default();
     let title = current.title.clone().unwrap_or_else(|| "Supervisor handoff before automatic context clear".into());
     let content = format!("{facts}\nSupervisor judgement (saved before the clear):\n{}\n", clip_block(current.content.trim(), SECTION_CHARS));
-    Ok(add_handoff(root, &title, content)?.id)
+    Ok(add_handoff(root, &title, content, agent)?.id)
 }
 
 /// Advance the state machine for one newly recorded supervisor turn.
@@ -475,7 +477,7 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
             Ok(Step::HandoffSaved(handoff_id))
         }
         Phase::AwaitingJudgement { handoff_id, saved_at, .. } => {
-            let handoff_id = merge_judgement(root, &handoff_id, saved_at)?;
+            let handoff_id = merge_judgement(root, &handoff_id, saved_at, turn.agent)?;
             let dir = turn.transcript.parent().context("transcript has no directory")?.to_path_buf();
             let before = crate::factory_context_reset::snapshot_transcripts(std::slice::from_ref(&dir));
             let control_id = queue

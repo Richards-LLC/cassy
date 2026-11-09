@@ -2759,21 +2759,48 @@ impl CasService {
                         _ => None,
                     }
                 });
-            message = crate::prompt_revalidation::attach_assignment_envelope(
-                &message,
-                binding.as_deref(),
-            );
-            if let Some((task_id, status)) = binding
+            let bound_task = binding
                 .as_deref()
-                .and_then(|id| tasks.as_ref()?.get(id).ok())
-                .and_then(|task| {
-                    assignment_stale_task(
-                        &message,
-                        task.status,
-                        task.assignee.as_deref(),
-                        &resolved_target,
-                    )
+                .and_then(|id| tasks.as_ref()?.get(id).ok());
+            let owns_task = bound_task.as_ref().is_some_and(|task| {
+                task.assignee.as_deref().is_some_and(|owner| {
+                    owner.eq_ignore_ascii_case(&resolved_target)
+                        || resolved_target_agent.as_ref().is_some_and(|agent| {
+                            owner.eq_ignore_ascii_case(&agent.id)
+                                || owner.eq_ignore_ascii_case(&agent.name)
+                        })
                 })
+            });
+            if let Some(task) = bound_task.as_ref()
+                && !owns_task
+                && task.assignee.is_some()
+                && !task.is_terminal()
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!("Assignment refused for {}: task belongs to another worker. Update its assignment before sending a new assignment.", task.id),
+                ));
+            }
+            message = match bound_task.as_ref() {
+                Some(task)
+                    if owns_task
+                        && matches!(task.status,
+                            cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) =>
+                {
+                    crate::prompt_revalidation::attach_assignment_followup(&message, &task.id)
+                }
+                _ => crate::prompt_revalidation::attach_assignment_envelope(
+                    &message, binding.as_deref(),
+                ),
+            };
+            if let Some((task_id, status)) = bound_task.and_then(|task| {
+                assignment_stale_task(
+                    &message,
+                    task.status,
+                    task.assignee.as_deref(),
+                    &resolved_target,
+                )
+            })
             {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
@@ -7462,6 +7489,10 @@ mod cas_89e1_post_merge_message_type_tests {
         tasks.update(&next).unwrap();
         for (task_id, message) in [
             (Some("cas-3e24"), "You're assigned cas-fba9."),
+            (
+                Some("cas-3e24"),
+                "<cas-assignment task_id=\"cas-3e24\" intent=\"followup\"/>You're assigned cas-fba9.",
+            ),
             (
                 None,
                 "<cas-assignment task_id=\"cas-fba9\"/>\n<cas-assignment/>\nYou're assigned cas-3e24.",

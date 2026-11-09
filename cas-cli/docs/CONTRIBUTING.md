@@ -225,6 +225,12 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+Supervisor follow-ups about a worker's current InProgress or Blocked task remain
+conversation, including `kind=answer` and messages with an explicit `task_id`.
+They do not assign work again or replace the recorded delivery start. Ownership
+matches the worker's registered name or id; messaging cannot take another
+worker's task. Fresh assignments retain their normal stale-task checks.
+
 Agent-facing message provenance and pointer wakes stamp the current render time
 in the host's local timezone (`TZ` when set), in twelve-hour form with a zone
 (for example `6:36 AM ET`). Queue age and first/replay provenance remain separate.

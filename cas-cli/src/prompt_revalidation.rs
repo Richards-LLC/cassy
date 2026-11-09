@@ -57,6 +57,13 @@ pub(crate) fn attach_queue_continuation(message: &str, task_id: &str) -> String 
         xml_attribute_value(task_id))
 }
 
+/// A supervisor's answer about work this recipient already owns is conversation,
+/// not another instruction to start it. Ingress validates ownership first.
+pub(crate) fn attach_assignment_followup(message: &str, task_id: &str) -> String {
+    format!("<cas-assignment task_id=\"{}\" intent=\"followup\"/>\n{message}",
+        xml_attribute_value(task_id))
+}
+
 fn is_queue_continuation(prompt: &str) -> bool {
     prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN)
         && prompt.find('>').and_then(|end| xml_attribute(&prompt[..end], "intent")) == Some("continue")
@@ -93,6 +100,9 @@ pub(crate) fn is_assignment_prompt(prompt: &str) -> bool {
 pub(crate) fn assignment_solicited_task_id(prompt: &str) -> Option<String> {
     if prompt.starts_with(ASSIGNMENT_ENVELOPE_OPEN) || prompt.starts_with("<cas-assignment/>") {
         let tag = prompt.get(..prompt.find('>')?)?;
+        if xml_attribute(tag, "intent") == Some("followup") {
+            return None;
+        }
         return xml_attribute(tag, "task_id")
             .filter(|id| !id.is_empty())
             .map(str::to_owned);

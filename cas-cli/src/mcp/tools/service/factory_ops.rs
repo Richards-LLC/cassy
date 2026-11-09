@@ -13745,6 +13745,93 @@ mod spawn_lifecycle_tests {
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standard_lane_account_admission_cas_8f40() {
+        use cas_store::SpawnQueueStore;
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 99.0.0'; else echo 'Logged in using ChatGPT'; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let test_name = "mcp::tools::service::factory_ops::spawn_lifecycle_tests::standard_lane_account_admission_cas_8f40";
+        if std::env::var_os("CODEX_LANE_ADMISSION_CHILD").is_none() {
+            let paths = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env("PATH", paths).env("CODEX_LANE_FIXTURE_BIN", &bin).env("CODEX_LANE_ADMISSION_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            crate::test_child::assert_passed(&String::from_utf8_lossy(&output.stdout), test_name);
+            return;
+        }
+        env.set("CAS_TEST_HUB_PATH", std::env::var_os("CODEX_LANE_FIXTURE_BIN").unwrap());
+        env.remove("CODEX_HOME");
+        let project = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init", "-b", "main"]);
+        git(&["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-m", "fixture"]);
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = cas_types::Task::new("cas-lane-epic".into(), "Lane admission".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        let account = env.home().join(".codex-selected");
+        std::fs::create_dir_all(&account).unwrap();
+        std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        // A different account's primary support must not authorize this account.
+        let other = env.home().join(".codex");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(other.join("models_cache.json"), serde_json::json!({
+            "fetched_at": chrono::Utc::now(), "client_version":"99.0.0", "models":[{"slug":"gpt-6.1-sol"}]
+        }).to_string()).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let ctx = crate::ops::fleet::FleetContext::operator("lane-fixture");
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        for (case, age, models, explicit, expected) in [
+            ("stale", 8, vec!["gpt-6-sol"], false, None),
+            ("fallback", 0, vec!["gpt-6-sol"], false, Some("gpt-6-sol")),
+            ("unsupported", 0, vec!["gpt-5.6-sol"], false, None),
+            ("explicit", 0, vec!["gpt-6-sol"], true, None),
+            ("primary", 0, vec!["gpt-6.1-sol"], false, Some("gpt-6.1-sol")),
+        ] {
+            std::fs::write(account.join("models_cache.json"), serde_json::json!({
+                "fetched_at": chrono::Utc::now() - chrono::Duration::days(age),
+                "client_version":"99.0.0", "models":models.iter().map(|slug| serde_json::json!({"slug":slug})).collect::<Vec<_>>()
+            }).to_string()).unwrap();
+            let mut request = serde_json::json!({"action":"spawn_workers", "count":1, "isolate":true,
+                "worker_names":case, "config_dir":account});
+            if explicit { request["cli"] = "codex".into(); request["model"] = "gpt-6.1-sol".into(); }
+            else { request["lane"] = "standard".into(); }
+            let before = queue.peek(10).unwrap().len();
+            let result = service.factory_spawn_workers_in_with_name_source(&ctx, serde_json::from_value(request).unwrap(), None,
+                &mut || panic!("explicit identity")).await;
+            if let Some(model) = expected {
+                let response = result.unwrap_or_else(|error| panic!("{case}: {error}"));
+                let rows = queue.peek(10).unwrap();
+                assert_eq!(rows.len(), before + 1);
+                let spec: cas_mux::WorkerSpec = serde_json::from_str(rows.last().unwrap().worker_spec.as_deref().unwrap()).unwrap();
+                assert_eq!(spec.model.as_deref(), Some(model));
+                assert_eq!(spec.config_dir.as_deref(), account.to_str());
+                if case == "fallback" { assert!(format!("{response:?}").contains("codex_sol_6")); }
+            } else {
+                assert!(result.is_err(), "{case}: unverified or unsupported lane must refuse before queueing");
+                assert_eq!(queue.peek(10).unwrap().len(), before);
+            }
+            assert!(!root.join("worktrees").join(case).exists());
+        }
+    }
+
     /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
     /// client (prowl's ChatGPT.app 0.146) cannot refuse a model the installed
     /// codex (0.163, printed with a trailing build token) runs. The version

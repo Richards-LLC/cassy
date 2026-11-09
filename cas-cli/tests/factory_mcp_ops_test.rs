@@ -15457,3 +15457,194 @@ async fn cas_afe0_authenticated_ack_is_recipient_scoped_and_does_not_surface_a_b
     ack.notification_id = Some(foreign);
     assert!(env.service.coordination(Parameters(ack)).await.is_err());
 }
+
+/// Build the real reassignment incident with independently movable local/origin tips.
+fn reassigned_start_fixture_cas_67fa(
+    shape: &str,
+) -> (FactoryTestEnv, CasService, PathBuf, Task, String) {
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker = "new-worker";
+    let path = init_pushed_worker_repo(&env, worker);
+    let project = env.cas_root.parent().unwrap();
+    std::fs::write(
+        env.cas_root.join("config.toml"),
+        "[project]\ncanonical_id = \"rebind-project\"\n",
+    )
+    .unwrap();
+    {
+        use cas::store::KnownRepoStore;
+        cas::store::known_repos::ensure_host_schema().unwrap();
+        cas::store::known_repos::open_host_known_repo_store()
+            .unwrap()
+            .bind(
+                "project:rebind-project",
+                &project.canonicalize().unwrap(),
+                &project.join(".git").canonicalize().unwrap(),
+            )
+            .unwrap();
+    }
+    let worker_id = register_codex_worker_at(&env, worker, "session-67fa", &path);
+    let mut supervisor = env.agent_store().get("test-supervisor-id").unwrap();
+    supervisor.factory_session = Some("session-67fa".into());
+    env.agent_store().update(&supervisor).unwrap();
+    let base = git_stdout(&path, &["rev-parse", "HEAD"]);
+    git_stdout(&path, &["push", "-q", "origin", "main"]);
+    let old_branch = "factory/previous-worker-cas-67fa";
+    git_stdout(&path, &["switch", "-qc", old_branch]);
+    git_stdout(
+        &path,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "cas-67fa: previous worker work",
+        ],
+    );
+    let old_tip = git_stdout(&path, &["rev-parse", "HEAD"]);
+    let origin_tip = if shape == "local-divergent" {
+        &base
+    } else {
+        &old_tip
+    };
+    git_stdout(
+        &path,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("{origin_tip}:refs/heads/{old_branch}"),
+        ],
+    );
+    let new_branch = "factory/new-worker-cas-67fa";
+    let inherited = if shape == "ancestor" { &old_tip } else { &base };
+    git_stdout(&path, &["switch", "-qc", new_branch, inherited]);
+    if shape != "local-divergent" {
+        git_stdout(&path, &["branch", "-f", old_branch, &base]);
+    }
+    let target = WorkTarget {
+        repo_selector: "project:rebind-project".into(),
+        target_branch: "main".into(),
+    };
+    let mut task = Task::new("cas-67fa".into(), "Reassigned task".into());
+    task.assignee = Some(worker.into());
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: target,
+        assignee: "previous-worker".into(),
+        branch: old_branch.into(),
+        base_sha: base,
+    });
+    env.task_store().add(&task).unwrap();
+    let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+    core.set_agent_id_for_testing(worker_id);
+    (env, CasService::new(core, None), path, task, old_tip)
+}
+
+#[tokio::test]
+async fn reassigned_task_start_rebinds_ancestor_with_audit_cas_67fa() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-67fa")]);
+    let (env, service, path, task, old_tip) = reassigned_start_fixture_cas_67fa("ancestor");
+    let refs = git_stdout(&path, &["show-ref"]);
+    let started = service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "start", "id": task.id,
+        }))))
+        .await
+        .unwrap();
+    assert_ne!(started.is_error, Some(true), "{}", get_text(&started));
+    let rebound = env.task_store().get(&task.id).unwrap();
+    let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
+    assert_eq!(start.assignee, "new-worker");
+    assert_eq!(start.branch, "factory/new-worker-cas-67fa");
+    assert_eq!(
+        start.base_sha,
+        task.deliverables
+            .factory_branch_start
+            .as_ref()
+            .unwrap()
+            .base_sha
+    );
+    assert_eq!(
+        rebound.deliverables.handoff_branches,
+        ["factory/previous-worker-cas-67fa"]
+    );
+    // The JSON audit marker is the existing durable rebind protocol.
+    let audit: serde_json::Value = rebound
+        .notes
+        .lines()
+        .find_map(|line| line.split_once("DELIVERY BRANCH REBOUND: "))
+        .map(|(_, json)| serde_json::from_str(json).unwrap())
+        .expect("rebind audit");
+    assert_eq!(
+        audit["previous_start"],
+        serde_json::to_value(&task.deliverables.factory_branch_start).unwrap()
+    );
+    assert_eq!(audit["tip"], old_tip);
+    let events = cas_store::quality_interventions_since(
+        &env.cas_root,
+        cas_store::InterventionKind::Rebind,
+        chrono::DateTime::UNIX_EPOCH,
+    )
+    .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].task_id.as_deref(), Some(task.id.as_str()));
+    assert_eq!(events[0].actor, audit["actor"].as_str().map(str::to_string));
+    service
+        .task(Parameters(task_req(
+            serde_json::json!({"action": "start", "id": task.id}),
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        cas_store::quality_interventions_since(
+            &env.cas_root,
+            cas_store::InterventionKind::Rebind,
+            chrono::DateTime::UNIX_EPOCH
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_eq!(git_stdout(&path, &["show-ref"]), refs);
+}
+
+#[tokio::test]
+async fn reassigned_task_start_preserves_divergent_source_cas_67fa() {
+    for shape in ["local-divergent", "origin-divergent"] {
+        let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-67fa")]);
+        let (env, service, path, task, _) = reassigned_start_fixture_cas_67fa(shape);
+        let refs = git_stdout(&path, &["show-ref"]);
+        let started = service
+            .task(Parameters(task_req(serde_json::json!({
+                "action": "start", "id": task.id,
+            }))))
+            .await
+            .unwrap();
+        assert_ne!(started.is_error, Some(true), "{}", get_text(&started));
+        let persisted = env.task_store().get(&task.id).unwrap();
+        assert_eq!(
+            persisted.deliverables.factory_branch_start, task.deliverables.factory_branch_start,
+            "{shape}"
+        );
+        assert!(
+            persisted.deliverables.handoff_branches.is_empty(),
+            "{shape}"
+        );
+        assert!(
+            cas_store::quality_interventions_since(
+                &env.cas_root,
+                cas_store::InterventionKind::Rebind,
+                chrono::DateTime::UNIX_EPOCH
+            )
+            .unwrap()
+            .is_empty(),
+            "{shape}"
+        );
+        assert!(
+            get_text(&started).contains("action=rebind_branch"),
+            "{shape}: {}",
+            get_text(&started)
+        );
+        assert_eq!(git_stdout(&path, &["show-ref"]), refs, "{shape}");
+    }
+}

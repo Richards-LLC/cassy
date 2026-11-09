@@ -54,6 +54,7 @@ pub(crate) mod viktor_watch;
 pub use server::CasCore;
 pub(crate) use server::AgentIdentitySource;
 pub use server::run_server;
+pub(crate) use server::QA_SANDBOX_ENV;
 #[cfg(unix)]
 pub(crate) use server::run_backend;
 pub(crate) use server::serving_state;

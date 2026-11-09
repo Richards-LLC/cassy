@@ -1488,6 +1488,7 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
         ("product.rs", "matching", "release", "test-agent", false),
         ("docs/qa/cas-bq01/LEDGER.md+product.rs", "matching", "release", "test-agent", false),
         ("docs/qa/journeys.md", "matching", "release", "test-agent", false),
+        ("docs/qa/batch-evaluations/AGENTS.md", "matching", "release", "test-agent", false),
         ("docs/qa/cas-bq01/LEDGER.md", "matching", "release", "batch-supervisor", false),
     ] {
         let mut env = TestEnvGuard::temp_home();
@@ -1505,6 +1506,10 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
         git(&fx.repo, &["branch", "-f", "main", &head]);
         let mut task = tasks.get("cas-bq01").unwrap();
         task.status = TaskStatus::AwaitingMerge;
+        let revalidate = path == "docs/qa/batch-evaluations/walk.md";
+        if revalidate {
+            task.status = TaskStatus::Blocked;
+        }
         task.deliverables.factory_branch_anchor = Some(head.clone());
         task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
             work_target: cas::types::WorkTarget { repo_selector: "project:test".into(), target_branch: "main".into() },
@@ -1540,6 +1545,21 @@ async fn waived_ledger_author_release_exit_cas_ace0() {
         assert_eq!(result.is_ok(), accepted, "{path}, {waiver}, {kind}, {author}: {result:?}");
         let verdicts = cas_store::release_verdicts_for_task(&root, "batch-project", "cas-bq01").unwrap();
         assert_eq!(verdicts.len(), usize::from(accepted));
+        if revalidate {
+            // A receipt must not turn a one-tip waiver into a permanent override.
+            task.status = TaskStatus::AwaitingMerge;
+            tasks.update(&task).unwrap();
+            cas_store::waive_qa_pass(&root, &task.id, "batch-supervisor", "test-agent",
+                "factory/test-agent", &fx.staging, "Review superseded the earlier waiver", chrono::Utc::now()).unwrap();
+            let refused = fx.close(&task.id).await;
+            assert_ne!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{refused}");
+            let restored = cas_store::waive_qa_pass(&root, &task.id, "batch-supervisor", "test-agent",
+                "factory/test-agent", &head, "Independent walkthrough reconfirmed", chrono::Utc::now()).unwrap();
+            let closed = fx.close(&task.id).await;
+            assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed}");
+            assert!(verdicts[0].author_overrides.is_empty());
+            assert_eq!(cas_store::list_qa_passes(&root, &task.id).unwrap()[0].id, restored.id);
+        }
         assert_eq!(tasks.get("cas-bq01").unwrap().status == TaskStatus::Closed, accepted, "{result:?}");
     }
 }

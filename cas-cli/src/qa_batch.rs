@@ -360,7 +360,8 @@ pub(crate) fn release_author_waiver(
         std::str::from_utf8(path).is_ok_and(|path| {
             (path.starts_with("docs/qa/") && path.ends_with("/LEDGER.md"))
                 || path.strip_prefix("docs/qa/batch-evaluations/")
-                    .is_some_and(|name| !name.contains('/') && name.ends_with(".md"))
+                    .is_some_and(|name| !name.contains('/') && name.ends_with(".md")
+                        && !matches!(name, "AGENTS.md" | "CLAUDE.md" | "GROK.md" | "SKILL.md"))
         })
     });
     Ok(records_only.then_some(pass))

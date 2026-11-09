@@ -171,17 +171,30 @@ fn message_assertion_refusal(repo: &Path, target: &str) -> Option<String> {
     if !guard.is_file() {
         return None;
     }
+    let target_ref = super::freshest_target_ref(repo, target);
+    let Some(target_commit) = super::resolve_branch_sha(repo, &target_ref) else {
+        return Some(format!(
+            "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`)."
+        ));
+    };
     let output = std::process::Command::new("python3")
         .arg(&guard)
-        .args(["--messages-only", "--changed-since", target])
+        .args(["--messages-only", "--changed-since", &target_commit])
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .current_dir(repo)
         .output();
     match output {
         Ok(output) if output.status.success() => None,
-        Ok(output) => Some(format!(
+        // FIX records are the checker's machine-readable findings. A failed
+        // invocation without a finding is unavailable proof, not a prose pin.
+        Ok(output) if output.status.code() == Some(1)
+            && String::from_utf8_lossy(&output.stdout).lines().any(|line| line.starts_with("FIX: ")) => Some(format!(
             "TEST_ASSERTION_PROSE: tests must assert behavior, error codes or rule IDs rather than human messages.\n{}{}",
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
+        )),
+        Ok(output) => Some(format!(
+            "TEST_ASSERTION_PROSE_UNAVAILABLE: test-shape checker exited {} without completing the check.\n{}{}",
+            output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
         )),
         Err(error) => Some(format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}")),
     }
@@ -949,7 +962,7 @@ mod tests {
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
         std::fs::write(&script, GUARD).unwrap();
         std::fs::write(script.with_file_name("rust_test_source.py"), include_str!("../../../../../../../../scripts/rust_test_source.py")).unwrap();
-        let head = commit_changelog_fixture(repo.path(), "install actual guard");
+        commit_changelog_fixture(repo.path(), "install actual guard");
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
             assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
@@ -959,7 +972,7 @@ mod tests {
         git(&["update-ref", "refs/remotes/origin/main", &base]);
         git(&["branch", "-D", "main"]);
         let refusal = |target: &str| park_refusal(cas_root.path(), repo.path(), &task,
-            &["docs/guide.md".into()], &head, target, None);
+            &["docs/guide.md".into()], &git(&["rev-parse", "HEAD"]), target, None);
         assert_eq!(refusal("main"), None, "remote-only target runs the actual guard");
         assert_eq!(refusal("origin/main"), None);
         let code = |target| refusal(target).unwrap().split_once(':').unwrap().0.to_string();
@@ -971,6 +984,11 @@ mod tests {
         let unrelated = git(&["commit-tree", "HEAD^{tree}", "-m", "unrelated root"]);
         git(&["update-ref", "refs/remotes/origin/unrelated", &unrelated]);
         assert_eq!(code("unrelated"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
+
+        let tokenizer = script.with_file_name("rust_test_source.py");
+        std::fs::rename(&tokenizer, tokenizer.with_extension("hidden")).unwrap();
+        assert_eq!(code("main"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
+        std::fs::rename(tokenizer.with_extension("hidden"), &tokenizer).unwrap();
 
         std::fs::write(repo.path().join("probe.test.ts"), "expect(error.message).toBe('please try later');\n").unwrap();
         commit_changelog_fixture(repo.path(), "introduce actual prose pin");

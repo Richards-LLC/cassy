@@ -3315,6 +3315,11 @@ fn queue_supervisor_startup_prompt(
     factory_session: Option<&str>,
     preface: Option<&str>,
 ) {
+    // Queued startup context is built in the daemon, before the new harness
+    // necessarily registers. Bind it to the named local supervisor explicitly.
+    let context_env = std::sync::Arc::new(cas_core::env_overlay::HookEnvironment::new()
+        .with_var("CAS_AGENT_NAME", supervisor_name));
+    let _context_scope = context_env.scope();
     let worker_list = if worker_names.is_empty() {
         "(none)".to_string()
     } else {
@@ -4298,6 +4303,8 @@ mod tests {
         // Exercise launch delivery with evidence the supervisor policy admits.
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("codex-sup-session".into(), "codex-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4377,6 +4384,8 @@ mod tests {
         entry.title = Some("Current Grok release recovery guidance".to_string());
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("grok-sup-session".into(), "grok-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 

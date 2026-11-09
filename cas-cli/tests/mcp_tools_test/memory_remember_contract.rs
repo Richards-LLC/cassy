@@ -474,13 +474,22 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     let a_new = id(a.cas_remember(Parameters(save("A newest approval receipt"))).await.unwrap());
     assert!(handoff::is_superseded(&memories.get(&a_old).unwrap()));
     let b = register("b", "supervisor-a", "machine-b", "factory-b");
-    let b_id = id(b.cas_remember(Parameters(save("B production approval receipt"))).await.unwrap());
+    // Even caller-supplied ownership tags cannot borrow A's authorization.
+    let mut peer_request = save("B production approval receipt");
+    peer_request.tags = Some("role:supervisor,handoff-machine:machine-a,handoff-owner:supervisor:supervisor-a".into());
+    let b_id = id(b.cas_remember(Parameters(peer_request)).await.unwrap());
     assert!(!handoff::is_superseded(&memories.get(&a_new).unwrap()));
     let other = register("a-other", "other-supervisor", "machine-a", "factory-other");
     let other_id = id(other.cas_remember(Parameters(save("Other local session approval"))).await.unwrap());
     // Reusing the logical supervisor name is the registry's explicit restart
     // contract; both the native session and factory process lifetime change.
     let restarted = register("a-restart", "supervisor-a", "machine-a", "factory-a-restart");
+    assert!(agents.get("b").unwrap().is_alive());
+    // Role-only legacy memories have unknown ownership and cannot carry local
+    // approvals, even when newer than every scoped handoff.
+    let mut legacy = cas::types::Entry::new("unowned-handoff".into(), "Unattributed approval".into());
+    legacy.tags = vec!["handoff".into(), "role:supervisor".into()];
+    memories.add(&legacy).unwrap();
     let surfaced = |agent_id: Option<&str>, session_id: &str| {
         let surfaced = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = surfaced.clone();

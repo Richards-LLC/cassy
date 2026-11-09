@@ -130,6 +130,14 @@ to the supervisor/director can establish execution within the configured stall
 window. Heartbeats and other workers' activity cannot. Resolved terminal turns
 and confirmed process exits retain precedence over this fallback.
 
+Supervisor memory handoffs carry `handoff-machine:` and `handoff-owner:`
+tags assigned by the writer, alongside author-session provenance. Supersession,
+SessionStart and automatic-clear judgement use the same host/logical-supervisor
+scope. The registry's explicit same-name restart keeps that local lineage when
+the native or factory session changes; registration never replaces a same-name
+supervisor on another machine. Legacy handoffs without ownership remain readable
+through memory tools but cannot inject approvals into startup.
+
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
 parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  supervisor-handoff-machine-lineage:
+    title: Supervisor startup and automatic clears restore only their own machine lineage, including explicit local restarts
+    tasks: [cas-fb21]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]

@@ -767,6 +767,7 @@ async fn standalone_source_work_split_keeps_reply_owner_cas_ad2c() {
     }
     assert!(builder.start(task_id, false).await.is_err());
     assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "mine": task_id})).await.is_err());
+    assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "theirs": task_id})).await.is_err());
 
     let offered = owner.factory(json!({"id": task_id, "target": "prowl", "theirs": task_id})).await.unwrap();
     let id = split_id(&offered);
@@ -779,8 +780,9 @@ async fn standalone_source_work_split_keeps_reply_owner_cas_ad2c() {
     assert_eq!(stored.external_ref.as_deref(), Some(source));
     assert_eq!(stored.assignee.as_deref(), Some("pr-w"));
     builder.start(task_id, false).await.unwrap();
-    // An ordinary update must not retire a standalone split as a moved child.
-    builder.task(json!({"action": "update", "id": task_id, "notes": "build underway"})).await.unwrap();
+    assert!(builder.factory(json!({"id": id, "decision": "release", "task_id": task_id})).await.is_err());
+    // Keeping a standalone task parentless must not retire its live split.
+    builder.task(json!({"action": "update", "id": task_id, "epic": ""})).await.unwrap();
     assert!(!cas_store::list_epic_split_child_releases(&builder.machine.cas_dir).unwrap()
         .contains(&(id.clone(), task_id.into())));
 

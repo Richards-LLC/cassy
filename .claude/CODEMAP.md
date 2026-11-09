@@ -102,7 +102,7 @@
 - `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` - audited branch/delivery recovery and empty retargeted-lane replacement.
 - `cas-cli/src/mcp/tools/core/task/block_hold.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` - task-scoped blocker answers, supervisor decision receipts and fresh-question deadlines.
 - `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - directed replies, blocker receipt ownership and revalidated batch-notice inbox reads.
-- `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs` - stakeholder source admission, same-task peer staffing transfer, heartbeat retirement and fenced release.
+- `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs`, `cas-cli/src/cloud/epic_split.rs` - stakeholder source admission, accepted owner-issued standalone work splits without reply authority, same-task peer staffing transfer, heartbeat retirement and fenced release.
 - `cas-cli/src/finding_triage.rs`, `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` - journey severity labels and default release-train assignment.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - retirement snapshots and persistent queues.

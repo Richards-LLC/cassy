@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  source-work-split-without-thread-replies:
+    title: The Slack claim owner delegates a standalone task through an accepted split while retaining reply authority and its source link
+    tasks: [cas-ad2c]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+    journeys: [FACTORY-SPAWN]
   batch-ledger-declared-coverage:
     title: Generated batch ledgers declare receipt deliveries and preflight rejects missing coverage before publishing
     tasks: [cas-6354]
@@ -333,6 +338,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-SOURCE-WORK-DELEGATION:
+    statement: Only an accepted owner-issued split grants a peer task work with external_ref intact; pending or unrelated shares grant no task work, and thread replies keep their separate claim authority.
+    check: Run standalone_source_work_split_keeps_reply_owner_cas_ad2c through integration_factory plus the existing one-sided grant/request cases; read back the assignment, source link, split release ledger and both reply-intent results.
+    bug: {task: cas-ad2c}
   FACTORY-UNDELIVERED-RELAY-ACTION:
     statement: A stale undelivered lifecycle relay queues one supervisor action before retiring its obsolete payload; failed escalation keeps the original pending and retries never duplicate the action.
     check: Run stale_blocked_relay_escalates_once_cas_f66d and failed_relay_escalation_keeps_original_pending_cas_f66d against the real prompt store; batch QA checks a supervisor receives the failure action without replaying the obsolete blocker.
@@ -994,8 +1003,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE]
+  owners: [cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT

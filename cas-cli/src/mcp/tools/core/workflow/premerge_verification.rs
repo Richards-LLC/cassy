@@ -1338,6 +1338,75 @@ mod tests {
         run(repo, &["rev-parse", "HEAD"])
     }
 
+    fn parked_candidate(repo: &Path, source: &str, target: &str) -> Candidate {
+        let source_sha = run(repo, &["rev-parse", source]);
+        let tree = run(repo, &["merge-tree", "--write-tree", target, source])
+            .lines().next().unwrap().to_string();
+        Candidate {
+            cas_root: repo.to_path_buf(), task_id: source.into(), repository: repo.to_path_buf(),
+            source_branch: source.into(), source_sha, target_branch: "main".into(),
+            target_sha: target.into(), tree, context_digest: String::new(),
+            proof: RepositoryProofBoundary {
+                peer_premerge: None, repository_root: String::new(), worktree_root: String::new(),
+                head_commit: String::new(), state_digest: String::new(), target_branch: None,
+                anchor_commits: Vec::new(),
+            },
+            preparation_ms: 0,
+        }
+    }
+
+    #[test]
+    fn shared_upkeep_keeps_back_to_back_candidate_approvals_cas_e79d() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let body = (0..24).map(|n| format!("section {n}\n")).collect::<String>();
+        for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+            "cas-cli/src/builtins/reference-history.json"]
+        {
+            commit_file(repo, path, &body, "base upkeep");
+        }
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        for (branch, marker) in [("factory/a", 2), ("factory/b", 20)] {
+            run(repo, &["checkout", "-q", "-b", branch, &base]);
+            for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+                "cas-cli/src/builtins/reference-history.json"]
+            {
+                let edited = body.replace(&format!("section {marker}\n"),
+                    &format!("section {marker}\nadded by {branch}\n"));
+                commit_file(repo, path, &edited, "delivery upkeep");
+            }
+        }
+        let first = parked_candidate(repo, "factory/a", &base);
+        let second = parked_candidate(repo, "factory/b", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        for candidate in [&first, &second] {
+            let target = run(repo, &["rev-parse", "main"]);
+            let tree = candidate.tree_on(&target).expect("unchanged reviewed doc hunks keep approval");
+            run(repo, &["merge", "-q", "--no-ff", &candidate.source_branch, "-m", "land delivery"]);
+            let landed = run(repo, &["rev-parse", "main"]);
+            assert_eq!(run(repo, &["rev-parse", "main^{tree}"]), tree);
+            assert_eq!(candidate.verify_landing(&landed), Ok(()));
+        }
+        let overview = std::fs::read_to_string(repo.join("docs/PRODUCT_OVERVIEW.md")).unwrap();
+        assert!(overview.contains("added by factory/a") && overview.contains("added by factory/b"));
+    }
+
+    #[test]
+    fn overlapping_code_still_holds_candidate_cas_e79d() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/a"]);
+        commit_file(repo, "src/lib.rs", "delivered\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+        let candidate = parked_candidate(repo, "factory/a", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        let target = commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nchanged\n", "sibling code");
+        assert!(candidate.tree_on(&target).is_err());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+    }
+
     /// cas-bfa8: a train created on another machine exists only on origin
     /// until the first merge into it. Its first candidate must resolve.
     #[test]

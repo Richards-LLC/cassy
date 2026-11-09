@@ -805,6 +805,77 @@ async fn gabber_findings_derive_priority_and_ready_order() {
     }
 }
 
+/// GH #1636/#1502: use Cassy's shipped registry, not an invented main flow.
+#[tokio::test]
+async fn factory_main_findings_retain_derived_priority_cas_7129() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, _) = fixture(&mut test_env);
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"),
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/qa/journeys.yaml"))).unwrap();
+    let service = CasService::new(core, None);
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    for journey in ["FACTORY-SUPERVISE", "FACTORY-MERGE", "FACTORY-CLOSE", "CLI-RELEASE", "FACTORY-SPAWN", "FACTORY-QA-RECEIPT"] {
+        let result = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "create", "title": format!("Broken {journey}"), "risk": "none", "task_type": "bug",
+            "priority": 0, "finding_origin": "review:operator",
+            "labels": format!("severity:broken,reach:main,journey:{journey}"),
+            "repro": "78 cached calls, 117K peak, 7.6M cumulative; supervisor auto-clears every turn",
+            "affected": "Every factory supervisor",
+        })).unwrap())).await.unwrap();
+        let text = extract_text(result);
+        let task = tasks.get(extract_task_id(&text).unwrap()).unwrap();
+        assert_eq!(task.priority.0, 1, "{journey}: {:?}", task.labels);
+        assert!(task.labels.contains(&"reach:main".into()));
+    }
+}
+
+/// Replay the stale P4 cas-bb0d finding, including an empty-label correction.
+#[tokio::test]
+async fn finding_label_corrections_replace_axes_without_priority_override_cas_7129() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _, repo, _) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"),
+        "version: 1\nmain_journeys: [supervise]\njourneys:\n- id: supervise\n  status: live\n").unwrap();
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let created = extract_text(service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "create", "title": "Supervisor clears on cumulative cache reads", "risk": "none",
+        "task_type": "bug", "priority": 0, "finding_origin": "review:operator",
+        "labels": "severity:broken,reach:main,incident",
+        "repro": "78 cached calls, 117K peak, 7.6M cumulative; supervisor auto-clears every turn",
+        "affected": "Every factory supervisor",
+    })).unwrap())).await.unwrap());
+    let id = extract_task_id(&created).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(id).unwrap().priority.0, 4);
+    for (labels, expected, axes) in [
+        ("", 4, ["severity:broken", "reach:theoretical"]),
+        ("severity:broken,reach:main,journey:supervise,corrected", 1, ["severity:broken", "reach:main"]),
+        ("severity:data_loss", 0, ["severity:data_loss", "reach:main"]),
+        ("reach:secondary", 1, ["severity:data_loss", "reach:secondary"]),
+        ("severity:broken,reach:theoretical", 4, ["severity:broken", "reach:theoretical"]),
+        ("", 4, ["severity:broken", "reach:theoretical"]),
+    ] {
+        service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "update", "id": id, "labels": labels, "priority": 0,
+        })).unwrap())).await.unwrap();
+        let task = tasks.get(id).unwrap();
+        assert_eq!(task.priority.0, expected, "{labels:?}: {:?}", task.labels);
+        assert!(task.labels.contains(&"from-finding".into()));
+        for axis in axes {
+            assert!(task.labels.iter().any(|label| label == axis));
+            let prefix = axis.split_once(':').unwrap().0;
+            assert_eq!(task.labels.iter().filter(|label| label.starts_with(&format!("{prefix}:"))).count(), 1);
+        }
+        if labels.is_empty() {
+            assert!(!task.labels.iter().any(|label| label == "incident" || label == "corrected" || label.starts_with("journey:")));
+        }
+    }
+}
+
 async fn pre_existing_follow_up(test_env: &mut TestEnvGuard, under_epic: bool) {
     let (temp, core, repo, task_id) =
         fixture_with_project(test_env, under_epic.then_some("qa-follow-up-fixture"));

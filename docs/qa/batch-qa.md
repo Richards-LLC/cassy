@@ -27,6 +27,13 @@ the exact receipt call once per target branch and live parked task set. Unrelate
 merges that only move the target tip do not repeat it. A new task set receives
 an offer using the current target SHA; the supervisor still records the receipt.
 
+Offers belong to the epic's current verification owner. Ownership transfers
+create a new offer for that owner; an owner absent from this machine never
+falls back to an unrelated supervisor. Delivery and inbox reads recheck both
+ownership and outstanding QA. Old hourly `qa_batch_overdue` notices and offers
+already covered by QA are withheld with their stored history retained, even
+when a different close gate still holds the shipped task open.
+
 While building, implementers capture before/after evidence at 390 and 1440
 pixels for visual changes. A non-implementer walks the frozen-tip candidate (or
 deployed staging where one exists), capped per release, and writes one ledger

@@ -41,6 +41,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "Supervisor reports journeys passed; run id pending",
         "Supervisor reports journeys passed; GitHub issue #1235",
         "QA says the tests passed",
+        "QA verified 12 tests",
         "QA reports the tests succeeded",
         "Supervisor reports tests passed, build not verified",
         "The merge queue will run the journeys after close",

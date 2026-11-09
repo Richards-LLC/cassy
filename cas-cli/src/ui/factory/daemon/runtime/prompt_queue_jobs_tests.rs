@@ -120,7 +120,7 @@ fn stale_blocked_relay_escalates_once_cas_f66d() {
     assert_eq!(notice.target, "lead");
     assert_eq!(notice.factory_session.as_deref(), Some("s"));
     assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
-    assert_eq!(super::super::FactoryDaemon::supervisor_wake_class(
+    assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
         &super::super::queue_and_events::WakeSender::Daemon, "lead", &notice.source, &notice.prompt,
     ), Some(super::super::queue_and_events::SupervisorWakeClass::Blocker));
     assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().pending_reason,

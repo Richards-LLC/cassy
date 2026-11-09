@@ -242,6 +242,13 @@ impl ClaimHolder {
     fn from_reason(reason: Option<&str>) -> Option<Self> {
         serde_json::from_str(reason?).ok()
     }
+
+    /// Source admission has always encoded the card id in this JSON name.
+    /// Keep existing sweep claims portable without a new Cloud protocol.
+    fn is_source_task(&self, project: &str, task_id: &str) -> bool {
+        self.v == 1 && self.kind == "task" && self.project == project
+            && self.name.ends_with(&format!(" (task {task_id})"))
+    }
 }
 
 /// A claim held by an agent that is not registered in this database.
@@ -802,6 +809,36 @@ impl PeerClaims {
             Instant::now() + CLAIM_TIMEOUT, None)
     }
 
+    /// Staffing a synced card moves its GitHub source, but never an
+    /// independent card's claim or a teammate account's lock. The caller
+    /// holds the source fence and has authenticated a live supervisor.
+    pub(crate) fn take_source_for_task(
+        &self, source: &str, task_id: &str, observed: &PeerHold,
+        agent_id: &str, agent_name: &str, duration_secs: u32,
+    ) -> Acquire {
+        let key = self.key(source);
+        let lock = match self.read_lock(&key, agent_id) {
+            Ok(Some(lock)) => lock,
+            _ => return Acquire::PeerHolds(observed.clone()),
+        };
+        if lock.foreign_account || lock.agent_id != observed.agent_id
+            || !ClaimHolder::from_reason(lock.claim_reason.as_deref())
+                .is_some_and(|holder| holder.is_source_task(&self.project, task_id))
+        {
+            return Acquire::PeerHolds(observed.clone());
+        }
+        // Conditional release rechecks the exact epoch/renewal snapshot;
+        // a concurrent winner is reported rather than overwritten.
+        match self.move_claim(source, ClaimKind::Task, &lock.agent_id,
+            agent_id, agent_name, duration_secs,
+            self.budget.expect("source handoff has a budget").deadline, Some(&lock))
+        {
+            // A known conflict cannot become advisory permission on failure.
+            Acquire::Unavailable(_) => Acquire::PeerHolds(observed.clone()),
+            answer => answer,
+        }
+    }
+
     fn move_claim(
         &self,
         task_id: &str,
@@ -1220,6 +1257,17 @@ pub fn renew_agent_claims(cas_root: &Path, agent_id: &str) -> RenewReport {
                 report.failed += 1;
             }
             Acquire::PeerHolds(hold) => {
+                if source_task.as_ref().is_some_and(|task|
+                    claims.read_lock(&claims.key(&task_id), agent_id).ok().flatten()
+                        .is_some_and(|lock| !lock.foreign_account && lock.agent_id == hold.agent_id
+                            && ClaimHolder::from_reason(lock.claim_reason.as_deref())
+                                .is_some_and(|holder| holder.is_source_task(&claims.project, &task.id))))
+                {
+                    // The same card was staffed by a peer. Retire this old
+                    // heartbeat registration instead of reclaiming or alarming.
+                    let _ = forget_source_claim(cas_root, agent_id, &task_id);
+                    continue;
+                }
                 notify_claim_lost(cas_root, agents.as_ref(), me.as_ref(), agent_id, &task_id, &hold);
                 report.conflicts.push((task_id, hold));
             }

@@ -2,16 +2,25 @@ use crate::mcp::tools::core::imports::*;
 
 /// The `dep_type` both `dep_add` and `dep_remove` read (cas-96ab): one
 /// parser, so the edge `dep_add` writes is the one a matching `dep_remove`
-/// finds. Case and `_`/`-` are ignored; anything unrecognised means Blocks.
-fn parse_dep_type(raw: &str) -> DependencyType {
-    match raw.to_lowercase().replace('_', "-").as_str() {
+/// finds. Case and `_`/`-` are ignored; unsupported types are refused.
+fn parse_dep_type(raw: &str) -> Result<DependencyType, McpError> {
+    let dep_type = match raw.to_lowercase().replace('_', "-").as_str() {
+        "blocks" => DependencyType::Blocks,
         "related" => DependencyType::Related,
         "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
         "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
         "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
         "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-        _ => DependencyType::Blocks,
-    }
+        _ => {
+            let valid = ["blocks", "requires_start", "related", "parent", "discovered", "extracted"];
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Unsupported dependency type `{raw}`. Valid values: {}.", valid.join(", "))),
+                data: Some(serde_json::json!({ "dep_type": raw, "valid_values": valid })),
+            });
+        }
+    };
+    Ok(dep_type)
 }
 
 impl CasCore {
@@ -33,7 +42,7 @@ impl CasCore {
             data: None,
         })?;
 
-        let dep_type = parse_dep_type(&req.dep_type);
+        let dep_type = parse_dep_type(&req.dep_type)?;
 
         let dep = Dependency {
             from_id: req.from_id.clone(),
@@ -162,7 +171,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let dep_type = parse_dep_type(&req.dep_type);
+        let dep_type = parse_dep_type(&req.dep_type)?;
 
         let found = task_store
             .remove_dependency_of_type(&req.from_id, &req.to_id, dep_type)

@@ -594,7 +594,7 @@ pub struct DependencyRequest {
     /// Dependency type: blocks close-gates and warn on start; requires_start
     /// remains a hard start gate.
     #[schemars(
-        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', or 'duplicate'"
+        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', 'discovered', or 'extracted'. Unsupported types are rejected."
     )]
     #[serde(default = "default_dep_type")]
     pub dep_type: String,

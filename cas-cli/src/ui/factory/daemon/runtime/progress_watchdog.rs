@@ -362,6 +362,76 @@ mod tests {
             .filter(|row| row.target == "operator" && row.prompt.contains("cas-c1fb-peer-handoff")).count(), 1);
     }
 
+    /// cas-1f65: the Nov 9 overnight. A train frozen for release (lift is
+    /// operator-only) holds two parked children. The supervisor hears once
+    /// that the freeze holds them and who lifts it; nothing is chased as a
+    /// stall or paged. After the lift they are local work again.
+    #[test]
+    fn deliveries_held_by_a_train_freeze_are_reported_once_not_paged_cas_1f65() {
+        use crate::mcp::tools::core::workflow::release_freeze;
+        const SESSION: &str = "frozen-train-1f65";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let repo = env.home().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").current_dir(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        let lane = "epic/release-train-vnext-cas-db63";
+        git(&["branch", lane]);
+        git(&["checkout", "-q", "-b", "factory/delivery"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let cas_dir = crate::store::init_cas_dir(&repo).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        for (name, role) in [("ready-cobra-72", AgentRole::Supervisor), ("bright-hound-47", AgentRole::Worker)] {
+            let mut agent = Agent::new(format!("{name}-id"), name.into());
+            (agent.role, agent.factory_session) = (role, Some(SESSION.into()));
+            agents.register(&agent).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut train = Task::new("cas-db63".into(), "Release train vNEXT".into());
+        (train.task_type, train.labels, train.branch) =
+            (cas_types::TaskType::Epic, vec!["release-train".into()], Some(lane.into()));
+        tasks.add(&train).unwrap();
+        for id in ["cas-0f47", "cas-1d99"] {
+            let mut task = Task::new(id.into(), "Parked train child".into());
+            (task.status, task.assignee) = (TaskStatus::AwaitingMerge, Some("bright-hound-47".into()));
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: lane.into(),
+            });
+            tasks.add(&task).unwrap();
+        }
+        release_freeze::freeze(&cas_dir, "cas-db63", "operator", None).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135, 180] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert!(rows.iter().all(|row| row.target != "operator" && !row.prompt.contains("progress_stalled")),
+            "a frozen train is not a stall: {rows:?}");
+        let held: Vec<_> = rows.iter().filter(|row| row.prompt.contains("kind=\"progress_operator_held\"")).collect();
+        assert_eq!(held.len(), 1, "one notice per freeze: {rows:?}");
+        assert_eq!(held[0].target, "ready-cobra-72");
+        assert!(["cas-0f47", "cas-1d99", "cas-db63"].iter().all(|id| held[0].prompt.contains(id)), "{}", held[0].prompt);
+
+        // The lift makes them mergeable here again: an ordinary stall.
+        release_freeze::lift(&cas_dir, "cas-db63", "operator").unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.prompt.contains("progress_stalled")).count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+    }
+
     /// GH #1500 / #1302: an overnight with a live, heartbeating but silent
     /// peer and an idle supervisor whose only wake is event-based. The
     /// supervisor is woken once at 45 min, the operator is paged once at

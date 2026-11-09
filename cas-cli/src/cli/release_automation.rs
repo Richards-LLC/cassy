@@ -1229,6 +1229,64 @@ mod tests {
     }
 
     #[test]
+    fn backfill_apply_reports_actual_hold_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(temp.path());
+        let mut child = Task::new("cas-held001".into(), "Published but held".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(git(temp.path(), &["rev-parse", "HEAD"]).unwrap());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        child.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+        let store = open_task_store(&root).unwrap();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        let report = close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        let outcome = report.split(&format!("{}: ", child.id)).nth(1).unwrap();
+        // HOLD and CI_OVERRIDE are machine outcome/refusal codes.
+        assert_eq!(outcome.split_whitespace().next(), Some("HOLD"), "{report}");
+        assert!(outcome.contains("CI_OVERRIDE"), "{report}");
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn backfill_uses_later_published_tag_for_shipped_child_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let repo = temp.path();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "-b", "factory/later-shipped"]).unwrap();
+        fs::write(repo.join("later.txt"), "later release delivery\n").unwrap();
+        git(repo, &["add", "later.txt"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fix(cas-later001): later release delivery"]).unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["tag", "v4.4.0"]).unwrap();
+        git(repo, &["push", "origin", "refs/tags/v4.4.0"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "another task reuses this branch"]).unwrap();
+        let mut child = Task::new("cas-later001".into(), "Shipped by later release".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.assignee = Some("release-owner".into());
+        child.deliverables.factory_branch_anchor = Some(anchor.clone());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: child.deliverables.work_target.clone().unwrap(),
+            assignee: "release-owner".into(), branch: "factory/later-shipped".into(), base_sha: base,
+        });
+        child.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+        let store = open_task_store(&root).unwrap();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &child.id).unwrap();
+        assert!(receipts.iter().any(|receipt| receipt.release_tag.as_deref() == Some("v4.4.0")
+            && receipt.task_heads.get(&child.id) == Some(&anchor)));
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+
+    #[test]
     fn backfill_continues_after_bad_train_and_accepts_legacy_train_lane() {
         let (temp, root, _, _, _) = fixture();
         let repo = temp.path();

@@ -507,5 +507,28 @@ mod describe_dependency_tests {
                 "dep_remove dep_type={spelling} removes the edge dep_add wrote"
             );
         }
+        for (index, invalid) in ["duplicate", "not-a-dependency", ""].into_iter().enumerate() {
+            let from = format!("cas-e659-from-{index}");
+            let to = format!("cas-e659-to-{index}");
+            store.add(&Task::new(from.clone(), "from".into())).unwrap();
+            store.add(&Task::new(to.clone(), "to".into())).unwrap();
+            let request = || Parameters(DependencyRequest {
+                from_id: from.clone(), to_id: to.clone(), dep_type: invalid.into(),
+            });
+            let error = core.cas_task_dep_add(request()).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.data.as_ref().unwrap()["valid_values"], serde_json::json!([
+                "blocks", "requires_start", "related", "parent", "discovered", "extracted"
+            ]));
+            assert!(store.get_dependencies(&from).unwrap().is_empty());
+            assert_eq!(store.get(&from).unwrap().status, TaskStatus::Open);
+
+            store.add_dependency(&Dependency::new(from.clone(), to.clone(), DependencyType::Blocks)).unwrap();
+            let error = core.cas_task_dep_remove(request()).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            let remaining = store.get_dependencies(&from).unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].dep_type, DependencyType::Blocks);
+        }
     }
 }

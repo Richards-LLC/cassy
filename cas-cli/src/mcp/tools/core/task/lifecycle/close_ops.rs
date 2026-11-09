@@ -14904,6 +14904,51 @@ fn released_version_heading(line: &str) -> bool {
         })
 }
 
+type PromotionNotes = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
+
+thread_local! {
+    static PROMOTION_NOTES: std::cell::RefCell<Option<PromotionNotes>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Keep shared presence probes read-only while carrying their promotion
+/// evidence back to the close gate that owns the persisted task note.
+struct PromotionAudit {
+    notes: Option<PromotionNotes>,
+    previous: Option<PromotionNotes>,
+}
+
+impl PromotionAudit {
+    fn new() -> Self {
+        Self::inherit(Some(Default::default()))
+    }
+
+    fn current() -> Option<PromotionNotes> {
+        PROMOTION_NOTES.with(|notes| notes.borrow().clone())
+    }
+
+    fn inherit(notes: Option<PromotionNotes>) -> Self {
+        let previous = PROMOTION_NOTES.with(|current| current.replace(notes.clone()));
+        Self { notes, previous }
+    }
+
+    fn record(note: String) {
+        if let Some(notes) = Self::current() {
+            notes.lock().unwrap().insert(note);
+        }
+    }
+
+    fn note(&self) -> Option<String> {
+        let notes = self.notes.as_ref()?.lock().unwrap();
+        (!notes.is_empty()).then(|| notes.iter().cloned().collect::<Vec<_>>().join("; "))
+    }
+}
+
+impl Drop for PromotionAudit {
+    fn drop(&mut self) {
+        PROMOTION_NOTES.with(|notes| notes.replace(self.previous.take()));
+    }
+}
+
 /// The history-derived ledger drop exception and its audit note.
 fn without_regenerated_history(
     repo_path: &std::path::Path,
@@ -15214,6 +15259,27 @@ fn epic_anchor_supersession(
 /// The recorded anchor is the only accepted snapshot: a reused live lane
 /// cannot supply another task's final blob to this child's epic accounting.
 fn epic_anchor_content_presence(
+    task: &Task,
+    children: &[Task],
+    repo: &std::path::Path,
+    anchor: &str,
+    target: &str,
+) -> (DeliveryContentPresence, Option<String>) {
+    let audit = PromotionAudit::new();
+    let (presence, note) = epic_anchor_content_presence_inner(task, children, repo, anchor, target);
+    let note = if matches!(&presence, DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }) {
+        match (note, audit.note()) {
+            (Some(note), Some(promotion)) => Some(format!("{note}; task {}: {promotion}", task.id)),
+            (None, Some(promotion)) => Some(format!("task {}: {promotion}", task.id)),
+            (note, None) => note,
+        }
+    } else {
+        note
+    };
+    (presence, note)
+}
+
+fn epic_anchor_content_presence_inner(
     task: &Task,
     children: &[Task],
     repo: &std::path::Path,
@@ -15644,6 +15710,7 @@ fn anchored_delivery_content_gate(
         .unwrap_or(std::time::Duration::MAX)
         .min(CHILD_CONTENT_GATE_BUDGET);
     let _scope = epic_measurement::Scope::new(budget);
+    let audit = PromotionAudit::new();
     let started = std::time::Instant::now();
     let outcome = anchored_delivery_content_gate_unbounded(
         task,
@@ -15676,7 +15743,17 @@ fn anchored_delivery_content_gate(
             budget.as_secs()
         )));
     }
-    outcome
+    match (outcome, audit.note()) {
+        (None | Some(MergeStateGateOutcome::Proceed), Some(note)) => {
+            Some(MergeStateGateOutcome::ProceedWithNote(format!(
+                "DECISION: delivery content accepted for task {}: {note}.", task.id
+            )))
+        }
+        (Some(MergeStateGateOutcome::ProceedWithNote(note)), Some(promotion)) => {
+            Some(MergeStateGateOutcome::ProceedWithNote(format!("{note}; {promotion}")))
+        }
+        (outcome, _) => outcome,
+    }
 }
 
 fn anchored_delivery_content_gate_unbounded(
@@ -25751,13 +25828,16 @@ fn delivery_content_presence_on_target_for_paths(
     // A release cut consumes per-task fragments after promoting their entries
     // into CHANGELOG.md. Apply that content-equivalence rule at the shared
     // target seam so close, merge and epic callers cannot disagree.
-    let (_, remaining) = without_promoted_changelog_fragments(
+    let (note, remaining) = without_promoted_changelog_fragments(
         repo_path,
         delivery_commit,
         target_ref,
         paths.clone(),
         owners,
     );
+    if let Some(note) = note {
+        PromotionAudit::record(note);
+    }
     if remaining.is_empty() {
         DeliveryContentPresence::Present { paths }
     } else {
@@ -25917,6 +25997,7 @@ where
         return items.iter().map(measure).collect();
     }
     let deadline = epic_measurement::deadline();
+    let promotion_notes = PromotionAudit::current();
     let width = std::thread::available_parallelism()
         .map_or(4, |count| count.get())
         .clamp(1, 8);
@@ -25927,8 +26008,10 @@ where
             let running: Vec<_> = chunk
                 .iter()
                 .map(|item| {
+                    let promotion_notes = promotion_notes.clone();
                     scope.spawn(move || {
                         let _deadline = epic_measurement::Scope::inherit(deadline);
+                        let _audit = PromotionAudit::inherit(promotion_notes);
                         measure(item)
                     })
                 })

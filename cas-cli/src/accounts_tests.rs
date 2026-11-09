@@ -14,7 +14,7 @@ fn claude_status_fixture(body: &str) -> crate::test_support::TestEnvGuard {
     let client = bin.join("claude");
     write(&client, &format!("#!/bin/sh\n{body}\n"));
     std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
-    env.set("PATH", &bin);
+    env.set("CAS_TEST_CLAUDE_BIN", &client);
     env
 }
 

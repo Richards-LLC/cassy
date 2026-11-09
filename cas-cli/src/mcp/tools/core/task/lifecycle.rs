@@ -2892,11 +2892,18 @@ impl CasCore {
                             Ok(ReusedFactoryBranchStart::Unchanged) => None,
                             Ok(ReusedFactoryBranchStart::Occupied { commit }) if fresh_start => {
                                 let lane = worker_branch.clone();
+                                let tip = crate::git_evidence::git_text(
+                                    worker_checkout, &["log", "-1", "--format=%H (%s)", &lane],
+                                ).ok_or_else(|| Self::error(
+                                    ErrorCode::INVALID_PARAMS,
+                                    format!("Cannot inspect retained branch {lane} before starting task {}.", task.id),
+                                ))?;
+                                let tip = tip.trim();
                                 worker_branch = checkout_task_beside_parked_delivery(
                                     worker_checkout, &worker.name, &task.id, target_branch, false,
                                 ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
                                 Some(format!(
-                                    "\n\n🔀 TASK BRANCH CUT: {lane} still holds {commit} outside `{target_branch}` and stays unchanged. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
+                                    "\n\n🔀 TASK BRANCH CUT: {lane} stays unchanged at tip {tip}. Unattributed work outside `{target_branch}` includes {commit}. This task starts on {worker_branch} from `{target_branch}`, so its PR does not wait for that work."
                                 ))
                             }
                             Ok(ReusedFactoryBranchStart::Occupied { commit }) => {

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  epic-timeout-recovery:
+    title: Timeout recovery commands record an exact supervisor verdict of the correct type before ordinary close; stale verdicts and unshipped receipts do not authorize the current dispatch
+    tasks: [cas-bf13]
+    invariants: [FACTORY-EXACT-TIMEOUT-RECOVERY]
+    journeys: [FACTORY-CLOSE]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]
@@ -274,6 +279,9 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-EXACT-TIMEOUT-RECOVERY:
+    statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
+    check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
   FACTORY-FINDING-PRIORITY:
     statement: Reproduced primary factory and CLI findings retain severity times main reach priority; correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
     check: Run independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
@@ -847,7 +855,7 @@ journeys:
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
   owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

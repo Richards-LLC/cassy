@@ -8083,6 +8083,7 @@ impl CasCore {
                             })?;
                         return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                             &req.id,
+                            required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Dispatch {
                                 dispatch_id: &timed_out.id,
                                 waited_mins: None,
@@ -8153,6 +8154,7 @@ impl CasCore {
                 {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                         &req.id,
+                        required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
                             dispatch_id: &dispatch.id,
                             waited_mins: None,
@@ -10057,6 +10059,7 @@ impl CasCore {
                     let recovery_action = timed_out.recovery_action.to_string();
                     return Ok(Self::tool_error(gate_text::verification_timeout_message(
                         &req.id,
+                        required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
                             dispatch_id: &timed_out.id,
                             waited_mins: Some(elapsed_mins),
@@ -10212,6 +10215,7 @@ impl CasCore {
                         // supervisor an alias they cannot call.
                         return Ok(Self::tool_error(gate_text::verification_timeout_message(
                             &req.id,
+                            required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Legacy {
                                 waited_mins: elapsed_mins,
                             },
@@ -30816,7 +30820,8 @@ esac
 
         let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
         assert!(refused, "{text}");
-        assert!(text.contains("VERIFICATION TIMED OUT") && text.contains("Already shipped"), "{text}");
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap().state,
+            cas_types::VerificationDispatchState::TimedOut);
         assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
         assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
 

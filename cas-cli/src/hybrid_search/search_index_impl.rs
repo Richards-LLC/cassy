@@ -148,6 +148,7 @@ impl SearchIndex {
             writer_memory: DEFAULT_WRITER_MEMORY,
             cached_reader: std::sync::Mutex::new(None),
             cached_query_parser: std::sync::Mutex::new(None),
+            task_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -233,6 +234,7 @@ impl SearchIndex {
             writer_memory: DEFAULT_WRITER_MEMORY,
             cached_reader: std::sync::Mutex::new(None),
             cached_query_parser: std::sync::Mutex::new(None),
+            task_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -403,6 +405,64 @@ impl SearchIndex {
         writer.commit()?;
 
         Ok(())
+    }
+
+    /// Refresh task documents from the canonical store in one batch.
+    /// The shared snapshot avoids rewriting the index until a task is added,
+    /// removed, or updated, while a new process always performs an initial
+    /// reconciliation before returning task search results.
+    pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<bool, MemError> {
+        let mut snapshot = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.updated_at.timestamp_micros()))
+            .collect::<Vec<_>>();
+        snapshot.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut indexed_snapshot = self
+            .task_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if indexed_snapshot.as_ref() == Some(&snapshot)
+            && self.count_documents(DocType::Task)? == tasks.len() as u64
+        {
+            return Ok(false);
+        }
+
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
+        let mut writer = self.writer()?;
+        writer.delete_term(tantivy::Term::from_field_text(
+            self.doc_type_field,
+            DocType::Task.as_str(),
+        ));
+
+        for task in tasks {
+            let mut content = task.title.clone();
+            if !task.description.is_empty() {
+                content.push(' ');
+                content.push_str(&task.description);
+            }
+            if !task.acceptance_criteria.is_empty() {
+                content.push(' ');
+                content.push_str(&task.acceptance_criteria);
+            }
+
+            let mut doc = tantivy::TantivyDocument::new();
+            doc.add_text(self.id_field, &task.id);
+            doc.add_text(self.content_field, &content);
+            doc.add_text(self.tags_field, "");
+            doc.add_text(self.type_field, task.status.to_string());
+            doc.add_text(self.doc_type_field, DocType::Task.as_str());
+            doc.add_text(self.title_field, &task.title);
+            writer.add_document(doc)?;
+        }
+
+        writer.commit()?;
+        *self
+            .cached_reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *indexed_snapshot = Some(snapshot);
+        Ok(true)
     }
 
     /// Index durable task artifacts with one commit for a close-time scan or

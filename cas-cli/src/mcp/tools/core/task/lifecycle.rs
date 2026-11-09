@@ -966,11 +966,18 @@ fn task_similarity(
 /// One open task that overlaps a task being created.
 type SimilarTask = (String, String, f64, Vec<String>);
 
+fn normalize_task_scope(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 /// The overlap checks for a new task, split by whether they may block it.
 #[derive(Debug, Default)]
 struct OpenTaskOverlap {
-    /// The best-scoring overlap with any open task other than the new task's
-    /// own parent epic and its siblings. This one requires confirmation.
+    /// The best-scoring overlap that requires confirmation, including exact
+    /// duplicates among siblings.
     blocking: Option<SimilarTask>,
     /// The best-scoring overlap with a sibling under the same epic. Children
     /// of one epic naturally share its identifiers, so this only warns.
@@ -1050,7 +1057,9 @@ fn open_task_similarity(
         else {
             continue;
         };
-        let slot = if siblings.contains(&task.id) {
+        let identical_scope = normalize_task_scope(&task.title) == normalize_task_scope(title)
+            && normalize_task_scope(&task.description) == normalize_task_scope(description);
+        let slot = if siblings.contains(&task.id) && !identical_scope {
             &mut overlap.sibling
         } else {
             &mut overlap.blocking
@@ -4212,7 +4221,7 @@ mod related_recall_response_tests {
                 &peer_task,
                 &[],
                 Some(&epic.id),
-                Some("peer-session"),
+                None,
             )
             .expect("persist peer-created task and parent edge");
 

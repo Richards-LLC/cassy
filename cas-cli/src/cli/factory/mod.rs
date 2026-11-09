@@ -457,8 +457,13 @@ fn resolve_lane_worker_specs(
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    let decisions = resolve_lane_specs(lane, slots, snapshot)
+    let primary = resolve_lane_specs(lane, slots, &Default::default())
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let decisions = if primary[0].spec.cli == cas_mux::SupervisorCli::Codex {
+        primary
+    } else {
+        resolve_lane_specs(lane, slots, snapshot).map_err(|error| anyhow::anyhow!(error.to_string()))?
+    };
     let recipe_id = decisions
         .first()
         .map(|decision| decision.recipe_id.clone())
@@ -1814,7 +1819,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
 
     // Resolve per-worker specs from the cascade (cas-2992): config files,
     // CLI flags, and per-worker JSON overrides in priority order.
-    let (mut resolved_worker_specs, worker_fallback_model, lane_route_notice) = {
+    let (mut resolved_worker_specs, worker_fallback_model, mut lane_route_notice) = {
         if let Some(lane) = args.lane.as_deref() {
             let (specs, notice) = resolve_lane_worker_specs(
                 lane,
@@ -1853,16 +1858,25 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         }
     };
 
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
+    }
+    if let Some(lane) = args.lane.as_deref() {
+        let (recipe, warnings) = crate::factory_auth_health::resolve_lane_account_models(
+            lane, &mut resolved_worker_specs, &preflight.capability_snapshot,
+        ).map_err(anyhow::Error::msg)?;
+        lane_route_notice = Some(format!("lane={lane} resolved recipe={recipe}{}",
+            warnings.into_iter().map(|warning| format!("; Warning: {warning}")).collect::<String>()));
+        if let Some(home) = dirs::home_dir() {
+            crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
+        }
+    }
     if let Some(notice) = lane_route_notice.as_deref() {
         tracing::info!(target: "cas::factory", "Factory lane route: {notice}");
         let theme = crate::ui::theme::ActiveTheme::default();
         let mut stdout = std::io::stdout();
         let mut fmt = crate::ui::components::Formatter::stdout(&mut stdout, theme);
         fmt.info(&format!("Factory lane route: {notice}"))?;
-    }
-
-    if let Some(home) = dirs::home_dir() {
-        crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
     }
 
     // cas-7199 / cas-a487: any resolved worker spec that landed on Codex

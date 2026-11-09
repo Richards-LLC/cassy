@@ -767,7 +767,7 @@ impl CasCore {
                 cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed
             )
             && let Some(verifier) = proof_dispatch.verifier_agent_id.as_deref().filter(|id| *id != caller_id)
-            && agent_store.get(verifier).is_ok_and(|agent| agent.is_alive())
+            && agent_store.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent))
         {
             let existing = cas_store::get_verification_for_dispatch(&self.cas_root, &requested_dispatch_id)
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
@@ -1112,9 +1112,16 @@ impl CasCore {
                 message: Cow::from(format!("Failed to commit verification transaction: {e}")),
                 data: None,
             })?;
+            crate::mcp::tools::service::mutation_receipt::verification_add_committed(
+                &req.task_id,
+                &verification.id,
+            );
         }
 
         if verification.status != VerificationStatus::SupervisorCall {
+            let _phase = crate::mcp::tools::service::mutation_receipt::phase(
+                "verification_reclaim_targets",
+            );
             crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
         }
 
@@ -1169,6 +1176,9 @@ impl CasCore {
         let candidate = super::premerge_verification::candidate_for_dispatch(&self.cas_root, &proof_dispatch)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         let close_retry = if candidate.is_some() {
+            let _phase = crate::mcp::tools::service::mutation_receipt::phase(
+                "verification_continuation",
+            );
             self.continue_premerge_after_verdict(&proof_dispatch, verification.status).await.unwrap_or_else(|error| format!("\nVerdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
         } else if verification.status == VerificationStatus::SupervisorCall {
             format!(
@@ -1630,6 +1640,54 @@ mod lifecycle_friction_tests {
         )
         .unwrap();
         (dir, core, task, dispatch)
+    }
+
+    #[tokio::test]
+    async fn cas_ce3e_dead_active_verifier_allows_supervisor_verdict() {
+        let mut env = TestEnvGuard::temp_home();
+        let (_dir, core, task, dispatch) = fixture(&mut env);
+        let mut process = std::process::Command::new("sh")
+            .args(["-c", "exit 0"]).spawn().unwrap();
+        let mut child = Agent::new_sub_agent(
+            "exited-verifier".into(), "task-verifier".into(), "review-supervisor".into(),
+        );
+        child.pid = Some(process.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut child, process.id());
+        process.wait().unwrap();
+        core.open_agent_store().unwrap().register(&child).unwrap();
+        let issued = cas_store::issue_verifier_capability(
+            &core.cas_root, &task.id, "review-supervisor",
+        ).unwrap();
+        cas_store::bind_verifier_capability(&core.cas_root, &issued.token, &child.id).unwrap();
+        cas_store::claim_verification_dispatch(
+            &core.cas_root, &task.id, "review-supervisor", &child.id, &issued.capability.id,
+        ).unwrap();
+        let input = crate::hooks::HookInput {
+            hook_event_name: "PreToolUse".into(),
+            session_id: "review-supervisor".into(),
+            agent_role: Some("supervisor".into()),
+            cwd: core.cas_root.parent().unwrap().to_string_lossy().into_owned(),
+            tool_name: Some("Agent".into()),
+            tool_use_id: Some("replacement-verifier".into()),
+            tool_input: Some(serde_json::json!({
+                "subagent_type":"task-verifier", "prompt":format!("Verify task {}", task.id),
+            })),
+            ..Default::default()
+        };
+        let hook = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&core.cas_root)).unwrap();
+        assert_ne!(serde_json::to_value(hook).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
+        let result = core.cas_verification_add(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "task_id":task.id,"dispatch_id":dispatch.id,
+                "status":"rejected","summary":"Recover after verifier exit",
+                "issues":"[{\"file\":\"src/lib.rs\",\"category\":\"correctness\",\"problem\":\"incomplete\"}]"
+            })).unwrap(),
+        )).await.expect("an exited verifier cannot block a supervisor verdict");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
+            .unwrap().unwrap();
+        assert_eq!(recorded.status, VerificationStatus::Rejected);
+        assert_eq!(recorded.provenance, cas_types::VerificationProvenance::SupervisorDirect);
     }
 
     #[tokio::test]

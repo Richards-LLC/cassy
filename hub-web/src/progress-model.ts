@@ -55,6 +55,8 @@ export interface ReleaseEpic {
   readonly counts?: EpicCounts;
   /** cas-2f4d: a frozen train's measured line, "Frozen 2:05 PM ET · ETA 2:50 PM ET". */
   readonly freeze?: { readonly frozen_at: string; readonly eta?: string | null; readonly summary: string } | null;
+  /** cas-e060: whether the operator paused this train's automatic cut; absent on other epics. */
+  readonly auto_cut_paused?: boolean;
 }
 export interface EpicCounts { readonly open: number; readonly in_progress: number; readonly merged: number }
 

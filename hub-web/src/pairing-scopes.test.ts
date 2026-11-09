@@ -329,6 +329,8 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
       "write-access": "factory-manage",
       // cas-2f4d: freezing is operating the train; lifting a freeze is the operator's management call.
       "freeze-train": "factory-operate", "lift-freeze": "factory-manage",
+      // cas-e060: pausing or resuming auto-cut is reversible operation.
+      "auto-cut": "factory-operate",
     };
     for (const [operation, scope] of Object.entries(expected) as [FleetOperation, Scope][]) expect(fleetOperationScope(operation), operation).toBe(scope);
   });

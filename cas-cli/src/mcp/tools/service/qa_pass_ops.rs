@@ -61,7 +61,21 @@ impl CasService {
         for task_id in receipt.task_heads.keys() {
             let note = match receipt.author_overrides.get(task_id) {
                 Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
-                None => note.clone(),
+                None => {
+                    let waiver = self.inner.open_task_store()?.get(task_id).ok()
+                        .and_then(|task| {
+                            let (repo, _) = crate::qa_batch::task_context(&self.inner.cas_root, &task).ok()?;
+                            if receipt.schema_version != cas_store::RELEASE_VERDICT_SCHEMA
+                                || crate::qa_batch::author_is_independent(&self.inner.cas_root, &task, &repo,
+                                    receipt.ledger_author_id.as_deref()?).ok()? { return None; }
+                            crate::qa_batch::release_author_waiver(&self.inner.cas_root, &task, &repo,
+                                receipt.task_heads.get(task_id)?).ok().flatten()
+                        });
+                    match waiver {
+                        Some(pass) => format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head),
+                        None => note.clone(),
+                    }
+                },
             };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");

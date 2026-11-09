@@ -180,6 +180,7 @@ pub(crate) struct StallEvidenceRequest {
     cas_dir: PathBuf,
     epic_id: Option<String>,
     session: String,
+    supervisor_name: String,
     /// The parked deliveries in the loop's current snapshot, for a job that
     /// reads no new snapshot (the database is unchanged).
     parked: Vec<ParkedDelivery>,
@@ -191,19 +192,22 @@ impl StallEvidenceRequest {
         cas_dir: PathBuf,
         epic_id: Option<String>,
         session: String,
+        supervisor_name: String,
         current: &DirectorData,
     ) -> Self {
         let parked = epic_id
             .as_deref()
             .map(|epic_id| parked_deliveries(current, epic_id))
             .unwrap_or_default();
-        let assignment = AssignmentRequest::new(cas_dir.clone(), current);
-        Self { cas_dir, epic_id, session, parked, assignment }
+        let assignment = AssignmentRequest::new(cas_dir.clone(), current, &session, &supervisor_name);
+        Self { cas_dir, epic_id, session, supervisor_name, parked, assignment }
     }
 
     pub(super) fn assignment_request(&self, fresh: Option<&DirectorData>) -> Option<AssignmentRequest> {
         match fresh {
-            Some(data) => AssignmentRequest::new(self.cas_dir.clone(), data),
+            Some(data) => AssignmentRequest::new(
+                self.cas_dir.clone(), data, &self.session, &self.supervisor_name,
+            ),
             None => self.assignment.clone(),
         }
     }
@@ -922,6 +926,7 @@ mod tests {
             dir.path().into(),
             Some("cas-epic".into()),
             "here".into(),
+            "supervisor".into(),
             &data,
         );
         let classify = |fresh| {

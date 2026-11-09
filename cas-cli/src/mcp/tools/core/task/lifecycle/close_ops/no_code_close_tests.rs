@@ -1553,6 +1553,86 @@ async fn reset_reused_lane_no_delivery_closes_after_approval_cas_d4d8() {
     assert!(dispatch.repository.unwrap().anchor_commits.is_empty());
 }
 
+/// GH #1673: retargeting an unmodified task lane must allow a supervisor to
+/// bind its clean replacement before the worker has to commit any delivery.
+#[tokio::test]
+async fn retarget_empty_branch_rebind_then_start_gh1673() {
+    for obstruction in ["old-commit", "historical-anchor", "dirty", "stale-target", "none"] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let id = "cas-a4a7";
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let lane = format!("{LANE}-{id}");
+        git(&checkout, &["checkout", "-q", "-b", &lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        let original = f.task(id).deliverables.factory_branch_start.unwrap();
+        if obstruction == "old-commit" {
+            std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&checkout, &["add", "own.rs"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-a4a7): existing work"]);
+        }
+        let old_tip = git(&checkout, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "-b", "new-target"]);
+        std::fs::write(repo.join("target.rs"), "pub fn target() {}\n").unwrap();
+        git(repo, &["add", "target.rs"]);
+        git(repo, &["commit", "-qm", "target history"]);
+        git(repo, &["push", "-q", "origin", "new-target"]);
+        let target_tip = git(repo, &["rev-parse", "HEAD"]);
+        let updated = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "proof_scope_fix":true,
+            "target_branch":"new-target", "reason":"Move the task to its new release train",
+        })).await;
+        assert_eq!(f.task(id).status, TaskStatus::Open, "{updated}");
+        let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{restarted}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&original));
+
+        let replacement = format!("{lane}-retarget");
+        let base = if obstruction == "stale-target" { "main" } else { "new-target" };
+        git(&checkout, &["checkout", "-q", "-b", &replacement, base]);
+        if obstruction == "dirty" {
+            std::fs::write(checkout.join("target.rs"), "uncommitted work\n").unwrap();
+        }
+        if obstruction == "historical-anchor" {
+            let mut task = f.task(id);
+            task.deliverables.historical_factory_branch_anchors.push(old_tip.clone());
+            f.put(&task);
+        }
+        let before = f.task(id);
+        let rebound = f.supervisor.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"rebind_branch", "id":id, "branch":replacement,
+            "reason":"Approve the empty replacement from the new target",
+        })).unwrap())).await;
+        if obstruction != "none" {
+            assert!(rebound.is_err(), "{obstruction}: {rebound:?}");
+            assert_eq!(serde_json::to_value(f.task(id).deliverables).unwrap(),
+                serde_json::to_value(before.deliverables).unwrap(), "{obstruction}");
+        } else {
+            assert!(rebound.is_ok(), "{rebound:?}");
+            let restarted = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            let task = f.task(id);
+            assert_eq!(task.status, TaskStatus::InProgress, "{restarted}");
+            let start = task.deliverables.factory_branch_start.unwrap();
+            assert_eq!(start.branch, replacement);
+            assert_eq!(start.base_sha, target_tip);
+            assert_eq!(Some(start.work_target), task.deliverables.work_target);
+            assert_eq!(start.assignee, WORKER);
+            assert!(task.deliverables.factory_branch_anchor.is_none());
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+        }
+        assert_eq!(git(repo, &["rev-parse", &lane]), old_tip, "{obstruction}");
+    }
+}
+
 /// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
@@ -2053,6 +2133,90 @@ async fn merging_released_main_parks_and_re_parks_but_local_main_is_not_released
     assert_eq!(parked.status, TaskStatus::AwaitingMerge);
     assert_eq!(parked.deliverables.factory_branch_anchor, parked_anchor);
 }
+/// GH #1620: replay the supervisor's spawn-then-update lane staffing before
+/// registration, then deliver through the ordinary park and daemon repair.
+#[tokio::test]
+async fn booting_worker_assignments_reach_ordered_queue_gh1620() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    env.set("CAS_FACTORY_SESSION", "queue-session");
+    let checkout = f.cas_dir().join("worktrees").join(WORKER);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut worker = agents.get("nocode-worker-session").unwrap();
+    worker.factory_session = Some("queue-session".into());
+    worker.metadata.insert("clone_path".into(), checkout.display().to_string());
+    let mut supervisor = agents.get("nocode-supervisor-session").unwrap();
+    supervisor.factory_session = worker.factory_session.clone();
+    agents.update(&supervisor).unwrap();
+    agents.unregister(&worker.id).unwrap();
+    let mut first = assigned("cas-d033a", TaskType::Task, "main");
+    first.status = TaskStatus::Open;
+    f.put(&first);
+    let spawns = crate::store::open_spawn_queue_store(&f.cas_dir()).unwrap();
+    let request = spawns.enqueue_spawn_with_task_queue(
+        1, &[WORKER.into()], true, None, Some("queue-session"), Some(&first.id),
+        None, None, &[],
+    ).unwrap();
+    spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Launched,
+        Some(WORKER), None).unwrap();
+    let pending = ["cas-d033b", "cas-d033c", "cas-d033d", "cas-d033e"];
+    for id in pending {
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        task.assignee = None;
+        f.put(&task);
+        call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "assignee":WORKER,
+        })).await;
+    }
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let queued = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.current_task.as_deref(), Some(first.id.as_str()));
+    assert_eq!(queued.pending, pending);
+    // Replayed producers and later spawn binding cannot duplicate or erase work.
+    crate::task_assignment::enqueue(&f.cas_dir(), &f.task(pending[0])).unwrap();
+    queues.bind_spawn(request, "queue-session", WORKER).unwrap();
+    assert_eq!(queues.get("queue-session", WORKER).unwrap().pending, pending);
+    call(&f.supervisor, serde_json::json!({
+        "action":"cancel", "id":pending[1], "reason":"Withdrawn before registration",
+    })).await;
+    call(&f.supervisor, serde_json::json!({
+        "action":"update", "id":pending[2], "assignee":"another-worker",
+    })).await;
+    agents.register(&worker).unwrap();
+    spawns.mark_processed(request).unwrap();
+    spawns.record_spawn_state(request, cas_store::SpawnLifecycleState::Registered,
+        Some(WORKER), None).unwrap();
+    call(&f.worker, serde_json::json!({"action":"start", "id":first.id})).await;
+    std::fs::write(checkout.join("own.rs"), "pub fn own() {}\n").unwrap();
+    git(&checkout, &["add", "own.rs"]);
+    git(&checkout, &["commit", "-qm", "fix(cas-d033a): first delivery"]);
+    git(&checkout, &["push", "-q", "origin", LANE]);
+    let response = call(&f.worker, serde_json::json!({
+        "action":"close", "id":first.id, "reason":"Delivered",
+    })).await;
+    assert_eq!(f.task(&first.id).status, TaskStatus::AwaitingMerge, "{response}");
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(pending[0]).status, TaskStatus::InProgress);
+    let queued = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(queued.current_task.as_deref(), Some(pending[0]));
+    let prompts = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
+    let briefs = prompts.peek_for_targets(&[WORKER], Some("queue-session"), 100).unwrap();
+    assert_eq!(briefs.iter().filter(|row|
+        crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt).as_deref() == Some(pending[0])
+    ).count(), 1);
+    // Complete B at the durable handoff boundary to exercise stale-tail skipping.
+    let mut second = f.task(pending[0]);
+    second.status = TaskStatus::AwaitingMerge;
+    f.put(&second);
+    agents.release_lease(pending[0], &worker.id).unwrap();
+    crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+    assert_eq!(f.task(pending[1]).status, TaskStatus::Cancelled);
+    assert_eq!(f.task(pending[2]).assignee.as_deref(), Some("another-worker"));
+    assert_eq!(f.task(pending[3]).status, TaskStatus::InProgress);
+    assert!(queues.get("queue-session", WORKER).unwrap().pending.is_empty());
+}
+
 /// A queued successor uses its own target, while the delivery just parked or
 /// closed keeps its immutable ref. Replaying that close cannot consume C.
 #[tokio::test]
@@ -2386,6 +2550,42 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
     let result = f.supervisor.factory(Parameters(request)).await.unwrap();
     result.content.iter().filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None })
         .collect::<Vec<_>>().join("\n")
+}
+
+/// GH #1670: a held execution retains its queue cursor while another task
+/// runs. Display execution from task state without moving that durable cursor.
+#[tokio::test]
+async fn worker_queue_reports_execution_separately_from_held_cursor_cas_600b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let held_id = "cas-8488-current";
+    let pending_id = "cas-8488-one";
+    let _ = queue_control(&f, Some(vec![pending_id])).await;
+    let _ = call(&f.worker, serde_json::json!({
+        "action":"update", "id":held_id, "status":"blocked",
+    })).await;
+    assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+    let mut active = assigned("cas-600b-active", TaskType::Task, "main");
+    active.status = TaskStatus::Open;
+    active.execution_note = Some("no-code".into());
+    active.external_ref = Some(PROOF.into());
+    f.put(&active);
+    let _ = call(&f.worker, serde_json::json!({"action":"start", "id":active.id})).await;
+    assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    for ids in [None, Some(vec![pending_id])] {
+        let report = queue_control(&f, ids).await;
+        // Assert task identity and grouping order, independent of display prose.
+        let reported = report.split_whitespace().filter(|token| token.starts_with("cas-"))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, vec![active.id.as_str(), held_id, pending_id], "{report}");
+        let queue = queues.get("queue-session", WORKER).unwrap();
+        assert_eq!(queue.current_task.as_deref(), Some(held_id));
+        assert!(queue.current_started);
+        assert_eq!(queue.pending, vec![pending_id]);
+        assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+        assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    }
 }
 
 /// Queue edits are supervisor operations and only affect pending work.

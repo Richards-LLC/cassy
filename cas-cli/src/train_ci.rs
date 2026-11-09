@@ -100,7 +100,9 @@ fn notify_green(root: &Path, epic: &cas_types::Task, previous: Option<&Value>, s
         previous["last_green"].as_str() != Some(head)
             && (previous["red_since"].is_string() || previous["last_green"].is_null())
     });
-    if !after_red_or_nothing {
+    // cas-e060: where auto-cut applies, the cut poll acts on this green and
+    // wakes the supervisor only when it needs notes or declines.
+    if !after_red_or_nothing || crate::mcp::tools::core::workflow::release_auto_cut::enabled(root, epic) {
         return Ok(());
     }
     crate::supervisor_notices::release_action(
@@ -109,7 +111,7 @@ fn notify_green(root: &Path, epic: &cas_types::Task, previous: Option<&Value>, s
         crate::supervisor_notices::ReleaseNoticePhase::CutReady,
         head,
         &format!(
-            "Train {} is green at {head}, run {}: cut it. Cassy never cuts on its own.",
+            "Train {} is green at {head}, run {}: cut it.",
             epic.id,
             state["run_id"].as_str().unwrap_or("unknown")
         ),

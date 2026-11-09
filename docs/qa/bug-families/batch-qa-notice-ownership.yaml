@@ -1,0 +1,4 @@
+title: Batch QA notices follow current verification ownership and suppress obsolete evidence waits
+tasks: [cas-0f7b]
+invariants: [FACTORY-QA-NOTICE-OWNER]
+journeys: [FACTORY-QA-RECEIPT]

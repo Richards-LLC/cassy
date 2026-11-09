@@ -171,23 +171,36 @@ fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types
     if !guard.is_file() {
         return None;
     }
-    let target_ref = super::preferred_diff_target_ref_for_delivery(repo, target, delivery_mode);
-    let Some(target_sha) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
+    // A local-merge delivery lands on the local target; otherwise the fresher
+    // of the local and origin target decides (remote-only train refs park).
+    let target_ref = if delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        target.to_string()
+    } else {
+        super::freshest_target_ref(repo, target)
+    };
+    let Some(target_commit) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
         return Some(format!(
-            "TEST_SHAPE_TARGET_UNRESOLVED: cannot resolve test-shape target {target_ref} to a commit. Fetch the integration target, then retry park.",
+            "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`). Fetch the integration target, then retry park."
         ));
     };
     let output = std::process::Command::new("python3")
         .arg(&guard)
-        .args(["--messages-only", "--changed-since", &target_sha])
+        .args(["--messages-only", "--changed-since", &target_commit])
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .current_dir(repo)
         .output();
     match output {
         Ok(output) if output.status.success() => None,
-        Ok(output) => Some(format!(
+        // FIX records are the checker's machine-readable findings. A failed
+        // invocation without a finding is unavailable proof, not a prose pin.
+        Ok(output) if output.status.code() == Some(1)
+            && String::from_utf8_lossy(&output.stdout).lines().any(|line| line.starts_with("FIX: ")) => Some(format!(
             "TEST_ASSERTION_PROSE: tests must assert behavior, error codes or rule IDs rather than human messages.\n{}{}",
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
+        )),
+        Ok(output) => Some(format!(
+            "TEST_ASSERTION_PROSE_UNAVAILABLE: test-shape checker exited {} without completing the check.\n{}{}",
+            output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
         )),
         Err(error) => Some(format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}")),
     }
@@ -247,8 +260,11 @@ fn changelog_refusal(
     } else {
         "Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading.".to_string()
     };
+    let inspected_ranges = delivery_ranges
+        .map(|ranges| format!("{ranges:?}"))
+        .unwrap_or_else(|| format!("first-parent history relative to {target}"));
     Some(format!(
-        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
     ))
 }
@@ -975,8 +991,8 @@ mod tests {
                 ("origin/epic/target", cas_types::DeliveryMode::PushBranch, expected),
                 (base.as_str(), cas_types::DeliveryMode::PushBranch, expected),
                 ("main", cas_types::DeliveryMode::LocalMerge, expected),
-                ("missing-target", cas_types::DeliveryMode::PushBranch, Some("TEST_SHAPE_TARGET_UNRESOLVED")),
-                ("epic/target", cas_types::DeliveryMode::LocalMerge, Some("TEST_SHAPE_TARGET_UNRESOLVED")),
+                ("missing-target", cas_types::DeliveryMode::PushBranch, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
+                ("epic/target", cas_types::DeliveryMode::LocalMerge, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
             ] {
                 task.delivery_mode = mode;
                 let refusal = park_refusal(cas_root.path(), repo.path(), &task,
@@ -988,6 +1004,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn park_checks_new_message_assertions_cas_6a3e() {
+        const GUARD: &str = include_str!("../../../../../../../../scripts/check-test-shape.py");
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-6a3e".into(), "source guard".into());
+        let script = repo.path().join("scripts/check-test-shape.py");
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, GUARD).unwrap();
+        std::fs::write(script.with_file_name("rust_test_source.py"), include_str!("../../../../../../../../scripts/rust_test_source.py")).unwrap();
+        commit_changelog_fixture(repo.path(), "install actual guard");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let base = git(&["rev-parse", "main"]);
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        git(&["branch", "-D", "main"]);
+        let refusal = |target: &str| park_refusal(cas_root.path(), repo.path(), &task,
+            &["docs/guide.md".into()], &git(&["rev-parse", "HEAD"]), target, None);
+        assert_eq!(refusal("main"), None, "remote-only target runs the actual guard");
+        assert_eq!(refusal("origin/main"), None);
+        let code = |target| refusal(target).unwrap().split_once(':').unwrap().0.to_string();
+        assert_eq!(code("missing-target"), "TEST_ASSERTION_TARGET_UNRESOLVED");
+
+        git(&["branch", "main", &base]);
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert_eq!(refusal("main"), None, "local-only target remains supported");
+        let unrelated = git(&["commit-tree", "HEAD^{tree}", "-m", "unrelated root"]);
+        git(&["update-ref", "refs/remotes/origin/unrelated", &unrelated]);
+        assert_eq!(code("unrelated"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
+
+        let tokenizer = script.with_file_name("rust_test_source.py");
+        std::fs::rename(&tokenizer, tokenizer.with_extension("hidden")).unwrap();
+        assert_eq!(code("main"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
+        std::fs::rename(tokenizer.with_extension("hidden"), &tokenizer).unwrap();
+
+        std::fs::write(repo.path().join("probe.test.ts"), "expect(error.message).toBe('please try later');\n").unwrap();
+        commit_changelog_fixture(repo.path(), "introduce actual prose pin");
+        assert_eq!(code("main"), "TEST_ASSERTION_PROSE");
     }
 
     #[test]
@@ -1079,6 +1138,86 @@ mod tests {
         let changed = vec!["changelog.d/cas-changelog-fixture.md".to_string(), "hub-web/src/app.ts".to_string()];
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &fragment, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");
+    }
+
+    #[test]
+    fn corrected_fragment_counts_at_final_delivery_tip_gh1690() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = changelog_fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["branch", "-m", "factory/worker"]);
+        let mut task = Task::new("cas-8c58".into(), "worker account preference".into());
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let fragment = "changelog.d/cas-8c58.md";
+        std::fs::write(repo.path().join(fragment),
+            "### Honor the configured Codex worker account\n\nUse the configured account before recommendations.\n").unwrap();
+        let original = commit_changelog_fixture(repo.path(),
+            "fix: honor configured Codex worker account before recommendations");
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        let target = cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
+            base_sha: base.clone(),
+        });
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![original.clone()],
+            },
+        };
+        let refusal = |head: &str| {
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(head)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(head)).unwrap();
+            assert!(paths.iter().any(|path| path == fragment));
+            changelog_refusal(repo.path(), &task, &paths, head, "main", Some(&ranges))
+        };
+        assert!(refusal(&original).is_some());
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Worker accounts\n\n- **Honor the configured Codex worker account** — Use the configured account before recommendations.\n").unwrap();
+        let corrected = commit_changelog_fixture(repo.path(),
+            "docs: use the required worker account changelog fragment format");
+        let origin = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"]).current_dir(origin.path()).output().unwrap();
+        assert!(output.status.success());
+        git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(&["push", "-q", "origin", "main", "factory/worker"]);
+        let root = repo.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        store.add(&task).unwrap();
+        let parking = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo.path(), "main", Some("factory/worker"), Some(&corrected),
+        );
+        let inspected = parking.deliverables.factory_branch_anchor.unwrap();
+        assert_eq!(inspected, corrected);
+        assert!(refusal(&inspected).is_none());
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+
+        // A stale caller can still inspect the old malformed snapshot. Its
+        // diagnostic must identify the inspected commit and attributed bounds.
+        let stale = refusal(&original).unwrap();
+        assert!(stale.contains(&original));
+        assert!(stale.contains(&base));
     }
 
     #[test]

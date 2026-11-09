@@ -1534,7 +1534,7 @@ fn handle_pre_tool_use_inner(
         && let Ok(Some(dispatch)) = cas_store::get_latest_verification_dispatch(cas_root, &task_id)
         && dispatch.state == cas_types::VerificationDispatchState::Claimed
         && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
-        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| agent.is_alive()))
+        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",
@@ -10440,8 +10440,8 @@ EOF
     }
 
     #[test]
-    fn quoted_read_only_regex_keeps_shell_boundaries_gh_1535() {
-        let command = r#"rg -n "name=\"content\"|:label=.*content|Content'|Content\"|tour" app/page.vue app/components/IdeaUnified* | head -65; ps -p 12345 -o pid=,etime=,stat=; tail -4 /task-artifacts/read-only.log"#;
+    fn quoted_read_only_regex_keeps_shell_boundaries_gh_1583() {
+        let command = r#"rg -n "name=\"content\"|:label=.*content|Content'|Content\"|tour" app/page.vue app/components/IdeaUnified* | head -65; ps -p 12345 -o pid=,etime=,stat=; tail -4 /task-artifacts/read-only.log; grep -E "item=\"value\"|=>" app/data.log"#;
         let cwd = Path::new("/fixture/worktree");
         let effects = shell_effects::collect(command, cwd).expect("read-only regex must resolve");
         assert!(effects.writes.is_empty() && effects.edits.is_empty() && effects.deletes.is_empty());
@@ -10472,6 +10472,7 @@ EOF
             format!(r#"bash -c 'printf "%s\n" "$$" > {artifacts}/cas-426f/release.pid; scripts/release.sh > {artifacts}/cas-426f/release.log 2>&1; rc=$?; printf "\nRELEASE_EXIT=%s\n" "$rc" >> {artifacts}/cas-426f/release.log; exit "$rc"'"#),
             r#"timeout 590 bash -c 'while [ $(grep -c "Summary \[" target/w58r2.log) -lt 2 ]; do sleep 10; done'; grep -E "FAIL|Summary|SIGABRT|TIMEOUT" target/w58r2.log; grep -c PASS target/w58r2.log"#.to_string(),
             r#"sh -c 'printf "%s\n" "$?"'"#.to_string(),
+            format!(r#"false > {artifacts}/cas-426f/guard.log 2>&1; result=$?; printf '%s\n' "$result" > {artifacts}/cas-426f/guard.exit; test "$result" -eq 1"#),
         ];
         let mut mismatches = Vec::new();
         for command in commands {

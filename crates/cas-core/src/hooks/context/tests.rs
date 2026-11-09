@@ -743,6 +743,8 @@ fn session_start_memory_injection_is_a_pull_pointer_under_budget_cas_71b2() {
 /// memories, so an older "CURRENT handoff" cannot resurface.
 #[test]
 fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339() {
+    let agent = cas_types::Agent::new("handoff-session".into(), "handoff-supervisor".into());
+    let lineage = crate::memory::handoff::HandoffLineage::for_agent(&agent);
     let now = chrono::Utc::now();
     let entry = |id: &str, minutes_ago: i64, tags: &[&str], content: &str| Entry {
         id: id.to_string(),
@@ -782,12 +784,19 @@ fn session_start_injects_only_the_newest_handoff_for_the_session_role_cas_0339()
             "Ordinary learning that still ranks",
         ),
     ] {
+        let mut memory = memory;
+        lineage.stamp(&mut memory);
         store.add(&memory).expect("add memory");
     }
 
+    let agents = cas_store::SqliteAgentStore::open(_temp.path()).unwrap();
+    cas_store::AgentStore::init(&agents).unwrap();
+    cas_store::AgentStore::register(&agents, &agent).unwrap();
     let build_as = |role: &str| {
         let stores = ContextStores {
             project_store: Some(&store),
+            agent_store: Some(&agents),
+            agent_id: Some(agent.id.clone()),
             knowledge_store: Some(&ks),
             ..ContextStores::empty()
         };

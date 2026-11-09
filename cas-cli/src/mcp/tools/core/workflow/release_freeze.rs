@@ -37,6 +37,12 @@ pub(crate) fn freeze_of(train: &Task) -> Option<Freeze> {
     if !is_release_train(train) || train.is_terminal() {
         return None;
     }
+    recorded(train)
+}
+
+/// The freeze label on any train, closed ones included: the cut history
+/// auto-cut's cadence reads (cas-e060).
+pub(crate) fn recorded(train: &Task) -> Option<Freeze> {
     train.labels.iter().find_map(|label| {
         let (secs, tip) = label.strip_prefix(FROZEN_LABEL)?.split_once(':')?;
         Some(Freeze { at: DateTime::from_timestamp(secs.parse().ok()?, 0)?, tip: tip.to_string() })

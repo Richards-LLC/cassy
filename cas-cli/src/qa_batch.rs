@@ -323,8 +323,48 @@ pub(crate) fn author_is_independent(
 
 pub(crate) fn author_refusal(task: &str, author: &str) -> String {
     format!(
-        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. Only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
+        "ledger author {author} is in {task}'s implementation lineage; the ledger must be walked by a QA reviewer, verifier or a worker that did not deliver it. Self-run checks remain the worker's own proof, not independent QA. A QA-ledger-only release verdict can use a supervisor's exact-head qa_waive (docs/qa/batch-qa.md). Otherwise only the operator can override, from their own terminal: `cas qa author-override {task} --note \"<why>\"`"
     )
+}
+
+/// GH #1655: a supervisor may accept the author of a QA record for release
+/// closeout. This never supplies independent QA or covers product/catalog work.
+/// Measure immutable Git paths, not a no-code declaration or mutable task notes.
+pub(crate) fn release_author_waiver(
+    root: &Path,
+    task: &Task,
+    repo: &Path,
+    head: &str,
+) -> Result<Option<cas_types::QaPass>, String> {
+    let passes = cas_store::list_qa_passes(root, &task.id).map_err(|e| e.to_string())?;
+    let Some(pass) = passes.into_iter().next().filter(|pass| {
+        pass.state == cas_types::QaPassState::Waived
+            && pass.bound_head == head
+            && pass.issuer_agent_id.as_deref().is_some_and(|issuer| !issuer.trim().is_empty())
+            && pass.summary.as_deref().is_some_and(|reason| !reason.trim().is_empty())
+    }) else { return Ok(None) };
+    let Some(base) = task.deliverables.factory_branch_start.as_ref()
+        .and_then(|start| commit(repo, &start.base_sha)) else { return Ok(None) };
+    if delivery_anchor(repo, task).as_deref() != Some(head)
+        || ancestor(repo, &base, head) != Some(true)
+    {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .args(["diff", "--no-ext-diff", "--name-only", "--no-renames", "-z", &base, head, "--"])
+        .current_dir(repo).output().map_err(|e| e.to_string())?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Ok(None);
+    }
+    let records_only = output.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()).all(|path| {
+        std::str::from_utf8(path).is_ok_and(|path| {
+            (path.starts_with("docs/qa/") && path.ends_with("/LEDGER.md"))
+                || path.strip_prefix("docs/qa/batch-evaluations/")
+                    .is_some_and(|name| !name.contains('/') && name.ends_with(".md")
+                        && !matches!(name, "AGENTS.md" | "CLAUDE.md" | "GROK.md" | "SKILL.md"))
+        })
+    });
+    Ok(records_only.then_some(pass))
 }
 
 /// Whether `report` names `task` as a whole ID, so `cas-12` is not `cas-123`.
@@ -400,16 +440,18 @@ pub(crate) fn prepare_receipt(
         if in_lineage(agents.as_ref(), &actors, &recorder.id) {
             return Err(format!("no self-review: recorder implemented {id}"));
         }
+        let anchor = resolved_delivery_anchor(&repo, &task, &target)
+            .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         if author_gated(&task, &repo) && in_lineage(agents.as_ref(), &actors, &author_id) {
             match author_override(root, &task) {
                 Some(words) => {
                     overrides.insert(id.clone(), words);
                 }
+                None if schema == cas_store::RELEASE_VERDICT_SCHEMA
+                    && release_author_waiver(root, &task, &repo, &anchor)?.is_some() => {},
                 None => return Err(author_refusal(id, &author_id)),
             }
         }
-        let anchor = resolved_delivery_anchor(&repo, &task, &target)
-            .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
         let staging = commit(&repo, staging).ok_or("staging_sha does not resolve to a commit")?;
         if ancestor(&repo, &anchor, &staging) != Some(true) {
             return Err(format!(
@@ -684,6 +726,8 @@ fn covering_receipt(
             && !receipt.author_overrides.contains_key(&task.id)
             && author_override(root, task).is_none()
             && !author_is_independent(root, task, repo, author)?
+            && !(receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA
+                && release_author_waiver(root, task, repo, reviewed)?.is_some())
         {
             continue;
         }

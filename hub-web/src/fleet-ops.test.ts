@@ -178,6 +178,12 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const freeze = trainControls(document, context([...CONTROL, "factory-operate"], new FleetOpsState(), { choose }), { id: "cas-tr" }).querySelector("button")!;
     freeze.click();
     expect(choose.mock.calls[1]![1].request.op).toEqual({ kind: "freeze_train", epic_id: "cas-tr" });
+    // cas-e060: a train row offers the operator Pause, and Resume once paused.
+    for (const [paused, call] of [[false, 2], [true, 3]] as const) {
+      const toggle = trainControls(document, context([...CONTROL, "factory-operate"], new FleetOpsState(), { choose }), { id: "cas-tr", auto_cut_paused: paused }).querySelectorAll("button")[1]!;
+      toggle.click();
+      expect(choose.mock.calls[call]![1].request.op).toEqual({ kind: "set_auto_cut_paused", epic_id: "cas-tr", paused: !paused });
+    }
   });
 
   it("gates each menu item: a control pairing can pause but sees Stop disabled with the command that adds factory:manage", () => {

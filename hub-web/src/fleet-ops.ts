@@ -62,7 +62,8 @@ export type OperationKind =
   | "shutdown_workers"
   | "assign_task"
   | "freeze_train"
-  | "lift_train_freeze";
+  | "lift_train_freeze"
+  | "set_auto_cut_paused";
 
 export interface OperationRequest {
   readonly op: { readonly kind: OperationKind } & Readonly<Record<string, unknown>>;
@@ -225,6 +226,19 @@ export function liftFreezeAction(epicId: string): FleetAction {
     request: { op: { kind: "lift_train_freeze", epic_id: epicId }, expected: {} },
     progress: "Lifting the freeze…",
     done: "Freeze lifted; merges resume.",
+  };
+}
+
+/** cas-e060: the operator's pause, or resume, of the train's automatic cut. */
+export function autoCutAction(epicId: string, paused: boolean): FleetAction {
+  return {
+    id: `auto-cut:${epicId}`,
+    operation: "auto-cut",
+    label: paused ? "Resume auto-cut" : "Pause auto-cut",
+    destructive: false,
+    request: { op: { kind: "set_auto_cut_paused", epic_id: epicId, paused: !paused }, expected: {} },
+    progress: paused ? "Resuming auto-cut…" : "Pausing auto-cut…",
+    done: paused ? "Auto-cut resumed." : "Auto-cut paused; the supervisor cuts this train.",
   };
 }
 

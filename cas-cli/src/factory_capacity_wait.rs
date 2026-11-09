@@ -641,6 +641,11 @@ mod tests {
         for name in ["capacity-first", "capacity-second", "/fixture/retired-cache"] {
             assert!(prompt.contains(name)); // Fixture identities, not human-readable wording.
         }
+        // One worker can finish a build and rejoin while another still
+        // waits: the waiting set and pressure episode have not changed.
+        admitted(&root, &repos[1]).unwrap();
+        record_refusal_with_kind(&root, &repos[1], "disk_fixture", CapacityKind::Disk, later).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(10)).unwrap(), 0);
         // Same snapshot after another deadline (or daemon restart) is quiet.
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later + Duration::minutes(21), || inventory(10)).unwrap(), 0);
         let later = later + Duration::minutes(21);

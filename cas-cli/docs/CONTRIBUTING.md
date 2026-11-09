@@ -1270,6 +1270,11 @@ callers cannot supply a base that hides commits. The old branch/base/observed ti
 new binding, approving supervisor and reason are recorded together. A missing
 old ref is recorded as unavailable. After a history rewrite, rebinding the same
 branch name refreshes its obsolete base or unreachable anchor with the same audit.
+After a target correction, an empty replacement at the new target is also
+accepted when the same assignee's original branch still equals its recorded
+start base and the task has no parked branch or current/historical delivery
+anchors. Start preserves the old binding until this supervisor approval;
+neither branch needs a placeholder commit.
 Repeating an unchanged binding leaves its base and audit unchanged. Rebinding does
 not change Git, assignment, leases or claims,
 and it does not waive proof, merge, QA or verification. The worker closes normally;

@@ -93,6 +93,56 @@ fn enqueue(cas_dir: &Path, target: &str, text: &str) -> i64 {
         .unwrap()
 }
 
+#[test]
+fn stale_blocked_relay_escalates_once_cas_f66d() {
+    use crate::prompt_revalidation::{LifecyclePromptDecision, LifecycleStaleOutcome};
+    let (_root, cas_dir) = project();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let occurrence = chrono::DateTime::parse_from_rfc3339("2026-11-02T12:00:00Z")
+        .unwrap().with_timezone(&chrono::Utc);
+    let body = format!("<task-lifecycle transition=\"task_blocked\" task_id=\"cas-f66d\" old=\"in_progress\" new=\"blocked\" actor=\"worker-a\" notification_id=\"42\" occurrence=\"{occurrence}\">\nWaiting\n</task-lifecycle>");
+    let row = queue.enqueue_with_session("lifecycle-wake:42", "lead", &body, "s").unwrap();
+    let decision = crate::prompt_revalidation::revalidate_lifecycle_prompt(
+        &body, cas_types::TaskStatus::InProgress, occurrence + chrono::Duration::seconds(1),
+    );
+    assert_eq!(decision, LifecyclePromptDecision::SuppressStale { task_id: "cas-f66d".into() });
+    assert_eq!(crate::prompt_revalidation::lifecycle_stale_outcome(&decision, true, false),
+        LifecycleStaleOutcome::UndeliveredRelayFailure { task_id: "cas-f66d".into() });
+    let stamp = QueueStamp::UndeliveredRelay {
+        notice: crate::prompt_revalidation::undelivered_relay_notice("cas-f66d", None),
+    };
+    stamp.apply(queue.as_ref(), row, "lead").unwrap();
+    stamp.apply(queue.as_ref(), row, "lead").unwrap();
+    let selected = super::super::queue_and_events::run_queue_select(&request(&cas_dir), 1).unwrap();
+    assert_eq!(selected.rows.len(), 1);
+    let notice = &selected.rows[0];
+    assert_ne!(notice.id, row);
+    assert_eq!(notice.target, "lead");
+    assert_eq!(notice.factory_session.as_deref(), Some("s"));
+    assert_eq!(notice.origin, Some(cas_store::QueueOrigin::Daemon));
+    assert_eq!(super::super::FactoryDaemon::supervisor_wake_class(
+        &super::super::queue_and_events::WakeSender::Daemon, "lead", &notice.source, &notice.prompt,
+    ), Some(super::super::queue_and_events::SupervisorWakeClass::Blocker));
+    assert_eq!(queue.message_delivery_report(row).unwrap().unwrap().pending_reason,
+        Some(cas_store::PendingReason::UndeliveredLifecycleRelay));
+    assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_some());
+}
+
+#[test]
+fn failed_relay_escalation_keeps_original_pending_cas_f66d() {
+    let (_root, cas_dir) = project();
+    let row = enqueue(&cas_dir, "lead", "blocked relay");
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_notice BEFORE INSERT ON prompt_queue BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+    let stamp = QueueStamp::UndeliveredRelay { notice: "notice".into() };
+    assert!(stamp.apply(queue.as_ref(), row, "lead").is_err());
+    assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_none());
+    conn.execute_batch("DROP TRIGGER reject_notice;").unwrap();
+    stamp.apply(queue.as_ref(), row, "lead").unwrap();
+    assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_some());
+}
+
 fn request(cas_dir: &Path) -> QueueSelectRequest {
     QueueSelectRequest {
         cas_dir: cas_dir.to_path_buf(),

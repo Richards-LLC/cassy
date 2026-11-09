@@ -325,7 +325,7 @@ mod tests {
             assert_eq!(tasks.get(id).unwrap().notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
         }
         // Re-recording the same QA payload creates audit evidence, not another action for the same gate.
-        service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap();
+        let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
         assert_eq!(pending_holds().len(), 2);
         // cas-809a: an epic takes no receipt of its own, so its status names the child receipts covering it.
         let mut train = Task::new("cas-train".into(), "train".into());

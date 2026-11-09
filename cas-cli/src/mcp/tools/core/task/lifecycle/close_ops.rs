@@ -7065,7 +7065,22 @@ impl CasCore {
         // still identifies that pushed final branch tip; the attribution
         // checks below must continue to vet its first-parent path, imported
         // target and sibling lease boundary.
-        let named_final_tip = explicit_receipt
+        // A fresh close already identifies the current work cycle through
+        // its recorded start. On an owned, pushed source branch that is the
+        // same exact-tip identity as an explicit receipt; commit subjects need
+        // not repeat the task ID. Parked deliveries keep their anchor rules.
+        let started_tip = (task.status == TaskStatus::InProgress
+            && task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                task.assignee.as_deref() == Some(start.assignee.as_str())
+                    && task.deliverables.work_target.as_ref() == Some(&start.work_target)
+                    && measured_branch.is_some_and(|branch| {
+                        branch.strip_prefix("origin/").unwrap_or(branch) == start.branch
+                            && unpushed_delivery_tip(repo_path, branch, &tip, task.delivery_mode).is_none()
+                    })
+                    && git_commit_is_ancestor(repo_path, &start.base_sha, recorded)
+            }))
+            .then_some(tip.as_str());
+        let named_final_tip = explicit_receipt.or(started_tip)
             .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
             .is_some_and(|receipt| receipt == tip)
             && measured_branch.is_some_and(|branch| {
@@ -35077,6 +35092,59 @@ esac
         assert!(core.tip_is_own_task_lineage(
             &store, &task, p, Some("factory/worker"), &red, Some(&green),
         ));
+    }
+
+    #[test]
+    fn fresh_park_uses_pushed_tip_from_recorded_start_cas_787e() {
+        use cas_store::TaskStore;
+        let _env = TestEnvGuard::temp_home();
+        let dir = init_factory_repo("worker");
+        let repo = dir.path();
+        let base = rev_parse_local(repo, "HEAD");
+        let red = commit_local(repo, "red.rs", "test(factory): replay incident");
+        let green = commit_local(repo, "green.rs", "fix(factory): resolve incident");
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", "factory/worker"]);
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::InProgress;
+        task.deliverables.factory_branch_anchor = Some(red.clone());
+        let target = cas_types::WorkTarget { repo_selector: "project:fixture".into(), target_branch: "main".into() };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: "factory/worker".into(), base_sha: base,
+        });
+        let root = repo.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        store.add(&task).unwrap();
+        let parking = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo, "main", Some("factory/worker"), Some(&green),
+        );
+        assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(green.as_str()));
+        assert_eq!(parking.status, TaskStatus::InProgress);
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(red.as_str()),
+            "prediction must leave persistence to the guarded park");
+        for mismatch in ["assignee", "branch", "target", "base", "parked", "missing"] {
+            let mut unrelated = task.clone();
+            let start = unrelated.deliverables.factory_branch_start.as_mut().unwrap();
+            match mismatch {
+                "assignee" => start.assignee = "another-worker".into(),
+                "branch" => start.branch = "factory/another-worker".into(),
+                "target" => start.work_target.target_branch = "another-target".into(),
+                "base" => start.base_sha = green.clone(),
+                "parked" => unrelated.status = TaskStatus::AwaitingMerge,
+                "missing" => unrelated.deliverables.factory_branch_start = None,
+                _ => unreachable!(),
+            }
+            let parking = core.advance_commit_time_anchor_before_park(
+                &store, &unrelated, repo, "main", Some("factory/worker"), Some(&green),
+            );
+            assert_eq!(parking.deliverables.factory_branch_anchor.as_deref(), Some(red.as_str()), "{mismatch}");
+        }
     }
 
     /// cas-43d2: a parked push delivery never advances to a commit origin

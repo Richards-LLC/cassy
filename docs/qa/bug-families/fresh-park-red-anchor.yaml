@@ -1,0 +1,5 @@
+title: First park measures the pushed fix tip from the active task start rather than its earlier red-test anchor
+found: '2026-11-08'
+tasks: [cas-787e]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-CLOSE]

@@ -26,6 +26,8 @@ pub enum ArtifactCommands {
     Fetch(FetchArgs),
     /// List the artifacts published for a task
     List(ListArgs),
+    /// Revoke an artifact, retaining an audit tombstone (live supervisor only)
+    Revoke(RevokeArgs),
     /// Plan (and with --yes, apply) reclaiming closed tasks' artifact
     /// directories and, with --simulators, their iOS simulators; no factory
     /// session needed
@@ -80,6 +82,13 @@ pub struct ShowArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct RevokeArgs {
+    pub id: String,
+    #[arg(long)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct FetchArgs {
     /// Task carrying the published artifact reference
     #[arg(long)]
@@ -123,6 +132,21 @@ pub fn execute(
             Ok(())
         }
         ArtifactCommands::List(args) => execute_list(args, cas_root, cli.json),
+        ArtifactCommands::Revoke(args) => {
+            let core = crate::mcp::CasCore::with_daemon(cas_root.to_path_buf(), None, None);
+            let outcome = core.revoke_artifact(&args.id, &args.reason)
+                .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+            if cli.json {
+                println!("{}", serde_json::to_string(&outcome)?);
+            } else {
+                println!("{} {}", if outcome.cloud_state == "pending" { "[WARN]" } else { "[OK]" }, outcome.summary());
+            }
+            if outcome.cloud_state == "pending" {
+                let error = anyhow::anyhow!("cloud revocation pending: bytes may still be retrievable");
+                return Err(if cli.json { super::JsonReportedFailure(error).into() } else { error });
+            }
+            Ok(())
+        }
         ArtifactCommands::Prune(args) => execute_prune(
             args,
             cas_root,
@@ -242,7 +266,14 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
     println!("     task    {}", artifact.task_id);
     println!("     type    {}", artifact.mime);
     println!("     sha256  {}", artifact.sha256);
-    println!("     status  {}", artifact.status);
+    println!("     status  {}", artifact.access_status());
+    if let Some(revocation) = &artifact.revocation {
+        println!("     revocation {}", serde_json::to_string(revocation)?);
+        if artifact.cloud_artifact_id.is_some() && revocation.cloud_revoked_at.is_none() {
+            println!("cloud revocation pending: bytes may still be retrievable");
+        }
+        return Ok(());
+    }
     if let Some(cloud_id) = &artifact.cloud_artifact_id {
         println!("     cloud   {cloud_id}");
     }
@@ -259,6 +290,12 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
 fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T> {
     result.map_err(|error| {
         if json {
+            if let Some(revoked) = error.downcast_ref::<crate::artifacts::ArtifactRevoked>() {
+                println!("{}", serde_json::json!({
+                    "status":"error", "state":"artifact_revoked", "artifact_id":revoked.artifact_id,
+                }));
+                return super::JsonReportedFailure(error).into();
+            }
             if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
                 println!("{}", serde_json::json!({
                     "status": "error", "state": "metadata_unavailable",
@@ -471,7 +508,7 @@ pub fn render_artifact_line(artifact: &PublishedArtifact) -> String {
         artifact.name,
         human_size(artifact.size_bytes),
         artifact.id,
-        artifact.status
+        artifact.access_status()
     )
 }
 
@@ -483,6 +520,20 @@ mod tests {
     /// whose id is closed here and held by no other known project is
     /// reclaimed with --yes; one whose id another project also holds is kept
     /// as unproven, plan-only by default.
+    #[test]
+    fn artifact_revoke_cli_requires_a_reason_cas_6d35() {
+        use clap::Parser;
+        let parsed = crate::cli::Cli::try_parse_from([
+            "cas", "artifact", "revoke", "art-fixture", "--reason", "Harmless fixture cleanup",
+        ]).unwrap();
+        let Some(crate::cli::Commands::Artifact(ArtifactCommands::Revoke(args))) = parsed.command else {
+            panic!("revoke command was not routed to its handler");
+        };
+        assert_eq!(args.id, "art-fixture");
+        assert_eq!(args.reason, "Harmless fixture cleanup");
+        assert!(crate::cli::Cli::try_parse_from(["cas", "artifact", "revoke", "art-fixture"]).is_err());
+    }
+
     #[test]
     fn legacy_top_level_dirs_are_reclaimed_only_when_provably_this_projects_cas_6162() {
         let env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -633,6 +684,7 @@ mod tests {
             cloud_url: None,
             slack_permalink: None,
             created_at: "2026-09-18T20:00:00Z".to_string(),
+            revocation: None,
         };
         let line = render_artifact_line(&artifact);
         assert!(line.contains("brief.pdf") && line.contains("art-1") && line.contains("local"));

@@ -1192,6 +1192,34 @@ or bearer is included in the note, output or saved record. Fetch requires the
 synced task and Cloud credentials; proof interpretation remains the verifier's
 responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 
+### Artifact revocation
+
+A live registered supervisor can run `cas artifact revoke <id> --reason <reason>`
+or call `artifact action=revoke id=<id> reason=<reason>`. Both use the same
+registry-backed authority check; a role environment variable alone cannot
+revoke. The first immutable local tombstone retains the artifact ID, actor ID,
+reason and revocation time alongside the original upload metadata. Repeats
+preserve that audit. `show` and `list` retain the metadata and report revoked
+access; JSON carries an optional `revocation` object while `status` retains the
+original upload phase. Managed fetch, signed views, Commander previews and
+new Slack shares refuse tombstoned artifacts, including cached proof metadata.
+
+For a known Cloud object the client sends authenticated
+`POST /api/artifacts/{cloud_id}/revoke` with `{"reason":"...","actor_id":"..."}`.
+The server contract requires an idempotent audit tombstone, object deletion
+(including denial through previously issued signed URLs), and refusal of later
+URL/fetch/complete requests. A positive receipt must identify the same object:
+`{"artifact_id":"<cloud_id>","revoked":true,"revoked_at":"<RFC3339>"}`.
+Only that receipt confirms Cloud deletion locally. A missing client, unsupported
+endpoint (including 404/405/501), rejected request or mismatched receipt leaves
+`cloud_state=pending` and explicitly reports:
+`cloud revocation pending: bytes may still be retrievable`.
+The MCP result is an error with the local/Cloud states retained; the CLI exits
+nonzero after printing that same partial outcome. Retry the same ID to finish
+Cloud revocation; it never replaces the first local actor, reason or timestamp.
+No Cloud ID is reported as `not_applicable`, not as confirmed Cloud deletion.
+The operation reads metadata only; it never downloads or reposts artifact bytes.
+
 ### Verification tiers and the spawn threshold
 
 Close measures the delivered diff from the task's recorded start to its anchor and records the tier as a task note. `lifecycle/review_tier.rs` owns the path rules for verification and QA, and the highest tier any path reaches applies.

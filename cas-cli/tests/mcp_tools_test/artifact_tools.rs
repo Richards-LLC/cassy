@@ -13,6 +13,7 @@ use tempfile::TempDir;
 fn req(action: &str) -> ArtifactRequest {
     ArtifactRequest {
         action: action.to_string(),
+        reason: None,
         notes: None,
         note_type: None,
         task_id: None,

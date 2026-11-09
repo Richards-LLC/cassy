@@ -3743,11 +3743,15 @@ mod epic_move_work_target_tests {
         store.init().unwrap();
         store.add(&epic("cas-0ef5-old", "epic/old")).unwrap();
         store.add(&epic("cas-0ef5-new", "epic/new")).unwrap();
+        let mut legacy = epic("cas-0ef5-legacy", "epic/legacy");
+        legacy.deliverables.work_target = None;
+        store.add(&legacy).unwrap();
         let mut failures = Vec::new();
-        for (id, pinned, branch, status, expected) in [
-            ("cas-0ef5-pinned", true, "epic/old", TaskStatus::Open, "epic/new"),
-            ("cas-0ef5-inherited", false, "epic/old", TaskStatus::InProgress, "epic/new"),
-            ("cas-0ef5-distinct", true, "release/selected", TaskStatus::Blocked, "release/selected"),
+        for (id, parent, pinned, branch, status, expected) in [
+            ("cas-0ef5-pinned", "cas-0ef5-old", true, "epic/old", TaskStatus::Open, "epic/new"),
+            ("cas-0ef5-inherited", "cas-0ef5-old", false, "epic/old", TaskStatus::InProgress, "epic/new"),
+            ("cas-0ef5-distinct", "cas-0ef5-old", true, "release/selected", TaskStatus::Blocked, "release/selected"),
+            ("cas-0ef5-branch-only", "cas-0ef5-legacy", true, "epic/legacy", TaskStatus::Open, "epic/new"),
         ] {
             let mut task = Task::new(id.into(), "Move between release trains".into());
             task.status = status;
@@ -3759,7 +3763,7 @@ mod epic_move_work_target_tests {
             });
             store.add(&task).unwrap();
             store.add_dependency(&Dependency::new(
-                id.into(), "cas-0ef5-old".into(), DependencyType::ParentChild,
+                id.into(), parent.into(), DependencyType::ParentChild,
             )).unwrap();
             let response = core.cas_task_update(Parameters(serde_json::from_value(
                 serde_json::json!({"id":id,"epic":"cas-0ef5-new"}),

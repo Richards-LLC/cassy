@@ -702,6 +702,9 @@ pub(crate) fn work_target_for_task_moved_into_epic(
         parent.id != epic.id
             && parent.task_type == cas_types::TaskType::Epic
             && (inherited_work_target_from_epic(parent).as_ref() == Some(task_target)
+                || (parent.deliverables.work_target.is_none()
+                    && parent.branch.as_deref() == Some(task_target.target_branch.as_str())
+                    && task_target.repo_selector == inherited.repo_selector)
                 || (!task.deliverables.work_target_pinned
                     && parent.deliverables.work_target.as_ref() == Some(task_target)))
     });

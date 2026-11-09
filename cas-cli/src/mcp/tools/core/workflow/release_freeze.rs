@@ -328,12 +328,19 @@ pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
 }
 
 impl crate::mcp::CasCore {
-    /// MCP `factory action=train_freeze id=<train>`: a live supervisor freezes.
+    /// MCP release freeze: a live supervisor explicitly confirms the lift policy.
     pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
             .map_err(|_| anyhow::anyhow!("train_freeze requires a live registered supervisor"))?;
-        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), reason)
+        let reason = reason
+            .and_then(|reason| reason.trim().strip_prefix("release-freeze:"))
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .ok_or_else(|| anyhow::anyhow!(
+                "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. Only the operator can lift it in Commander; a published release covering its tip also ends it. A supervisor cannot lift it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
+            ))?;
+        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason))
     }
 }
 
@@ -387,6 +394,32 @@ mod tests {
             store.add_dependency(&Dependency::new(id.into(), "cas-tr".into(), DependencyType::ParentChild)).unwrap();
         }
         (temp, root)
+    }
+
+    #[test]
+    fn mcp_release_freeze_requires_explicit_confirmation() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, root) = fixture();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let store = crate::store::open_task_store(&root).unwrap();
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+
+        for reason in [Some("Lane CI freeze until run 42582303864 finishes"), None, Some("release-freeze: ")] {
+            let error = core.train_freeze("cas-tr", reason).expect_err("unconfirmed release freeze");
+            eprintln!("{error}");
+            assert_eq!(error.to_string().split(':').next(), Some("TRAIN_FREEZE_CONFIRMATION_REQUIRED"));
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+
+        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release")).unwrap();
+        assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
+        lift(&root, "cas-tr", "operator").unwrap();
+        assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
     }
 
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,

@@ -175,6 +175,14 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
             }
         }
     }
+    if tool_name == "factory"
+        && let Some(Value::Object(reason)) = properties.get_mut("reason")
+    {
+        reason.insert(
+            "description".to_string(),
+            Value::String("Reason for loop_cancel; worktree_merge requires a non-empty audit reason with supervisor_override=true. train_freeze: explicit release-freeze confirmation, `release-freeze: <reason>`; only the operator in Commander or a published release ends it. Not a temporary CI hold; see CONTRIBUTING's Temporary CI merge hold follow-up.".to_string()),
+        );
+    }
     if let Some(Value::Object(action)) = properties.get_mut("action") {
         action.insert(
             "enum".to_string(),

@@ -974,7 +974,7 @@ mod tests {
     /// next task. A close that names its Rust-only commit is judged on that
     /// commit, not refused as user-facing because of the branch tip.
     #[test]
-    fn qa_prefers_scoped_evidence_and_honors_explicit_legacy_citations_cas_6ebf() {
+    fn qa_prefers_project_evidence_over_colliding_legacy_cas_0876() {
         let temp = tempfile::tempdir().unwrap();
         let cas_root = temp.path().join("project/.cas");
         std::fs::create_dir_all(&cas_root).unwrap();
@@ -985,13 +985,26 @@ mod tests {
         std::fs::create_dir_all(scoped.join("github-issues")).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("LEDGER.md"), "historical evidence").unwrap();
-        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        // An unnamespaced ledger can belong to another project with the
+        // same short task id. Attachments alone must not select that ledger.
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        let other_root = temp.path().join("other-project/.cas");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let [other_scoped, _] = crate::config::factory_task_artifact_dirs(&other_root, &base, &task.id);
+        std::fs::create_dir_all(&other_scoped).unwrap();
+        std::fs::write(other_scoped.join("LEDGER.md"), "other project evidence").unwrap();
+        assert_eq!(task_qa_artifacts_dir(&other_root, &base, &task), other_scoped);
         std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
         std::fs::create_dir_all(legacy.join("qa")).unwrap();
         std::fs::write(legacy.join("qa/bundle.json"), "historical bundle").unwrap();
         task.notes = format!("qa-bundle: {}", legacy.join("qa/bundle.json").display());
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        // A task's explicit historical citation remains a fallback when its
+        // project has no QA evidence, never when scoped proof is available.
+        std::fs::remove_file(scoped.join("LEDGER.md")).unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         task.notes = format!("qa-bundle: {}", scoped.join("qa/bundle.json").display());
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
         std::fs::write(legacy.join("LEDGER.md"), "").unwrap();

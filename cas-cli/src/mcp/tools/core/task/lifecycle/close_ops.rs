@@ -18811,6 +18811,17 @@ mod parent_branch_resolver_tests {
             "epic/live-lane"
         );
 
+        // GH #1664: a parked delivery retains its declared integration
+        // target even when that target was also the epic's original base.
+        legacy_default_child.status = TaskStatus::AwaitingMerge;
+        legacy_default_child.deliverables.parked_branch = Some("factory/original-cas-child".into());
+        legacy_default_child.deliverables.factory_branch_anchor = Some("parked-tip".into());
+        assert_eq!(
+            effective_close_work_target(&legacy_default_child, Some(&epic))
+                .unwrap().target_branch,
+            "main",
+        );
+
         let mut explicit_child = child;
         explicit_child.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:fixture".into(),
@@ -32620,6 +32631,49 @@ esac
             let out = run_factory_branch_merge_gate_with_attribution(
                 &task, &req, "main", p,
                 TaskCommitAttribution { receipt: Some(receipt), window: Some(&window) },
+            );
+            assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
+        }
+    }
+
+    /// GH #1664: a squash-integrated parked delivery must outrank the
+    /// assignee's unrelated current lane, including a remote-only source.
+    #[test]
+    fn parked_squash_delivery_outranks_reassigned_lane_cas_0876() {
+        let (dir, mut task, anchor) = transferred_delivery_gh1180();
+        let p = dir.path();
+        // Remove the merge's ancestry while retaining the delivered content.
+        git(p, &["reset", "--hard", "HEAD^1"]);
+        git(p, &["merge", "--squash", "factory/original"]);
+        git(p, &["commit", "-q", "-m", "squash delivery (cas-test1)"]);
+        let receipt = head_sha(p);
+        assert!(!git_commit_is_ancestor(p, &anchor, "main"));
+        // Ordinary untagged commits on the new lane cannot override durable
+        // delivery identity merely because there is no foreign task tag.
+        git(p, &["checkout", "-q", "factory/receiver"]);
+        git(p, &["commit", "--amend", "-q", "-m", "current lane work"]);
+        git(p, &["checkout", "-q", "main"]);
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        });
+        for remote_only in [false, true] {
+            let expected = if remote_only {
+                git(p, &["update-ref", "refs/remotes/origin/factory/original", &anchor]);
+                git(p, &["branch", "-D", "factory/original"]);
+                "origin/factory/original"
+            } else { "factory/original" };
+            assert_eq!(task_delivery_branch(p, &task).as_deref(), Some(expected));
+            assert_eq!(resolve_close_delivery_branch(p, &task, "receiver").unwrap(), expected);
+            let mut req = base_req(&task.id);
+            req.commit_receipt = Some(receipt.clone());
+            let window = TaskCommitReceiptWindow {
+                identity: task_commit_identity(&task, None),
+                ..window_at(1_000_000_000, "latest task lease claim/transfer")
+            };
+            let out = run_factory_branch_merge_gate_with_attribution(
+                &task, &req, "main", p,
+                TaskCommitAttribution { receipt: Some(&receipt), window: Some(&window) },
             );
             assert!(matches!(out, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)), "{out:?}");
         }

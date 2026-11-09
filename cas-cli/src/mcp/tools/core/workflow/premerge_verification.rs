@@ -1209,7 +1209,7 @@ impl CasCore {
         // candidate must fall through so the caller invalidates the old approval
         // before the fresh-review path reports the candidate error.
         let Ok(candidate) =
-            self.build_verification_candidate(task, repo, source, target, digest.to_string())
+            self.build_verification_candidate(task, repo, source, target, digest.to_string(), None)
         else {
             return Ok(None);
         };
@@ -1277,6 +1277,7 @@ impl CasCore {
             source,
             target,
             context_digest(&self.cas_root, task).map_err(fail)?,
+            None,
         )?;
         candidate.validate(&self.cas_root, task).map_err(fail)?;
         Ok(candidate)
@@ -1289,44 +1290,12 @@ impl CasCore {
         source: &str,
         target: &str,
         digest: String,
+        inherited_supervisor_call: Option<InheritedSupervisorCall>,
     ) -> Result<Candidate, McpError> {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = review_target(repo, target).map_err(fail)?;
         let repository = repo.canonicalize().map_err(fail)?;
-        let inherited_supervisor_call = if let Some(prior_dispatch) =
-            cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
-            && let Some(prior_candidate) =
-                candidate_for_dispatch(&self.cas_root, &prior_dispatch).map_err(fail)?
-        {
-            let verifications = self
-                .open_verification_store()?
-                .get_for_task(&task.id)
-                .map_err(fail)?;
-            let preview = Candidate {
-                cas_root: self.cas_root.clone(),
-                task_id: task.id.clone(),
-                repository: repository.clone(),
-                source_branch: source.into(),
-                source_sha: source_sha.clone(),
-                target_branch: target.into(),
-                target_sha: target_sha.clone(),
-                tree: String::new(),
-                context_digest: digest.clone(),
-                proof: prior_candidate.proof.clone(),
-                preparation_ms: 0,
-                inherited_supervisor_call: None,
-            };
-            inherited_supervisor_call_for_candidate(
-                task,
-                &prior_dispatch,
-                &prior_candidate,
-                &preview,
-                &verifications,
-            )
-        } else {
-            None
-        };
         let key = bound_candidate_key(
             &task.id,
             &repository,

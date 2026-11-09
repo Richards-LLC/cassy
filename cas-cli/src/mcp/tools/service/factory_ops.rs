@@ -4705,7 +4705,12 @@ impl CasService {
                 if worker.role != AgentRole::Worker || !worker.visible_to_factory_session(factory_session.as_deref()) { continue; }
                 if let Some(session) = worker.factory_session.as_deref() {
                     let queue = queues.get(session, &worker.name).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-                    if queue.revision > 0 { binary_versions.push_str(&format!("\n{}", crate::worker_task_queue::render(&worker.name, &queue))); }
+                    if queue.revision > 0 {
+                        let tasks = self.inner.open_task_store()?;
+                        let report = crate::worker_task_queue::render(&worker, &queue, tasks.as_ref())
+                            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                        binary_versions.push_str(&format!("\n{report}"));
+                    }
                 }
             },
             Err(error) => binary_versions.push_str(&format!("\nTask queues unavailable: {error}")),

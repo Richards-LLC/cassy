@@ -227,7 +227,8 @@ impl CasCore {
                 .await?;
             queue = queues.get(session, &worker.name).map_err(error)?;
         }
-        Ok(format!("{}{source_notices}", render(&worker.name, &queue)))
+        let tasks = self.open_task_store()?;
+        Ok(format!("{}{source_notices}", render(&worker, &queue, tasks.as_ref()).map_err(error)?))
     }
 
     /// Called after either close or park commits, including immutable receipts.
@@ -701,16 +702,29 @@ impl CasCore {
     }
 }
 
-pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
-    let current = queue.current_task.as_deref().unwrap_or("none");
+pub(crate) fn render(
+    worker: &Agent,
+    queue: &WorkerTaskQueue,
+    tasks: &dyn cas_store::TaskStore,
+) -> cas_store::Result<String> {
+    // The cursor retains held work for dispatch recovery; execution and holds
+    // come from current task state, without rewriting that durable position.
+    let owns = |task: &cas_types::Task| task.assignee.as_deref()
+        .is_some_and(|assignee| assignee == worker.name || assignee == worker.id);
+    let current = tasks.list(Some(TaskStatus::InProgress))?.into_iter()
+        .find(|task| owns(task)).map(|task| task.id).unwrap_or_else(|| "none".into());
+    let mut held = tasks.list(Some(TaskStatus::Blocked))?.into_iter()
+        .filter(|task| owns(task)).map(|task| task.id).collect::<Vec<_>>();
+    held.sort();
+    let held = if held.is_empty() { "none".into() } else { held.join(", ") };
     let pending = if queue.pending.is_empty() {
         "none".into()
     } else {
         queue.pending.join(" -> ")
     };
     let mut output = format!(
-        "Task queue for {worker} (revision {})\nCurrent: {current}\nPending: {pending}",
-        queue.revision
+        "Task queue for {} (revision {})\nCurrent: {current}\nHeld: {held}\nPending: {pending}",
+        worker.name, queue.revision
     );
     if queue.starting && queue.context_reset_from.is_some() {
         output.push_str(&format!("\nContext reset: waiting for fresh conversation (request {})",
@@ -719,7 +733,7 @@ pub(crate) fn render(worker: &str, queue: &WorkerTaskQueue) -> String {
     if let Some(note) = queue.notes.last() {
         output.push_str(&format!("\n{note}"));
     }
-    output
+    Ok(output)
 }
 
 /// Recover durable cursors after lock contention, process loss or an invalid

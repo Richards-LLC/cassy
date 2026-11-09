@@ -812,7 +812,7 @@ async fn factory_main_findings_retain_derived_priority_cas_7129() {
     let (_temp, core, repo, _) = fixture(&mut test_env);
     std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
     std::fs::write(repo.join("docs/qa/journeys.yaml"),
-        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/qa/journeys.yaml"))).unwrap();
+        include_str!("../../../../docs/qa/journeys.yaml")).unwrap();
     let service = CasService::new(core, None);
     let tasks = open_task_store(&repo.join(".cas")).unwrap();
     for journey in ["FACTORY-SUPERVISE", "FACTORY-MERGE", "FACTORY-CLOSE", "CLI-RELEASE", "FACTORY-SPAWN", "FACTORY-QA-RECEIPT"] {

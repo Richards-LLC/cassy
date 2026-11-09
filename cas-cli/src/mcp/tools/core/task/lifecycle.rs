@@ -966,11 +966,18 @@ fn task_similarity(
 /// One open task that overlaps a task being created.
 type SimilarTask = (String, String, f64, Vec<String>);
 
+fn normalize_task_scope(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 /// The overlap checks for a new task, split by whether they may block it.
 #[derive(Debug, Default)]
 struct OpenTaskOverlap {
-    /// The best-scoring overlap with any open task other than the new task's
-    /// own parent epic and its siblings. This one requires confirmation.
+    /// The best-scoring overlap that requires confirmation, including exact
+    /// duplicates among siblings.
     blocking: Option<SimilarTask>,
     /// The best-scoring overlap with a sibling under the same epic. Children
     /// of one epic naturally share its identifiers, so this only warns.
@@ -1050,7 +1057,9 @@ fn open_task_similarity(
         else {
             continue;
         };
-        let slot = if siblings.contains(&task.id) {
+        let identical_scope = normalize_task_scope(&task.title) == normalize_task_scope(title)
+            && normalize_task_scope(&task.description) == normalize_task_scope(description);
+        let slot = if siblings.contains(&task.id) && !identical_scope {
             &mut overlap.sibling
         } else {
             &mut overlap.blocking
@@ -2449,6 +2458,7 @@ impl CasCore {
         })?;
 
         let mut queued_start_snapshot = queued_start.then(|| task.clone());
+        let branch_start_snapshot = task.clone();
 
         // cas-a0d2: an unattributed row is adopted into this project here. The
         // in-progress write below persists it, so the repair survives and every
@@ -2678,6 +2688,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut reassigned_branch = None;
         let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
@@ -2909,28 +2920,40 @@ impl CasCore {
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    if (task.deliverables.factory_branch_start.is_none() || reset_start_base)
-                        && crate::factory_isolation::branch_at(worker_checkout).as_deref()
-                            == Some(worker_branch.as_str())
+                    // Reassignment may replace a boundary only after all old
+                    // tips are proven inherited. Inspect immediately before the
+                    // successful start write, through the shared rebind audit.
+                    let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+                            start.assignee != worker.name && start.branch != worker_branch
+                        })
+                        && task.assignee.as_deref().is_none_or(|assignee| assignee == worker.name);
+                    if crate::factory_isolation::branch_at(worker_checkout).as_deref()
+                        == Some(worker_branch.as_str())
                     {
-                        let base_sha = GitOperations::new(worker_repo_root)
-                            .ref_sha(&worker_branch)
-                            .map_err(|error| {
-                                Self::error(
-                                    ErrorCode::INVALID_PARAMS,
-                                    format!("Cannot record task start base: {error}"),
-                                )
-                            })?;
-                        factory_branch_start = Some(cas_types::FactoryBranchStart {
-                            work_target: task
-                                .deliverables
-                                .work_target
-                                .clone()
-                                .expect("declared target"),
-                            assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
-                            branch: worker_branch,
-                            base_sha,
-                        });
+                        if reassigned {
+                            reassigned_branch = Some((
+                                worker_checkout.to_path_buf(), worker.clone(), worker_branch,
+                            ));
+                        } else if task.deliverables.factory_branch_start.is_none() || reset_start_base {
+                            let base_sha = GitOperations::new(worker_repo_root)
+                                .ref_sha(&worker_branch)
+                                .map_err(|error| {
+                                    Self::error(
+                                        ErrorCode::INVALID_PARAMS,
+                                        format!("Cannot record task start base: {error}"),
+                                    )
+                                })?;
+                            factory_branch_start = Some(cas_types::FactoryBranchStart {
+                                work_target: task
+                                    .deliverables
+                                    .work_target
+                                    .clone()
+                                    .expect("declared target"),
+                                assignee: task.assignee.clone().unwrap_or_else(|| worker.name.clone()),
+                                branch: worker_branch,
+                                base_sha,
+                            });
+                        }
                     }
                     parked_branch_note.or(beside_note).or(reset_note)
                 } else {
@@ -3544,6 +3567,12 @@ impl CasCore {
         if let Some(start) = factory_branch_start {
             task.deliverables.factory_branch_start = Some(start);
         }
+        let automatic_rebind = reassigned_branch.and_then(|(checkout, worker, branch)| {
+            super::rebind::reassigned_branch_start(&checkout, &task, &worker, &branch)
+        });
+        if let Some((start, _)) = automatic_rebind.as_ref() {
+            task.deliverables.factory_branch_start = Some(start.clone());
+        }
         task.updated_at = chrono::Utc::now();
 
         // cas-ec74: `updated_at` is store-owned. Adopt the stamp the store
@@ -3552,9 +3581,19 @@ impl CasCore {
         // cas-d5f4: there is no await between acquiring the local lease and
         // persisting InProgress. A response deadline can cancel before this
         // local transition or after it, never between its two writes.
-        let start_update = match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
-            Some(expected) => task_store.update_if_current(&task, expected),
-            None => task_store.update(&task),
+        let start_update = if let Some((_, audit)) = automatic_rebind.as_ref() {
+            audit.persist(
+                &self.cas_root,
+                task_store.as_ref(),
+                queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref())
+                    .unwrap_or(&branch_start_snapshot),
+                &mut task,
+            )
+        } else {
+            match queued_start_snapshot.as_ref().or(split_start_snapshot.as_ref()) {
+                Some(expected) => task_store.update_if_current(&task, expected),
+                None => task_store.update(&task),
+            }
         };
         task.updated_at = match start_update {
             Ok(updated_at) => updated_at,
@@ -4191,6 +4230,79 @@ mod related_recall_response_tests {
             )))
             .await
             .expect_err("a matching task outside the epic still needs confirmation");
+    }
+
+    #[tokio::test]
+    async fn peer_created_task_searches_by_id_and_blocks_identical_sibling_recreation() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+
+        let mut epic = Task::new("cas-ep16".into(), "Search freshness epic".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).expect("add epic");
+        let peer_task = Task::new(
+            "cas-1668".into(),
+            "Quasar marigold dependency reconciliation".into(),
+        );
+        store
+            .create_atomic(
+                &peer_task,
+                &[],
+                Some(&epic.id),
+                None,
+            )
+            .expect("persist peer-created task and parent edge");
+
+        let id_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: peer_task.id.clone(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search by canonical task ID");
+        let id_results = text(id_results);
+        assert!(id_results.contains(&peer_task.id), "{id_results}");
+
+        let semantic_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: "quasar marigold dependency".to_string(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search peer-created task by content");
+        let semantic_results = text(semantic_results);
+        assert!(semantic_results.contains(&peer_task.id), "{semantic_results}");
+
+        let mut changed_task = peer_task.clone();
+        changed_task.title.push_str(" updated");
+        store.update(&changed_task).expect("update one canonical task");
+        let search_index = core.open_search_index().expect("search index");
+        let refreshed = search_index
+            .refresh_tasks(&store.list(None).expect("list tasks after update"))
+            .expect("refresh changed task");
+        assert_eq!(refreshed, 1, "only the updated task document is rewritten");
+
+        let before = store.list(None).expect("list tasks before duplicate").len();
+        let mut duplicate = child_request(&changed_task.title, epic.id.clone());
+        duplicate.description = Some(changed_task.description.clone());
+        let error = core
+            .cas_task_create(Parameters(duplicate))
+            .await
+            .expect_err("identical sibling work must offer reuse before writing");
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains(&peer_task.id), "{}", error.message);
+        assert_eq!(
+            store.list(None).expect("list tasks after duplicate").len(),
+            before
+        );
     }
 
     #[tokio::test]

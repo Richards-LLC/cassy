@@ -1,5 +1,26 @@
 # Contributing to Cassy
 
+## Memory update receipts
+
+`memory action=update id=<id> title=<title>` saves the title alone or together
+with `content`. Omitted fields retain their stored values. A successful edit
+returns `structured_content` with `id` and `changes` (the updated field names),
+alongside the existing text receipt.
+
+## Native Codex verifier identity
+
+An MCP caller belongs to its connection. Native Codex children share the
+parent's connection; choosing a role or receiving a dispatch ID does not create
+independent reviewer authority. `coordination whoami` shows the caller's type,
+role and parent. A shared-connection child registration fails before mutation
+with `rule_id=shared_mcp_child_identity`.
+
+Use the daemon-owned candidate verifier or a separately registered reviewer
+with a sealed handoff for the exact dispatch. A native child that observes its
+parent's identity returns that evidence without recording a verdict, including
+`status=error`. A registered supervisor may perform its own review and record
+the verdict directly; its provenance remains `supervisor_direct`.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to
@@ -129,6 +150,15 @@ worker's transcript is unresolved, its own recent activity or outbound message
 to the supervisor/director can establish execution within the configured stall
 window. Heartbeats and other workers' activity cannot. Resolved terminal turns
 and confirmed process exits retain precedence over this fallback.
+
+Supervisor memory handoffs carry a writer-assigned `handoff-machine:` tag.
+Supersession, SessionStart and automatic-clear judgement select by project
+store, machine and role. A local successor can change its name and factory
+session without losing its predecessor's handoff. `handoff-owner:` and author
+session provenance are audit stamps, never selection keys. Registry restart
+reconciliation cannot replace a same-name supervisor on another machine.
+Legacy handoffs without a machine stamp remain readable through memory tools
+but cannot inject approvals into startup.
 
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
@@ -1195,7 +1225,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -1972,6 +2002,15 @@ file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log`.
 
+Close measures a delivery's recorded `parked_branch` (local, then origin)
+before deriving branches from its current assignee. Its recorded `work_target`
+remains authoritative after parking, including squash-integrated deliveries;
+a later epic lane does not redefine that proof boundary. Ownership, start-range,
+publication and receipt checks still apply. QA reads project-scoped evidence
+before historical flat task directories. A flat directory is a fallback only
+when the task explicitly cites its historical bundle and no scoped QA evidence
+exists; a colliding short task ID alone never selects another project's ledger.
+
 ## Project capture configuration
 
 `cas config list --section qa.capture` lists the project capture settings.
@@ -2509,9 +2548,14 @@ capped command to be retried; it does not hold a builder slot while waiting.
 Registered workers retain their InProgress task and lease during capacity
 waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
-shows that episode once; the background reminder scan queues at most one capacity
-notice after 20 minutes. Its wake request follows normal supervisor readiness
-policy and retains the task's active state. A delivered explicit assistance
+shows that episode once. Higher-priority queue waits never wake the supervisor.
+Disk-watermark waits share one pressure notice per factory session after 20
+minutes, listing waiting workers and reclaimable target caches. The background
+reminder scan persists the pressure snapshot and updates it only when the
+waiting set or reclaimable bytes change; incomplete inventories report an
+unknown total. A resolved pressure episode can recur. Other resource refusals
+retain their one-notice-per-worker escalation after 20 minutes. Notice wakes
+follow normal supervisor readiness policy and retain the task's active state. A delivered explicit assistance
 message consumes that episode's automatic notice even after a gap longer than
 four minutes between retries. A stale retry stops reserving queue position;
 the live task lease still preserves its original wait age and notice state.

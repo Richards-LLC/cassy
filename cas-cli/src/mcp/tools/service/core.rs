@@ -67,6 +67,7 @@ impl CasService {
         let inner_req = EntryUpdateRequest {
             valid_until: req.valid_until,
             id: req.id.ok_or_else(|| self.missing_id("memory", "update"))?,
+            title: req.title,
             content: req.content,
             tags: req.tags,
             importance: req.importance,
@@ -845,6 +846,17 @@ impl CasService {
             supervisor_override: req.supervisor_override,
         };
         self.inner.cas_task_transfer(Parameters(inner_req)).await
+    }
+
+    pub(super) async fn task_recover_delivery(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("task", "recover_delivery"))?;
+        let receipt = req.commit_receipt.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "commit_receipt required for recover_delivery"))?;
+        let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for recover_delivery"))?;
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.recover_task_delivery(&id, &receipt, &reason)
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("Delivery recovery failed: {error}"))))
     }
 
     pub(super) async fn task_rebind_branch(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {

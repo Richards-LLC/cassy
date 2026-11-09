@@ -550,7 +550,7 @@ impl FactoryDaemon {
             }
             ClientMessage::InterruptPane { .. } | ClientMessage::SendMessage { .. }
             | ClientMessage::SupervisorCommand { .. } | ClientMessage::SupervisorCommandStatus { .. }
-            | ClientMessage::SupervisorCommandStep { .. } => {
+            | ClientMessage::SupervisorCommandStep { .. } | ClientMessage::SupervisorCommandCancel { .. } => {
                 unreachable!("Commander controls return through the shared dispatcher")
             }
             ClientMessage::RequestPaneKeyframe { .. } | ClientMessage::ScrollbackRequest { .. } => {

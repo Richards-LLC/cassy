@@ -89,7 +89,7 @@ mod search_index_impl;
 mod search_index_query;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tantivy::query::QueryParser;
 use tantivy::schema::*;
@@ -241,6 +241,8 @@ pub struct SearchIndex {
     cached_reader: Mutex<Option<IndexReader>>,
     // Cached QueryParser (index + fields don't change)
     cached_query_parser: Mutex<Option<QueryParser>>,
+    // Last canonical task-store snapshot written to the shared index.
+    task_snapshot: Arc<Mutex<Option<Vec<(String, i64)>>>>,
 }
 
 impl Clone for SearchIndex {
@@ -268,6 +270,7 @@ impl Clone for SearchIndex {
             // them avoids sharing synchronization state between CasCore clones.
             cached_reader: Mutex::new(None),
             cached_query_parser: Mutex::new(None),
+            task_snapshot: Arc::clone(&self.task_snapshot),
         }
     }
 }

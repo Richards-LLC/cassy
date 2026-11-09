@@ -38,7 +38,7 @@ impl CasService {
             .map_err(reject)?;
         cas_store::record_qa_batch_receipt(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
-        super::mutation_receipt::batch_receipt_committed(&receipt.id, &receipt.staging_sha);
+        super::mutation_receipt::batch_receipt_committed(label, &receipt.id, &receipt.staging_sha);
         // cas-6048: the peer machine's close gate learns it through task sync.
         crate::qa_pass::sync::record_batch(&self.inner.cas_root, &receipt)
             .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("batch receipt sync note failed: {e}")))?;
@@ -61,7 +61,21 @@ impl CasService {
         for task_id in receipt.task_heads.keys() {
             let note = match receipt.author_overrides.get(task_id) {
                 Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
-                None => note.clone(),
+                None => {
+                    let waiver = self.inner.open_task_store()?.get(task_id).ok()
+                        .and_then(|task| {
+                            let (repo, _) = crate::qa_batch::task_context(&self.inner.cas_root, &task).ok()?;
+                            if receipt.schema_version != cas_store::RELEASE_VERDICT_SCHEMA
+                                || crate::qa_batch::author_is_independent(&self.inner.cas_root, &task, &repo,
+                                    receipt.ledger_author_id.as_deref()?).ok()? { return None; }
+                            crate::qa_batch::release_author_waiver(&self.inner.cas_root, &task, &repo,
+                                receipt.task_heads.get(task_id)?).ok().flatten()
+                        });
+                    match waiver {
+                        Some(pass) => format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head),
+                        None => note.clone(),
+                    }
+                },
             };
             if let Err(error) = self.inner.open_task_store()?.append_note(task_id, &note) {
                 tracing::warn!(%task_id, %error, "batch receipt recorded but task audit note failed");
@@ -506,18 +520,32 @@ impl CasService {
         if crate::config::Config::load(&self.inner.cas_root).is_ok_and(|c| c.qa().mode == crate::config::QaMode::Batch) {
             let task = self.inner.open_task_store()?.get(task_id)
                 .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
-            let (repo, target) = crate::qa_batch::task_context(&self.inner.cas_root, &task)
-                .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
-            let receipt = match crate::qa_batch::resolved_delivery_anchor(&repo, &task, &target) {
-                Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, &task, &repo, &target, &head)
-                    .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?,
-                None => None,
+            let covering = |task: &cas_types::Task| -> Result<Option<cas_store::QaBatchReceipt>, String> {
+                let (repo, target) = crate::qa_batch::task_context(&self.inner.cas_root, task)?;
+                match crate::qa_batch::resolved_delivery_anchor(&repo, task, &target) {
+                    Some(head) => crate::qa_batch::satisfying_receipt(&self.inner.cas_root, task, &repo, &target, &head),
+                    None => Ok(None),
+                }
             };
-            batch = match receipt {
-                Some(receipt) => format!("Batch QA PASS for {task_id}: receipt={} staging={} ledger={} ({}).\n",
-                    receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.ledger_path),
-                None => format!("Batch QA: no valid staging receipt for {task_id}'s current delivery.\n"),
-            };
+            // An epic never has a receipt of its own (batch_receipt refuses it as
+            // self-review); its tip is covered by its children's receipts.
+            if task.task_type == cas_types::TaskType::Epic {
+                let children = self.inner.open_task_store()?.get_subtasks(task_id)
+                    .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+                let rows: Vec<(String, Option<String>)> = children.iter()
+                    .map(|child| (child.id.clone(), covering(child).ok().flatten().map(|receipt| receipt.id)))
+                    .collect();
+                let covered = rows.iter().filter(|(_, receipt)| receipt.is_some()).count();
+                batch = format!("Batch QA: {task_id} is an epic and takes no receipt of its own; its children's receipts cover it ({covered} of {} children covered).\n{}",
+                    rows.len(),
+                    rows.iter().map(|(id, receipt)| format!("- {id}: {}\n", receipt.as_deref().map_or("no valid staging receipt".to_owned(), |id| format!("receipt={id}")))).collect::<String>());
+            } else {
+                batch = match covering(&task).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))? {
+                    Some(receipt) => format!("Batch QA PASS for {task_id}: receipt={} staging={} ledger={} ({}).\n",
+                        receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.ledger_path),
+                    None => format!("Batch QA: no valid staging receipt for {task_id}'s current delivery.\n"),
+                };
+            }
         }
         let _ = cas_store::latest_qa_pass(&self.inner.cas_root, task_id, chrono::Utc::now());
         let passes = cas_store::list_qa_passes(&self.inner.cas_root, task_id)

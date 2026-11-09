@@ -150,8 +150,8 @@ pub(super) async fn prepare_service(cas_root: std::path::PathBuf) -> anyhow::Res
     use crate::mcp::daemon::{EmbeddedDaemonConfig, spawn_daemon};
     use crate::mcp::tools::CasService;
 
-    let cloud_sync_allowed =
-        match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
+    let cloud_sync_allowed = qa_sandbox().is_none()
+        && match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
             Ok(()) => true,
             Err(error) => {
                 eprintln!("[Cassy] Cloud sync disabled: {error}");
@@ -906,6 +906,35 @@ fn install_serve_panic_hook(cas_root: &std::path::Path) {
 ///
 /// Logs the chosen resolution strategy at DEBUG level for diagnosability.
 pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
+    let root = resolve_unsandboxed_root()?;
+    enforce_qa_sandbox(&root, qa_sandbox().as_deref())?;
+    Ok(root)
+}
+
+/// `cas serve --sandbox <dir>` pins this for the server and its backends (cas-3271).
+pub(crate) const QA_SANDBOX_ENV: &str = "CAS_QA_SANDBOX";
+
+pub(crate) fn qa_sandbox() -> Option<std::path::PathBuf> {
+    std::env::var_os(QA_SANDBOX_ENV).filter(|dir| !dir.is_empty()).map(Into::into)
+}
+
+/// A QA sandbox serves only a store under its scratch directory, so an inherited
+/// live `CAS_ROOT` is refused before anything is opened, registered or synced.
+pub(crate) fn enforce_qa_sandbox(root: &std::path::Path, sandbox: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let Some(sandbox) = sandbox else { return Ok(()) };
+    let inside = sandbox.canonicalize().ok().zip(root.canonicalize().ok())
+        .is_some_and(|(sandbox, root)| root.starts_with(sandbox));
+    if inside {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "QA sandbox refused: store {} is not under the sandbox {}; unset the inherited CAS_ROOT and initialize the scratch store with `cas init` inside the sandbox",
+        root.display(),
+        sandbox.display()
+    )
+}
+
+fn resolve_unsandboxed_root() -> anyhow::Result<std::path::PathBuf> {
     use crate::store::find_cas_root_from;
 
     if let Ok(dir) = std::env::var("CLAUDE_PROJECT_DIR") {
@@ -2373,6 +2402,34 @@ url = "https://context7.invalid/mcp"
             ("CAS_ROOT", None),
         ]);
         let error = resolve_mcp_serve_root().unwrap_err();
+    }
+
+    /// cas-3271: a QA sandbox refuses an inherited live CAS_ROOT and serves its own store.
+    #[test]
+    fn qa_sandbox_refuses_a_store_outside_its_scratch_directory() {
+        let live = TempDir::new().unwrap();
+        let scratch = TempDir::new().unwrap();
+        let (live, scratch) = (live.path().canonicalize().unwrap(), scratch.path().canonicalize().unwrap());
+        init_cas_dir(&live).unwrap();
+        init_cas_dir(&scratch).unwrap();
+        let sandbox = scratch.to_string_lossy().into_owned();
+        let inherited = live.join(".cas").to_string_lossy().into_owned();
+        {
+            let _env = TestEnvGuard::with_optional_vars(&[
+                ("CLAUDE_PROJECT_DIR", None),
+                ("CAS_ROOT", Some(&inherited)),
+                (super::QA_SANDBOX_ENV, Some(&sandbox)),
+            ]);
+            assert!(resolve_mcp_serve_root().is_err());
+            assert!(super::qa_sandbox().is_some());
+        }
+        let own = scratch.join(".cas").to_string_lossy().into_owned();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CLAUDE_PROJECT_DIR", None),
+            ("CAS_ROOT", Some(&own)),
+            (super::QA_SANDBOX_ENV, Some(&sandbox)),
+        ]);
+        assert_eq!(resolve_mcp_serve_root().unwrap(), scratch.join(".cas"));
     }
 
     /// When CLAUDE_PROJECT_DIR is not set, the function must still work via the

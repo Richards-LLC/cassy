@@ -133,6 +133,7 @@ JS
 
 write_valid_draft() {
     local path="$1" name="${1##*/}"
+    name="${name%.md}" # a file name in the body would trip the hub's unattached-file rule
     cat >"$path" <<'EOF2'
 ```text
 *Live on production — User — Cassy v{{VERSION}}*

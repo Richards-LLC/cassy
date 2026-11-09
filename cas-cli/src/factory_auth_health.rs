@@ -304,6 +304,95 @@ pub fn codex_account_model_support(
     }
 }
 
+/// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
+/// bounded by the preflight's own deadline (cas-c8de) so a hung binary
+/// cannot stall a spawn; `None` when it cannot be read in time.
+pub(crate) fn installed_codex_version(deadline: crate::bounded_process::Deadline) -> Option<String> {
+    let output = crate::bounded_process::run_command(
+        std::process::Command::new("codex").arg("--version"),
+        deadline,
+        std::time::Duration::from_secs(3),
+    )
+    .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !text.is_empty()).then_some(text)
+}
+
+/// The `CODEX_HOME` a Codex worker runs against: its account directory with
+/// `~` expanded, or the default `~/.codex` (spawns clear `CODEX_HOME`).
+pub(crate) fn codex_home_path(account_dir: Option<&str>) -> Option<std::path::PathBuf> {
+    match account_dir {
+        Some(dir) => match dir.strip_prefix('~') {
+            Some(suffix) => dirs::home_dir().map(|home| home.join(suffix.trim_start_matches('/'))),
+            None => Some(std::path::PathBuf::from(dir)),
+        },
+        None => dirs::home_dir().map(|home| home.join(".codex")),
+    }
+}
+
+/// Resolve a lane only after its account has been selected. General capability
+/// evidence can describe another Codex home; replace it with this account's
+/// model evidence before applying the registry's fallback order. Unverified
+/// candidates cannot justify spending a worker/worktree on a lane request.
+/// Explicit recipes retain their separate affirmative-absence preflight.
+pub(crate) fn resolve_lane_account_models(
+    lane: &str,
+    specs: &mut [cas_mux::WorkerSpec],
+    snapshot: &cas_factory::CapabilitySnapshot,
+) -> Result<(String, Vec<String>), String> {
+    use cas_factory::{CapabilityAvailability, CapabilityEvidence, CapabilitySnapshot};
+    let registry = cas_factory::registry().map_err(|error| error.to_string())?;
+    let now = chrono::Utc::now();
+    let version = std::cell::OnceCell::new();
+    let installed = || version.get_or_init(|| installed_codex_version(
+        crate::bounded_process::Deadline::after(std::time::Duration::from_secs(3)),
+    )).clone();
+    let mut decisions = Vec::new();
+    for spec in specs.iter() {
+        let mut account_snapshot = snapshot.clone();
+        if spec.cli == cas_mux::SupervisorCli::Codex {
+            let account_dir = spec.config_dir.as_deref().or(spec.requester_config_dir.as_deref());
+            let home = codex_home_path(account_dir).ok_or("spawn refused: Codex account home is unavailable")?;
+            let binary_available = installed().is_some();
+            account_snapshot.availability.retain(|identity, _| identity.harness != "codex");
+            for recipe in registry.recipes.values().filter(|recipe| recipe.harness == cas_mux::SupervisorCli::Codex) {
+                let support = if binary_available {
+                    codex_account_model_support(&home, &recipe.model, now, &installed)
+                } else {
+                    CodexModelSupport::Unverified("installed Codex version is unavailable".into())
+                };
+                let (availability, reason) = match support {
+                    CodexModelSupport::Supported => (CapabilityAvailability::Available, format!("{} supports {}", home.display(), recipe.model)),
+                    CodexModelSupport::Unsupported { .. } => (CapabilityAvailability::Unavailable, format!("{} does not list {}", home.display(), recipe.model)),
+                    CodexModelSupport::Unverified(reason) => (CapabilityAvailability::Unavailable, format!("{} cannot verify {}: {reason}; refresh the account catalogue with the installed Codex and retry", home.display(), recipe.model)),
+                };
+                account_snapshot.record(cas_factory::recipe_route_identity(recipe, "default"),
+                    CapabilityEvidence::new(availability, CapabilitySnapshot::now_ms()).with_reason(reason));
+            }
+        }
+        let mut decision = cas_factory::resolve_lane(lane, &account_snapshot)
+            .map_err(|error| format!("spawn refused before queueing: {error}"))?;
+        decision.spec.name = spec.name.clone();
+        if decision.spec.cli == spec.cli {
+            decision.spec.config_dir = spec.config_dir.clone();
+            decision.spec.requester_config_dir = spec.requester_config_dir.clone();
+            decision.spec.requester_secure_storage_dir = spec.requester_secure_storage_dir.clone();
+        }
+        decisions.push(decision);
+    }
+    let mut recipes = Vec::new();
+    let mut warnings = Vec::new();
+    for (spec, decision) in specs.iter_mut().zip(decisions) {
+        recipes.push(decision.recipe_id);
+        warnings.extend(decision.warnings);
+        *spec = decision.spec;
+    }
+    recipes.dedup();
+    warnings.sort();
+    warnings.dedup();
+    Ok((recipes.join(","), warnings))
+}
+
 /// Claude's JSONL transcript carries assistant/user records rather than a
 /// terminal turn marker, so the account signal is an error record whose text
 /// names an authentication failure, with any later assistant output closing

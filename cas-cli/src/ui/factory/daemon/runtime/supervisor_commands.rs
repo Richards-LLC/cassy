@@ -472,7 +472,15 @@ impl FactoryDaemon {
         anyhow::ensure!(!client_ref.is_empty() && client_ref.len() <= 128 && client_ref.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "Invalid command reference.");
         let owner = (device.to_owned(), client_ref.clone());
         if let Request::Run { command, confirmed } = &request {
+            // A chooser may have been closed in the native pane after Commander
+            // stopped polling its observed receipt. Refresh it before admission.
+            let idle = self.app.mux.supervisor().is_some_and(|pane| !pane.has_exited() && idle_prompt(&screen(pane)));
             for record in self.supervisor_commands.records.values_mut() {
+                if record.receipt.interactive && idle {
+                    record.receipt.phase = Phase::Observed;
+                    record.receipt.interactive = false;
+                    record.receipt.detail = "The native chooser is no longer open. No additional change was confirmed.".into();
+                }
                 if record.receipt.phase == Phase::Submitted && record.started.elapsed() > Duration::from_secs(90) {
                     record.receipt.phase = Phase::Unconfirmed;
                     record.receipt.detail = if record.receipt.command == Command::ReloadCassy {
@@ -487,7 +495,13 @@ impl FactoryDaemon {
             self.supervisor_commands.evict_expired();
             anyhow::ensure!(self.supervisor_commands.records.len() < RECEIPT_CAP, "Too many supervisor commands in the last 10 minutes. Try again shortly.");
             anyhow::ensure!(!command.needs_confirmation() || *confirmed, "This command needs confirmation.");
-            anyhow::ensure!(!self.supervisor_commands.records.values().any(|r| matches!(r.receipt.phase, Phase::Queued | Phase::Submitted) || r.receipt.interactive), "Another supervisor command is awaiting an outcome.");
+            if let Some(blocking) = self.supervisor_commands.records.values().find(|r| matches!(r.receipt.phase, Phase::Queued | Phase::Submitted) || r.receipt.interactive) {
+                let name = serde_json::to_value(blocking.receipt.command)?.as_str().unwrap_or_default().to_owned();
+                if blocking.receipt.phase == Phase::Submitted {
+                    anyhow::bail!("/{name} has been submitted and is awaiting an outcome. Wait for it to finish; Dismiss cannot cancel a submitted command.");
+                }
+                anyhow::bail!("/{name} is still pending. Use Dismiss command status on its card to cancel it. An open native chooser can also be closed with Close chooser.");
+            }
             if *command == Command::Finish {
                 let pane = self.app.mux.supervisor().ok_or_else(|| anyhow::anyhow!("The supervisor has not started."))?;
                 anyhow::ensure!(!pane.has_exited(), "The supervisor has ended.");
@@ -523,6 +537,24 @@ impl FactoryDaemon {
             return Ok(DaemonMessage::SupervisorCommandReceipt { receipt });
         }
         anyhow::ensure!(self.supervisor_commands.records.contains_key(&owner), "The original command receipt is unavailable. Do not resend an uncertain command.");
+        // Cancel before advancing queued Finish: Dismiss must never submit it,
+        // even if the prompt became ready in the meantime. No PTY bytes here.
+        if request == Request::Cancel {
+            let record = self.supervisor_commands.records.get_mut(&owner).expect("command owner checked");
+            anyhow::ensure!(record.receipt.phase != Phase::Submitted, "This command has already been submitted. Wait for its outcome; Dismiss cannot cancel it.");
+            if record.receipt.phase == Phase::Queued || record.receipt.interactive {
+                record.receipt.detail = if record.receipt.phase == Phase::Queued {
+                    "Queued command cancelled. Nothing was typed."
+                } else { "Chooser tracking cancelled. Nothing was typed; close the native chooser before sending another command." }.into();
+                record.receipt.phase = Phase::Cancelled;
+                record.receipt.interactive = false;
+                record.started = Instant::now();
+                if let Some(job) = record.hook.take() { job.abort(); }
+                if let Some(job) = self.supervisor_commands.readiness.take() { job.abort(); }
+                self.supervisor_commands.readiness_polled = None;
+            }
+            return Ok(DaemonMessage::SupervisorCommandReceipt { receipt: record.receipt.clone() });
+        }
         self.advance_queued_finish();
         let record = self.supervisor_commands.records.get_mut(&owner).expect("command owner checked");
         if record.receipt.phase == Phase::Queued {
@@ -852,6 +884,55 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&input).matches("/exit").count(), 1);
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2() {
+        use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
+        if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2") { return; }
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (root, mut daemon) = fixture().await;
+        let name = daemon.app.supervisor_name().to_owned();
+        let owner = MessageAttribution { device_id: Some("device-a".into()), operator_verified: true, ..Default::default() };
+        let finish = Request::Run { command: Command::Finish, confirmed: true };
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯ draft".as_bytes()).unwrap();
+        let queued = daemon.dispatch_supervisor_command(finish.clone(), "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(queued, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Queued));
+        daemon.supervisor_commands.records.get_mut(&("device-a".into(), "stuck-finish".into())).unwrap().started -= REPLAY_WINDOW;
+        let mut foreign = owner.clone(); foreign.device_id = Some("device-b".into());
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), foreign).await.is_err());
+        let cancelled = daemon.dispatch_supervisor_command(Request::Cancel, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(cancelled, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled && !receipt.interactive));
+        // Cancellation and a replay must never type the queued Finish.
+        let replay = daemon.dispatch_supervisor_command(finish, "stuck-finish".into(), owner.clone()).await.unwrap();
+        assert!(matches!(replay, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled));
+        daemon.advance_queued_finish();
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        quiet_for(&mut daemon, &name, COMMAND_SETTLE);
+        daemon.dispatch_supervisor_command(Request::Run { command: Command::Model, confirmed: false }, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while daemon.app.mux.pane_inject_busy(&name) || !std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let input = std::fs::read(root.path().join("input")).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().feed(b"\x1bcSelect model\r\nOpus\r\nSonnet").unwrap();
+        let chooser = daemon.dispatch_supervisor_command(Request::Status, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        assert!(matches!(chooser, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
+        let cancelled = daemon.dispatch_supervisor_command(Request::Cancel, "dismiss-chooser".into(), owner.clone()).await.unwrap();
+        assert!(matches!(cancelled, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Cancelled && !receipt.interactive));
+        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), input);
+        // Dismiss does not type Escape or bypass a real native modal.
+        assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Exit, confirmed: true }, "modal-exit".into(), owner.clone()).await.is_err());
+        daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
+        let exit = daemon.dispatch_supervisor_command(Request::Run { command: Command::Exit, confirmed: true }, "exit-after-cancel".into(), owner.clone()).await.unwrap();
+        assert!(matches!(exit, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Submitted));
+        // Dismiss cannot release a genuinely submitted command for another mutation.
+        assert!(daemon.dispatch_supervisor_command(Request::Cancel, "exit-after-cancel".into(), owner.clone()).await.is_err());
+        assert!(daemon.dispatch_supervisor_command(Request::Run { command: Command::Finish, confirmed: true }, "blocked-finish".into(), owner).await.is_err());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read(root.path().join("input")).unwrap()[input.len()..].ends_with(b"\r") { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let exit_input = std::fs::read(root.path().join("input")).unwrap();
+        assert_eq!(String::from_utf8_lossy(&exit_input[input.len()..]).matches("/exit").count(), 1);
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser() {
         use super::super::supervisor_single_turn_tests::{fixture_child, fixture};
         if !fixture_child("ui::factory::daemon::runtime::supervisor_commands::tests::native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser") { return; }
@@ -881,10 +962,12 @@ mod tests {
         let opened = daemon.dispatch_supervisor_command(Request::Status, "cmd-model".into(), owner.clone()).await.unwrap();
         assert!(matches!(opened, DaemonMessage::SupervisorCommandReceipt { receipt } if receipt.phase == Phase::Observed && receipt.interactive));
         daemon.app.mux.get_mut(&name).unwrap().feed("\x1bc\x1b[20;1H❯".as_bytes()).unwrap();
-        let closed = daemon.dispatch_supervisor_command(Request::Step { key: Key::Cancel }, "cmd-model".into(), owner.clone()).await.unwrap();
-        assert!(matches!(closed, DaemonMessage::SupervisorCommandReceipt { receipt } if !receipt.interactive));
-        assert_eq!(std::fs::read(root.path().join("input")).unwrap(), writes, "stale controls must send no key");
+        // cas-f1a2: Commander stops polling observed choosers. A new Run must
+        // discover that the native pane closed it without a Step or Status.
         daemon.dispatch_supervisor_command(Request::Run { command: Command::Usage, confirmed: false }, "cmd-usage".into(), owner).await.unwrap();
+        let closed = &daemon.supervisor_commands.records[&("device-a".into(), "cmd-model".into())].receipt;
+        assert_eq!(closed.phase, Phase::Observed);
+        assert!(!closed.interactive);
         // Pane names are human names; the registry's primary key is a different ID.
         let cas_dir = daemon.app.cas_dir();
         let store = crate::store::open_agent_store(cas_dir).unwrap();

@@ -4392,6 +4392,17 @@ root. The layers are:
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
 
+## Default Codex worker account
+
+Set `factory.codex_home` with `cas config set factory.codex_home "~/.codex-work"`
+from the project on each machine that should use that account. This local
+project setting accepts an existing account path or alias. `spawn_workers`
+uses it for Codex slots whose `config_dir` was omitted, including lane requests,
+before inherited accounts or quota recommendations. Explicit batch and per-worker
+`config_dir` values take precedence. The spawn receipt names
+`source=factory.codex_home`; invalid accounts are refused before queueing. Clear
+it with `cas config set factory.codex_home ""` to restore account recommendations.
+
 ## Cloud reader slots
 
 Supervisor registration derives a stable Cloud `factory_id` from the machine id,

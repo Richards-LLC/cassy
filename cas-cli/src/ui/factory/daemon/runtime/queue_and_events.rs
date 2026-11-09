@@ -20122,6 +20122,66 @@ mod tests {
     /// is temporarily unavailable must not make boot verification reap the
     /// still-starting harness before its post-registration window expires.
     #[tokio::test]
+    async fn canary_failure_retains_boot_diagnostics_cas_4cdd() {
+        if !super::super::supervisor_single_turn_tests::fixture_child(
+            "ui::factory::daemon::runtime::queue_and_events::tests::canary_failure_retains_boot_diagnostics_cas_4cdd",
+        ) { return; }
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        for has_pane in [true, false] {
+            let worker = if has_pane { "canary-reaped" } else { "canary-unconfirmed" };
+            let task_id = if has_pane { "cas-boot1" } else { "cas-boot2" };
+            let mut task = Task::new(task_id.into(), "boot fixture".into());
+            task.assignee = Some(worker.into());
+            tasks.add(&task).unwrap();
+            let request = queue.enqueue_spawn(1, &[], false, None,
+                Some(&daemon.session_name), Some(task_id)).unwrap();
+            queue.record_spawn_state(request, cas_store::SpawnLifecycleState::Launched,
+                Some(worker), None).unwrap();
+            daemon.app.mux.set_worker_spec(worker, cas_mux::WorkerSpec::builtin_default());
+            let output = format!("{}\nBOOT_FIXTURE_E_SETTINGS token=fixture-secret-4cdd\n", "x".repeat(2_100));
+            if has_pane {
+                let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+                    command: "sh".into(), args: vec!["-c".into(), "read line".into()],
+                    cwd: Some(temp.path().to_path_buf()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+                }).unwrap();
+                daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+                    worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+                ).unwrap());
+            }
+            let mut pane = super::super::relay::PaneBuffer::default();
+            pane.append(output.as_bytes());
+            daemon.pane_buffers.insert(worker.into(), pane);
+            daemon.spawn_verifications.insert(worker.into(), SpawnVerification {
+                request_id: Some(request), launched_at: Instant::now() - Duration::from_secs(61),
+                registered_at: None, task_id: Some(task_id.into()),
+                launched_wall: std::time::SystemTime::now() - Duration::from_secs(61),
+            });
+            daemon.reconcile_spawn_verifications().await;
+            assert!(!daemon.spawn_verifications.contains_key(worker));
+            assert!(daemon.dead_workers.contains(worker));
+            assert!(!daemon.pane_buffers.contains_key(worker));
+            assert!(crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap().is_empty());
+            let row = queue.recent_spawn_lifecycle(&daemon.session_name, 20).unwrap()
+                .into_iter().find(|row| row.id == request).unwrap();
+            assert_eq!(row.state, cas_store::SpawnLifecycleState::Failed);
+            assert_eq!(row.worker_name.as_deref(), Some(worker));
+            assert_eq!(row.task_id.as_deref(), Some(task_id));
+            let detail = row.detail.unwrap();
+            assert!(detail.contains("BOOT_FIXTURE_E_SETTINGS"));
+            assert!(!detail.contains("fixture-secret-4cdd"));
+            let task = tasks.get(task_id).unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_eq!(task.assignee.as_deref(), if has_pane { None } else { Some(worker) });
+            assert!(crate::cli::factory::wedged::execute_debug(Some(&cas_dir), worker, 20).is_ok());
+            assert!(crate::cli::factory::wedged::execute_debug(Some(&cas_dir), &request.to_string(), 20).is_ok());
+        }
+    }
+
+    #[tokio::test]
     async fn post_registration_verification_tolerates_cas_server_wait_gh_1173() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();

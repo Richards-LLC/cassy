@@ -1866,6 +1866,57 @@ mod tests {
         }
     }
 
+    /// cas-bfe3: a /mcp reconnect re-registers the supervisor from its launch
+    /// session id. An answer written after a /clear rebind must still reach
+    /// Commander, threaded under the verified question it answers.
+    #[test]
+    fn mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let (temp, root, queue) = terminal_session(vec![]);
+        let account = temp.path().join("account");
+        for (key, value) in [
+            ("CAS_AGENT_ROLE", "supervisor"),
+            ("CAS_FACTORY_SESSION", "factory-1"),
+            ("CAS_FACTORY_SUPERVISOR_CLI", "claude"),
+        ] {
+            env.set(key, value);
+        }
+        env.set("CLAUDE_CONFIG_DIR", &account);
+        let agents = SqliteAgentStore::open(&root).unwrap();
+        let mut supervisor = agents.get("supervisor-id").unwrap();
+        supervisor.cc_session_id = Some("after-clear".into());
+        agents.update(&supervisor).unwrap();
+        crate::mcp::CasCore::with_daemon(root.clone(), None, None)
+            .register_agent("supervisor-id".into(), "supervisor".into(), None)
+            .unwrap();
+
+        let message = queue.enqueue_operator_message(
+            "commander:Alice@phone", "supervisor", "overall status please", Some("factory-1"),
+            None, None, false, None,
+            &OperatorStamp {
+                operator: "Alice".into(), device_id: "phone".into(), device_label: "phone".into(),
+                scopes: vec!["message:send".into()], verified: true,
+            },
+        ).unwrap();
+        let now = Utc::now() + chrono::Duration::seconds(1);
+        let at = |offset| (now + chrono::Duration::seconds(offset)).to_rfc3339();
+        let directory = account.join("projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+        std::fs::create_dir_all(&directory).unwrap();
+        let prompt = format!("[cas #{} operator Alice@phone verified 0s first]\noverall status please", message.id());
+        let values = [
+            serde_json::json!({"timestamp":at(0),"type":"user","uuid":"question","origin":{"kind":"human"},"message":{"content":prompt}}),
+            serde_json::json!({"timestamp":at(1),"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Train is green."}],"stop_reason":"end_turn"}}),
+        ];
+        std::fs::write(directory.join("after-clear.jsonl"), values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+
+        scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), &mut MirrorScanState::default());
+        let replies = operator_replies(&queue);
+        let answer = replies.iter().find(|reply| reply.message == "Train is green.")
+            .expect("the answer after a reconnect must reach Commander");
+        assert_eq!(answer.reply_to, Some(message.id()));
+        assert_eq!(answer.device_id, "phone");
+    }
+
     #[test]
     fn mirrored_history_is_idempotent_and_deduplicates_matching_explicit_reply() {
         let temp = tempfile::tempdir().unwrap();

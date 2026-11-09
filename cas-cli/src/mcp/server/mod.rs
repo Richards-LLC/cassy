@@ -854,7 +854,14 @@ impl CasCore {
         }
 
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
-        agent.cc_session_id = Some(session_id.clone());
+        // cas-bfe3: server bootstrap reads CAS_SESSION_ID, the pane's launch
+        // session. A SessionStart rebind after /clear is newer, so an MCP
+        // reconnect keeps it instead of pointing the row (and the Commander
+        // mirror) back at the pre-clear transcript.
+        agent.cc_session_id = (source == AgentIdentitySource::ServerInternal)
+            .then(|| agent_store.get(&canonical_id).ok().and_then(|prior| prior.cc_session_id))
+            .flatten()
+            .or_else(|| Some(session_id.clone()));
 
         crate::mcp::daemon::register_with_role_reconciliation(
             agent_store.as_ref(),

@@ -982,8 +982,8 @@ invariants:
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
     bug: {task: cas-2a07}
   FACTORY-SOURCE-WORK-DELEGATION:
-    statement: Only an accepted owner-issued split grants a peer task work with external_ref intact; pending or unrelated shares grant no task work, and thread replies keep their separate claim authority.
-    check: Run standalone_source_work_split_keeps_reply_owner_cas_ad2c through integration_factory plus the existing one-sided grant/request cases; read back the assignment, source link, split release ledger and both reply-intent results.
+    statement: Only an accepted owner-issued split grants a peer task work with external_ref intact; pending or unrelated shares grant no task work, tasks without a matching accepted split leave caller identity unchanged, and thread replies keep their separate claim authority.
+    check: Run standalone_source_work_split_keeps_reply_owner_cas_ad2c through integration_factory plus the existing one-sided grant/request cases; read back the assignment, source link, split release ledger and both reply-intent results. Run shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc to verify unrelated staffing preserves each session's fleet isolation.
     bug: {task: cas-ad2c}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:

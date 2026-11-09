@@ -1,7 +1,7 @@
 //! Capacity waiting is a worker admission episode, never a task lifecycle state.
 //! Readers fence episodes with the current task lease. The existing notice
 //! outbox makes deadline reconciliation safe across retries and daemon restarts.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -55,9 +55,17 @@ pub(crate) struct CapacityWait {
 struct PressureNotice {
     episode: String,
     revision: u64,
-    workers: Vec<(String, String, String)>,
+    workers: Vec<(String, String, u64)>,
     reclaimable_bytes: Option<u64>,
     notified: bool,
+}
+
+fn read_pressure(root: &Path) -> Result<BTreeMap<String, PressureNotice>> {
+    match std::fs::read(directory(root).join("pressure.state")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn write_pressure(root: &Path, notices: &BTreeMap<String, PressureNotice>) -> Result<()> {
@@ -401,6 +409,20 @@ pub(crate) fn admitted(root: &Path, repo: &Path) -> Result<()> {
             std::fs::remove_file(file)?;
         }
     }
+    // End a fully resolved pressure episode here, not at the next daemon
+    // scan: a worker may be refused again before that scan gets a turn.
+    let mut pressure = read_pressure(root)?;
+    if !pressure.is_empty() {
+        let mut remaining = BTreeSet::new();
+        for (_, wait) in entries(root)? {
+            if wait.kind == CapacityKind::Disk && !wait.notified {
+                remaining.insert(serde_json::to_string(&wait.session)?);
+            }
+        }
+        let before = pressure.len();
+        pressure.retain(|key, _| remaining.contains(key));
+        if pressure.len() != before { write_pressure(root, &pressure)?; }
+    }
     Ok(())
 }
 
@@ -534,12 +556,7 @@ fn reconcile_with_inventory(
         write(root, &wait).context("persist delivered capacity escalation")?;
         notified += 1;
     }
-    let state_path = directory(root).join("pressure.state");
-    let mut pressure: BTreeMap<String, PressureNotice> = match std::fs::read(&state_path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(error) => return Err(error.into()),
-    };
+    let mut pressure = read_pressure(root)?;
     let selected_session = session.map(|session| serde_json::to_string(&Some(session))).transpose()?;
     let previous_count = pressure.len();
     pressure.retain(|key, _| selected_session.as_ref().is_some_and(|selected| selected != key)
@@ -554,7 +571,7 @@ fn reconcile_with_inventory(
     let agents = open_agent_store(root)?.list(None)?;
     for (key, waits) in disk_groups {
         if waits.iter().all(|wait| now - wait.since < Duration::seconds(ESCALATE_SECONDS)) { continue; }
-        let workers = waits.iter().map(|wait| (wait.worker_id.clone(), wait.task_id.clone(), wait.episode.clone())).collect::<Vec<_>>();
+        let workers = waits.iter().map(|wait| (wait.worker_id.clone(), wait.task_id.clone(), wait.lease_epoch)).collect::<Vec<_>>();
         let previous = pressure.entry(key.clone()).or_insert_with(|| PressureNotice {
             episode: uuid::Uuid::new_v4().to_string(), revision: 0, workers: workers.clone(), reclaimable_bytes, notified: false,
         });

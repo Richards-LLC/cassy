@@ -241,10 +241,17 @@ interface SessionOptions {
   control(): Promise<void>;
   send(message: unknown): boolean;
   changed(): void;
+  /** A finished command's one-line outcome, shown once as a self-clearing toast. */
+  settled?(receipt: CommandReceipt): void;
 }
 const COMMAND_OUTCOME_WINDOW_MS = 95_000;
 /** The daemon's prefix on an error it answers a supervisor command with (`CommanderControl::error_prefix`). */
 export const COMMAND_ERROR_PREFIX = "supervisor command failed:";
+/** A finished command needs no card: its one-line outcome clears itself (cas-95ea).
+ * Usage stays, because its card carries the harness readout the operator asked for. */
+function settlesToToast(receipt: CommandReceipt): boolean {
+  return receipt.phase === "observed" && !receipt.interactive && receipt.command !== "usage";
+}
 /** One conversation owns its mutations and polls only for their outcomes. */
 export class SupervisorCommandSession {
   readonly receipts = new Map<string, CommandReceipt>();
@@ -307,6 +314,9 @@ export class SupervisorCommandSession {
     if (current.phase === "refused" && receipt.phase !== "refused") return;
     this.receipts.set(receipt.client_ref, receipt);
     this.acknowledged.add(receipt.client_ref);
+    if (settlesToToast(receipt) && !this.dismissed.has(receipt.client_ref)) {
+      this.dismissed.add(receipt.client_ref); this.options.settled?.(receipt);
+    }
     if (this.cancelling.has(receipt.client_ref) && receipt.phase !== "queued" && receipt.phase !== "submitted" && !receipt.interactive) {
       this.cancelling.delete(receipt.client_ref); this.dismissed.add(receipt.client_ref);
     }

@@ -1,6 +1,6 @@
 # Cassy — Codemap
 
-> Structural map regenerated from the merged workspace: 18 Rust members, Commander and Slack bridge. Regenerate with `/codemap` after module moves.
+> Structural map reconciled with the next release train: 18 Rust members, Commander and Slack bridge. Regenerate with `/codemap` after module moves.
 
 ## Top-level layout
 
@@ -60,7 +60,7 @@
 - `cas-cli/src/ui/factory/app/`, `cas-cli/src/ui/factory/director/` - TUI state, worker dispatch/readiness, provisioning and delivery evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/` - daemon lifecycle, event/probe jobs and queued work; `lifecycle.rs` handles expiry and shutdown; `director_refresh_tests.rs` covers blocker episodes.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - attributed envelopes, delivery-tip context, recipient receipts and durable escalation before an undelivered lifecycle relay retires.
-- `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake and ordered session wakes.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake, managed claim outcomes and ordered session wakes; `violet_reader_tests.rs` covers explicit-unmanaged fallback fencing.
 - `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs`, `crates/cas-pty/src/input_queue.rs` - attach input draining and PTY byte diagnostics.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/`, `cas-cli/src/ui/factory/server_registry.rs` - attach guards, socket cleanup and owned-server checks.
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - allowlists, Finish queues and native execution/reconnect evidence.

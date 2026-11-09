@@ -1199,7 +1199,8 @@ fn sync_update_preserves_live_execution_lease_cas_c4a52() {
     task.assignee = None;
     store.update(&task).unwrap();
     assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Open);
-    // Releasing the lease also allows a fresh replicated reset afterward.
+    // Lease release does not erase a status-only assigned resume. A local
+    // ownership release is still authoritative and permits replicated reset.
     task.status = TaskStatus::InProgress;
     task.assignee = Some(owner.name.clone());
     store.update(&task).unwrap();
@@ -1208,6 +1209,12 @@ fn sync_update_preserves_live_execution_lease_cas_c4a52() {
     let mut remote = expected.clone();
     remote.status = TaskStatus::Open;
     remote.assignee = None;
+    assert_eq!(store.update_from_sync(&remote, &expected).unwrap(), None);
+    task.assignee = None;
+    store.update(&task).unwrap();
+    let expected = store.get(&task.id).unwrap();
+    let mut remote = expected.clone();
+    remote.status = TaskStatus::Open;
     assert!(store.update_from_sync(&remote, &expected).unwrap().is_some());
 }
 

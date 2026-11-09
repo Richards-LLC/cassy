@@ -1,0 +1,5 @@
+title: Reproduction and temporary candidate SHAs do not declare missing epic code dependencies
+found: '2026-11-09'
+tasks: [cas-0f47]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SPAWN]

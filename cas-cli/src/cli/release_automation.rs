@@ -425,6 +425,23 @@ fn preview_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<Strin
     reconcile_shipped_train(root, train_id, tag, true)
 }
 
+fn unmerged_factory_commit_count(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> usize {
+    let Some(start) = child.deliverables.factory_branch_start.as_ref() else {
+        return 0;
+    };
+    let branch = start.branch.trim_start_matches("refs/heads/");
+    let refs = [format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")];
+    let Some(branch_ref) = refs.into_iter().find(|reference| {
+        git(repo, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{reference}^{{commit}}")]).is_ok()
+    }) else {
+        return 0;
+    };
+    git(repo, &["rev-list", "--count", &format!("{tag_sha}..{branch_ref}")])
+        .ok()
+        .and_then(|count| count.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
 fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
     let (repo, _integration) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("release train has no integration branch")?;
@@ -450,7 +467,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     let needs_migration = children.iter().any(|child| {
         child.status != TaskStatus::Cancelled
             && !child.is_terminal()
-            && child.id != "cas-526e"
+            && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
             && !child.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| matches!(
                 crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
                     &repo, anchor, &tag_sha, &child.id,
@@ -478,6 +495,15 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             report.push(format!("{}: SKIP (cancelled); gate verdict N/A", child.id));
             continue;
         }
+        let unmerged_commits = if child.is_terminal() {
+            0
+        } else {
+            unmerged_factory_commit_count(&repo, child, &tag_sha)
+        };
+        if unmerged_commits > 0 {
+            report.push(format!("{}: SKIP ({unmerged_commits} unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)", child.id));
+            continue;
+        }
         let anchor = child.deliverables.factory_branch_anchor.as_deref();
         let shipped = anchor.is_some_and(|anchor| matches!(
             crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
@@ -502,19 +528,15 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             report.push(format!("{}: SKIP (already {}); gate verdict N/A", child.id, child.status));
             continue;
         }
-        if child.id == "cas-526e" {
-            report.push("cas-526e: SKIP (two unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)".into());
+        let successor = successor.as_ref().context("successor train missing for unfinished child")?;
+        let lane = next_lane.as_deref().context("successor train has no lane")?;
+        if dry_run {
+            report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
         } else {
-            let successor = successor.as_ref().context("successor train missing for unfinished child")?;
-            let lane = next_lane.as_deref().context("successor train has no lane")?;
-            if dry_run {
-                report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
-            } else {
-                moved_count += usize::from(move_to_next_train(
-                    store.as_ref(), child, train_id, &successor.id, successor, lane,
-                )?);
-                report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
-            }
+            moved_count += usize::from(move_to_next_train(
+                store.as_ref(), child, train_id, &successor.id, successor, lane,
+            )?);
+            report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
         }
     }
 
@@ -958,6 +980,14 @@ mod tests {
         git(repo, &["push", "origin", "main", &old_lane, next_lane, "--tags"]).unwrap();
         // This tag exists only locally. Publication checks must reject it.
         git(repo, &["tag", "-a", "v4.3.1", "-m", "local-only release"]).unwrap();
+        let unmerged_branch = "factory/unmerged-delivery";
+        let release_sha = git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap();
+        git(repo, &["checkout", "-b", unmerged_branch, "v4.3.0"]).unwrap();
+        for message in ["unmerged one", "unmerged two"] {
+            git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", message]).unwrap();
+        }
+        git(repo, &["push", "origin", unmerged_branch]).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
 
         let store = open_task_store(&root).unwrap();
         shipped.deliverables.work_target = Some(WorkTarget {
@@ -990,13 +1020,20 @@ mod tests {
         });
         shipped_child.deliverables.work_target = Some(shipped_target);
         store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
-        let mut open_child = Task::new("cas-526e".into(), "Next release child".into());
-        open_child.origin_project = Some("release-fixture".into());
-        open_child.deliverables.work_target = Some(WorkTarget {
+        let mut unmerged_child = Task::new("cas-a102".into(), "Unmerged release child".into());
+        unmerged_child.origin_project = Some("release-fixture".into());
+        let unmerged_target = WorkTarget {
             repo_selector: "project:release-fixture".into(),
             target_branch: old_lane.clone(),
+        };
+        unmerged_child.deliverables.work_target = Some(unmerged_target.clone());
+        unmerged_child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: unmerged_target,
+            assignee: owner.id.clone(),
+            branch: unmerged_branch.into(),
+            base_sha: release_sha,
         });
-        store.create_atomic(&open_child, &[], Some(&shipped.id), None).unwrap();
+        store.create_atomic(&unmerged_child, &[], Some(&shipped.id), None).unwrap();
         let mut another_open_child = Task::new("cas-a101".into(), "Move to successor".into());
         another_open_child.origin_project = Some("release-fixture".into());
         another_open_child.deliverables.work_target = Some(WorkTarget {
@@ -1012,16 +1049,16 @@ mod tests {
         let _cwd = env.enter_dir(repo);
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
-        assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         let preview = preview_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
         assert!(preview.contains("cas-a100: CLOSE; gate verdict PASS"), "{preview}");
-        assert!(preview.contains("cas-526e: SKIP (two unmerged commits; left open; parent and target unchanged); gate verdict N/A"), "{preview}");
+        assert!(preview.contains("cas-a102: SKIP (2 unmerged commits; left open; parent and target unchanged); gate verdict N/A"), "{preview}");
         assert!(preview.contains("cas-a101: MOVE -> cas-next001"), "{preview}");
         assert!(preview.contains("no writes"), "{preview}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
-        assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap().is_empty());
@@ -1029,15 +1066,15 @@ mod tests {
         assert!(first.contains("reconciled"), "{first}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open, "{first}");
         assert_eq!(store.get(&shipped_child.id).unwrap().status, TaskStatus::Closed);
-        let parent = store.get_parent_epic(&open_child.id).unwrap().unwrap();
+        let parent = store.get_parent_epic(&unmerged_child.id).unwrap().unwrap();
         assert_eq!(parent.id, shipped.id);
-        assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
-        assert_eq!(store.get(&open_child.id).unwrap().status, TaskStatus::Open);
-        assert!(first.contains("cas-526e"), "{first}");
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().status, TaskStatus::Open);
+        assert!(first.contains("cas-a102"), "{first}");
         assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, current.id);
         assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, next_lane);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
-        assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap();
         assert!(receipts.iter().any(|receipt| {
             receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA

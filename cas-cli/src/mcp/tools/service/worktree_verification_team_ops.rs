@@ -507,7 +507,11 @@ fn render_batch_receipt(receipt: &cas_store::QaBatchReceipt) -> String {
         .collect();
     format!(
         "{label} {id}{origin}\nRecorded: {at} by {recorder}\nLedger author: {author} ({role})\nStaging: {staging}\nLedger: {artifact} {path} sha256={sha}\nTasks ({count}): {tasks}",
-        label = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA { "Release verdict" } else { "Batch QA receipt" },
+        label = match receipt.schema_version {
+            cas_store::RELEASE_VERDICT_SCHEMA => "Release verdict",
+            cas_store::RELEASE_TAG_VERDICT_SCHEMA => "Published release tag verdict",
+            _ => "Batch QA receipt",
+        },
         id = receipt.id,
         origin = if receipt.imported { " (synced from a peer machine)" } else { "" },
         at = receipt.recorded_at,

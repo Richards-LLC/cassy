@@ -1,6 +1,6 @@
 # Cassy — Codemap
 
-> Regenerated from the merged source tree: 18 Rust workspace members and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated from the merged workspace: 18 Rust members, Commander and Slack bridge. Regenerate with `/codemap` after module moves.
 
 ## Top-level layout
 
@@ -23,7 +23,6 @@
 - `cas-cli/` - executable `cas` and composed application library.
 - `crates/cas-types/` - task, agent, delivery, event and wire types.
 - `crates/cas-store/` - SQLite task, agent, verification, prompt, QA and knowledge stores.
-- `crates/cas-store/src/task_store.rs`, `cas-cli/src/cloud/syncer/pull.rs` - conditional sync writes and live-owner protection of assigned InProgress tasks.
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.
@@ -58,7 +57,7 @@
 ## Factory runtime and terminals
 
 - `cas-cli/src/ui/factory/app/`, `cas-cli/src/ui/factory/director/` - TUI state, worker dispatch/readiness, provisioning and delivery evidence.
-- `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, events, probes, scheduling and queued work; `lifecycle.rs` owns expiry, merge recovery and shutdown; `director_refresh_tests.rs` replays blocker episodes.
+- `cas-cli/src/ui/factory/daemon/runtime/` - daemon lifecycle, event/probe jobs and queued work; `lifecycle.rs` handles expiry and shutdown; `director_refresh_tests.rs` covers blocker episodes.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - attributed envelopes, delivery-tip context, recipient receipts and durable escalation before an undelivered lifecycle relay retires.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake and ordered session wakes.
 - `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs`, `crates/cas-pty/src/input_queue.rs` - attach input draining and PTY byte diagnostics.
@@ -89,7 +88,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution and existing parked-anchor protections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, typed filesystem refusals and queue-proof validation.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - authenticated supervisor import grants and linked-checkout WIP identity; empty checkpoints require explicit task attribution.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - import grants and linked-checkout commit/WIP attribution.
 - `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs` - bounded close-reason proof assertions and clause-specific receipt checks.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - review dispatch, read-only backfill admission, target-only parked-anchor recovery, ordinary close and lifecycle outbox.
@@ -106,15 +105,17 @@
 - `cas-cli/src/finding_triage.rs`, `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` - journey severity labels and default release-train assignment.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - retirement snapshots and persistent queues.
-- `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - provenance repair, durable prompts and QA maintenance.
+- `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - provenance repair, durable prompts and QA maintenance; conditional task sync lives in `crates/cas-store/src/task_store.rs` and `cas-cli/src/cloud/syncer/pull.rs`.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 - `cas-cli/src/mcp/tools/service/core.rs`, `cas-cli/src/mcp/tools/core/memory.rs`, `cas-cli/src/mcp/tools/core/rules.rs`, `cas-cli/src/mcp/tools/core/rule_drift.rs` - memory/rule dispatch, partial updates, provenance and drift.
 
 ## QA, Commander and services
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - journey registry validation and diff selection.
-- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - ledger grammar, captures, deployed origins and walk progress.
-- `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - independent QA with head/pass-scoped evidence, release verdicts, owner-scoped receipt offers and live notice revalidation at queue/inbox boundaries.
+- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - ledger scaffolds, parsing and declared batch coverage.
+- `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
+- `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.
+- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - release verdicts, authorship rules and owner-scoped receipt notices.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.

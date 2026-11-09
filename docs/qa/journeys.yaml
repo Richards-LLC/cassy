@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-08'
+updated: '2026-11-09'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  batch-ledger-declared-coverage:
+    title: Generated batch ledgers declare receipt deliveries and preflight rejects missing coverage before publishing
+    tasks: [cas-6354]
+    invariants: [FACTORY-QA-LEDGER-COVERAGE]
+    journeys: [FACTORY-QA-RECEIPT]
   release-freeze-explicit-confirmation:
     title: MCP release freeze requires an explicit reason prefix before mutation and names the operator/publication lift policy
     tasks: [cas-0a5d8]
@@ -347,6 +352,10 @@ invariants:
     statement: A harness exit without a verdict returns its exact dispatch to a retryable audited state; one replacement owns the retry, stale children cannot publish, and the stderr reason remains readable after success.
     check: Run automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f through the real merge preparation and automatic handoff, plus failed_verifier_release_fences_claims_and_preserves_audit_cas_4271. Batch QA forces a disposable verifier harness to exit 1, retries the same merge once and checks one replacement, unchanged proof, stale-child refusal, preserved stderr and exact candidate landing.
     bug: {task: cas-4271}
+  FACTORY-QA-LEDGER-COVERAGE:
+    statement: Batch scaffold and brief name every intended receipt delivery; preflight rejects missing coverage and published declared coverage cannot be extended by prose mentions.
+    check: Run qa_ledger_init_check_and_no_overwrite through the CLI, then batch_qa_receipt_closes_listed_deliveries_cas_d697 and release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e through supervisor MCP. Generate coverage, check before publication, accept both declared deliveries, reject an unlisted ID mentioned in prose, and retain legacy receipt behavior.
+    bug: {task: cas-6354}
   FACTORY-QA-NOTICE-OWNER:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
@@ -999,8 +1008,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-EVIDENCE-IDENTITY]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/qa_ledger.rs, cas-cli/src/cli/qa_ledger.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-LEDGER-COVERAGE, FACTORY-QA-EVIDENCE-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

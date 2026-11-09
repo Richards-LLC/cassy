@@ -29798,7 +29798,7 @@ mod merge_state_gate_tests {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "released-train" | "same-line-evolved" | "batch-target-proof") {
                 // Publication records the reviewed mapping before sibling work
                 // evolves the same file. Close must reuse that immutable map.
                 git(p, &["push", "-q", "origin", "main"]);

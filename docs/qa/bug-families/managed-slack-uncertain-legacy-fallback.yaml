@@ -1,0 +1,8 @@
+title: An uncertain managed Slack claim cannot enable legacy intake on a fresh non-owner reader
+tasks: [cas-30b0]
+# no case: The registry has no managed-Slack claim/fallback journey or invariant.
+# The Violet handoff journey covers unread mail succession, a separate behavior.
+# Local fallback is covered by the named Rust regression; live Cloud routing
+# remains outside this authorized client-only delivery.
+invariants: []
+journeys: []

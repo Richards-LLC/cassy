@@ -301,7 +301,6 @@ async fn retired_assignee_keeps_required_verification_cas_8826() {
             let f = fixture(&mut env, "main");
             let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
             config.set("verification.enabled", "true").unwrap();
-            config.set("code_review.owner", "worker").unwrap();
             config.save(&f.cas_dir()).unwrap();
             env.set("CAS_AGENT_ROLE", "supervisor");
             let id = "cas-8826";

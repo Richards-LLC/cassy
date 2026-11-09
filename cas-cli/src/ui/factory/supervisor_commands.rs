@@ -60,7 +60,7 @@ impl SupervisorCommandKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SupervisorCommandPhase { Queued, Submitted, Observed, Refused, Unconfirmed }
+pub enum SupervisorCommandPhase { Queued, Submitted, Observed, Refused, Unconfirmed, Cancelled }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SupervisorCommandReceipt {
@@ -78,5 +78,7 @@ pub struct SupervisorCommandReceipt {
 pub enum SupervisorCommandRequest {
     Run { command: SupervisorCommand, confirmed: bool },
     Status,
+    /// Cancel queued work or release chooser tracking without writing to the PTY.
+    Cancel,
     Step { key: SupervisorCommandKey },
 }

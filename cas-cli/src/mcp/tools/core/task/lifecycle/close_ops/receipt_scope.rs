@@ -254,8 +254,11 @@ fn changelog_refusal(
     } else {
         "Add a per-delivery line such as `- **Title** — What changed.` under a `### Added — <area>` or `### Fixed — <area>` heading.".to_string()
     };
+    let inspected_ranges = delivery_ranges
+        .map(|ranges| format!("{ranges:?}"))
+        .unwrap_or_else(|| format!("first-parent history relative to {target}"));
     Some(format!(
-        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
     ))
 }
@@ -1084,6 +1087,86 @@ mod tests {
         let changed = vec!["changelog.d/cas-changelog-fixture.md".to_string(), "hub-web/src/app.ts".to_string()];
         let accepted = park_refusal(cas_root.path(), repo.path(), &task, &changed, &fragment, "main", None);
         assert!(accepted.is_none(), "{accepted:?}");
+    }
+
+    #[test]
+    fn corrected_fragment_counts_at_final_delivery_tip_gh1690() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        use cas_store::TaskStore;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = changelog_fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["branch", "-m", "factory/worker"]);
+        let mut task = Task::new("cas-8c58".into(), "worker account preference".into());
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let fragment = "changelog.d/cas-8c58.md";
+        std::fs::write(repo.path().join(fragment),
+            "### Honor the configured Codex worker account\n\nUse the configured account before recommendations.\n").unwrap();
+        let original = commit_changelog_fixture(repo.path(),
+            "fix: honor configured Codex worker account before recommendations");
+        task.status = cas_types::TaskStatus::InProgress;
+        task.assignee = Some("worker".into());
+        let target = cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(), branch: "factory/worker".into(),
+            base_sha: base.clone(),
+        });
+        task.deliverables.factory_branch_anchor = Some(original.clone());
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![original.clone()],
+            },
+        };
+        let refusal = |head: &str| {
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(head)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(head)).unwrap();
+            assert!(paths.iter().any(|path| path == fragment));
+            changelog_refusal(repo.path(), &task, &paths, head, "main", Some(&ranges))
+        };
+        assert!(refusal(&original).is_some());
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Worker accounts\n\n- **Honor the configured Codex worker account** — Use the configured account before recommendations.\n").unwrap();
+        let corrected = commit_changelog_fixture(repo.path(),
+            "docs: use the required worker account changelog fragment format");
+        let origin = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("git")
+            .args(["init", "-q", "--bare"]).current_dir(origin.path()).output().unwrap();
+        assert!(output.status.success());
+        git(&["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(&["push", "-q", "origin", "main", "factory/worker"]);
+        let root = repo.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let store = cas_store::SqliteTaskStore::open(&root).unwrap();
+        store.init().unwrap();
+        store.add(&task).unwrap();
+        let parking = core.advance_commit_time_anchor_before_park(
+            &store, &task, repo.path(), "main", Some("factory/worker"), Some(&corrected),
+        );
+        let inspected = parking.deliverables.factory_branch_anchor.unwrap();
+        assert_eq!(inspected, corrected);
+        assert!(refusal(&inspected).is_none());
+        assert_eq!(store.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(original.as_str()));
+
+        // A stale caller can still inspect the old malformed snapshot. Its
+        // diagnostic must identify the inspected commit and attributed bounds.
+        let stale = refusal(&original).unwrap();
+        assert!(stale.contains(&original));
+        assert!(stale.contains(&base));
     }
 
     #[test]

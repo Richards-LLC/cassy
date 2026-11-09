@@ -5022,11 +5022,19 @@ impl CasCore {
         // A previously published source is a receipt/reconciliation request,
         // not another delivery review. This local hint never authorizes a
         // mutation: the existing fresh containment check below must confirm it.
+        // cas-a8dd: a candidate binds the review only while it can still be
+        // reused: its source is the parked anchor or the branch tip, or it is
+        // transactional. An earlier round's candidate would only be replaced
+        // by a fresh review, so it must not hide a delivery already merged.
         let deferred_contained_review = if let Some(task) = scoped_task.as_deref() {
+            let branch_tip = manager.git().resolve_commit(&worktree.branch);
             let bound = match cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))? {
                 Some(dispatch) => super::premerge_verification::candidate_for_dispatch(&cas_root, &dispatch)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.is_some(),
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
+                    .is_some_and(|candidate| dispatch.delivery_transaction_id.is_some()
+                        || task.deliverables.factory_branch_anchor.as_deref() == Some(candidate.source_sha.as_str())
+                        || branch_tip.as_deref() == Some(candidate.source_sha.as_str())),
                 None => false,
             };
             let remote = format!("origin/{}", worktree.parent_branch);

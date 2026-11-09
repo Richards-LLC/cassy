@@ -103,7 +103,7 @@ impl Lane {
 
     fn current_handoff(&self) -> cas_types::Entry {
         let handoffs = self.handoffs();
-        cas_core::memory::handoff::current_handoff(&handoffs, "supervisor").unwrap().clone()
+        cas_core::memory::handoff::current_handoff(&handoffs, "supervisor", Some(&cas_core::memory::handoff::HandoffLineage::for_agent(&self.agents[0]))).unwrap().clone()
     }
 
     fn deliver_notice(&self) {
@@ -137,6 +137,7 @@ fn over_budget_wake_at_idle_boundary_hands_off_and_clears_once() {
     crate::store::open_store(&lane.root).unwrap().add(&{
         let mut judgement = cas_types::Entry::new("mem-judgement".into(), "Next: merge the no-op wake fix first.".into());
         judgement.tags = vec!["handoff".into(), "role:supervisor".into()];
+        cas_core::memory::handoff::HandoffLineage::for_agent(&lane.agents[0]).stamp(&mut judgement);
         judgement
     }).unwrap();
     lane.turn(40_000, true);

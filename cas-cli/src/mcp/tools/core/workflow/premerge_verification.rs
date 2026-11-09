@@ -86,7 +86,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE")
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("PREMERGE_GIT_IO: git at {}: {error}", repo.display()))?;
     if !output.status.success() {
         // cas-c5db: `merge-base --is-ancestor` answers "no" with an empty
         // stderr; name the whole command and its exit so a refusal is actionable.
@@ -107,6 +107,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// to `if !ok` two lines away); only full-context identity may rebind. An
 /// empty or unreadable patch is an error, never a match.
 pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+    delivered_patch_id_for_paths(repo, target, tree, &[])
+}
+
+fn delivered_patch_id_for_paths(repo: &Path, target: &str, tree: &str, paths: &[&str]) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {
@@ -124,6 +128,8 @@ pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Resul
         let diff = diff
             .args(["diff", "--binary", "--no-color", "--no-renames", "--no-ext-diff"])
             .args(["--no-textconv", context, target, tree])
+            .arg("--")
+            .args(paths)
             .output()
             .map_err(|error| error.to_string())?;
         if !diff.status.success() || diff.stdout.is_empty() {
@@ -233,25 +239,26 @@ fn write_once<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
 ) -> Result<(), String> {
     use std::io::Write;
     let directory = path.parent().ok_or("immutable record directory missing")?;
-    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    let io_error = |error| format!("PREMERGE_CANDIDATE_RECORD_IO: {}: {error}", path.display());
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(io_error)?;
     file.write_all(&serde_json::to_vec(value).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+        .map_err(io_error)?;
     file.as_file()
         .sync_all()
-        .map_err(|error| error.to_string())?;
+        .map_err(io_error)?;
     match file.persist_noclobber(path) {
         Ok(_) => Ok(()),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             let previous: T =
-                serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
+                serde_json::from_slice(&std::fs::read(path).map_err(io_error)?)
+                    .map_err(|error| format!("PREMERGE_CANDIDATE_RECORD_PARSE: {}: {error}", path.display()))?;
             if &previous == value {
                 Ok(())
             } else {
                 Err("immutable candidate record changed".into())
             }
         }
-        Err(error) => Err(error.error.to_string()),
+        Err(error) => Err(io_error(error.error)),
     }
 }
 
@@ -317,14 +324,14 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     );
     for directory in crate::config::factory_task_artifact_dirs(root, &paths.base, &task.id) {
         let ledger = directory.join("LEDGER.md");
-        match std::fs::read(ledger) {
+        match std::fs::read(&ledger) {
             Ok(bytes) => {
                 hash.update(b"ledger\0");
                 hash.update((bytes.len() as u64).to_le_bytes());
                 hash.update(bytes);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("PREMERGE_CONTEXT_LEDGER_READ: {}: {error}", ledger.display())),
         }
     }
     Ok(format!("{:x}", hash.finalize()))
@@ -344,9 +351,14 @@ pub(crate) fn candidate_for_dispatch(
         .join("verification-candidates")
         .join(&bound_key)
         .join("candidate.json");
-    let candidate: Candidate =
-        serde_json::from_slice(&std::fs::read(manifest).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+    let bytes = std::fs::read(&manifest).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_READ: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
+        manifest.display(), dispatch.id,
+    ))?;
+    let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_PARSE: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
+        manifest.display(), dispatch.id,
+    ))?;
     let key = candidate_key(
         &candidate.task_id,
         &candidate.repository,
@@ -426,11 +438,12 @@ impl Candidate {
         // move that recomputes the exact reviewed tree, such as a ref fast-
         // forward or a queue merge of commits the source already carries,
         // changes no reviewed content, whatever the path overlap says.
-        if let Ok(merged) = git(
+        let merged = git(
             &self.repository,
             &["merge-tree", "--write-tree", target, &self.source_sha],
-        ) && merged.lines().next() == Some(self.tree.as_str())
-        {
+        )?;
+        let tree = merged.lines().next().ok_or("merge tree missing")?.to_string();
+        if tree == self.tree {
             return Ok(self.tree.clone());
         }
         git(
@@ -441,35 +454,37 @@ impl Candidate {
             &self.repository,
             &["merge-base", &self.target_sha, &self.source_sha],
         )?;
-        let changed = repository_proof::delivery_paths_changed(
+        // Shared overview additions may touch the same file while leaving
+        // every delivered hunk and its context unchanged. Compare the actual
+        // clean merge's full-context patch, never waive the whole document.
+        let overview = "docs/PRODUCT_OVERVIEW.md";
+        let unchanged_overview = delivered_patch_id_for_paths(
+            &self.repository, &self.target_sha, &self.tree, &[overview],
+        ).ok().zip(delivered_patch_id_for_paths(
+            &self.repository, target, &tree, &[overview],
+        ).ok()).is_some_and(|(reviewed, current)| reviewed == current);
+        let reviewed_changes = |paths: Vec<String>| paths.into_iter()
+            .filter(|path| path != overview || !unchanged_overview).collect::<Vec<_>>();
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.target_sha,
             target,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "target changed reviewed delivery files: {}; review the new candidate",
                 changed.join(", ")
             ));
         }
-        let merged = git(
-            &self.repository,
-            &["merge-tree", "--write-tree", target, &self.source_sha],
-        )?;
-        let tree = merged
-            .lines()
-            .next()
-            .ok_or("merge tree missing")?
-            .to_string();
-        let changed = repository_proof::delivery_paths_changed(
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.tree,
             &tree,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "recomputed merge changed reviewed delivery content: {}",
@@ -552,13 +567,14 @@ impl Candidate {
 impl Approval {
     fn promotion(&self) -> Result<Option<Promotion>, String> {
         let path = self.candidate.directory()?.join("promotion.json");
-        let bytes = match std::fs::read(path) {
+        let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("PREMERGE_PROMOTION_READ: {} for dispatch {}: {error}", path.display(), self.dispatch_id)),
         };
-        let record: Promotion =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let record: Promotion = serde_json::from_slice(&bytes).map_err(|error| format!(
+            "PREMERGE_PROMOTION_PARSE: {} for dispatch {}: {error}", path.display(), self.dispatch_id,
+        ))?;
         let candidate = &self.candidate;
         if record.dispatch_id != self.dispatch_id
             || record.verdict_id != self.verdict_id
@@ -906,7 +922,9 @@ impl CasCore {
         }
         refresh_review_target(repo, target).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
@@ -1047,7 +1065,9 @@ impl CasCore {
         else {
             return Ok(None);
         };
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
             || dispatch.receipt_id.is_some()
             || prior.context_digest != digest
@@ -1161,7 +1181,9 @@ impl CasCore {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = review_target(repo, target).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         let key = candidate_key(
             &task.id,
             &repository,
@@ -1181,8 +1203,12 @@ impl CasCore {
         .map_err(fail)?;
         let manifest = directory.join("candidate.json");
         if manifest.exists() {
-            let candidate: Candidate =
-                serde_json::from_slice(&std::fs::read(manifest).map_err(fail)?).map_err(fail)?;
+            let bytes = std::fs::read(&manifest).map_err(|error| {
+                fail(format!("could not read cached candidate manifest {}: {error}", manifest.display()))
+            })?;
+            let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| {
+                fail(format!("could not parse cached candidate manifest {}: {error}", manifest.display()))
+            })?;
             if candidate.task_id != task.id
                 || candidate.repository != repository
                 || candidate.source_branch != source
@@ -1212,16 +1238,19 @@ impl CasCore {
             }
             return Ok(candidate);
         }
-        std::fs::create_dir_all(&directory).map_err(fail)?;
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            fail(format!("could not create candidate directory {}: {error}", directory.display()))
+        })?;
         if let Some(dispatch) =
             cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
             && let Some(proof) = dispatch.repository.as_ref()
             && proof_candidate_key(proof).map_err(fail)?.as_deref()
                 == directory.file_name().and_then(|name| name.to_str())
         {
-            return Err(fail(
-                "candidate manifest missing for an existing dispatch; explicit recovery required",
-            ));
+            return Err(fail(format!(
+                "candidate manifest {} is missing for existing dispatch {}; explicit recovery required",
+                manifest.display(), dispatch.id,
+            )));
         }
         let merged = git(
             repo,
@@ -1281,7 +1310,9 @@ impl CasCore {
         proof.worktree_root = checkout
             .path
             .canonicalize()
-            .map_err(fail)?
+            .map_err(|error| {
+                fail(format!("could not resolve candidate checkout {}: {error}", checkout.path.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let candidate = Candidate {
@@ -1336,6 +1367,79 @@ mod tests {
         run(repo, &["add", "-A"]);
         run(repo, &["commit", "-q", "-m", message]);
         run(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn parked_candidate(repo: &Path, source: &str, target: &str) -> Candidate {
+        let source_sha = run(repo, &["rev-parse", source]);
+        let tree = run(repo, &["merge-tree", "--write-tree", target, source])
+            .lines().next().unwrap().to_string();
+        Candidate {
+            cas_root: repo.to_path_buf(), task_id: source.into(), repository: repo.to_path_buf(),
+            source_branch: source.into(), source_sha, target_branch: "main".into(),
+            target_sha: target.into(), tree, context_digest: String::new(),
+            proof: RepositoryProofBoundary {
+                peer_premerge: None, repository_root: String::new(), worktree_root: String::new(),
+                head_commit: String::new(), state_digest: String::new(), target_branch: None,
+                anchor_commits: Vec::new(),
+            },
+            preparation_ms: 0,
+        }
+    }
+
+    #[test]
+    fn shared_upkeep_keeps_back_to_back_candidate_approvals_cas_e79d() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let body = (0..24).map(|n| format!("section {n}\n")).collect::<String>();
+        for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+            "cas-cli/src/builtins/reference-history.json"]
+        {
+            commit_file(repo, path, &body, "base upkeep");
+        }
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        for (branch, marker) in [("factory/a", 2), ("factory/b", 20)] {
+            run(repo, &["checkout", "-q", "-b", branch, &base]);
+            for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+                "cas-cli/src/builtins/reference-history.json"]
+            {
+                let edited = body.replace(&format!("section {marker}\n"),
+                    &format!("section {marker}\nadded by {branch}\n"));
+                commit_file(repo, path, &edited, "delivery upkeep");
+            }
+        }
+        let first = parked_candidate(repo, "factory/a", &base);
+        let second = parked_candidate(repo, "factory/b", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        for candidate in [&first, &second] {
+            let target = run(repo, &["rev-parse", "main"]);
+            let tree = candidate.tree_on(&target).expect("unchanged reviewed doc hunks keep approval");
+            run(repo, &["merge", "-q", "--no-ff", &candidate.source_branch, "-m", "land delivery"]);
+            let landed = run(repo, &["rev-parse", "main"]);
+            assert_eq!(run(repo, &["rev-parse", "main^{tree}"]), tree);
+            assert_eq!(candidate.verify_landing(&landed), Ok(()));
+        }
+        let overview = std::fs::read_to_string(repo.join("docs/PRODUCT_OVERVIEW.md")).unwrap();
+        assert!(overview.contains("added by factory/a") && overview.contains("added by factory/b"));
+    }
+
+    #[test]
+    fn overlapping_code_still_holds_candidate_cas_e79d() {
+      for path in ["src/lib.rs", "docs/PRODUCT_OVERVIEW.md"] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, path, "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/a"]);
+        commit_file(repo, path, "delivered\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+        let candidate = parked_candidate(repo, "factory/a", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        let target = commit_file(repo, path, "first\nsecond\nthird\nchanged\nfifth\nlast\n", "sibling edit");
+        assert!(git(repo, &["merge-tree", "--write-tree", &target, &candidate.source_sha]).is_ok(),
+            "the review guard must hold even a clean merge when reviewed context changed");
+        assert!(candidate.tree_on(&target).is_err());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+      }
     }
 
     /// cas-bfa8: a train created on another machine exists only on origin

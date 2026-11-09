@@ -38,12 +38,20 @@ pub(super) fn validated_started_delivery(
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
     };
-    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
-        || task.assignee.as_deref() != Some(start.assignee.as_str())
-        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(
-            repo,
+    // Linked factory checkouts may have no local project pin. The shared
+    // primary repository still supplies their identity, as it does at start.
+    let repository_matches = |root: &Path| {
+        crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            root,
             &start.work_target.repo_selector,
         )
+    };
+    let checkout_identity_matches = repository_matches(repo);
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !(checkout_identity_matches
+            || crate::mcp::tools::core::task::repo_context::git_layout(repo)
+                .is_ok_and(|(primary, _)| repository_matches(&primary)))
     {
         return Ok(None);
     }
@@ -200,6 +208,12 @@ pub(super) fn validated_started_delivery(
         if on_lane
             && (merged.is_empty()
                 || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+            // The inherited repository identity can recover real WIP, but
+            // cannot make an unnamed, unrecorded empty checkpoint task-owned.
+            // Such metadata-only commits still need their own attribution.
+            && (checkout_identity_matches
+                || commit_is_task_attributable(repo, sha, &identity)
+                || has_first_parent_tree_effect(repo, sha) == Some(true))
         {
             commits.push(sha.to_string());
         }
@@ -1530,6 +1544,7 @@ pub(super) fn merge_tip_content_presence(
                 target,
                 Some(std::slice::from_ref(path)),
                 true,
+                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
             )
         })
     });
@@ -1564,6 +1579,7 @@ pub(super) fn merge_tip_content_presence(
                 target,
                 merge_tip,
                 &carries_source,
+                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
             )
         })
         .collect();
@@ -1598,6 +1614,7 @@ pub(super) fn merge_tip_content_presence(
                         && matches!(
                             super::delivery_content_presence_in_parent_for_paths(
                                 repo, commit, &first, Some(std::slice::from_ref(&path)), false,
+                                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
                             ),
                             DeliveryContentPresence::Present { .. }
                                 | DeliveryContentPresence::Superseded { .. }
@@ -1907,6 +1924,7 @@ pub(super) fn ordinary_anchor_content_presence(
         target,
         anchor,
         &carries_source,
+        &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
     );
     let DeliveryContentPresence::Dropped { paths } = &original else {
         return original;
@@ -1949,7 +1967,8 @@ pub(super) fn ordinary_anchor_content_presence(
                         commit,
                         target,
                         Some(&selected),
-                        true
+                        true,
+                        &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
                     ),
                     DeliveryContentPresence::Present { .. }
                         | DeliveryContentPresence::Superseded { .. }

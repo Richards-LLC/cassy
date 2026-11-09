@@ -501,6 +501,11 @@ pub struct ArtifactRequest {
     )]
     pub action: String,
 
+    /// Non-empty audit reason for supervisor-only revocation.
+    #[schemars(description = "Required audit reason for supervisor-only revoke; local denial is immediate, Cloud deletion may remain pending")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+
     /// Receipt appended with a portable artifact reference after Cloud commits.
     #[schemars(
         description = "Optional task proof receipt to append after publish commits to Cloud; one call publishes and attaches the log"

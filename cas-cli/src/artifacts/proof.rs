@@ -45,6 +45,10 @@ pub fn lookup_metadata(
 ) -> anyhow::Result<PublishedArtifact> {
     let store = SqliteArtifactStore::open(cas_root)?;
     let local = store.get(id)?;
+    if let Some(artifact) = local.as_ref().filter(|artifact| artifact.revocation.is_some()) {
+        anyhow::ensure!(task_id.is_none_or(|task| task == artifact.task_id), "artifact belongs to another task");
+        return Ok(artifact.clone());
+    }
     if task_id.is_none() {
         if let Some(artifact) = local {
             return Ok(artifact);
@@ -112,6 +116,7 @@ pub(crate) fn same_artifact(a: &PublishedArtifact, b: &PublishedArtifact) -> boo
 }
 
 pub(crate) fn validate(artifact: &PublishedArtifact, task_id: &str) -> anyhow::Result<()> {
+    super::require_available(artifact)?;
     ArtifactRef {
         artifact_id: artifact.id.clone(),
         name: artifact.name.clone(),
@@ -305,6 +310,7 @@ fn fetch(
     validate(&artifact, &artifact.task_id)?;
     let existing = store.get(&artifact.id)?;
     if let Some(existing) = &existing {
+        super::require_available(existing)?;
         anyhow::ensure!(
             same_artifact(existing, &artifact),
             "artifact ledger conflicts with proof reference"
@@ -315,7 +321,10 @@ fn fetch(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact is not committed to Cloud"))?;
     let client = cloud.ok_or_else(|| anyhow::anyhow!("not logged in to Cassy Cloud"))?;
-    let view = client.view_url(cloud_id)?;
+    let view = client.view_url(cloud_id).map_err(|error| match error {
+        super::ViewFailure::Revoked => anyhow::Error::from(super::ArtifactRevoked { artifact_id: artifact.id.clone() }),
+        error => error.into(),
+    })?;
     anyhow::ensure!(
         view.artifact_id == cloud_id,
         "Cloud returned another artifact id"
@@ -325,6 +334,9 @@ fn fetch(
         view,
     };
     let bytes = super::slack::download(&signed)?;
+    if let Some(current) = store.get(&artifact.id)? {
+        super::require_available(&current)?;
+    }
 
     let task_dir = &roots.task_artifacts_dir;
     std::fs::create_dir_all(task_dir)?;

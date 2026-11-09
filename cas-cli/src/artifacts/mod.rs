@@ -41,6 +41,81 @@ use paths::{PublishRoots, resolve_publishable_path};
 
 pub use proof::{MetadataUnavailable, lookup_metadata};
 
+#[derive(Debug, thiserror::Error)]
+#[error("artifact {artifact_id} is revoked; byte retrieval and sharing are disabled")]
+pub struct ArtifactRevoked {
+    pub artifact_id: String,
+}
+
+pub fn require_available(artifact: &PublishedArtifact) -> Result<(), ArtifactRevoked> {
+    if artifact.revocation.is_some() {
+        return Err(ArtifactRevoked { artifact_id: artifact.id.clone() });
+    }
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RevokeOutcome {
+    pub artifact_id: String,
+    pub task_id: String,
+    pub local_state: &'static str,
+    pub cloud_state: &'static str,
+    pub revocation: cas_store::ArtifactRevocation,
+    pub cloud_error: Option<String>,
+}
+
+impl RevokeOutcome {
+    pub fn summary(&self) -> String {
+        let state = match self.cloud_state {
+            "pending" => "cloud revocation pending: bytes may still be retrievable",
+            "revoked" => "Cloud revocation confirmed",
+            _ => "no Cloud object recorded",
+        };
+        format!(
+            "Local access revoked: {}\n{state}\nactor_id: {}\nreason: {}\nrevoked_at: {}",
+            self.artifact_id, self.revocation.actor_id, self.revocation.reason, self.revocation.revoked_at,
+        )
+    }
+}
+
+/// Called only after the CLI/MCP boundary authenticates a live supervisor.
+/// The local tombstone lands before any network operation and survives failure.
+pub fn revoke(
+    store: &SqliteArtifactStore,
+    client: Option<&ArtifactUploadClient>,
+    id: &str,
+    actor_id: &str,
+    reason: &str,
+) -> anyhow::Result<RevokeOutcome> {
+    let artifact = store.get(id)?.ok_or_else(|| anyhow::anyhow!("unknown artifact {id}"))?;
+    let mut revocation = store.revoke(id, actor_id, reason)?;
+    let mut cloud_error = None;
+    let cloud_state = if let Some(cloud_id) = &artifact.cloud_artifact_id {
+        if revocation.cloud_revoked_at.is_some() {
+            "revoked"
+        } else if let Some(client) = client {
+            match client.revoke(cloud_id, &revocation.reason, &revocation.actor_id) {
+                Ok(receipt) => {
+                    store.confirm_cloud_revocation(id, &receipt.revoked_at)?;
+                    revocation = store.get(id)?.and_then(|artifact| artifact.revocation)
+                        .ok_or_else(|| anyhow::anyhow!("artifact tombstone disappeared"))?;
+                    "revoked"
+                }
+                Err(error) => { cloud_error = Some(error); "pending" }
+            }
+        } else {
+            cloud_error = Some("Cloud credentials are unavailable".into());
+            "pending"
+        }
+    } else {
+        "not_applicable"
+    };
+    Ok(RevokeOutcome {
+        artifact_id: artifact.id, task_id: artifact.task_id, local_state: "revoked",
+        cloud_state, revocation, cloud_error,
+    })
+}
+
 /// 64 KiB: large enough that hashing a 25 MiB file is a handful of syscalls,
 /// small enough not to matter on a constrained host.
 const HASH_CHUNK: usize = 64 * 1024;
@@ -242,6 +317,7 @@ pub struct SignedView {
 /// Why an artifact cannot be viewed through Cloud.
 #[derive(Debug)]
 pub enum ViewError {
+    Revoked(ArtifactRevoked),
     /// No record by that id in this project.
     Unknown(String),
     /// The record exists but never committed to Cloud; its bytes are only on
@@ -259,6 +335,7 @@ pub enum ViewError {
 impl std::fmt::Display for ViewError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ViewError::Revoked(error) => write!(f, "{error}"),
             ViewError::Unknown(id) => write!(f, "no artifact {id} in this project"),
             ViewError::NotInCloud { status } => write!(
                 f,
@@ -286,6 +363,7 @@ pub fn signed_view(
         .get(id.trim())
         .map_err(|error| ViewError::Store(error.to_string()))?
         .ok_or_else(|| ViewError::Unknown(id.trim().to_string()))?;
+    require_available(&artifact).map_err(ViewError::Revoked)?;
     let cloud_id = match (
         artifact.status.as_str(),
         artifact.cloud_artifact_id.as_deref(),
@@ -298,7 +376,10 @@ pub fn signed_view(
         }
     };
     let client = client.ok_or(ViewError::NotLoggedIn)?;
-    let view = client.view_url(&cloud_id).map_err(ViewError::Cloud)?;
+    let view = client.view_url(&cloud_id).map_err(|error| match error {
+        ViewFailure::Revoked => ViewError::Revoked(ArtifactRevoked { artifact_id: artifact.id.clone() }),
+        error => ViewError::Cloud(error),
+    })?;
     Ok(SignedView { artifact, view })
 }
 
@@ -589,6 +670,73 @@ mod tests {
                 cloud: None,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn artifact_revoke_cloud_pending_ack_and_reshare_cas_6d35() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path, body_json}};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/cloud-fixture/url"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error":"artifact_revoked",
+            }))).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/cloud-fixture/revoke"))
+            .and(body_json(serde_json::json!({"actor_id":"supervisor", "reason":"Harmless fixture cleanup"})))
+            .respond_with(move |_: &wiremock::Request| match seen.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(404),
+                1 => ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                    "error":"artifact_delete_failed",
+                })),
+                2 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id":"another-object", "revoked":true, "revoked_at":"2026-11-09T21:00:00Z",
+                })),
+                _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "artifact_id":"cloud-fixture", "revoked":true, "revoked_at":"2026-11-09T21:00:00Z",
+                })),
+            }).expect(4).mount(&server).await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let f = fixture();
+            let file = f.task_dir.join("harmless.txt");
+            fs::write(&file, b"disposable fixture only").unwrap();
+            let published = publish(&f.context(), &file).unwrap();
+            let id = published.artifact.id;
+            f.store.mark_uploaded(&id, "cloud-fixture").unwrap();
+            f.store.mark_committed(&id, None).unwrap();
+            let client = ArtifactUploadClient::new(&endpoint, "fixture-token");
+            assert_eq!(slack::fetch_verified(&f.store, Some(&client), &id).unwrap_err().code, "artifact_revoked");
+            let first = revoke(&f.store, Some(&client), &id, "supervisor", "Harmless fixture cleanup").unwrap();
+            assert_eq!(first.local_state, "revoked");
+            assert_eq!(first.cloud_state, "pending");
+            assert!(first.revocation.cloud_revoked_at.is_none());
+            assert!(matches!(signed_view(&f.store, Some(&client), &id), Err(ViewError::Revoked(_))));
+            assert_eq!(slack::fetch_verified(&f.store, Some(&client), &id).unwrap_err().code, "artifact_revoked");
+            let failed_delete = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
+            assert_eq!(failed_delete.cloud_state, "pending");
+            assert!(failed_delete.cloud_error.is_some());
+            assert_eq!(failed_delete.revocation, first.revocation);
+            let wrong = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
+            assert_eq!(wrong.cloud_state, "pending");
+            assert_eq!(wrong.revocation, first.revocation);
+            let confirmed = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
+            assert_eq!(confirmed.cloud_state, "revoked");
+            assert_eq!(confirmed.revocation.actor_id, first.revocation.actor_id);
+            assert_eq!(confirmed.revocation.reason, first.revocation.reason);
+            assert_eq!(confirmed.revocation.revoked_at, first.revocation.revoked_at);
+            assert!(confirmed.revocation.cloud_revoked_at.is_some());
+            let repeated = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
+            assert_eq!(repeated.revocation, confirmed.revocation);
+            assert_eq!(repeated.cloud_state, "revoked");
+        }).await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.iter().filter(|request| request.method.as_str() == "GET").count(), 1);
     }
 
     #[test]

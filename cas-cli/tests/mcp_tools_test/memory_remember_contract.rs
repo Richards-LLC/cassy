@@ -473,7 +473,7 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     let a_old = id(a.cas_remember(Parameters(save("A approval receipt"))).await.unwrap());
     let a_new = id(a.cas_remember(Parameters(save("A newest approval receipt"))).await.unwrap());
     assert!(handoff::is_superseded(&memories.get(&a_old).unwrap()));
-    let b = register("b", "supervisor-b", "machine-b", "factory-b");
+    let b = register("b", "supervisor-a", "machine-b", "factory-b");
     let b_id = id(b.cas_remember(Parameters(save("B production approval receipt"))).await.unwrap());
     assert!(!handoff::is_superseded(&memories.get(&a_new).unwrap()));
     let other = register("a-other", "other-supervisor", "machine-a", "factory-other");
@@ -482,10 +482,11 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     // contract; both the native session and factory process lifetime change.
     let restarted = register("a-restart", "supervisor-a", "machine-a", "factory-a-restart");
     let surfaced = |agent_id: Option<&str>, session_id: &str| {
-        let surfaced = std::cell::RefCell::new(Vec::new());
-        let callback = |id: &str, kind: &str, _: Option<&str>| {
-            if kind == "handoff" { surfaced.borrow_mut().push(id.to_string()); }
-        };
+        let surfaced = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = surfaced.clone();
+        let callback: cas_core::hooks::context::SurfacedItemCallback = Box::new(move |id, kind, _| {
+            if kind == "handoff" { captured.lock().unwrap().push(id.to_string()); }
+        });
         let stores = ContextStores {
             project_store: Some(memories.as_ref()),
             agent_store: Some(agents.as_ref()),
@@ -499,7 +500,7 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
         };
         build_context_with_stores(&input, &stores, &DefaultHooksConfig::new(), 10,
             Some(&callback), "mcp__cs__").unwrap();
-        surfaced.into_inner()
+        surfaced.lock().unwrap().clone()
     };
     for (agent, native_session, expected) in [
         (Some("a-old"), "a-after-clear", Some(a_new.as_str())),

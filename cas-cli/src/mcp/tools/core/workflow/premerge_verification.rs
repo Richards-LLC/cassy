@@ -107,6 +107,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// to `if !ok` two lines away); only full-context identity may rebind. An
 /// empty or unreadable patch is an error, never a match.
 pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+    delivered_patch_id_for_paths(repo, target, tree, &[])
+}
+
+fn delivered_patch_id_for_paths(repo: &Path, target: &str, tree: &str, paths: &[&str]) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {
@@ -124,6 +128,8 @@ pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Resul
         let diff = diff
             .args(["diff", "--binary", "--no-color", "--no-renames", "--no-ext-diff"])
             .args(["--no-textconv", context, target, tree])
+            .arg("--")
+            .args(paths)
             .output()
             .map_err(|error| error.to_string())?;
         if !diff.status.success() || diff.stdout.is_empty() {
@@ -426,11 +432,12 @@ impl Candidate {
         // move that recomputes the exact reviewed tree, such as a ref fast-
         // forward or a queue merge of commits the source already carries,
         // changes no reviewed content, whatever the path overlap says.
-        if let Ok(merged) = git(
+        let merged = git(
             &self.repository,
             &["merge-tree", "--write-tree", target, &self.source_sha],
-        ) && merged.lines().next() == Some(self.tree.as_str())
-        {
+        )?;
+        let tree = merged.lines().next().ok_or("merge tree missing")?.to_string();
+        if tree == self.tree {
             return Ok(self.tree.clone());
         }
         git(
@@ -441,35 +448,37 @@ impl Candidate {
             &self.repository,
             &["merge-base", &self.target_sha, &self.source_sha],
         )?;
-        let changed = repository_proof::delivery_paths_changed(
+        // Shared overview additions may touch the same file while leaving
+        // every delivered hunk and its context unchanged. Compare the actual
+        // clean merge's full-context patch, never waive the whole document.
+        let overview = "docs/PRODUCT_OVERVIEW.md";
+        let unchanged_overview = delivered_patch_id_for_paths(
+            &self.repository, &self.target_sha, &self.tree, &[overview],
+        ).ok().zip(delivered_patch_id_for_paths(
+            &self.repository, target, &tree, &[overview],
+        ).ok()).is_some_and(|(reviewed, current)| reviewed == current);
+        let reviewed_changes = |paths: Vec<String>| paths.into_iter()
+            .filter(|path| path != overview || !unchanged_overview).collect::<Vec<_>>();
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.target_sha,
             target,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "target changed reviewed delivery files: {}; review the new candidate",
                 changed.join(", ")
             ));
         }
-        let merged = git(
-            &self.repository,
-            &["merge-tree", "--write-tree", target, &self.source_sha],
-        )?;
-        let tree = merged
-            .lines()
-            .next()
-            .ok_or("merge tree missing")?
-            .to_string();
-        let changed = repository_proof::delivery_paths_changed(
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.tree,
             &tree,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "recomputed merge changed reviewed delivery content: {}",
@@ -1394,17 +1403,21 @@ mod tests {
 
     #[test]
     fn overlapping_code_still_holds_candidate_cas_e79d() {
+      for path in ["src/lib.rs", "docs/PRODUCT_OVERVIEW.md"] {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         run(repo, &["init", "-q", "-b", "main"]);
-        let base = commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+        let base = commit_file(repo, path, "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
         run(repo, &["checkout", "-q", "-b", "factory/a"]);
-        commit_file(repo, "src/lib.rs", "delivered\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+        commit_file(repo, path, "delivered\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
         let candidate = parked_candidate(repo, "factory/a", &base);
         run(repo, &["checkout", "-q", "main"]);
-        let target = commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nchanged\n", "sibling code");
+        let target = commit_file(repo, path, "first\nsecond\nthird\nchanged\nfifth\nlast\n", "sibling edit");
+        assert!(git(repo, &["merge-tree", "--write-tree", &target, &candidate.source_sha]).is_ok(),
+            "the review guard must hold even a clean merge when reviewed context changed");
         assert!(candidate.tree_on(&target).is_err());
         assert_eq!(run(repo, &["rev-parse", "main"]), target);
+      }
     }
 
     /// cas-bfa8: a train created on another machine exists only on origin

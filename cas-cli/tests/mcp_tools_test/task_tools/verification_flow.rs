@@ -11899,8 +11899,15 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
     )
     .expect("enable verification");
 
+    // This fixture delivers verifier evidence, not repository code. Declare
+    // that scope so close tests sanitized verdict persistence independently
+    // of an unrelated factory branch in the caller's checkout.
+    let mut request = simple_task_req("Embedded verifier evidence");
+    request.task_type = "chore".into();
+    request.execution_note = Some("no-code".into());
+    request.external_ref = Some("artifact:verifier-embedded-boundary".into());
     let created = service
-        .cas_task_create(Parameters(simple_task_req("Embedded verifier evidence")))
+        .cas_task_create(Parameters(request))
         .await
         .expect("create task");
     let task_id = extract_task_id(&extract_text(created))

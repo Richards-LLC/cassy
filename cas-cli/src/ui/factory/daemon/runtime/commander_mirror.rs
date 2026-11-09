@@ -771,13 +771,17 @@ pub(super) fn scan_supervisor_replies(
         let _ = resume_floor(root, session, false, None);
         return;
     }
-    let supervisors = agents
+    let mut supervisors = agents
         .iter()
         .filter(|agent| {
             agent.role == cas_types::AgentRole::Supervisor
                 && agent.factory_session.as_deref() == Some(session)
         })
         .collect::<Vec<_>>();
+    // cas-bfe3: two registrations of one pane share a transcript. The oldest
+    // registration owns its turns, so each answer reaches Commander once.
+    supervisors.sort_by(|a, b| (a.registered_at, &a.id).cmp(&(b.registered_at, &b.id)));
+    let mut mirrored_paths = HashSet::new();
     if supervisors.is_empty() {
         return;
     }
@@ -886,6 +890,10 @@ pub(super) fn scan_supervisor_replies(
         };
         state.resolution_misses.remove(&agent.id);
         state.unresolved_warned.remove(&agent.id);
+        if !mirrored_paths.insert(path.clone()) {
+            state.cursors.remove(&agent.id);
+            continue;
+        }
         let Ok(metadata) = std::fs::metadata(&path) else {
             state.cursors.remove(&agent.id);
             continue;
@@ -1868,7 +1876,7 @@ mod tests {
 
     /// cas-bfe3: a /mcp reconnect re-registers the supervisor from its launch
     /// session id. An answer written after a /clear rebind must still reach
-    /// Commander, threaded under the verified question it answers.
+    /// Commander once, threaded under the verified question it answers.
     #[test]
     fn mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3() {
         let mut env = crate::test_support::TestEnvGuard::new();
@@ -1889,6 +1897,12 @@ mod tests {
         crate::mcp::CasCore::with_daemon(root.clone(), None, None)
             .register_agent("supervisor-id".into(), "supervisor".into(), None)
             .unwrap();
+        // A later registration of the same pane under its new session id
+        // shares the transcript; it must not post every answer a second time.
+        let mut duplicate = agents.get("supervisor-id").unwrap();
+        duplicate.id = "after-clear".into();
+        duplicate.registered_at = Utc::now() + chrono::Duration::seconds(1);
+        agents.register(&duplicate).unwrap();
 
         let message = queue.enqueue_operator_message(
             "commander:Alice@phone", "supervisor", "overall status please", Some("factory-1"),
@@ -1911,6 +1925,7 @@ mod tests {
 
         scan_supervisor_replies(&root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), &mut MirrorScanState::default());
         let replies = operator_replies(&queue);
+        assert_eq!(replies.iter().filter(|reply| reply.message == "Train is green.").count(), 1);
         let answer = replies.iter().find(|reply| reply.message == "Train is green.")
             .expect("the answer after a reconnect must reach Commander");
         assert_eq!(answer.reply_to, Some(message.id()));

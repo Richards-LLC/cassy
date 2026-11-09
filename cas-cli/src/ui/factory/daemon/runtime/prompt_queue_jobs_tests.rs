@@ -131,10 +131,10 @@ fn stale_blocked_relay_escalates_once_cas_f66d() {
 #[test]
 fn failed_relay_escalation_keeps_original_pending_cas_f66d() {
     let (_root, cas_dir) = project();
-    let row = enqueue(&cas_dir, "lead", "blocked relay");
     let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let row = queue.enqueue_with_session("lifecycle-wake:43", "lead", "blocked relay", "s").unwrap();
     let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-    conn.execute_batch("CREATE TRIGGER reject_notice BEFORE INSERT ON prompt_queue BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
+    conn.execute_batch("CREATE TRIGGER reject_notice BEFORE INSERT ON prompt_queue WHEN NEW.target = 'lead' BEGIN SELECT RAISE(FAIL, 'injected'); END;").unwrap();
     let stamp = QueueStamp::UndeliveredRelay { notice: "notice".into() };
     assert!(stamp.apply(queue.as_ref(), row, "lead").is_err());
     assert!(queue.queued_prompt(row).unwrap().unwrap().processed_at.is_none());

@@ -651,7 +651,9 @@ impl CasService {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
                 let timings = receipt.timings();
-                let timing_suffix = if tool_name == "verification" && receipt.action() == "add" {
+                let include_timings = (tool_name == "search" && action == "search")
+                    || (tool_name == "verification" && receipt.action() == "add");
+                let timing_suffix = if include_timings {
                     format!(" Timing (inclusive, + running): {timings}")
                 } else {
                     String::new()
@@ -665,7 +667,7 @@ impl CasService {
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
                         "budget_ms": budget.as_millis() as u64,
-                        "timings": if tool_name == "verification" && receipt.action() == "add" { Some(timings) } else { None },
+                        "timings": if include_timings { Some(timings) } else { None },
                     })),
                 })
             }
@@ -988,6 +990,9 @@ pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
             "show" | "list" | "ready" | "blocked" | "dep_list" | "available" | "mine"
         ),
         "memory" => !matches!(action, "get" | "list" | "recent"),
+        // Search also has write actions (observe, feedback, entity extraction).
+        // Only the known retrieval action is non-mutating for this receipt.
+        "search" => action != "search",
         "factory" => !matches!(
             action,
             "worker_status"
@@ -2340,10 +2345,56 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn read_only_search_deadline_cas_533a() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        tasks.add(&cas_types::Task::new("cas-1214".into(), "Search evidence".into())).unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({
+            "action": "search", "query": "cas-1214", "doc_type": "task",
+            "limit": 3, "include_source": true, "max_tokens": 2000,
+        });
+        let sender = service.clone();
+        let request = serde_json::from_value(arguments.clone()).unwrap();
+        let call = async move {
+            let result = sender.search(Parameters(request)).await.unwrap();
+            assert!(result_text(&result).contains("cas-1214"));
+            // Hold the response after the real incident's search has run.
+            std::future::pending::<Result<rmcp::model::CallToolResult, rmcp::ErrorData>>().await
+        };
+        let error = service.call_with_deadline(
+            "search", arguments.as_object(), std::time::Duration::from_secs(55), call,
+        ).await.unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        let data = error.data.unwrap();
+        assert_eq!(data["mutation_outcome"], "NOT_APPLICABLE");
+        assert!(data["notification_id"].is_null());
+        assert_eq!(data["budget_ms"], 55_000);
+        let timings = data["timings"].as_str().unwrap();
+        for phase in ["search_index_open=", "search_task_load=", "search_task_refresh=", "search_lookup="] {
+            assert!(timings.contains(phase), "missing machine phase {phase}: {timings}");
+        }
+    }
+
     #[test]
     fn timeout_backstop_never_treats_task_close_as_read_only() {
         assert!(potentially_mutating_call("task", "close"));
         assert!(!potentially_mutating_call("task", "show"));
         assert!(potentially_mutating_call("unknown_future_tool", "anything"));
+        for action in ["observe", "retrieval_feedback", "entity_extract", "future_action"] {
+            assert!(potentially_mutating_call("search", action), "{action}");
+        }
     }
 }

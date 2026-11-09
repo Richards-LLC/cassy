@@ -382,7 +382,7 @@ pub(crate) fn cited_commit_warning(
         return String::new();
     }
     format!(
-        "\n\n⚠️ CITED CODE NOT ON THIS EPIC (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
+        "\n\n⚠️ CITED CODE NOT ON THIS EPIC [CITED_CODE_NOT_ON_EPIC] (cas-1630): {}. The task cannot start until that code reaches {branch}: merge the epic that has it into {branch}, or file the task under that epic.",
         lines.join("; ")
     )
 }

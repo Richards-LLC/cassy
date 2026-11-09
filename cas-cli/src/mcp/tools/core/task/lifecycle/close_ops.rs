@@ -36331,7 +36331,9 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
 
         let (dir, task, _, fragment) = build("cas-test1", "release");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", dir.path()) {
-            MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => {}
+            MergeStateGateOutcome::ProceedWithNote(note) => {
+                assert!(note.contains(&task.id) && note.contains(&fragment), "{note}")
+            }
             other => panic!("a release-promoted fragment is delivered: {other:?}"),
         }
         assert!(
@@ -36370,7 +36372,8 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         let sibling = Task { id: "cas-other".into(), ..task.clone() };
         let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");
         assert!(
-            matches!(presence, DeliveryContentPresence::Present { .. }),
+            matches!(presence, DeliveryContentPresence::Present { .. })
+                && note.as_deref().is_some_and(|note| note.contains("cas-other") && note.contains(&fragment)),
             "an epic close accepts its child's promoted fragment: {presence:?} {note:?}"
         );
     }

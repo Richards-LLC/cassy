@@ -285,7 +285,13 @@ for (const [index, variant] of variants.entries()) {
         await page.route(content("art-inline-audio"), (route) => route.fulfill({ contentType: "audio/wav", body: readFileSync(new URL("../media/evidence.wav", import.meta.url)) }));
         hub.supervisorSays(PELICAN, "The recording and audio are attached.", { attachments: [file("art-inline-video", "Evidence video.webm", "video/webm"), file("art-inline-audio", "Evidence audio.wav", "audio/wav"), file("art-local-preview", "Local screenshot.png", "image/png")] });
         for (const tag of ["video", "audio"]) {
-          await log.locator(`.rich-attachment:has(a[data-artifact-id="art-inline-${tag}"]) .rich-media`).scrollIntoViewIfNeeded();
+          const attachment = log.locator(`.rich-attachment:has(a[data-artifact-id="art-inline-${tag}"])`);
+          // Reader focus owns this destination before a pending resize can
+          // restore the previous anchor and leave the lazy preview offscreen.
+          await attachment.getByRole("link").focus();
+          const preview = attachment.locator(".rich-media");
+          await preview.scrollIntoViewIfNeeded();
+          await expect(preview).toHaveAttribute("data-preview-state", "ready");
           const player = log.locator(tag);
           await expect(player).toBeVisible();
           await expect(player).toHaveAttribute("preload", "none");

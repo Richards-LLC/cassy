@@ -2281,14 +2281,26 @@ async fn team_pull_status_only_resume_preserves_assigned_execution_cas_45e7() {
         endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
     }, CloudSyncerConfig::default());
 
-    for (offset, remote_status, expected_status) in [
-        (-60, TaskStatus::Open, TaskStatus::InProgress),
-        (60, TaskStatus::Open, TaskStatus::InProgress),
-        (120, TaskStatus::Blocked, TaskStatus::Blocked),
+    for (offset, remote_status, applies, reassign) in [
+        (-60, TaskStatus::Open, false, false),
+        (60, TaskStatus::Open, false, false),
+        (120, TaskStatus::Blocked, true, false),
+        (180, TaskStatus::InProgress, true, true),
     ] {
+        if reassign {
+            // Restore assigned intent without a lease, then lose its owner.
+            local.status = TaskStatus::InProgress;
+            local.updated_at = tasks.update(&local).unwrap();
+            let mut departed = owner.clone();
+            departed.status = cas_types::AgentStatus::Shutdown;
+            agents.update(&departed).unwrap();
+        }
         let before = tasks.get(&local.id).unwrap();
         let mut remote = local.clone();
         remote.status = remote_status;
+        if reassign {
+            remote.assignee = Some("peer-worker".into());
+        }
         remote.updated_at += chrono::Duration::seconds(offset);
         let mut raw = serde_json::to_value(&remote).unwrap();
         raw["project_id"] = serde_json::json!(project);
@@ -2303,9 +2315,9 @@ async fn team_pull_status_only_resume_preserves_assigned_execution_cas_45e7() {
         let result = syncer.pull_team(team, project, entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         let stored = tasks.get(&local.id).unwrap();
-        assert_eq!(stored.status, expected_status, "offset={offset}");
-        assert_eq!(stored.assignee, local.assignee);
-        if expected_status == TaskStatus::InProgress {
+        assert_eq!(stored.status, if applies { remote_status } else { before.status }, "offset={offset}");
+        assert_eq!(stored.assignee, if applies { remote.assignee.clone() } else { before.assignee.clone() });
+        if !applies {
             assert_eq!(stored.updated_at, before.updated_at);
             assert_eq!(result.pulled_tasks, 0);
             assert!(result.task_status_transitions.is_empty());

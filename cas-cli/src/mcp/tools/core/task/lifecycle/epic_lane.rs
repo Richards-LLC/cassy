@@ -329,9 +329,8 @@ pub(crate) fn stale_base_note(
     }
 }
 
-/// cas-1630: a follow-up created in `epic` that cites a commit its branch
-/// lacks cannot start until that code reaches the branch. Name each such
-/// commit, and the open epic that has it, so the base is fixed at create.
+/// cas-1630: warn about explicitly required code missing from this epic.
+/// Repro/evidence citations and dangling candidates do not declare a base.
 pub(crate) fn cited_commit_warning(
     repo: &Path,
     store: &dyn cas_store::TaskStore,
@@ -341,14 +340,21 @@ pub(crate) fn cited_commit_warning(
     let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) else {
         return String::new();
     };
-    let Ok(pattern) = regex::Regex::new(r"\b[0-9a-f]{7,40}\b") else {
+    let Ok(pattern) = regex::Regex::new(
+        r"(?i)(?:\b(?:depends?\s+on|requires?|needs?|based\s+on|builds?\s+on)\s+|\b(?:base(?:\s+commit)?|dependenc(?:y|ies))\s*[:=]\s*)(?:(?:the|code|fix|commit|in|from|at)\s+)*`?([0-9a-f]{7,40})\b",
+    ) else {
         return String::new();
     };
-    // Most tasks cite no commit; skip the task scan for them.
-    if !pattern
-        .find_iter(text)
-        .any(|m| m.as_str().bytes().any(|byte| byte.is_ascii_alphabetic()))
-    {
+    let Ok(negated) = regex::Regex::new(r"(?i)\b(?:not|never|without|no|doesn't|don't)\s*$") else {
+        return String::new();
+    };
+    let required: Vec<_> = pattern.captures_iter(text)
+        .filter(|capture| !negated.is_match(&text[..capture.get(0).unwrap().start()]))
+        .filter_map(|capture| capture.get(1).map(|sha| sha.as_str()))
+        .filter(|sha| sha.bytes().any(|byte| byte.is_ascii_alphabetic()))
+        .collect();
+    // Most tasks declare no code dependency; skip the task scan for them.
+    if required.is_empty() {
         return String::new();
     }
     let mut seen = std::collections::BTreeSet::new();
@@ -362,12 +368,14 @@ pub(crate) fn cited_commit_warning(
         .filter_map(|task| task.branch.clone().map(|branch| (task.id, branch)))
         .collect();
     let mut lines = Vec::new();
-    for found in pattern.find_iter(text).map(|m| m.as_str()) {
-        if !found.bytes().any(|byte| byte.is_ascii_alphabetic()) || !seen.insert(found) || seen.len() > 10 {
+    for found in required {
+        if !seen.insert(found) || seen.len() > 10 {
             continue;
         }
         if !git_ok(repo, &["rev-parse", "--verify", "--quiet", &format!("{found}^{{commit}}")])
             || on_branch(repo, found, branch)
+            || git_stdout(repo, &["for-each-ref", "--count=1", "--format=%(refname)", "--contains", found])
+                .is_none_or(|refs| refs.is_empty())
         {
             continue;
         }

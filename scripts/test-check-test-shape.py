@@ -11,6 +11,45 @@ spec.loader.exec_module(shape)
 
 
 class Shapes(unittest.TestCase):
+    def test_retrieval_state_assertions_are_structured_cas_0bdc(self):
+        for state in ('ready', 'offline', 'loading'):
+            with self.subTest(state=state):
+                self.assertFalse(shape.message_assertions(
+                    f'expect(detail(1).dataset.retrievalState).toBe("{state}");', 'work-picture.test.ts'))
+        self.assertEqual(shape.message_assertions(
+            'expect(detail(1).dataset.retrievalState.message).toBe("please retry");',
+            'work-picture.test.ts'), [(1, 'TEST_ASSERTION_PROSE')])
+
+    def test_source_event_identity_assertions_are_structured_cas_0bdc(self):
+        self.assertFalse(shape.message_assertions(
+            'expect(detail(0).dataset.sourceEventId).toBe("cached");\n'
+            'expect(detail(1).dataset.sourceEventId).toBe("edit");', 'work-picture.test.ts'))
+        self.assertEqual(shape.message_assertions(
+            'expect(detail(0).textContent).toBe("cached");', 'work-picture.test.ts'),
+            [(1, 'TEST_ASSERTION_PROSE')])
+
+    def test_inline_caller_payload_preservation_cas_0bdc(self):
+        source = '''it("preserves supplied detail", () => {
+    picture.detail("m", "s", { event_id: "cached", detail: "cached source" });
+    picture.detail("m", "s", { event_id: "edit", detail: "Recovered edit" });
+    expect(detail(0).textContent).toContain("cached source");
+    expect(detail(1).textContent).not.toContain("cached source");
+    expect(detail(1).textContent).toContain("Recovered edit");
+    expect(detail(1).textContent).toContain("Please try again when the connection to the remote service becomes available.");
+});
+it("keeps unrelated copy checked", () => {
+    const expected = { detail: "expected only" };
+    expect(detail(1).textContent).toContain("cached source");
+    expect(detail(1).textContent).toContain("expected only");
+});'''
+        for payload in ('Recovered edit', 'Caller data can contain full sentences whose exact bytes must survive rendering.'):
+            with self.subTest(payload=payload):
+                replay = source.replace('Recovered edit', payload)
+                self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts'),
+                                 [(7, 'TEST_ASSERTION_PROSE'), (11, 'TEST_ASSERTION_PROSE'),
+                                  (12, 'TEST_ASSERTION_PROSE')])
+                self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(7, 'exact-text pin')])
+
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [
             ('test_example.py', 'with self.assertRaisesRegex(ValueError, "please try later"): run()', True),

@@ -54,7 +54,9 @@ def python_literal_value(node):
 
 
 def machine_id_receiver(expression):
-    return re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+    # Recognize terminal structured fields, not the words used as their values.
+    field = r'(?:code|error_code|rule_id|id|state|[A-Za-z_$][\w$]*(?:Id|State|_id|_state))'
+    return re.search(r'\.' + field + r'(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
 
 
 def python_bindings(scope):
@@ -171,6 +173,47 @@ def javascript_bindings(source):
         for literal in re.finditer(JS_LITERAL, match[2]):
             bound.setdefault(match[1], []).append((text(literal[0]), match.start(2) + literal.start()))
     return bound
+
+
+def javascript_payload_offsets(source, path):
+    """Literal readbacks of data supplied to a call in the same block.
+
+    A callback body starts a new block: test titles, assertions and data in a
+    sibling test cannot establish payload provenance. Object literals do not
+    start blocks, so inline call arguments retain their caller's scope.
+    """
+    if Path(path).suffix not in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
+        return set()
+    literals = {start: (end, value) for start, end, value in text_literals(source, path)
+                if re.fullmatch(JS_LITERAL, source[start:end])}
+    masked = list(source)
+    for start, end, _ in text_literals(source, path):
+        masked[start:end] = ' ' * (end - start)
+        if start in literals:
+            masked[start] = '\0'
+    code = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', lambda m: ' ' * len(m[0]), ''.join(masked))
+    stack, observed, supplied = [], {}, set()
+    excluded = r'(?:expect|assert|it|test|describe)(?:\.|$)|(?:^|\.)to[A-Z]'
+    for token in re.finditer(r'[\w$.]+\s*\(|[()[\]{}\0]', code):
+        value = token[0]
+        if value == '\0':
+            block = max((i for i, frame in enumerate(stack) if frame[2]), default=-1)
+            scope = stack[block][3] if block >= 0 else 0
+            key = (scope, literals[token.start()][1])
+            observed[token.start()] = key
+            calls = [frame[1] for frame in stack[block + 1:] if frame[1]]
+            if calls and not any(re.match(excluded, call) for call in calls):
+                supplied.add(key)
+        elif value[-1] in '([{':
+            char = value[-1]
+            call = value[:-1].strip() if char == '(' else ''
+            if call in ('if', 'for', 'while', 'switch', 'catch', 'with', 'function'):
+                call = ''
+            block = char == '{' and bool(re.search(r'(?:=>|\)|\belse|\btry|\bfinally|\bdo)\s*$', code[:token.start()]))
+            stack.append((char, call, block, token.start()))
+        elif stack and stack[-1][0] == {')': '(', ']': '[', '}': '{'}[value]:
+            stack.pop()
+    return {offset for offset, key in observed.items() if key in supplied}
 
 
 def message_assertions(source, path, changed_lines=None):
@@ -362,7 +405,10 @@ def message_assertions(source, path, changed_lines=None):
                 line = source.count('\n', 0, offset) + 1
                 if human_message_literal(value) and (changed_lines is None or line in changed_lines or use_line in changed_lines):
                     hits.append((line, 'TEST_ASSERTION_PROSE'))
+    payloads = javascript_payload_offsets(source, path)
     for start, end, value in text_literals(source, path):
+        if start in payloads:
+            continue
         line = source.count('\n', 0, start) + 1
         if source[start:start + 1] == '/':
             literal_parts = re.sub(r'\\.|\[(?:\\.|[^\]])*\]|\{\d+(?:,\d*)?\}', '', value)
@@ -602,9 +648,12 @@ def lint_text_pins(source, path, ranges=None, changed_lines=None):
     diagnostics = (list(rust_assertion_diagnostics(source)) if Path(path).suffix == '.rs'
                    else list(js_assertion_diagnostics(source, path)) if Path(path).suffix in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs') else [])
     inputs = list(rust_runtime_inputs(source)) if Path(path).suffix == '.rs' else []
+    payloads = javascript_payload_offsets(source, path)
     if Path(path).suffix in ('.py', '.pyi'):
         inputs = list(python_runtime_inputs(source))
     for start, end, body in literals:
+        if start in payloads:
+            continue
         if any(left <= start < right for left, right in diagnostics):
             continue
         if ranges and not any(left <= start < right for left, right in ranges):

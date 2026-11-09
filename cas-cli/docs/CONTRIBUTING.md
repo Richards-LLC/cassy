@@ -4145,11 +4145,14 @@ wire or structural contracts carry `// pin: <reason>` immediately above the
 statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
-Tests assert behavior or stable error/rule IDs, never human-message wording.
+Tests assert behavior or structured state/identity fields (including stable
+error/rule IDs), never human-message wording.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain
-valid.
+valid. For JS/TS inline literals, payload readbacks must match bytes supplied to
+a non-assertion call in the same block; test titles and sibling tests do not
+establish payload provenance.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

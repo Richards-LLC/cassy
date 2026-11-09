@@ -4,7 +4,7 @@ export type CommandKey = "previous" | "next" | "select" | "cancel";
 export interface CommandReceipt {
   client_ref: string;
   command: SupervisorCommand;
-  phase: "queued" | "submitted" | "observed" | "refused" | "unconfirmed";
+  phase: "queued" | "submitted" | "observed" | "refused" | "unconfirmed" | "cancelled";
   detail: string;
   output: string;
   interactive: boolean;
@@ -190,7 +190,7 @@ function canCloseUnconfirmedUsage(receipt: CommandReceipt): boolean {
 
 export function commandReceiptNode(receipt: CommandReceipt, step?: (key: CommandKey) => void, dismiss?: () => void): HTMLElement {
   const row = document.createElement("article"); row.className = "supervisor-command-receipt"; row.dataset.phase = receipt.phase;
-  const title = document.createElement("strong"); title.textContent = `/${receipt.command} · ${{ queued: "Queued", submitted: "Requested", observed: "Observed", refused: "Not sent", unconfirmed: "Unconfirmed" }[receipt.phase]}`;
+  const title = document.createElement("strong"); title.textContent = `/${receipt.command} · ${{ queued: "Queued", submitted: "Requested", observed: "Observed", refused: "Not sent", unconfirmed: "Unconfirmed", cancelled: "Cancelled" }[receipt.phase]}`;
   const detail = document.createElement("p"); detail.textContent = receipt.detail;
   row.append(title, detail);
   if (receipt.output) {
@@ -206,7 +206,7 @@ export function commandReceiptNode(receipt: CommandReceipt, step?: (key: Command
       button.onclick = () => step(key); row.append(button);
     }
   }
-  if (dismiss && !receipt.interactive) {
+  if (dismiss) {
     const button = document.createElement("button"); button.type = "button";
     button.textContent = "Dismiss command status"; button.onclick = dismiss; row.append(button);
   }
@@ -249,10 +249,23 @@ export const COMMAND_ERROR_PREFIX = "supervisor command failed:";
 export class SupervisorCommandSession {
   readonly receipts = new Map<string, CommandReceipt>();
   private readonly dismissed = new Set<string>();
+  private readonly cancelling = new Set<string>();
   get visibleReceipts(): CommandReceipt[] { return [...this.receipts.values()].filter(receipt => !this.dismissed.has(receipt.client_ref)); }
-  /** Hiding status never cancels a command or permits a concurrent mutation. */
-  dismiss(ref: string): void {
-    if (!this.receipts.has(ref) || this.receipts.get(ref)!.interactive) return;
+  /** Release queued work or chooser tracking only after the daemon confirms. */
+  async dismiss(ref: string): Promise<void> {
+    const receipt = this.receipts.get(ref);
+    if (!receipt || this.cancelling.has(ref)) return;
+    if (receipt.phase === "queued" || receipt.interactive) {
+      this.cancelling.add(ref);
+      try {
+        const reason = this.options.unavailable(); if (reason) throw new Error(reason);
+        await this.options.control();
+        const changed = this.options.unavailable(); if (changed) throw new Error(changed);
+        if (!this.options.send({ SupervisorCommandCancel: { client_ref: ref } })) throw new Error("The cancellation was not sent. Check the connection.");
+        this.poll(ref);
+      } catch (error) { this.cancelling.delete(ref); throw error; }
+      return;
+    }
     this.dismissed.add(ref); this.options.changed();
   }
   supported = false;
@@ -267,7 +280,11 @@ export class SupervisorCommandSession {
   constructor(private readonly options: SessionOptions) {}
   async run(command: SupervisorCommand, confirmed: boolean): Promise<void> {
     const reason = this.options.unavailable(); if (reason) throw new Error(reason);
-    if (this.requesting || [...this.receipts.values()].some(receipt => receipt.phase === "queued" || receipt.phase === "submitted" || receipt.interactive)) throw new Error("Wait for the current command or close its chooser first.");
+    const blocking = [...this.receipts.values()].find(receipt => receipt.phase === "queued" || receipt.phase === "submitted" || receipt.interactive);
+    if (blocking) throw new Error(blocking.phase === "submitted"
+      ? `/${blocking.command} has been submitted. Wait for its outcome; Dismiss cannot cancel a submitted command.`
+      : `/${blocking.command} is pending. Use Dismiss command status on its card to cancel it, or Close chooser to close its native view.`);
+    if (this.requesting) throw new Error("Wait for the current command request.");
     this.requesting = true;
     try { await this.request(command, confirmed); } finally { this.requesting = false; }
   }
@@ -286,9 +303,13 @@ export class SupervisorCommandSession {
   receive(receipt: CommandReceipt): void {
     const current = this.receipts.get(receipt.client_ref);
     if (!current || current.command !== receipt.command) return;
+    if (current.phase === "cancelled") return;
     if (current.phase === "refused" && receipt.phase !== "refused") return;
     this.receipts.set(receipt.client_ref, receipt);
     this.acknowledged.add(receipt.client_ref);
+    if (this.cancelling.has(receipt.client_ref) && receipt.phase !== "queued" && receipt.phase !== "submitted" && !receipt.interactive) {
+      this.cancelling.delete(receipt.client_ref); this.dismissed.add(receipt.client_ref);
+    }
     if (receipt.phase !== "refused") this.clearRefusals(receipt.command);
     const ended = this.endedCommands.get(receipt.client_ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
@@ -323,7 +344,12 @@ export class SupervisorCommandSession {
   }
   reject(ref: string, detail: string): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
-    if (receipt.phase === "observed" || receipt.phase === "refused") return true;
+    if (this.cancelling.delete(ref)) {
+      // A failed Cancel does not settle the command. Keep reading its actual
+      // outcome, including when it advanced before the cancellation arrived.
+      receipt.detail = detail; this.poll(ref); this.options.changed(); return true;
+    }
+    if (receipt.phase === "observed" || receipt.phase === "refused" || receipt.phase === "cancelled") return true;
     if (!this.acknowledged.has(ref) && detail.startsWith(COMMAND_ERROR_PREFIX)) {
       this.refuse(receipt, detail.slice(COMMAND_ERROR_PREFIX.length).trim());
       this.stopPoll(ref); this.options.changed(); return true;
@@ -364,10 +390,11 @@ export class SupervisorCommandSession {
     let queued = false;
     const read = () => {
       const receipt = this.receipts.get(ref);
-      if (!receipt || (receipt.phase !== "queued" && receipt.phase !== "submitted")) { this.stopPoll(ref); return; }
-      if (receipt.phase === "queued") queued = true;
+      const cancelling = this.cancelling.has(ref);
+      if (!receipt || (!cancelling && receipt.phase !== "queued" && receipt.phase !== "submitted")) { this.stopPoll(ref); return; }
+      if (receipt.phase === "queued" && !cancelling) queued = true;
       else if (queued) { started = Date.now(); queued = false; }
-      if (receipt.phase !== "queued" && Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
+      if ((cancelling || receipt.phase !== "queued") && Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
         this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
       }
       this.options.send({ SupervisorCommandStatus: { client_ref: ref } });

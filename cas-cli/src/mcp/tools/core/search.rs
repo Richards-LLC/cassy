@@ -133,8 +133,6 @@ impl CasCore {
         let include_provenance = provenance_version.is_some();
         let query_family = query_family(&req.query, req.doc_type.as_deref());
 
-        let search = self.open_search_index()?;
-
         let doc_types = req
             .doc_type
             .as_ref()
@@ -150,6 +148,24 @@ impl CasCore {
                 _ => None,
             })
             .unwrap_or_default();
+
+        let search = self.open_search_index()?;
+        let task_store = if doc_types.is_empty() || doc_types.contains(&DocType::Task) {
+            let store = self.open_task_store()?;
+            let tasks = store.list(None).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to refresh task search index: {error}")),
+                data: None,
+            })?;
+            search.refresh_tasks(&tasks).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to refresh task search index: {error}")),
+                data: None,
+            })?;
+            Some(store)
+        } else {
+            None
+        };
 
         // Parse scope filter
         let scope_filter: ScopeFilter = match req.scope.to_lowercase().as_str() {
@@ -199,7 +215,6 @@ impl CasCore {
         }
 
         let store = self.open_store().ok();
-        let task_store = self.open_task_store().ok();
         let rule_store = self.open_rule_store().ok();
         let skill_store = self.open_skill_store().ok();
         let code_store = crate::store::open_code_store(&self.cas_root).ok();
@@ -337,7 +352,7 @@ impl CasCore {
                         } else {
                             (
                                 format!("[Task] {}", result.id),
-                                scope_ok && tags_ok,
+                                false,
                                 HitMetadata {
                                     scope: "project".to_string(),
                                     ..Default::default()
@@ -347,7 +362,7 @@ impl CasCore {
                     } else {
                         (
                             format!("[Task] {}", result.id),
-                            scope_ok && tags_ok,
+                            false,
                             HitMetadata {
                                 scope: "project".to_string(),
                                 ..Default::default()

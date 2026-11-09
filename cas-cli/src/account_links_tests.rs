@@ -6,6 +6,14 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+fn logged_out_claude() -> crate::test_support::TestEnvGuard {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let client = env.home().join("claude");
+    crate::test_paths::warm_stub(&client, "#!/bin/sh\nprintf '%s' '{\"loggedIn\":false}'\n");
+    env.set("CAS_TEST_CLAUDE_BIN", &client);
+    env
+}
+
 /// A login for `email` in `dir`, as each provider stores it.
 fn login(provider: Provider, dir: &Path, email: &str) {
     use base64::Engine as _;
@@ -44,6 +52,7 @@ fn linked_home(provider: Provider) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn ensure_links_empty_slots_keeps_real_items_and_credentials() {
+    let _env = logged_out_claude();
     for provider in Provider::ALL {
         let (home, account) = linked_home(provider);
         let h = home.path();
@@ -100,6 +109,7 @@ fn ensure_links_empty_slots_keeps_real_items_and_credentials() {
 
 #[test]
 fn recreated_retired_folders_are_named_and_never_linked() {
+    let _env = logged_out_claude();
     for provider in Provider::ALL {
         let (home, _) = linked_home(provider);
         let h = home.path();
@@ -142,6 +152,7 @@ fn recreated_retired_folders_are_named_and_never_linked() {
 
 #[test]
 fn a_launch_repair_touches_only_the_launched_folder_and_keeps_it_logged_in() {
+    let _env = logged_out_claude();
     for provider in Provider::ALL {
         let (home, account) = linked_home(provider);
         let h = home.path();

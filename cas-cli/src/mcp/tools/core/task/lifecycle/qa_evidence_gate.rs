@@ -179,9 +179,9 @@ pub(crate) fn qa_evidence_close_gate(
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(cas_root, base, &task.id);
     let cited = crate::qa_evidence::cited_bundle_path(&task.notes);
-    // Explicit historical citations remain valid. Otherwise prefer new QA
-    // evidence; a namespace created only for issue attachments must not hide
-    // an existing legacy ledger or terminal receipt.
+    // Project evidence wins even over a historical citation. A flat task id
+    // alone cannot identify its project; legacy evidence requires an explicit
+    // task citation rather than an implicit same-id lookup.
     let legacy_cited = cited.as_deref().is_some_and(|path| {
         let path = crate::qa_evidence::expand_home(path);
         path.starts_with(&legacy) && std::fs::symlink_metadata(path).is_ok()
@@ -189,13 +189,23 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     let scoped_evidence = scoped.join("LEDGER.md").exists()
         || scoped.join("qa").exists()
         || scoped.join("terminal-qa").exists();
-    if (legacy_cited || (cited.is_none() && !scoped_evidence))
+    if !scoped_evidence && legacy_cited
         && crate::config::canonical_factory_task_artifact_dir(base, &legacy).is_some()
     {
         legacy
     } else {
         scoped
     }
+}
+
+/// The task's resolved evidence directory, as the close gate reads it.
+pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf, String> {
+    let config = crate::config::Config::load(cas_root).map_err(|e| e.to_string())?;
+    let paths = crate::config::resolved_factory_artifact_paths(
+        cas_root,
+        config.factory().artifacts_root.as_deref(),
+    );
+    Ok(task_qa_artifacts_dir(cas_root, &paths.base, task))
 }
 
 /// Format preflight before either verification-dispatch path mutates state.
@@ -749,23 +759,29 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         pass.notes.push(format!("QA batch evidence deferred: task={} head={head}; staging receipt required before close", task.id));
     }
     if let Some(receipt) = batch_receipt {
-        let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
-            "QA batch debt satisfied by release verdict"
+        if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+            pass.notes.push(format!(
+                "QA batch debt satisfied by published tag: receipt={} tag={} task={} anchor={}",
+                receipt.id,
+                receipt.release_tag.as_deref().unwrap_or(""),
+                task.id,
+                receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or(""),
+            ));
         } else {
-            "QA batch evidence PASS"
-        };
-        pass.notes.push(format!(
-            "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
-            receipt.id,
-            receipt.staging_sha,
-            receipt.ledger_artifact_id,
-            task.id,
-            receipt
-                .task_heads
-                .get(&task.id)
-                .map(String::as_str)
-                .unwrap_or("")
-        ));
+            let outcome = if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA {
+                "QA batch debt satisfied by release verdict"
+            } else {
+                "QA batch evidence PASS"
+            };
+            pass.notes.push(format!(
+                "{outcome}: receipt={} staging={} ledger={} task={} anchor={}",
+                receipt.id,
+                receipt.staging_sha,
+                receipt.ledger_artifact_id,
+                task.id,
+                receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")
+            ));
+        }
     }
     if let Some(waiver) = waiver {
         let evidence = match tier {
@@ -974,7 +990,7 @@ mod tests {
     /// next task. A close that names its Rust-only commit is judged on that
     /// commit, not refused as user-facing because of the branch tip.
     #[test]
-    fn qa_prefers_scoped_evidence_and_honors_explicit_legacy_citations_cas_6ebf() {
+    fn qa_prefers_project_evidence_over_colliding_legacy_cas_0876() {
         let temp = tempfile::tempdir().unwrap();
         let cas_root = temp.path().join("project/.cas");
         std::fs::create_dir_all(&cas_root).unwrap();
@@ -985,13 +1001,26 @@ mod tests {
         std::fs::create_dir_all(scoped.join("github-issues")).unwrap();
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(legacy.join("LEDGER.md"), "historical evidence").unwrap();
-        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        // An unnamespaced ledger can belong to another project with the
+        // same short task id. Attachments alone must not select that ledger.
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        let other_root = temp.path().join("other-project/.cas");
+        std::fs::create_dir_all(&other_root).unwrap();
+        let [other_scoped, _] = crate::config::factory_task_artifact_dirs(&other_root, &base, &task.id);
+        std::fs::create_dir_all(&other_scoped).unwrap();
+        std::fs::write(other_scoped.join("LEDGER.md"), "other project evidence").unwrap();
+        assert_eq!(task_qa_artifacts_dir(&other_root, &base, &task), other_scoped);
         std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
         std::fs::create_dir_all(legacy.join("qa")).unwrap();
         std::fs::write(legacy.join("qa/bundle.json"), "historical bundle").unwrap();
         task.notes = format!("qa-bundle: {}", legacy.join("qa/bundle.json").display());
+        assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
+        // A task's explicit historical citation remains a fallback when its
+        // project has no QA evidence, never when scoped proof is available.
+        std::fs::remove_file(scoped.join("LEDGER.md")).unwrap();
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), legacy);
+        std::fs::write(scoped.join("LEDGER.md"), "new evidence").unwrap();
         task.notes = format!("qa-bundle: {}", scoped.join("qa/bundle.json").display());
         assert_eq!(task_qa_artifacts_dir(&cas_root, &base, &task), scoped);
         std::fs::write(legacy.join("LEDGER.md"), "").unwrap();

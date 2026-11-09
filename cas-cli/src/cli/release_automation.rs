@@ -2,6 +2,7 @@
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
+use cas_types::{Dependency, DependencyType, TaskStatus, TaskTerminalOutcome, TaskType};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -34,6 +35,12 @@ pub struct InstalledArgs {
     receipt: PathBuf,
     #[arg(long)]
     repo: String,
+}
+#[derive(Debug, Args)]
+pub struct BackfillArgs {
+    /// Show the reconciliation and release-tag close verdicts without writing.
+    #[arg(long)]
+    dry_run: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
 struct ReleaseContext {
@@ -402,7 +409,390 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
             "v{version} published and installed: post-release steps due (notes checksums, Slack, factory restart, release receipt)"
         ),
     )?;
+    let reconciled = close_shipped_train(root, &context.train_id, &format!("v{version}"))?;
+    println!("{reconciled}");
     Ok(true)
+}
+
+/// Apply the published tag verdict to one release train. All effects are
+/// idempotent: existing tag receipts are reused, terminal children are skipped,
+/// and migrated children already target the next train.
+pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<String> {
+    reconcile_shipped_train(root, train_id, tag, false)
+}
+
+fn preview_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<String> {
+    reconcile_shipped_train(root, train_id, tag, true)
+}
+
+fn unmerged_factory_commit_count(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> usize {
+    let Some(start) = child.deliverables.factory_branch_start.as_ref() else {
+        return 0;
+    };
+    let branch = start.branch.trim_start_matches("refs/heads/");
+    let refs = [format!("refs/heads/{branch}"), format!("refs/remotes/origin/{branch}")];
+    let Some(branch_ref) = refs.into_iter().find(|reference| {
+        git(repo, &["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{reference}^{{commit}}")]).is_ok()
+    }) else {
+        return 0;
+    };
+    git(repo, &["rev-list", "--count", &format!("{tag_sha}..{branch_ref}")])
+        .ok()
+        .and_then(|count| count.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+fn is_release_train_task(task: &cas_types::Task) -> bool {
+    task.task_type == TaskType::Epic
+        && (crate::mcp::tools::core::task::release_train::is_release_train(task)
+            || task.effective_epic_branch().is_some_and(|lane| lane.starts_with("epic/release-train-")))
+}
+
+fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> bool {
+    let Some(anchor) = crate::qa_batch::delivery_anchor(repo, child) else {
+        return false;
+    };
+    crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
+}
+
+fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
+    let version = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))?;
+    let output = Command::new("git").arg("-C").arg(repo)
+        .args(["ls-remote", "--tags", "origin"]).output()?;
+    ensure!(output.status.success(), "cannot verify later published tags: {}", String::from_utf8_lossy(&output.stderr));
+    let mut published = std::collections::BTreeMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((sha, reference)) = line.split_once('\t') else { continue };
+        let Some(name) = reference.strip_prefix("refs/tags/") else { continue };
+        let name = name.strip_suffix("^{}").unwrap_or(name);
+        // Git emits the peeled annotated tag after its tag object.
+        published.insert(name.to_string(), sha.to_string());
+    }
+    let mut tags = Vec::new();
+    for (name, remote_sha) in published {
+        let Ok(candidate) = semver::Version::parse(name.strip_prefix('v').unwrap_or(&name)) else { continue };
+        if candidate > version && git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{name}^{{commit}}")])
+            .is_ok_and(|local| local == remote_sha)
+        {
+            tags.push((candidate, name, remote_sha));
+        }
+    }
+    tags.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(tags.into_iter().map(|(_, name, sha)| (name, sha)).collect())
+}
+
+fn preview_release_close_hold(root: &Path, child: &cas_types::Task, repo: &Path) -> Option<String> {
+    match crate::mcp::tools::core::task::lifecycle::merge_close::release_receipt_close_admission(root, child, repo) {
+        Ok(own_review) => own_review,
+        Err(reason) => Some(reason),
+    }
+}
+
+fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
+    let (repo, _integration) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
+        .context("release train has no integration branch")?;
+    let tag_sha = published_tag_sha(&repo, tag)?;
+    let store = open_task_store(root)?;
+    let train = store.get(train_id)?;
+    ensure!(
+        is_release_train_task(&train),
+        "{train_id} is not a release train"
+    );
+    let lane = train.effective_epic_branch().context("release train has no lane")?;
+    let lane_ref = if git(&repo, &["rev-parse", "--verify", &format!("origin/{lane}^{{commit}}")]).is_ok() {
+        format!("origin/{lane}")
+    } else {
+        lane.to_string()
+    };
+    ensure!(
+        git(&repo, &["merge-base", "--is-ancestor", &lane_ref, &tag_sha]).is_ok(),
+        "release tag {tag} does not contain train lane {lane}"
+    );
+
+    let children = store.get_subtasks(train_id)?;
+    let needs_later_tags = children.iter().any(|child| !child.is_terminal()
+        && crate::qa_batch::delivery_anchor(&repo, child).is_some()
+        && !delivery_is_shipped(&repo, child, &tag_sha));
+    let later_tags = if needs_later_tags { published_later_tags(&repo, tag)? } else { Vec::new() };
+    let shipped_tags: std::collections::BTreeMap<_, _> = children.iter().filter_map(|child| {
+        if delivery_is_shipped(&repo, child, &tag_sha) {
+            Some((child.id.clone(), tag.to_string()))
+        } else {
+            later_tags.iter().find(|(_, sha)| delivery_is_shipped(&repo, child, sha))
+                .map(|(later_tag, _)| (child.id.clone(), later_tag.clone()))
+        }
+    }).collect();
+    let needs_migration = children.iter().any(|child| {
+        child.status != TaskStatus::Cancelled
+            && !child.is_terminal()
+            && !shipped_tags.contains_key(&child.id)
+            && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
+    });
+    let successor = if needs_migration {
+        crate::mcp::tools::core::task::release_train::open_trains(store.as_ref(), &_integration)
+            .into_iter()
+            .filter(|candidate| candidate.id != train_id
+                && crate::mcp::tools::core::workflow::release_freeze::freeze_of(candidate).is_none())
+            .min_by(|left, right| left.created_at.cmp(&right.created_at).then_with(|| left.id.cmp(&right.id)))
+            .context("unfinished children need migration, but no successor release train is open")?
+            .into()
+    } else {
+        None
+    };
+    let next_lane = successor.as_ref().and_then(cas_types::Task::effective_epic_branch).map(str::to_string);
+    let mut included_by_tag = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut preview_holds = Vec::new();
+    let mut report = Vec::new();
+    if let Some(successor) = &successor {
+        let lane = next_lane.as_deref().context("successor train has no lane")?;
+        report.push(format!("Successor: {} ({lane})", successor.id));
+    }
+    let mut moved_count = 0;
+    let mut receipt_recorded = false;
+    for child in &children {
+        if child.status == TaskStatus::Cancelled {
+            report.push(format!("{}: SKIP (cancelled); gate verdict N/A", child.id));
+            continue;
+        }
+        if let Some(shipped_tag) = shipped_tags.get(&child.id) {
+            included_by_tag.entry(shipped_tag.clone()).or_default().push(child.id.clone());
+            if child.status == TaskStatus::Closed {
+                report.push(format!("{}: SKIP (already closed); gate verdict PASS (tag contains delivery)", child.id));
+            } else if dry_run {
+                if let Some(reason) = preview_release_close_hold(root, child, &repo) {
+                    preview_holds.push(child.id.clone());
+                    report.push(format!("{}: HOLD ({reason}); ordinary close required", child.id));
+                } else {
+                    report.push(format!("{}: CLOSE pending ordinary close gates; release receipt admission PASS (tag contains delivery)", child.id));
+                }
+            } else {
+                report.push(format!("{}: CHECK ordinary close gates (tag contains delivery)", child.id));
+            }
+            if child.status != TaskStatus::AwaitingMerge && child.status != TaskStatus::Closed {
+                report.push(format!("{}: shipped tree is present; status {} needs its ordinary close", child.id, child.status));
+            }
+            continue;
+        }
+        let unmerged_commits = if child.is_terminal() {
+            0
+        } else {
+            unmerged_factory_commit_count(&repo, child, &tag_sha)
+        };
+        if unmerged_commits > 0 {
+            report.push(format!("{}: SKIP ({unmerged_commits} unmerged commits; left open; parent and target unchanged); gate verdict N/A (not in tag)", child.id));
+            continue;
+        }
+        if child.is_terminal() {
+            report.push(format!("{}: SKIP (already {}); gate verdict N/A", child.id, child.status));
+            continue;
+        }
+        let successor = successor.as_ref().context("successor train missing for unfinished child")?;
+        let lane = next_lane.as_deref().context("successor train has no lane")?;
+        if dry_run {
+            report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
+        } else {
+            moved_count += usize::from(move_to_next_train(
+                store.as_ref(), child, train_id, &successor.id, successor, lane,
+            )?);
+            report.push(format!("{}: MOVE -> {} ({lane}); gate verdict N/A (not in tag)", child.id, successor.id));
+        }
+    }
+
+    let mut closed_count = 0;
+    let mut receipt_failed = Vec::new();
+    for (receipt_tag, included) in included_by_tag {
+        let closing_ids: Vec<_> = included.iter().filter(|id| {
+            store.get(id).is_ok_and(|task| task.status != TaskStatus::Closed)
+        }).cloned().collect();
+        let project = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
+        let receipts = cas_store::list_qa_batch_receipts(root, &project)?;
+        let reusable = receipts.into_iter().find(|receipt| {
+            receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA
+                && receipt.release_tag.as_deref() == Some(receipt_tag.as_str())
+                && included.iter().all(|id| {
+                    receipt.task_heads.get(id).is_some_and(|head| {
+                        store.get(id).ok().and_then(|task| task.deliverables.factory_branch_anchor)
+                            .as_deref() == Some(head.as_str())
+                            && crate::qa_batch::release_tag_ships_delivery(&repo, head, &receipt.staging_sha, id)
+                    })
+                })
+        });
+        let receipt = if let Some(receipt) = reusable {
+            Some(receipt)
+        } else if dry_run {
+            for id in &included {
+                if let Err(error) = crate::qa_batch::prepare_release_tag_receipt(root, std::slice::from_ref(id), &receipt_tag) {
+                    receipt_failed.push(id.clone());
+                    let prefix = format!("{id}: ");
+                    let line = format!("{id}: ERROR (release receipt prep: {error}); gate verdict N/A");
+                    if let Some(existing) = report.iter_mut().find(|entry| entry.starts_with(&prefix)) {
+                        *existing = line;
+                    } else {
+                        report.push(line);
+                    }
+                }
+            }
+            None
+        } else {
+            let receipt = crate::qa_batch::prepare_release_tag_receipt(root, &included, &receipt_tag)
+                .map_err(anyhow::Error::msg)?;
+            cas_store::record_qa_batch_receipt(root, &receipt)?;
+            receipt_recorded = true;
+            Some(receipt)
+        };
+        if let Some(receipt) = receipt {
+            if !dry_run {
+                crate::qa_pass::sync::record_batch(root, &receipt)?;
+            }
+            if !dry_run && !closing_ids.is_empty() {
+                let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                let outcomes = runtime.block_on(core.close_release_covered_delivery_outcomes(&receipt));
+                for id in &closing_ids {
+                    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+                    let line = match outcomes.get(id) {
+                        Some(CassyMergeClose::Closed { .. }) => format!("{id}: CLOSE; gate verdict PASS (closed from {receipt_tag})"),
+                        Some(CassyMergeClose::AlreadyClosed) => format!("{id}: SKIP (already closed); gate verdict PASS"),
+                        Some(CassyMergeClose::Held(reason)) => format!("{id}: HOLD; gate verdict CLOSE_REFUSED ({reason})"),
+                        _ => format!("{id}: HOLD; gate verdict CLOSE_OUTCOME_UNAVAILABLE"),
+                    };
+                    if let Some(existing) = report.iter_mut().find(|entry| entry.starts_with(&format!("{id}: "))) {
+                        *existing = line;
+                    }
+                }
+            }
+        }
+        closed_count += closing_ids.iter().filter(|id| {
+            store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed)
+        }).count();
+    }
+
+    let refreshed = store.get_subtasks(train_id)?;
+    let mut train_closed = false;
+    let train_will_close = refreshed.iter().all(|child| {
+        child.is_terminal()
+            || (!receipt_failed.contains(&child.id)
+                && !preview_holds.contains(&child.id)
+                && (shipped_tags.contains_key(&child.id)
+                    || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0))
+    });
+    if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) {
+        let mut closed = store.get(train_id)?;
+        if !closed.is_terminal() {
+            let now = chrono::Utc::now();
+            closed.status = TaskStatus::Closed;
+            closed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
+            closed.closed_at = Some(now);
+            closed.updated_at = now;
+            closed.close_reason = Some(format!("Release tag {tag} shipped train lane {lane}."));
+            store.update(&closed)?;
+            train_closed = true;
+        }
+    }
+    if dry_run {
+        let mut preview = format!("{train_id} ({tag}) dry-run: no writes");
+        for line in &report {
+            preview.push_str("\n  ");
+            preview.push_str(line);
+        }
+        let train_action = if !train_will_close {
+            "STAY OPEN (unmerged or held children remain open)"
+        } else if refreshed.iter().any(|child| !child.is_terminal() && shipped_tags.contains_key(&child.id)) {
+            "CLOSE pending ordinary close gates"
+        } else {
+            "CLOSE"
+        };
+        preview.push_str(&format!("\n  Train verdict: {train_action}"));
+        return Ok(preview);
+    }
+    let changed = closed_count > 0 || moved_count > 0 || train_closed || receipt_recorded;
+    Ok(if changed {
+        format!("{train_id} reconciled from {tag}: closed {closed_count} delivery(ies). {}", report.join("; "))
+    } else if report.is_empty() {
+        format!("{train_id}: no changes for {tag}")
+    } else {
+        format!("{train_id}: no close changes for {tag}. {}", report.join("; "))
+    })
+}
+
+fn published_tag_sha(repo: &Path, tag: &str) -> Result<String> {
+    ensure!(semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).is_ok(), "invalid release tag {tag}");
+    let local = git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
+    let remote = std::process::Command::new("git")
+        .arg("-C").arg(repo)
+        .args(["ls-remote", "origin", &format!("refs/tags/{tag}"), &format!("refs/tags/{tag}^{{}}")])
+        .output()?;
+    ensure!(remote.status.success(), "cannot verify published tag {tag}: {}", String::from_utf8_lossy(&remote.stderr));
+    let found = String::from_utf8_lossy(&remote.stdout).lines().any(|line| {
+        line.split_whitespace().next() == Some(local.as_str())
+    });
+    ensure!(found, "tag {tag} is not published on origin at {local}");
+    Ok(local)
+}
+
+fn move_to_next_train(
+    store: &dyn cas_store::TaskStore,
+    child: &cas_types::Task,
+    from: &str,
+    to: &str,
+    next_train: &cas_types::Task,
+    lane: &str,
+) -> Result<bool> {
+    let already_parent = store.get_parent_epic(&child.id)?.is_some_and(|parent| parent.id == to);
+    if already_parent
+        && child.deliverables.work_target.as_ref().is_some_and(|target| target.target_branch == lane) {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now();
+    if !already_parent {
+        store.remove_dependency_of_type(&child.id, from, DependencyType::ParentChild)?;
+        store.add_dependency(&Dependency {
+            from_id: child.id.clone(),
+            to_id: to.to_string(),
+            dep_type: DependencyType::ParentChild,
+            created_at: now,
+            created_by: Some("release-automation".into()),
+        })?;
+    }
+    let mut moved = store.get(&child.id)?;
+    let repo_selector = next_train.deliverables.work_target.as_ref()
+        .context("current release train has no repository target")?.repo_selector.clone();
+    moved.deliverables.work_target = Some(cas_types::WorkTarget {
+        repo_selector,
+        target_branch: lane.to_string(),
+    });
+    moved.updated_at = now;
+    store.update(&moved)?;
+    store.append_note(&child.id, &format!(
+        "[{}] ✅ DECISION Release migration: not included in the published tag; moved from {from} to {to} on `{lane}`.",
+        now.format("%Y-%m-%d %H:%M"),
+    ))?;
+    Ok(true)
+}
+
+pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
+    let mut failures = Vec::new();
+    for (train, tag) in [
+        ("cas-c4a0", "v4.3.0"),
+        ("cas-baf5", "v4.4.0"),
+        ("cas-dcb3", "v4.5.0"),
+        ("cas-d7c7", "v4.6.0"),
+    ] {
+        let result = if args.dry_run {
+            preview_shipped_train(root, train, tag)
+        } else {
+            close_shipped_train(root, train, tag)
+        };
+        match result {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("[ERROR] {train} ({tag}): {error:#}");
+                failures.push(train);
+            }
+        }
+    }
+    ensure!(failures.is_empty(), "release backfill failed for {}", failures.join(", "));
+    Ok(())
 }
 
 pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()> {
@@ -449,6 +839,9 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();
+        // CI runners have no global identity; annotated tags and merges need one.
+        git(repo, &["config", "user.name", "Fixture"]).unwrap();
+        git(repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
         git(
             repo,
             &[
@@ -560,6 +953,13 @@ mod tests {
                     .unwrap()
             )
         );
+        // Installing reconciles the train from its published tag, so publish it.
+        let bare = repo.join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        let tag = format!("v{}", args.version);
+        git(repo, &["tag", "-a", &tag, "-m", "release", &sha]).unwrap();
+        git(repo, &["push", "origin", train.branch.as_deref().unwrap(), &tag]).unwrap();
         // Core may roll to the next train before the host installs.
         train.status = cas_types::TaskStatus::Closed;
         train.epic_verification_owner = None;
@@ -656,5 +1056,365 @@ mod tests {
             reminders.list_recently_ended(&owner.id, 60).unwrap().len(),
             2
         );
+    }
+
+    #[test]
+    fn published_train_backfill_closes_and_moves_once() {
+        let (temp, root, mut shipped, owner, _) = fixture();
+        let repo = temp.path();
+        let old_lane = shipped.branch.clone().unwrap();
+        let next_lane = "epic/release-train-next001";
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n\n[qa]\nmode = \"batch\"\n").unwrap();
+        let bare = temp.path().join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/released.rs"), "pub fn released() {}\n").unwrap();
+        git(repo, &["add", "src/released.rs"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "delivery"])
+            .unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        git(repo, &["merge", "--no-ff", &old_lane, "-m", "merge release train"]).unwrap();
+        fs::write(repo.join("src/released.rs"), "pub fn released() { /* shipped edit */ }\n").unwrap();
+        git(repo, &["add", "src/released.rs"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "edit shipped file after merge"])
+            .unwrap();
+        fs::write(repo.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [4.3.0] - 2026-11-08\n\n- Shipped.\n").unwrap();
+        git(repo, &["add", "CHANGELOG.md"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "release: v4.3.0"])
+            .unwrap();
+        git(repo, &["tag", "-a", "v4.3.0", "-m", "release v4.3.0"]).unwrap();
+        git(repo, &["branch", next_lane, "main"]).unwrap();
+        git(repo, &["push", "origin", "main", &old_lane, next_lane, "--tags"]).unwrap();
+        // This tag exists only locally. Publication checks must reject it.
+        git(repo, &["tag", "-a", "v4.3.1", "-m", "local-only release"]).unwrap();
+        let release_sha = git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap();
+        let reused_branch = "factory/reused-shipped-lane";
+        git(repo, &["checkout", "-b", reused_branch, "v4.3.0"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "post-tag next-train work"])
+            .unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        let unmerged_branch = "factory/unmerged-delivery";
+        git(repo, &["checkout", "-b", unmerged_branch, "v4.3.0"]).unwrap();
+        for message in ["unmerged one", "unmerged two"] {
+            git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", message]).unwrap();
+        }
+        git(repo, &["push", "origin", unmerged_branch]).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+
+        let store = open_task_store(&root).unwrap();
+        shipped.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: "main".into(),
+        });
+        store.update(&shipped).unwrap();
+        let mut current = Task::new("cas-next001".into(), "Current train".into());
+        current.task_type = TaskType::Epic;
+        current.labels.push("release-train".into());
+        current.branch = Some(next_lane.into());
+        current.deliverables.work_target = shipped.deliverables.work_target.clone();
+        store.add(&current).unwrap();
+
+        let mut shipped_child = Task::new("cas-a100".into(), "Shipped child".into());
+        shipped_child.origin_project = Some("release-fixture".into());
+        shipped_child.assignee = Some(owner.id.clone());
+        shipped_child.status = TaskStatus::AwaitingMerge;
+        shipped_child.deliverables.factory_branch_anchor = Some(anchor);
+        let shipped_target = WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: old_lane.clone(),
+        };
+        shipped_child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: shipped_target.clone(),
+            assignee: owner.id.clone(),
+            branch: reused_branch.into(),
+            base_sha: release_sha.clone(),
+        });
+        shipped_child.deliverables.work_target = Some(shipped_target);
+        assert_eq!(unmerged_factory_commit_count(repo, &shipped_child, &release_sha), 1);
+        store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
+        let mut unmerged_child = Task::new("cas-a102".into(), "Unmerged release child".into());
+        unmerged_child.origin_project = Some("release-fixture".into());
+        let unmerged_target = WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: old_lane.clone(),
+        };
+        unmerged_child.deliverables.work_target = Some(unmerged_target.clone());
+        unmerged_child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: unmerged_target,
+            assignee: owner.id.clone(),
+            branch: unmerged_branch.into(),
+            base_sha: release_sha,
+        });
+        store.create_atomic(&unmerged_child, &[], Some(&shipped.id), None).unwrap();
+        let mut another_open_child = Task::new("cas-a101".into(), "Move to successor".into());
+        another_open_child.origin_project = Some("release-fixture".into());
+        another_open_child.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: old_lane.clone(),
+        });
+        store.create_atomic(&another_open_child, &[], Some(&shipped.id), None).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_SESSION_ID", &owner.id);
+        env.set("CAS_AGENT_NAME", &owner.name);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let _cwd = env.enter_dir(repo);
+        assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
+        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        let preview = preview_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
+        assert!(preview.contains("cas-a102: SKIP (2 unmerged commits; left open; parent and target unchanged); gate verdict N/A"), "{preview}");
+        assert!(preview.contains("cas-a101: MOVE -> cas-next001"), "{preview}");
+        assert!(preview.contains("Successor: cas-next001"), "{preview}");
+        assert!(!preview.contains("remains"), "{preview}");
+        assert!(preview.contains("no writes"), "{preview}");
+        let tag_receipt = crate::qa_batch::prepare_release_tag_receipt(
+            &root,
+            std::slice::from_ref(&shipped_child.id),
+            "v4.3.0",
+        ).unwrap();
+        assert_eq!(tag_receipt.task_heads.get(&shipped_child.id), shipped_child.deliverables.factory_branch_anchor.as_ref());
+        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap().is_empty());
+        let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
+        assert!(first.contains("reconciled"), "{first}");
+        assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open, "{first}");
+        assert_eq!(store.get(&shipped_child.id).unwrap().status, TaskStatus::Closed);
+        let parent = store.get_parent_epic(&unmerged_child.id).unwrap().unwrap();
+        assert_eq!(parent.id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().status, TaskStatus::Open);
+        assert!(first.contains("cas-a102"), "{first}");
+        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, current.id);
+        assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, next_lane);
+        assert_eq!(store.get_parent_epic(&unmerged_child.id).unwrap().unwrap().id, shipped.id);
+        assert_eq!(store.get(&unmerged_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
+        let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap();
+        assert!(receipts.iter().any(|receipt| {
+            receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA
+                && receipt.release_tag.as_deref() == Some("v4.3.0")
+                && receipt.ledger_author_id.is_none()
+        }));
+        assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no close changes"));
+    }
+
+    fn published_backfill_fixture() -> (tempfile::TempDir, PathBuf, Task, Task) {
+        let (temp, root, mut train, _, _) = fixture();
+        let repo = temp.path();
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = 'release-fixture'\n[factory]\nepic_base_branch = 'main'\nrelease_train = true\n[qa]\nmode = 'batch'\n").unwrap();
+        let bare = repo.join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["tag", "v4.3.0"]).unwrap();
+        git(repo, &["push", "origin", "main", train.branch.as_deref().unwrap(), "--tags"]).unwrap();
+        train.labels.push("release-train-cut".into());
+        train.deliverables.work_target.as_mut().unwrap().repo_selector = "project:release-fixture".into();
+        let store = open_task_store(&root).unwrap();
+        store.update(&train).unwrap();
+        let mut successor = Task::new("cas-next001".into(), "Next train".into());
+        successor.task_type = TaskType::Epic;
+        successor.labels.push("release-train".into());
+        successor.branch = Some("epic/release-train-next001".into());
+        successor.deliverables.work_target = train.deliverables.work_target.clone();
+        store.add(&successor).unwrap();
+        (temp, root, train, successor)
+    }
+
+    #[test]
+    fn backfill_skips_frozen_uncut_successors_cas_e8cc() {
+        let (temp, root, train, mut successor) = published_backfill_fixture();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(temp.path());
+        successor.labels.push(format!("release-train-frozen:1:{}", git(temp.path(), &["rev-parse", "HEAD"]).unwrap()));
+        let store = open_task_store(&root).unwrap();
+        store.update(&successor).unwrap();
+        let child = Task::new("cas-a101".into(), "Unfinished historical work".into());
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        assert!(preview_shipped_train(&root, &train.id, "v4.3.0").is_err());
+        assert!(close_shipped_train(&root, &train.id, "v4.3.0").is_err());
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert!(store.get_subtasks(&successor.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_preview_checks_release_close_admission_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let repo = temp.path();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        let store = open_task_store(&root).unwrap();
+        let mut child = Task::new("cas-a100".into(), "Shipped dedicated review".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(git(repo, &["rev-parse", "HEAD"]).unwrap());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        for gate in ["own-review", "ci-override", "request-changes"] {
+            let mut held = child.clone();
+            if gate == "ci-override" {
+                held.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+            } else if gate == "request-changes" {
+                held.status = TaskStatus::Open;
+                held.deliverables.historical_factory_branch_anchors = held.deliverables.factory_branch_anchor.take().into_iter().collect();
+            }
+            store.update(&held).unwrap();
+            preview_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+            assert!(preview_release_close_hold(&root, &held, repo).is_some(), "{gate}");
+            let after = store.get(&held.id).unwrap();
+            assert_eq!(after.status, held.status);
+            assert_eq!(after.deliverables.factory_branch_anchor, held.deliverables.factory_branch_anchor);
+            assert_eq!(store.get_parent_epic(&held.id).unwrap().unwrap().id, train.id);
+            assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
+            assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &held.id).unwrap().is_empty());
+        }
+        // A retired shipped delivery stays held on the historical train in
+        // both preview and execution, rather than migrating as unfinished work.
+        close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::Open);
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn backfill_apply_reports_actual_hold_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(temp.path());
+        let mut child = Task::new("cas-held001".into(), "Published but held".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(git(temp.path(), &["rev-parse", "HEAD"]).unwrap());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        child.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+        let store = open_task_store(&root).unwrap();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        let report = close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        let outcome = report.split(&format!("{}: ", child.id)).nth(1).unwrap();
+        // HOLD and CI_OVERRIDE are machine outcome/refusal codes.
+        assert_eq!(outcome.split(|c: char| c.is_whitespace() || c == ';').next(), Some("HOLD"), "{report}");
+        assert!(outcome.contains("CI_OVERRIDE"), "{report}");
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn backfill_uses_later_published_tag_for_shipped_child_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let repo = temp.path();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "-b", "factory/later-shipped"]).unwrap();
+        fs::write(repo.join("later.txt"), "later release delivery\n").unwrap();
+        git(repo, &["add", "later.txt"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fix(cas-later001): later release delivery"]).unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["tag", "v4.4.0"]).unwrap();
+        git(repo, &["push", "origin", "refs/tags/v4.4.0"]).unwrap();
+        git(repo, &["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "another task reuses this branch"]).unwrap();
+        let mut child = Task::new("cas-later001".into(), "Shipped by later release".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.assignee = Some("release-owner".into());
+        child.deliverables.factory_branch_anchor = Some(anchor.clone());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        child.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: child.deliverables.work_target.clone().unwrap(),
+            assignee: "release-owner".into(), branch: "factory/later-shipped".into(), base_sha: base,
+        });
+        child.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+        let store = open_task_store(&root).unwrap();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        close_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+        let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &child.id).unwrap();
+        assert!(receipts.iter().any(|receipt| receipt.release_tag.as_deref() == Some("v4.4.0")
+            && receipt.task_heads.get(&child.id) == Some(&anchor)));
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert_eq!(store.get(&child.id).unwrap().status, TaskStatus::AwaitingMerge);
+    }
+
+    #[test]
+    fn backfill_continues_after_bad_train_and_accepts_legacy_train_lane() {
+        let (temp, root, _, _, _) = fixture();
+        let repo = temp.path();
+        let bare = temp.path().join("origin.git");
+        fs::write(
+            root.join("config.toml"),
+            "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n",
+        ).unwrap();
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        let store = open_task_store(&root).unwrap();
+        let target = WorkTarget {
+            repo_selector: "project:release-fixture".into(),
+            target_branch: "main".into(),
+        };
+        let mut current = Task::new("cas-51aa9".into(), "Current train".into());
+        current.task_type = TaskType::Epic;
+        current.labels.push("release-train".into());
+        current.branch = Some("epic/release-train-vnext-cas-51aa9".into());
+        current.deliverables.work_target = Some(target.clone());
+        store.add(&current).unwrap();
+
+        let trains = [
+            ("cas-c4a0", "v4.3.0"),
+            ("cas-baf5", "v4.4.0"),
+            ("cas-dcb3", "v4.5.0"),
+            ("cas-d7c7", "v4.6.0"),
+        ];
+        let main = git(repo, &["rev-parse", "main"]).unwrap();
+        for (id, tag) in trains {
+            let lane = if id == "cas-d7c7" {
+                "epic/release-train-v4-5-1-cas-d7c7".to_string()
+            } else {
+                format!("epic/release-train-{id}")
+            };
+            git(repo, &["branch", &lane, &main]).unwrap();
+            let mut train = Task::new(id.into(), format!("Release train {id}").into());
+            train.task_type = if id == "cas-c4a0" { TaskType::Task } else { TaskType::Epic };
+            if id != "cas-d7c7" {
+                train.labels.push("release-train".into());
+            }
+            train.branch = Some(lane);
+            train.deliverables.work_target = Some(target.clone());
+            store.add(&train).unwrap();
+            git(repo, &["tag", "-a", tag, "-m", tag]).unwrap();
+        }
+        let mut push = vec!["push", "origin", "main"];
+        let lanes = trains.iter().map(|(id, _)| {
+            if *id == "cas-d7c7" {
+                "epic/release-train-v4-5-1-cas-d7c7".to_string()
+            } else {
+                format!("epic/release-train-{id}")
+            }
+        }).collect::<Vec<_>>();
+        push.extend(lanes.iter().map(String::as_str));
+        push.push("--tags");
+        git(repo, &push).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        assert!(backfill(&BackfillArgs { dry_run: true }, &root).is_err());
+        for (id, _) in trains {
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::Open, "dry-run mutated {id}");
+        }
+        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
+        assert_eq!(store.get("cas-c4a0").unwrap().status, TaskStatus::Open);
+        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
+        }
+        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
+        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
+        }
     }
 }

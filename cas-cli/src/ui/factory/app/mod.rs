@@ -2213,12 +2213,6 @@ impl FactoryApp {
             held_workers.is_some()
                 || !matches!(state, super::director::SupervisorActionableState::AssignReadyWork { .. })
         })?;
-        let has_live_operator_ask = self.factory_session.as_deref().is_some_and(|session| {
-            assignment_evidence::has_live_operator_ask(data, session, &self.supervisor_name, now)
-        });
-        if !has_live_operator_ask {
-            return Some(actionable);
-        }
         match actionable {
             super::director::SupervisorActionableState::AssignReadyWork {
                 task_ids,
@@ -4298,6 +4292,8 @@ mod tests {
         // Exercise launch delivery with evidence the supervisor policy admits.
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("codex-sup-session".into(), "codex-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4377,6 +4373,8 @@ mod tests {
         entry.title = Some("Current Grok release recovery guidance".to_string());
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("grok-sup-session".into(), "grok-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 

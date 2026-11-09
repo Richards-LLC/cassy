@@ -4612,7 +4612,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     task.deliverables.factory_branch_anchor = Some(tip.clone());
     task.deliverables.parked_branch = Some(rework.into());
     tasks.update(&task).unwrap();
-    match service.factory(Parameters(request)).await {
+    match service.factory(Parameters(request.clone())).await {
         Ok(result) => {
             if !get_text(&result).contains(rework)
                 || !Command::new("git").args(["merge-base", "--is-ancestor", &tip, "main"])
@@ -4651,6 +4651,31 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
             }
         }
         Err(error) => failures.push(format!("single parked worker delivery must merge: {error}")),
+    }
+
+    // cas-a8dd: a later round lands in the train while the latest dispatch
+    // is still bound to the earlier round's candidate. Re-running the merge
+    // reports the parked tip as contained, not a review of a new candidate.
+    let landed = format!("factory/alice-{}", task.id);
+    run_git(&["switch", &landed], &worker);
+    std::fs::write(worker.join("round3.rs"), "pub fn landed() {}\n").unwrap();
+    run_git(&["add", "round3.rs"], &worker);
+    run_git(&["commit", "-m", "third delivery"], &worker);
+    let round3 = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["merge", "--no-ff", &landed, "-m", "train landed round three"], &repo.root);
+    run_git(&["push", "origin", "main", &landed], &repo.root);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(round3.clone());
+    task.deliverables.parked_branch = Some(landed.clone());
+    // Reopening the merged task clears its anchor; the re-park records it again.
+    tasks.update(&task).unwrap();
+    tasks.update(&task).unwrap();
+    assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor, Some(round3));
+    let mut rerun = request.clone();
+    rerun.id = Some(landed);
+    match service.factory(Parameters(rerun)).await {
+        Ok(result) if get_text(&result).contains("nothing new to merge") => {}
+        outcome => failures.push(format!("a landed parked tip with a stale bound candidate must be contained: {outcome:?}")),
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }

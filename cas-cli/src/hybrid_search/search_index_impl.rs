@@ -148,6 +148,7 @@ impl SearchIndex {
             writer_memory: DEFAULT_WRITER_MEMORY,
             cached_reader: std::sync::Mutex::new(None),
             cached_query_parser: std::sync::Mutex::new(None),
+            task_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -233,6 +234,7 @@ impl SearchIndex {
             writer_memory: DEFAULT_WRITER_MEMORY,
             cached_reader: std::sync::Mutex::new(None),
             cached_query_parser: std::sync::Mutex::new(None),
+            task_snapshot: std::sync::Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -402,6 +404,111 @@ impl SearchIndex {
         writer.add_document(doc)?;
         writer.commit()?;
 
+        Ok(())
+    }
+
+    /// Refresh task documents from the canonical store in one batch.
+    /// The shared snapshot avoids rewriting unchanged documents, while a new
+    /// process always performs an initial reconciliation before returning task
+    /// search results. Returns the number of task documents added, updated, or
+    /// removed.
+    pub fn refresh_tasks(&self, tasks: &[Task]) -> Result<usize, MemError> {
+        let mut snapshot = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.updated_at.timestamp_micros()))
+            .collect::<Vec<_>>();
+        snapshot.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut indexed_snapshot = self
+            .task_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if indexed_snapshot.as_ref() == Some(&snapshot)
+            && self.count_documents(DocType::Task)? == tasks.len() as u64
+        {
+            return Ok(0);
+        }
+
+        #[cfg(test)]
+        let _disk_index_test_lock = crate::test_support::disk_index_test_lock();
+        let mut writer = self.writer()?;
+        let previous = indexed_snapshot.as_ref();
+        let full_rebuild = match previous {
+            None => true,
+            Some(previous) => self.count_documents(DocType::Task)? != previous.len() as u64,
+        };
+        let mut rewritten = 0;
+        if full_rebuild {
+            writer.delete_term(tantivy::Term::from_field_text(
+                self.doc_type_field,
+                DocType::Task.as_str(),
+            ));
+            for task in tasks {
+                Self::add_task_document(&mut writer, self, task)?;
+                rewritten += 1;
+            }
+        } else if let Some(previous) = previous {
+            let current_ids = snapshot
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let previous_by_id = previous
+                .iter()
+                .map(|(id, updated_at)| (id.as_str(), *updated_at))
+                .collect::<std::collections::HashMap<_, _>>();
+
+            for (id, _) in previous {
+                if !current_ids.contains(id.as_str()) {
+                    writer.delete_term(tantivy::Term::from_field_text(self.id_field, id));
+                    rewritten += 1;
+                }
+            }
+            for task in tasks {
+                if previous_by_id.get(task.id.as_str()) == Some(&task.updated_at.timestamp_micros()) {
+                    continue;
+                }
+                Self::add_task_document(&mut writer, self, task)?;
+                rewritten += 1;
+            }
+        }
+
+        if rewritten == 0 {
+            return Ok(0);
+        }
+
+        writer.commit()?;
+        *self
+            .cached_reader
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *indexed_snapshot = Some(snapshot);
+        Ok(rewritten)
+    }
+
+    fn add_task_document(
+        writer: &mut tantivy::IndexWriter,
+        index: &SearchIndex,
+        task: &Task,
+    ) -> Result<(), MemError> {
+        writer.delete_term(tantivy::Term::from_field_text(index.id_field, &task.id));
+
+        let mut content = task.title.clone();
+        if !task.description.is_empty() {
+            content.push(' ');
+            content.push_str(&task.description);
+        }
+        if !task.acceptance_criteria.is_empty() {
+            content.push(' ');
+            content.push_str(&task.acceptance_criteria);
+        }
+
+        let mut doc = tantivy::TantivyDocument::new();
+        doc.add_text(index.id_field, &task.id);
+        doc.add_text(index.content_field, &content);
+        doc.add_text(index.tags_field, "");
+        doc.add_text(index.type_field, task.status.to_string());
+        doc.add_text(index.doc_type_field, DocType::Task.as_str());
+        doc.add_text(index.title_field, &task.title);
+        writer.add_document(doc)?;
         Ok(())
     }
 

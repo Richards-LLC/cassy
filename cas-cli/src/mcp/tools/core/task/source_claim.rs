@@ -191,6 +191,15 @@ impl CasCore {
                 {
                     answer = Acquire::PeerHolds(hold);
                 }
+                if actor.role == AgentRole::Supervisor && actor.is_alive()
+                    && let Acquire::PeerHolds(hold) = &answer
+                {
+                    answer = claims.take_source_for_task(
+                        &key, &task_name, hold, &actor.id,
+                        &format!("{} (task {task_name})", actor.name),
+                        crate::cloud::peer_claims::lease_duration_secs(&root),
+                    );
+                }
                 if answer == Acquire::Claimed {
                     // Existing agent metadata projects these claims into the usual
                     // heartbeat; no independent source lease table or protocol.

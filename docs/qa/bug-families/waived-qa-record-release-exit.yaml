@@ -1,0 +1,5 @@
+title: A waived QA-record-only delivery can receive its release verdict without admitting product self-review
+found: '2026-11-08'
+tasks: [cas-ace0]
+invariants: []
+journeys: [FACTORY-QA-RECEIPT]

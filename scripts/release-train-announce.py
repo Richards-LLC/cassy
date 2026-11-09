@@ -78,6 +78,50 @@ PRE_PUBLICATION_TOKENS = frozenset({
 })
 
 
+# The Violet hub refuses a post that names a file its reader cannot open
+# (`unattached_file`) or shows UTC (`utc_time`). Release bodies attach nothing, so
+# any such name fails. Mirrors cas-cli/src/cli/violet_cmd/draft_check.rs.
+_DOC_EXT = "md|html|pdf|png|jpg|jpeg|gif|svg|csv|json|txt|log|zip|yaml|toml"
+_FILE_EXT = _DOC_EXT + "|ts|js|py|rs"
+HUB_FILE_REFERENCE = re.compile(
+    r"(?:~/|/(?:home|tmp|mnt|Users|var)/)[^\s`<>\"'()\[\]{},;!?]*"
+    rf"|(?<![\w.])[A-Za-z0-9_@.\-]+(?:/[A-Za-z0-9_@.\-]+)+\.(?:{_FILE_EXT})\b(?::\d+(?::\d+)?)?"
+    rf"|(?<![\w./])[A-Za-z0-9_@\-][A-Za-z0-9_@.\-]*\.(?:{_DOC_EXT})\b(?::\d+(?::\d+)?)?"
+    r"|\bart-[0-9a-f]{8}\b", re.IGNORECASE)
+HUB_URL = re.compile(
+    r"<[a-z][\w+.\-]*:[^<>\n]+>|\b[a-z][\w+.\-]*://[^\s<>`]+|\b(?:mailto|tel):[^\s<>`]+"
+    r"|\b(?:[a-z0-9\-]+\.)+[a-z]{2,}(?::\d+)?/[^\s<>`]*", re.IGNORECASE)
+HUB_UTC = re.compile(
+    r"\b(?:UTC|GMT)\b|\b\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?Z\b"
+    r"|\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|\+00:00)\b", re.IGNORECASE)
+HUB_CODE_FILE = re.compile(r"\.(?:ts|js|py|rs)$", re.IGNORECASE)
+
+
+def hub_readability_hits(line: str, in_code: bool) -> tuple[bool, list[tuple[str, str]]]:
+    """Hub-refused names and times on one line, outside fenced code."""
+    visible, start = "", 0
+    for fence in re.finditer(r"```", line):
+        if not in_code:
+            visible += line[start:fence.start()]
+        in_code, start = not in_code, fence.end()
+    if not in_code:
+        visible += line[start:]
+    hits = []
+    prose = HUB_URL.sub("", visible)
+    for match in HUB_FILE_REFERENCE.finditer(prose):
+        reference = match.group()
+        name = re.sub(r":\d+(?::\d+)?$", "", reference.rstrip(".")).rstrip("/").rsplit("/", 1)[-1]
+        explicit = reference.startswith(("~/", "/"))
+        first = reference.split("/")[0]
+        if (HUB_CODE_FILE.search(name) and not explicit and reference.count("/") < 2
+                and first != first.lower()):
+            continue
+        hits.append(("unattached_file", f"names {reference!r}, which the reader cannot open; describe it without a path"))
+    for time in HUB_UTC.finditer(SLACK_LINK.sub(r"\1", visible)):
+        hits.append(("utc_time", f"shows {time.group()!r}; use CT or labelled ET, never UTC"))
+    return in_code, hits
+
+
 def user_word_hits(line: str) -> list[tuple[str, str]]:
     """Each whole-word (or plural) user-thread word in `line`, with its swap."""
     return [(match.group(), USER_SWAPS[forbidden])
@@ -100,7 +144,11 @@ def body_errors(index: int, body: str, pre_publication: bool = False) -> list[st
         if not (pre_publication and token.group() in PRE_PUBLICATION_TOKENS):
             report(normalized[:token.start()].count("\n") + 1, "unresolved_token",
                    f"contains unresolved token {token.group()}; fill its published value")
+    in_code = False
     for line_number, line in enumerate(lines, start=1):
+        in_code, hub_hits = hub_readability_hits(line, in_code)
+        for rule, detail in hub_hits:
+            report(line_number, rule, f"{detail} (the Violet hub refuses it)")
         if "**" in line:
             report(line_number, "slack_bold", "contains forbidden ** markdown; use *bold*")
         visible = len(SLACK_LINK.sub(r"\1", line))

@@ -181,7 +181,10 @@ notes. Approval continues merge admission and leaves a quiet receipt; rejection,
 questions and failed or expired reviews wake the owner with findings. Manual
 verifiers keep their existing handoff and authority. Automatic reviews select
 a provider account through the shared launch resolver; failed harness notices
-include the stderr tail and full log path.
+include the stderr tail and full log path. A crashed automatic verifier releases
+only its own unresolved claim, consumes its old authority and retains an audit
+of the failure. Retrying the same merge starts one replacement on the same
+candidate; stale verdicts are refused and each attempt retains separate logs.
 
 Native Codex children share their parent's MCP caller. Shared connections refuse
 child registration before changing caller or session state. Initial dispatches

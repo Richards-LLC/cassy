@@ -164,11 +164,18 @@ pub(super) fn launch(
     task: &Task,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    if cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+        .map_err(|e| e.to_string())?.state != cas_types::VerificationDispatchState::Pending {
+        return Ok(None);
+    }
     let proof = dispatch
         .repository
         .as_ref()
         .ok_or("candidate proof missing")?;
-    let directory = core.cas_root.join("verification-runs").join(&dispatch.id);
+    // A replacement must not read an earlier attempt's verdict or overwrite
+    // its stderr. The exact dispatch and candidate remain unchanged.
+    let directory = core.cas_root.join("verification-runs").join(&dispatch.id)
+        .join(format!("attempt-{:032x}", rand::random::<u128>()));
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
     let (mut command, notice) = command(&core.cas_root, &output)?;
@@ -193,7 +200,7 @@ fn launch_command(
     let input = output.with_file_name("prompt.txt");
     std::fs::write(&input, body).map_err(|e| e.to_string())?;
     let mut child = cas_types::Agent::new_sub_agent(
-        format!("task-verifier-{}", live.id),
+        format!("task-verifier-{:032x}", rand::random::<u128>()),
         "task-verifier".into(),
         live.owner_agent_id.clone(),
     );
@@ -228,7 +235,27 @@ fn launch_command(
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
-            let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
+            let error = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error);
+            match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
+                Ok(true) => {
+                    let retry = candidate_for_dispatch(&worker.cas_root, &live)
+                        .ok().flatten()
+                        .map(|candidate| format!(
+                            "Retry factory action=worktree_merge id={} task_id={}; one replacement will claim this exact dispatch.",
+                            candidate.source_branch, live.task_id
+                        ))
+                        .unwrap_or_else(|| format!(
+                            "Retry the automatic verifier handoff on exact dispatch {}.", live.id
+                        ));
+                    let _ = attention(&worker, &live, &format!(
+                        "Automatic verifier stopped: {error}. Its claim was released and audited. {retry}"
+                    ));
+                }
+                Ok(false) => {} // A verdict, timeout or replacement already owns recovery.
+                Err(recovery) => {
+                    let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Claim recovery failed: {recovery}. Inspect this exact dispatch before retrying."));
+                }
+            }
         }
         if let Ok(agents) = worker.open_agent_store() {
             let _ = agents.graceful_shutdown(&child.id);
@@ -456,9 +483,9 @@ mod tests {
         let handle = result.expect("a notice failure must not report a failed launch")
             .expect("the verifier was launched");
         handle.join().unwrap();
-        let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-        assert!(owns(&root, &claimed));
-        assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+        let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert!(!owns(&root, &recovered));
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
     }
 
     #[test]
@@ -485,8 +512,10 @@ if [ "$1" = login ]; then
     echo 'Logged in using ChatGPT'
     exit 0
 fi
-if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
     echo 'Task is already Closed' >&2
     exit 1
 fi
@@ -638,8 +667,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 .unwrap()
                 .unwrap();
             let candidate = candidate_for_dispatch(&root, &dispatch).unwrap().unwrap();
-            let directory = root.join("verification-runs").join(&dispatch.id);
-            std::fs::create_dir_all(&directory).unwrap();
+            let directory = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                .unwrap().next().unwrap().unwrap().path();
             let output = directory.join("verdict.json");
             assert!(
                 core.emit_premerge_review_handoff(&task, &dispatch)
@@ -693,7 +722,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
             );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-            assert!(owns(&root, &claimed));
+            if matches!(status, "harness_failed" | "malformed") {
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
+                assert!(!owns(&root, &claimed));
+            } else {
+                assert!(owns(&root, &claimed));
+            }
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
             if matches!(status, "malformed" | "harness_failed" | "late_error") {
                 assert!(verdict.is_none(), "failed transport cannot approve");
@@ -766,6 +800,36 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .contains(diagnostics.lines().next().unwrap())
                     );
                 }
+            }
+            if status == "harness_failed" {
+                let old_child = dispatch.verifier_agent_id.as_deref().unwrap();
+                let old_stderr = std::fs::read(output.with_file_name("harness.log")).unwrap();
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"replacement reviewed the candidate",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                // Retry the merge's automatic handoff once, retaining its join
+                // handle so completion needs no new timer or polling loop.
+                let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();
+                let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                assert_eq!(replacement.id, dispatch.id);
+                assert_ne!(replacement.verifier_agent_id.as_deref(), Some(old_child));
+                assert!(core.emit_premerge_review_handoff(&task, &replacement).unwrap().is_none());
+                let stale = CasCore::with_daemon(root.clone(), None, core.daemon.clone());
+                stale.bind_agent_identity(old_child.into(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
+                    "summary":"stale child's competing verdict", "issues":"[]",
+                })).unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                assert!(runtime.block_on(stale.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).is_err());
+                handle.join().unwrap();
+                let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(verdict.status, VerificationStatus::Approved);
+                assert_eq!(verdict.agent_id, replacement.verifier_agent_id);
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
+                assert_eq!(std::fs::read(output.with_file_name("harness.log")).unwrap(), old_stderr);
             }
             eprintln!(
                 "AUTOMATIC_VERIFIER row={status} hand_launches=0 dispatch={} candidate={}",

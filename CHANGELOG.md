@@ -7,6 +7,72 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.8.0] - 2026-11-09
+
+### Fixed — Release close gate
+
+- **Close deliveries after release prep** — A task's promoted changelog fragment remains accepted by the shared delivery-content gate when its entries appear under a released version in `CHANGELOG.md`.
+- **Reconcile shipped release trains** — A published tag now supplies an explicit delivery verdict, closes shipped children and their train, and moves unfinished work to the current train idempotently.
+
+### Fixed — Commander
+
+- **Project cards identify the supervisor** — Each project row shows the supervisor's name before its machine, falling back to the role when no name is available.
+- **Dismiss stuck supervisor commands** — Dismiss cancels queued Finish or chooser tracking in the daemon without typing into the pane. Closed native choosers stop blocking later commands, and refusals name the command still awaiting an outcome.
+
+### Fixed — Release latency receipt
+
+- **The release receipt measures first commit to main for an untracked train** — Was: a train cut without a tracked release receipt printed `FIRST_CHILD_TO_MAIN_SECONDS=unavailable`, so the thirty-minute commit-to-main budget could not be checked. Now: the receipt falls back to the earliest commit of the merged release PR and prints the measured seconds.
+- **The report and receipt state one main-to-published budget** — Was: a release published from a main push recorded the ten-minute default as `BUDGET_SECONDS` while stating a twenty-minute main-to-published budget, so the release report printed 10m. Now: every main-push release (merge-queue green or main landing) takes its budget from the publish entry of `scripts/release-stage-budgets.json`; an explicit `--budget-seconds` still wins.
+
+### Added — QA sandbox
+
+- **`cas serve --sandbox <dir>` for isolated QA walks** — Was: a candidate `cas serve` started for QA obeyed an inherited `CAS_ROOT`, registered a supervisor in the live store and synced to the cloud. Now: with `--sandbox <dir>` the server refuses any store outside that directory before opening or registering anything and keeps cloud sync off; the QA craft skill points to it.
+
+### Fixed — Batch QA receipts
+
+- **batch_receipt says which record it wrote** — Was: the `verification_type` parameter read "batch_receipt: release", so a supervisor recorded a batch QA receipt as a release code-review verdict, which then blocked closes; the committed line did not say which record was written. Now: the parameter says to omit it for a batch QA receipt and that release is only the code-review verdict, and the committed line names the record (Batch QA receipt or Release verdict).
+- **A batch receipt is refused for a ledger the close gate would reject** — Was: `verification action=batch_receipt` recorded a receipt on a ledger that `cas qa ledger check` rejected (duplicate headline counts, label mismatch), so the epic close later failed at verification. Now: batch_receipt runs the same ledger check against the ledger owner task first and refuses with its diagnostics before any receipt is written.
+
+### Fixed — Task start
+
+- **Reassigned tasks inherit their source branch safely** — Starting on the new worker's branch now rebinds only when both the previous local and origin tips are inherited. The rebind preserves task attribution and records the same branch history, audit note and ledger event as supervisor approval. Divergent or unavailable old tips retain the recorded source and the `rebind_branch` recovery action.
+
+### Fixed — Batch QA status
+
+- **qa_status on an epic names the child receipts that cover it** — Was: `verification action=qa_status` on a release-train epic said "no valid staging receipt", although batch_receipt refuses an epic as self-review so it could never be recorded. Now: the epic's status lists each child delivery with the receipt that covers it, and no longer asks for a receipt that cannot exist.
+
+### Fixed — Release notes lint
+
+- **The release-notes lint refuses drafts the Violet hub refuses as unreadable** — Was: `release-train-announce.py --lint` passed a draft that named a plain file such as DESIGN.md or showed a UTC time, then Violet refused the post as format_unreadable. Now: the lint applies the hub's unattached-file and UTC-time rules to every body (names inside links and fenced code still pass), so a draft that lints clean posts.
+
+### Fixed — Re-running a merge already in its train
+
+- **A delivery already in its train is reported as merged** — Was: re-running `factory action=worktree_merge` on an awaiting-merge delivery whose parked tip was already in the target, while its latest review was bound to an earlier round's candidate, refused with "review the new candidate" or opened a fresh review. Now: an earlier round's review candidate no longer holds the merge (only a candidate of the parked tip or the branch tip, or a transactional one, does), so the re-run reports the delivery as already contained and changes nothing. Deliveries not yet in the target are reviewed as before.
+
+### Fixed — Capped worker tests
+
+- **Resolve Rust tools for isolated tests** — Named worker tests find Cargo in launch PATH, `CARGO_HOME/bin` or `~/.cargo/bin` and stage `rustc` and `rustdoc` from the resolved Cargo's toolchain directory, while keeping that directory out of the isolated test PATH.
+
+### Fixed — Automatic pre-merge verifier falls back to Claude
+
+- **The automatic verifier runs on Claude when no Codex account can** — Was: when every Codex home was logged out or over its usage threshold, the automatic pre-merge verifier did not start and asked the supervisor to launch the task-verifier by hand, even with an eligible Claude account available. Now: it launches the same verifier, with the same prompt and dispatch, on the eligible Claude account that the spawn account selector picks, and a notice names the harness, account and model it used. The supervisor is asked to launch it only when neither harness has an eligible account; that refusal lists every Codex and Claude home with its reason.
+
+### Fixed — Verification
+
+- **A second verifier can no longer be spawned under a running one** — Was: while the daemon's bound task-verifier was still reviewing a parked delivery, a factory supervisor could spawn a second task-verifier on the same dispatch. The first verifier returned an error verdict, the supervisor's answer to it resolved the dispatch and the merge continued, and the second verifier's later rejection could not be recorded, so an incomplete delivery merged. Now: that spawn is refused and names the running verifier and its dispatch, so the supervisor waits for its verdict. A supervisor-direct verdict is also refused while a bound verifier is still reviewing and has not raised a supervisor_call.
+
+### Fixed — Batch QA close
+
+- **A reopened delivery closes on the receipt that already covers it** — Was: after a post-merge reopen cleared the active branch anchor, closing answered "waiting for batch receipt" even though `qa_status` reported the covering receipt as PASS. Now: close falls back to the delivery's latest retired anchor, the same one `qa_status` uses, so the two agree.
+
+### Fixed — Automatic pre-merge verifier finds the task's evidence
+
+- **The automatic verifier is told where the task's evidence lives** — Was: the daemon-run pre-merge verifier had to derive `~/.cas/artifacts/<project-key>/<task-id>/` itself, guessed the wrong project key, and reported the task's LEDGER.md and test logs as "could not be located" while they existed. Now: its prompt names the task's resolved evidence directory, the same one the close gate reads, and asks it to name that absolute path if evidence is absent there.
+
+### Fixed — MCP tool schema size
+
+- **The verification tool's schema fits its size budget again** — Was: the longer `verification_type` wording pushed the published tool list to 59,089 bytes, over its 59,000-byte budget. Now: the same guidance (omit it for a batch QA receipt; `release` is the review verdict) in shorter text, and the list is back under budget.
+
 ## [4.7.0] - 2026-11-08
 
 ### Fixed — Factory merges

@@ -64,7 +64,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    Deploy-only: run `cas deliverable capture --task <task-id> --side before` at task start, before deploying.
    Reports and release notes read pairs there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
    use the transcript and diff, with credentials redacted; record sandbox reset and the check that
-   no smoke rows remain inline.
+   no smoke rows remain inline. Candidate MCP walks use `cas serve --sandbox <dir>` ([isolation](references/verify-harness.md#isolated-candidate-serve)).
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`, `THRESHOLD`, `GRACE`,
    `DEBOUNCE`, and `RETRY`; record whether each constant is predictable from the user's visible
    contract. For terminal states, dump all visible text across surfaces and flag

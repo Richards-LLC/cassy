@@ -567,6 +567,12 @@ pub enum ClientMessage {
         #[serde(default)]
         attribution: MessageAttribution,
     },
+    /// Cancel the caller's queued command or chooser tracking without PTY input.
+    SupervisorCommandCancel {
+        client_ref: String,
+        #[serde(default)]
+        attribution: MessageAttribution,
+    },
     /// Navigate only the original caller's currently open native chooser.
     SupervisorCommandStep {
         client_ref: String,

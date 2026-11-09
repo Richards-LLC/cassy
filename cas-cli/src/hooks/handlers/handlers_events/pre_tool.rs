@@ -1518,6 +1518,33 @@ fn handle_pre_tool_use_inner(
         }
     }
 
+    // cas-beaf: a factory `Agent` verifier mints no handoff, so its verdict
+    // is recorded under the spawning session. While a bound verifier is
+    // still running on the dispatch, a second verifier's verdict cannot land
+    // once the first resolves it; refuse that spawn and name the running one.
+    if tool_name == "Agent"
+        && is_factory_agent
+        && let Some(tool_input) = input.tool_input.as_ref()
+        && tool_input.get("subagent_type").and_then(|value| value.as_str()) == Some("task-verifier")
+        && let Some(task_id) = unique_existing_task_id(
+            tool_input.get("prompt").and_then(|value| value.as_str()).unwrap_or_default(),
+            stores.tasks(),
+        )
+        && let Ok(Some(dispatch)) = cas_store::get_latest_verification_dispatch(cas_root, &task_id)
+        && dispatch.state == cas_types::VerificationDispatchState::Claimed
+        && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
+        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| agent.is_alive()))
+    {
+        return Ok(HookOutput::with_pre_tool_permission(
+            "deny",
+            &format!(
+                "Verifier {verifier} is already running on dispatch {} for task {task_id}; a second verifier's verdict could not be recorded once that dispatch resolves. Next: wait for its verdict or supervisor_call (`{}verification action=latest task_id={task_id}`).",
+                dispatch.id,
+                crate::harness_policy::own_tool_prefix(),
+            ),
+        ));
+    }
+
     // Mint verifier authority only on the authenticated parent's Task/Agent
     // spawn path. Authority stays entirely server-side: this hook leaves the
     // model-visible prompt/input byte-for-byte unchanged, while SubagentStart
@@ -13253,6 +13280,56 @@ mod worker_commit_guard_tests {
             Some("deny"),
             "no CODEMAP.md present → nothing to gate on, must not deny: {val}"
         );
+    }
+
+    /// cas-beaf incident (cas-06f53): the daemon's bound verifier claimed the
+    /// dispatch, then the factory supervisor spawned a second task-verifier.
+    /// That spawn is refused while the bound verifier runs, and allowed again
+    /// once it has finished.
+    #[test]
+    fn factory_verifier_spawn_waits_for_the_running_bound_verifier_cas_beaf() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cas_root = crate::store::init_cas_dir(tmp.path()).expect("init cas");
+        let agents = open_agent_store(&cas_root).expect("agent store");
+        let owner = Agent::new_with_role("factory-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        agents.register(&owner).expect("register supervisor");
+        open_task_store(&cas_root)
+            .expect("task store")
+            .add(&Task::new("cas-beaf-two".into(), "Two verifiers".into()))
+            .expect("task");
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &cas_root, "cas-beaf-two", &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        )
+        .expect("dispatch");
+        let bound = Agent::new_sub_agent(format!("task-verifier-{}", dispatch.id), "task-verifier".into(), owner.id.clone());
+        cas_store::issue_server_verifier_handoff(&cas_root, "cas-beaf-two", &dispatch.id, &owner.id, "daemon")
+            .expect("handoff");
+        cas_store::bind_server_verifier_handoff_and_register_child(&cas_root, &owner.id, &bound)
+            .expect("bound verifier claims the dispatch");
+
+        let mut input = crate::hooks::handlers::HookInput::default();
+        input.hook_event_name = "PreToolUse".to_string();
+        input.session_id = owner.id.clone();
+        input.agent_role = Some("supervisor".into());
+        input.cwd = tmp.path().to_string_lossy().to_string();
+        input.tool_name = Some("Agent".to_string());
+        input.tool_use_id = Some("tool-use-second-verifier".to_string());
+        input.tool_input = Some(serde_json::json!({
+            "subagent_type": "task-verifier", "prompt": "Verify task cas-beaf-two"
+        }));
+        let decision = |input: &crate::hooks::handlers::HookInput| {
+            serde_json::to_value(handle_pre_tool_use(input, Some(&cas_root)).expect("pretool"))
+                .expect("serialize")["hookSpecificOutput"]
+                .clone()
+        };
+        let refused = decision(&input);
+        assert_eq!(refused["permissionDecision"], "deny", "{refused}");
+        assert!(refused["permissionDecisionReason"].as_str().unwrap().contains(&bound.id), "{refused}");
+
+        agents.graceful_shutdown(&bound.id).expect("bound verifier finished");
+        assert_ne!(decision(&input)["permissionDecision"], "deny");
     }
 
     #[test]

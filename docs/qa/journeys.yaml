@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  train-delivery-contract-integration:
+    title: Current recovery receipts and renamed epic targets coexist with recorded squash delivery identity
+    tasks: [cas-e7a8]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   booting-worker-task-admission:
     title: Tasks assigned during worker startup enter the ordered backlog once and continue after delivery
     tasks: [cas-d033]

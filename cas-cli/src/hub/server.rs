@@ -2815,7 +2815,7 @@ fn artifact_view_error(error: crate::artifacts::ViewError) -> Response {
     use crate::artifacts::cloud::ViewFailure;
     let (status, code, detail) = match &error {
         ViewError::Unknown(_) => return generic_not_found(),
-        ViewError::Revoked(_) => (
+        ViewError::Revoked(_) | ViewError::Cloud(ViewFailure::Revoked) => (
             StatusCode::GONE,
             "artifact_revoked",
             None,

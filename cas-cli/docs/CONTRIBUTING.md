@@ -1197,7 +1197,9 @@ responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 A live registered supervisor can run `cas artifact revoke <id> --reason <reason>`
 or call `artifact action=revoke id=<id> reason=<reason>`. Both use the same
 registry-backed authority check; a role environment variable alone cannot
-revoke. The first immutable local tombstone retains the artifact ID, actor ID,
+revoke. Cloud authenticates owner/team access but cannot distinguish supervisors
+from other team members; supervisor-only authority is a client rule. Unknown
+and other-team artifact IDs both return 404. The first immutable local tombstone retains the artifact ID, actor ID,
 reason and revocation time alongside the original upload metadata. Repeats
 preserve that audit. `show` and `list` retain the metadata and report revoked
 access; JSON carries an optional `revocation` object while `status` retains the
@@ -1217,6 +1219,13 @@ endpoint (including 404/405/501), rejected request or mismatched receipt leaves
 The MCP result is an error with the local/Cloud states retained; the CLI exits
 nonzero after printing that same partial outcome. Retry the same ID to finish
 Cloud revocation; it never replaces the first local actor, reason or timestamp.
+HTTP 503 means Cloud retained its tombstone but object deletion failed; this is
+a retryable failure and retains the same pending warning and original audit.
+After revocation, Cloud URL issuance and completion return 409 with
+`error=artifact_revoked`; fetch reports that stable revocation state instead of
+an uncommitted upload. Previously issued signed URLs expire within at most ten
+minutes under the Cloud contract; deletion and access denial are not confirmed
+locally until the positive receipt arrives.
 No Cloud ID is reported as `not_applicable`, not as confirmed Cloud deletion.
 The operation reads metadata only; it never downloads or reposts artifact bytes.
 

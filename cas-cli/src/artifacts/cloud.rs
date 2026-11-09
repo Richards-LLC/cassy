@@ -274,6 +274,8 @@ pub enum ViewFailure {
     NotLive { reason: String },
     /// 404 for the artifact: unknown, or in a team this account is not in.
     NotFound { interaction: String },
+    /// 409 with the stable artifact_revoked code; no URL may be issued.
+    Revoked,
     /// 409: the artifact exists but is not committed (pending or rejected).
     NotCommitted {
         status: Option<String>,
@@ -286,6 +288,7 @@ pub enum ViewFailure {
 impl fmt::Display for ViewFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ViewFailure::Revoked => write!(f, "artifact_revoked: Cloud has revoked this artifact"),
             ViewFailure::NotLive { reason } => write!(f, "{reason}"),
             ViewFailure::NotFound { interaction } => write!(
                 f,
@@ -718,9 +721,13 @@ impl ArtifactUploadClient {
             }
             404 => return Err(ViewFailure::NotFound { interaction }),
             409 => {
-                let status = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|value| {
+                let value = serde_json::from_str::<serde_json::Value>(&body).ok();
+                if value.as_ref().and_then(|value| value.get("error")).and_then(serde_json::Value::as_str)
+                    == Some("artifact_revoked")
+                {
+                    return Err(ViewFailure::Revoked);
+                }
+                let status = value.and_then(|value| {
                         value
                             .get("status")
                             .and_then(serde_json::Value::as_str)

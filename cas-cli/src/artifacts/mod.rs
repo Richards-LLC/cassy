@@ -376,7 +376,10 @@ pub fn signed_view(
         }
     };
     let client = client.ok_or(ViewError::NotLoggedIn)?;
-    let view = client.view_url(&cloud_id).map_err(ViewError::Cloud)?;
+    let view = client.view_url(&cloud_id).map_err(|error| match error {
+        ViewFailure::Revoked => ViewError::Revoked(ArtifactRevoked { artifact_id: artifact.id.clone() }),
+        error => ViewError::Cloud(error),
+    })?;
     Ok(SignedView { artifact, view })
 }
 

@@ -321,7 +321,10 @@ fn fetch(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact is not committed to Cloud"))?;
     let client = cloud.ok_or_else(|| anyhow::anyhow!("not logged in to Cassy Cloud"))?;
-    let view = client.view_url(cloud_id)?;
+    let view = client.view_url(cloud_id).map_err(|error| match error {
+        super::ViewFailure::Revoked => anyhow::Error::from(super::ArtifactRevoked { artifact_id: artifact.id.clone() }),
+        error => error.into(),
+    })?;
     anyhow::ensure!(
         view.artifact_id == cloud_id,
         "Cloud returned another artifact id"

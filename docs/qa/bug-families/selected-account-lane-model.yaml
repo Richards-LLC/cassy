@@ -1,0 +1,5 @@
+title: Lane admission checks the selected Codex account before queueing, warns on a supported registry fallback, and excludes failed harnesses from idle staffing
+found: '2026-11-08'
+tasks: [cas-8f40]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SPAWN]

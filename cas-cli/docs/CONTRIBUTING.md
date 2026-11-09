@@ -1,5 +1,12 @@
 # Contributing to Cassy
 
+## Memory update receipts
+
+`memory action=update id=<id> title=<title>` saves the title alone or together
+with `content`. Omitted fields retain their stored values. A successful edit
+returns `structured_content` with `id` and `changes` (the updated field names),
+alongside the existing text receipt.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to
@@ -1195,7 +1202,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -1971,6 +1978,15 @@ proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log`.
+
+Close measures a delivery's recorded `parked_branch` (local, then origin)
+before deriving branches from its current assignee. Its recorded `work_target`
+remains authoritative after parking, including squash-integrated deliveries;
+a later epic lane does not redefine that proof boundary. Ownership, start-range,
+publication and receipt checks still apply. QA reads project-scoped evidence
+before historical flat task directories. A flat directory is a fallback only
+when the task explicitly cites its historical bundle and no scoped QA evidence
+exists; a colliding short task ID alone never selects another project's ledger.
 
 ## Project capture configuration
 

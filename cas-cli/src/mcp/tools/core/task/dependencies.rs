@@ -2,16 +2,25 @@ use crate::mcp::tools::core::imports::*;
 
 /// The `dep_type` both `dep_add` and `dep_remove` read (cas-96ab): one
 /// parser, so the edge `dep_add` writes is the one a matching `dep_remove`
-/// finds. Case and `_`/`-` are ignored; anything unrecognised means Blocks.
-fn parse_dep_type(raw: &str) -> DependencyType {
-    match raw.to_lowercase().replace('_', "-").as_str() {
+/// finds. Case and `_`/`-` are ignored; unsupported types are refused.
+fn parse_dep_type(raw: &str) -> Result<DependencyType, McpError> {
+    let dep_type = match raw.to_lowercase().replace('_', "-").as_str() {
+        "blocks" => DependencyType::Blocks,
         "related" => DependencyType::Related,
         "parent" | "parentchild" | "parent-child" => DependencyType::ParentChild,
         "discovered" | "discoveredfrom" | "discovered-from" => DependencyType::DiscoveredFrom,
         "extracted" | "extractedfrom" | "extracted-from" => DependencyType::ExtractedFrom,
         "requires-start" | "requiresstart" => DependencyType::RequiresStart,
-        _ => DependencyType::Blocks,
-    }
+        _ => {
+            let valid = ["blocks", "requires_start", "related", "parent", "discovered", "extracted"];
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!("Unsupported dependency type `{raw}`. Valid values: {}.", valid.join(", "))),
+                data: Some(serde_json::json!({ "dep_type": raw, "valid_values": valid })),
+            });
+        }
+    };
+    Ok(dep_type)
 }
 
 impl CasCore {
@@ -33,7 +42,7 @@ impl CasCore {
             data: None,
         })?;
 
-        let dep_type = parse_dep_type(&req.dep_type);
+        let dep_type = parse_dep_type(&req.dep_type)?;
 
         let dep = Dependency {
             from_id: req.from_id.clone(),
@@ -162,7 +171,7 @@ impl CasCore {
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
 
-        let dep_type = parse_dep_type(&req.dep_type);
+        let dep_type = parse_dep_type(&req.dep_type)?;
 
         let found = task_store
             .remove_dependency_of_type(&req.from_id, &req.to_id, dep_type)
@@ -506,6 +515,29 @@ mod describe_dependency_tests {
                 store.get_dependencies(&from).unwrap().is_empty(),
                 "dep_remove dep_type={spelling} removes the edge dep_add wrote"
             );
+        }
+        for (index, invalid) in ["duplicate", "not-a-dependency", ""].into_iter().enumerate() {
+            let from = format!("cas-e659-from-{index}");
+            let to = format!("cas-e659-to-{index}");
+            store.add(&Task::new(from.clone(), "from".into())).unwrap();
+            store.add(&Task::new(to.clone(), "to".into())).unwrap();
+            let request = || Parameters(DependencyRequest {
+                from_id: from.clone(), to_id: to.clone(), dep_type: invalid.into(),
+            });
+            let error = core.cas_task_dep_add(request()).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            assert_eq!(error.data.as_ref().unwrap()["valid_values"], serde_json::json!([
+                "blocks", "requires_start", "related", "parent", "discovered", "extracted"
+            ]));
+            assert!(store.get_dependencies(&from).unwrap().is_empty());
+            assert_eq!(store.get(&from).unwrap().status, TaskStatus::Open);
+
+            store.add_dependency(&Dependency::new(from.clone(), to.clone(), DependencyType::Blocks)).unwrap();
+            let error = core.cas_task_dep_remove(request()).await.unwrap_err();
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            let remaining = store.get_dependencies(&from).unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].dep_type, DependencyType::Blocks);
         }
     }
 }

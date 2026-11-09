@@ -370,7 +370,7 @@ pub struct VerificationRequest {
     pub ledger_artifact_id: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(description = "batch_receipt: full 40-hex staging commit SHA, contained in each task's configured target")]
+    #[schemars(description = "batch_receipt: full 40-hex staging SHA in each task's configured target")]
     pub staging_sha: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -440,8 +440,8 @@ pub struct VerificationRequest {
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
-    /// Verification type: 'task' (default) or 'epic'; batch_receipt also takes 'release'.
-    #[schemars(description = "task (default), epic; batch_receipt: release.")]
+    /// Verification type: 'task' (default) or 'epic'. For batch_receipt, omit it to record a batch QA receipt; 'release' records only the release code-review verdict, never a QA walk.
+    #[schemars(description = "task (default), epic; batch_receipt: omit=QA, release=review")]
     #[serde(default)]
     pub verification_type: Option<String>,
 

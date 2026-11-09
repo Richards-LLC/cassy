@@ -8,6 +8,7 @@ pub(crate) use notes::note_notification_ids;
 mod proposals;
 mod query;
 mod rebind;
+mod recover_delivery;
 pub(crate) mod repo_context;
 pub(crate) mod release_train;
 pub(crate) mod source_claim;

@@ -1530,6 +1530,7 @@ pub(super) fn merge_tip_content_presence(
                 target,
                 Some(std::slice::from_ref(path)),
                 true,
+                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
             )
         })
     });
@@ -1564,6 +1565,7 @@ pub(super) fn merge_tip_content_presence(
                 target,
                 merge_tip,
                 &carries_source,
+                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
             )
         })
         .collect();
@@ -1598,6 +1600,7 @@ pub(super) fn merge_tip_content_presence(
                         && matches!(
                             super::delivery_content_presence_in_parent_for_paths(
                                 repo, commit, &first, Some(std::slice::from_ref(&path)), false,
+                                &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
                             ),
                             DeliveryContentPresence::Present { .. }
                                 | DeliveryContentPresence::Superseded { .. }
@@ -1907,6 +1910,7 @@ pub(super) fn ordinary_anchor_content_presence(
         target,
         anchor,
         &carries_source,
+        &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
     );
     let DeliveryContentPresence::Dropped { paths } = &original else {
         return original;
@@ -1949,7 +1953,8 @@ pub(super) fn ordinary_anchor_content_presence(
                         commit,
                         target,
                         Some(&selected),
-                        true
+                        true,
+                        &identity.task_id.as_deref().into_iter().collect::<Vec<_>>(),
                     ),
                     DeliveryContentPresence::Present { .. }
                         | DeliveryContentPresence::Superseded { .. }

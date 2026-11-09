@@ -107,7 +107,7 @@ pub(super) fn verify(
         .split_whitespace()
         .filter_map(|word| {
             word.strip_prefix("merge_group_run=")
-                .map(|value| value.trim_end_matches([',', ';', '.']))
+                .map(|value| value.trim_end_matches([',', ';', '.', ':']))
         })
         .collect();
     if citations.is_empty() {
@@ -138,10 +138,10 @@ pub(super) fn verify(
         || run["event"] != "merge_group"
         || run["status"] != "completed"
         || run["conclusion"] != "success"
-        || run["path"]
-            .as_str()
-            .map(|path| path.split('@').next().unwrap_or_default())
-            != Some(".github/workflows/ci.yml")
+        || !matches!(
+            run["path"].as_str().map(|path| path.split('@').next().unwrap_or_default()),
+            Some(".github/workflows/ci.yml" | ".github/workflows/full-validation.yml")
+        )
         || run.pointer("/repository/full_name").and_then(Value::as_str) != Some(slug.as_str())
         || run
             .pointer("/head_repository/full_name")

@@ -455,6 +455,32 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     crate::qa_batch::release_tag_ships_delivery(repo, &anchor, tag_sha, &child.id)
 }
 
+fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
+    let version = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))?;
+    let output = Command::new("git").arg("-C").arg(repo)
+        .args(["ls-remote", "--tags", "origin"]).output()?;
+    ensure!(output.status.success(), "cannot verify later published tags: {}", String::from_utf8_lossy(&output.stderr));
+    let mut published = std::collections::BTreeMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Some((sha, reference)) = line.split_once('\t') else { continue };
+        let Some(name) = reference.strip_prefix("refs/tags/") else { continue };
+        let name = name.strip_suffix("^{}").unwrap_or(name);
+        // Git emits the peeled annotated tag after its tag object.
+        published.insert(name.to_string(), sha.to_string());
+    }
+    let mut tags = Vec::new();
+    for (name, remote_sha) in published {
+        let Ok(candidate) = semver::Version::parse(name.strip_prefix('v').unwrap_or(&name)) else { continue };
+        if candidate > version && git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{name}^{{commit}}")])
+            .is_ok_and(|local| local == remote_sha)
+        {
+            tags.push((candidate, name, remote_sha));
+        }
+    }
+    tags.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    Ok(tags.into_iter().map(|(_, name, sha)| (name, sha)).collect())
+}
+
 fn preview_release_close_hold(root: &Path, child: &cas_types::Task, repo: &Path) -> Option<String> {
     match crate::mcp::tools::core::task::lifecycle::merge_close::release_receipt_close_admission(root, child, repo) {
         Ok(own_review) => own_review,
@@ -484,10 +510,22 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     );
 
     let children = store.get_subtasks(train_id)?;
+    let needs_later_tags = children.iter().any(|child| !child.is_terminal()
+        && crate::qa_batch::delivery_anchor(&repo, child).is_some()
+        && !delivery_is_shipped(&repo, child, &tag_sha));
+    let later_tags = if needs_later_tags { published_later_tags(&repo, tag)? } else { Vec::new() };
+    let shipped_tags: std::collections::BTreeMap<_, _> = children.iter().filter_map(|child| {
+        if delivery_is_shipped(&repo, child, &tag_sha) {
+            Some((child.id.clone(), tag.to_string()))
+        } else {
+            later_tags.iter().find(|(_, sha)| delivery_is_shipped(&repo, child, sha))
+                .map(|(later_tag, _)| (child.id.clone(), later_tag.clone()))
+        }
+    }).collect();
     let needs_migration = children.iter().any(|child| {
         child.status != TaskStatus::Cancelled
             && !child.is_terminal()
-            && !delivery_is_shipped(&repo, child, &tag_sha)
+            && !shipped_tags.contains_key(&child.id)
             && unmerged_factory_commit_count(&repo, child, &tag_sha) == 0
     });
     let successor = if needs_migration {
@@ -502,7 +540,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         None
     };
     let next_lane = successor.as_ref().and_then(cas_types::Task::effective_epic_branch).map(str::to_string);
-    let mut included = Vec::new();
+    let mut included_by_tag = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut preview_holds = Vec::new();
     let mut report = Vec::new();
     if let Some(successor) = &successor {
@@ -516,9 +554,8 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             report.push(format!("{}: SKIP (cancelled); gate verdict N/A", child.id));
             continue;
         }
-        let shipped = delivery_is_shipped(&repo, child, &tag_sha);
-        if shipped {
-            included.push(child.id.clone());
+        if let Some(shipped_tag) = shipped_tags.get(&child.id) {
+            included_by_tag.entry(shipped_tag.clone()).or_default().push(child.id.clone());
             if child.status == TaskStatus::Closed {
                 report.push(format!("{}: SKIP (already closed); gate verdict PASS (tag contains delivery)", child.id));
             } else if dry_run {
@@ -563,7 +600,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
 
     let mut closed_count = 0;
     let mut receipt_failed = Vec::new();
-    if !included.is_empty() {
+    for (receipt_tag, included) in included_by_tag {
         let closing_ids: Vec<_> = included.iter().filter(|id| {
             store.get(id).is_ok_and(|task| task.status != TaskStatus::Closed)
         }).cloned().collect();
@@ -571,12 +608,12 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         let receipts = cas_store::list_qa_batch_receipts(root, &project)?;
         let reusable = receipts.into_iter().find(|receipt| {
             receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA
-                && receipt.release_tag.as_deref() == Some(tag)
+                && receipt.release_tag.as_deref() == Some(receipt_tag.as_str())
                 && included.iter().all(|id| {
                     receipt.task_heads.get(id).is_some_and(|head| {
                         store.get(id).ok().and_then(|task| task.deliverables.factory_branch_anchor)
                             .as_deref() == Some(head.as_str())
-                            && crate::qa_batch::release_tag_ships_delivery(&repo, head, &tag_sha, id)
+                            && crate::qa_batch::release_tag_ships_delivery(&repo, head, &receipt.staging_sha, id)
                     })
                 })
         });
@@ -584,7 +621,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             Some(receipt)
         } else if dry_run {
             for id in &included {
-                if let Err(error) = crate::qa_batch::prepare_release_tag_receipt(root, std::slice::from_ref(id), tag) {
+                if let Err(error) = crate::qa_batch::prepare_release_tag_receipt(root, std::slice::from_ref(id), &receipt_tag) {
                     receipt_failed.push(id.clone());
                     let prefix = format!("{id}: ");
                     let line = format!("{id}: ERROR (release receipt prep: {error}); gate verdict N/A");
@@ -597,7 +634,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             }
             None
         } else {
-            let receipt = crate::qa_batch::prepare_release_tag_receipt(root, &included, tag)
+            let receipt = crate::qa_batch::prepare_release_tag_receipt(root, &included, &receipt_tag)
                 .map_err(anyhow::Error::msg)?;
             cas_store::record_qa_batch_receipt(root, &receipt)?;
             receipt_recorded = true;
@@ -610,13 +647,22 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
             if !dry_run && !closing_ids.is_empty() {
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                let close_report = runtime.block_on(core.close_release_covered_deliveries(&receipt));
-                if !close_report.trim().is_empty() {
-                    report.push(close_report.trim().to_string());
+                let outcomes = runtime.block_on(core.close_release_covered_delivery_outcomes(&receipt));
+                for id in &closing_ids {
+                    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+                    let line = match outcomes.get(id) {
+                        Some(CassyMergeClose::Closed { .. }) => format!("{id}: CLOSE; gate verdict PASS (closed from {receipt_tag})"),
+                        Some(CassyMergeClose::AlreadyClosed) => format!("{id}: SKIP (already closed); gate verdict PASS"),
+                        Some(CassyMergeClose::Held(reason)) => format!("{id}: HOLD; gate verdict CLOSE_REFUSED ({reason})"),
+                        _ => format!("{id}: HOLD; gate verdict CLOSE_OUTCOME_UNAVAILABLE"),
+                    };
+                    if let Some(existing) = report.iter_mut().find(|entry| entry.starts_with(&format!("{id}: "))) {
+                        *existing = line;
+                    }
                 }
             }
         }
-        closed_count = closing_ids.iter().filter(|id| {
+        closed_count += closing_ids.iter().filter(|id| {
             store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed)
         }).count();
     }
@@ -627,7 +673,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         child.is_terminal()
             || (!receipt_failed.contains(&child.id)
                 && !preview_holds.contains(&child.id)
-                && (delivery_is_shipped(&repo, child, &tag_sha)
+                && (shipped_tags.contains_key(&child.id)
                     || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0))
     });
     if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) {
@@ -651,7 +697,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         }
         let train_action = if !train_will_close {
             "STAY OPEN (unmerged or held children remain open)"
-        } else if refreshed.iter().any(|child| !child.is_terminal() && delivery_is_shipped(&repo, child, &tag_sha)) {
+        } else if refreshed.iter().any(|child| !child.is_terminal() && shipped_tags.contains_key(&child.id)) {
             "CLOSE pending ordinary close gates"
         } else {
             "CLOSE"

@@ -43,7 +43,7 @@ pub fn handle_pre_tool_use(
             .and_then(|v| v.get("command"))
             .and_then(|v| v.as_str())
             .unwrap();
-        let (args, suffix, isolated_test_env) = worker_check_command(command).expect("route was selected");
+        let (args, suffix, isolated_test_env, test_env) = worker_check_command(command).expect("route was selected");
         let Some(root) = cas_root else {
             return Ok(HookOutput::with_pre_tool_permission(
                 "deny",
@@ -79,11 +79,12 @@ pub fn handle_pre_tool_use(
         };
         let executable = std::env::current_exe()?;
         let rewritten = format!(
-            "{} factory worker-check --cas-root {}{}{} -- {}{}",
+            "{} factory worker-check --cas-root {}{}{}{} -- {}{}",
             shell_quote_path(&executable),
             shell_quote_path(root),
             if detach { " --detach" } else { "" },
             isolated_test_env.as_ref().map(|path| format!(" --isolated-test-env {}", shell_quote_path(path))).unwrap_or_default(),
+            test_env.iter().map(|spec| format!(" --test-env '{}'", spec.replace('\'', "'\"'\"'"))).collect::<String>(),
             args.iter()
                 .map(|arg| if arg.trim_start().starts_with("test(") {
                     format!("'{arg}'")
@@ -1758,14 +1759,24 @@ fn handle_pre_tool_use_inner(
 }
 
 /// Accept a literal check/targeted nextest plus a simple log/background suffix.
-/// The sole env prefix is the complete fixed provider-isolation profile; never
-/// accept general wrappers, shell substitutions, toolchains or build overrides.
-fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>)> {
+/// Test prefixes are metadata for the capped child, never runner bootstrap
+/// assignments. Shell substitutions, identity and build overrides stay refused.
+fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<std::path::PathBuf>, Vec<String>)> {
     let command = command.trim();
     if command.contains(['\n', '\r']) { return None; }
-    let (cargo, isolated) = if command.starts_with("env ") {
-        let split = command.find(" cargo ")?;
-        let words = command[..split].split_whitespace().collect::<Vec<_>>();
+    if let Some((args, suffix)) = literal_worker_check_command(command) {
+        return Some((args, suffix, None, vec![]));
+    }
+    let lexed = factory_shell_lex(command, true, 0);
+    let cargo = lexed.tokens.iter().position(|token| matches!(token, ShellToken::Word(word) if word == "cargo"))?;
+    let split = *lexed.ends.get(cargo.checked_sub(1)?)?;
+    let prefix = &command[..split];
+    if prefix.contains(['$', '`', ';', '|', '&', '>', '<', '(', ')', '\0']) { return None; }
+    let (args, suffix) = literal_worker_check_command(command[split..].trim_start())?;
+    if args.first().map(String::as_str) != Some("nextest") { return None; }
+    // Preserve the existing complete provider-isolation profile.
+    let isolated = (|| {
+        let words = prefix.split_whitespace().collect::<Vec<_>>();
         let (assignment, prefix) = words.split_last()?;
         let directory = assignment.strip_prefix("XDG_CONFIG_HOME=")?;
         // A literal path, never a shell expansion or arbitrary assignment.
@@ -1781,11 +1792,24 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
             { return None; }
         }
         if removed.len() != crate::factory_worker_check::ISOLATED_TEST_CREDENTIALS.len() { return None; }
-        (&command[split + 1..], Some(std::path::PathBuf::from(directory)))
-    } else { (command, None) };
-    let (args, suffix) = literal_worker_check_command(cargo)?;
-    if isolated.is_some() && args.first().map(String::as_str) != Some("nextest") { return None; }
-    Some((args, suffix, isolated))
+        Some(std::path::PathBuf::from(directory))
+    })();
+    if isolated.is_some() { return Some((args, suffix, isolated, vec![])); }
+    let words = shell_words::split(prefix).ok()?;
+    let mut index = usize::from(words.first().is_some_and(|word| word == "env"));
+    let mut test_env = vec![];
+    while let Some(word) = words.get(index) {
+        let spec = if matches!(word.as_str(), "-u" | "--unset") {
+            index += 1;
+            format!("-{}", words.get(index)?)
+        } else if let Some(key) = word.strip_prefix("--unset=") {
+            format!("-{key}")
+        } else { word.clone() };
+        crate::factory_worker_check::test_environment_spec(&spec)?;
+        test_env.push(spec);
+        index += 1;
+    }
+    Some((args, suffix, None, test_env))
 }
 
 fn literal_worker_check_command(command: &str) -> Option<(Vec<String>, String)> {

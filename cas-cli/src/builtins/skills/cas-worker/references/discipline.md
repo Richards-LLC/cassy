@@ -53,7 +53,11 @@ Select exactly one package and a mandatory positive named-test filterset:
 Select `--lib` or one `--test <harness>` from the project's explicit Cargo
 harness inventory (`scripts/cas-test-targets.py` in cas-src). An omitted target
 means `--lib`. Empty, `all()`, glob/regex and negated filters, repeated packages,
-broad flags, environment prefixes and compound commands are refused.
+broad flags, unapproved environment prefixes and compound commands are refused.
+Named tests may use literal HOME, Cargo/Rustup home, CI and Git identity/config
+assignments or `env -u` for those inputs. The capped runner applies them only to
+the test child; its own identity, admission and receipts stay protected. Shell
+expansions and identity/build overrides remain refused.
 Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
 receipts. Run the red test before fixing it, then commit and run the green test.

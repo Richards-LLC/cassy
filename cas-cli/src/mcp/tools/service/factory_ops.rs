@@ -3272,7 +3272,7 @@ impl CasService {
                         spec.requester_secure_storage_dir = ctx.requester_from_env.then(|| requester_secure_storage_dir(spec.cli)).flatten();
                     }
                 }
-                account_selection_notice.push_str(&recommend_spawn_accounts(&mut specs, true, &account_policy, chrono::Utc::now(), |provider| {
+                account_selection_notice.push_str(&recommend_spawn_accounts(&mut specs, true, &factory_config, &account_policy, chrono::Utc::now(), |provider| {
                     let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
                     crate::account_registry::collect_for(provider, &home, false)
                 }));

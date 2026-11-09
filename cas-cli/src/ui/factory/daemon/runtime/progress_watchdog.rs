@@ -3,8 +3,10 @@
 //! its supervisor once with what is waiting on whom; still nothing after
 //! another 45, it pages the operator once. Heartbeats and liveness never
 //! count, nor do the daemon's own rows (relays, fired reminders).
+//! A delivery parked for a frozen release train waits on the operator's
+//! lift, not on anyone here: it is reported once per freeze, never chased.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -16,10 +18,18 @@ const QUIET_SECS: i64 = 45 * 60;
 /// whether this episode already woke the supervisor or paged the operator.
 static EPISODES: Mutex<Option<HashMap<String, (String, DateTime<Utc>, bool, bool)>>> = Mutex::new(None);
 
+/// Freeze notices already relayed by this daemon; the relay key also
+/// dedupes them durably across restarts.
+static HELD_REPORTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// Parked deliveries held by a train freeze, by train: when the freeze
+/// started and since when it holds, then the held task ids.
+type FreezeHeld = BTreeMap<String, (i64, String, Vec<String>)>;
+
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -42,6 +52,8 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let peer_branches: HashSet<_> = peer_tasks.iter().filter_map(|id| store.get(id).ok())
         .filter(|task| task.task_type == cas_types::TaskType::Epic)
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
+    let mut all_tasks = None;
+    let mut freeze_held = FreezeHeld::new();
     tasks.retain(|task| {
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
@@ -79,8 +91,22 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             .or(task.branch.as_deref()).filter(|target| !target.trim().is_empty())
             .or_else(|| parent.as_ref().and_then(|epic| epic.effective_epic_branch()));
         let Some(target) = target else { return true };
-        !peer_branches.contains(target) && !cas_dir.parent()
-            .is_some_and(|repo| delivery_is_contained(repo, task, target))
+        if peer_branches.contains(target) || cas_dir.parent().is_some_and(|repo| delivery_is_contained(repo, task, target)) {
+            return false;
+        }
+        // cas-1f65: only the operator lifts a release freeze; a repair may
+        // still merge under a red, so it stays actionable here.
+        use crate::mcp::tools::core::workflow::release_freeze;
+        if task.labels.iter().any(|label| label == release_freeze::REPAIR_LABEL) {
+            return true;
+        }
+        let trains = all_tasks.get_or_insert_with(|| store.list(None).unwrap_or_default());
+        let target = crate::mcp::tools::core::task::repo_context::effective_epic_ref(cas_dir, target);
+        let Some((train, freeze)) = release_freeze::frozen_target(cas_dir, trains, &target) else { return true };
+        freeze_held.entry(train.id.clone())
+            .or_insert_with(|| (freeze.at.timestamp(), release_freeze::frozen_since(&train, &freeze), Vec::new()))
+            .2.push(task.id.clone());
+        false
     });
     tasks.sort_by(|a, b| a.id.cmp(&b.id));
     let mut fingerprint: Vec<String> = tasks.iter()
@@ -103,7 +129,32 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor))
+    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held))
+}
+
+/// Tell the supervisor once per freeze which deliveries it holds and who
+/// lifts it, so a frozen train is never reported as a stall.
+fn report_freeze_held(cas_dir: &Path, held: FreezeHeld) {
+    let mut reported = HELD_REPORTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let reported = reported.get_or_insert_with(HashSet::new);
+    for (train, (at, since, mut ids)) in held {
+        let key = format!("train-freeze-held:{train}:{at}");
+        if reported.contains(&key) {
+            continue;
+        }
+        ids.sort();
+        let detail = format!(
+            "Parked for a frozen release train, so not a stall: {}. {since}. Only the operator can lift it, with Lift freeze on the {train} train card in Commander; publishing the release also ends it. The progress watchdog will not chase these deliveries or page the operator for them.",
+            ids.join(", ")
+        );
+        if matches!(
+            super::lifecycle::enqueue_worker_attention_relay_detail_with_key(cas_dir, "progress_operator_held", "supervisor",
+                None, None, |_| detail.clone(), &key, Some(&key)),
+            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
+        ) {
+            reported.insert(key);
+        }
+    }
 }
 
 /// Whether the newest decision in `notes` is a `DECISION HOLD`; any later
@@ -131,7 +182,8 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor)) = observe(cas_dir, session, now) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held)) = observe(cas_dir, session, now) else { return };
+    report_freeze_held(cas_dir, freeze_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let episodes = episodes.get_or_insert_with(HashMap::new);
     // A project hold is the operator's own stop, not a stall.

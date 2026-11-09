@@ -78,7 +78,7 @@
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/` - attach signal guards and fingerprinted socket cleanup.
 - `cas-cli/src/ui/factory/daemon/runtime/` - startup, lifecycle, events, probes, queued work and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/lifecycle.rs` - attention relays, merged-delivery approval recovery, merge-queue ejection return/page, verification expiry sweeps (with progress-based deadline extension up to an hour) and shutdown cleanup.
-- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - local no-progress watchdog: supervisor wake at 45 min, operator page at 90; excludes operator-owned blocked checks, contained parked deliveries and binding peer-owned work/target epics.
+- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs` - local no-progress watchdog: supervisor wake at 45 min, operator page at 90; excludes operator-owned blocked checks, contained parked deliveries, deliveries held by a frozen release train (reported once) and binding peer-owned work/target epics.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs` - transcript ownership, Claude/Codex/Grok answer and API-error mirrors, and bounded historical watches. Shared key-shape redaction lives in `cas-cli/src/hooks/handlers/handlers_events/message_display.rs`.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - prompt readiness, clock-stamped pointer wakes, attributed director queue envelopes with immutable delivery-tip context, queued input and recipient receipts.
 - `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop exit and input ownership.

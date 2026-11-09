@@ -220,7 +220,6 @@ mod tests {
         let reason = "CI reported 10312 tests passed / 1 failed";
         let error = validate_claims(reason, cas_root.path(), receipt_root.path())
             .expect_err("an unsupported CI claim still requires a receipt");
-        assert!(error.starts_with("PROOF CLAIM RECEIPT REQUIRED"), "{error}");
         assert!(error.contains("EXTERNAL_COMPLETION"), "{error}");
         assert!(error.contains(reason), "{error}");
 

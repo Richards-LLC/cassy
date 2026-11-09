@@ -669,9 +669,10 @@ fn validate_completion_artifact_path(
         .map_err(|error| reject(format!("could not load [factory] artifacts_root: {error}")))?;
     let configured_root =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let canonical_artifact = artifact_path.canonicalize().map_err(|_| reject(
-        "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<project-key>/<task-id>/.".to_string()
-    ))?;
+    let canonical_artifact = artifact_path.canonicalize().map_err(|error| reject(format!(
+        "completion artifact path gate: could not resolve {}: {error}. artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<project-key>/<task-id>/.",
+        artifact_path.display(),
+    )))?;
     let dirs = crate::config::factory_task_artifact_dirs(cas_root, &configured_root, task_id);
     let permitted = dirs
         .iter()
@@ -2160,11 +2161,11 @@ fn read_task_scoped_log(
         .map_err(|error| format!("scoped log path rejected: {error}"))?;
     let path = std::path::Path::new(path);
     let metadata =
-        std::fs::metadata(path).map_err(|error| format!("scoped log unreadable: {error}"))?;
+        std::fs::metadata(path).map_err(|error| format!("scoped log unreadable at {}: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
         return Err("scoped log must be a file no larger than 32 MiB".into());
     }
-    std::fs::read_to_string(path).map_err(|error| format!("scoped log unreadable: {error}"))
+    std::fs::read_to_string(path).map_err(|error| format!("scoped log unreadable at {}: {error}", path.display()))
 }
 
 fn validate_inherited_scoped_failures(
@@ -16297,13 +16298,16 @@ pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> 
 /// recorded parked branch, the assignee's per-task and own branches, then
 /// handoff branches and prior holders' branches.
 fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
-    let mut candidates: Vec<String> = task.deliverables.parked_branch.clone().into_iter().collect();
+    // A retired anchor leaves a historical branch, not the current delivery.
+    let mut candidates: Vec<String> = task.deliverables.parked_branch.clone()
+        .filter(|_| task.deliverables.factory_branch_anchor.is_some()).into_iter().collect();
     if let Some(assignee) = task.assignee.as_deref() {
         // cas-73b8: the per-task branch, when the worker used one, holds
         // exactly this task's commits.
         candidates.push(crate::factory_isolation::worker_task_branch(assignee, &task.id));
         candidates.push(format!("factory/{assignee}"));
     }
+    candidates.extend(task.deliverables.parked_branch.clone());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
     candidates.extend(
         handoff_prior_holders(&task.notes)
@@ -16413,6 +16417,16 @@ fn recorded_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Resul
     let identity = task_commit_identity(task, None);
     let holds_anchor = task.deliverables.factory_branch_anchor.as_deref()
         .is_some_and(|anchor| git_commit_is_ancestor(repo, anchor, &branch));
+    // cas-0876 preserved a completed (including squash-integrated) delivery.
+    // A historical ref that lacks the current anchor, or an unintegrated
+    // prior continuation, cannot override the active worker's receipt.
+    let integrated = task.deliverables.factory_branch_anchor.as_deref()
+        .zip(task.deliverables.work_target.as_ref())
+        .is_some_and(|(anchor, target)| {
+            commit_is_merged_into_parent(repo, anchor, &target.target_branch)
+                || find_squash_tree_match(repo, anchor, &target.target_branch).is_some()
+        });
+    if !holds_anchor || !integrated { return Ok(None); }
     if !holds_anchor && matches!(task_attribution::branch_task_claims(repo, &branch, &identity), Some((None, Some(_)))) {
         return Err(format!("DELIVERY BRANCH UNRESOLVED: recorded parked branch {branch} belongs to another task"));
     }
@@ -18654,6 +18668,11 @@ pub(crate) fn effective_close_work_target(
     // it against a later epic lane would measure a different delivery.
     if task.deliverables.parked_branch.is_some()
         && let Some(target) = task.deliverables.work_target.as_ref()
+        && !parent_epic.is_some_and(|epic| {
+            epic.branch.as_deref() == Some(target.target_branch.as_str())
+                && epic.deliverables.work_target.as_ref()
+                    .is_some_and(|current| current.target_branch != target.target_branch)
+        })
     {
         return Some(target.clone());
     }

@@ -1,0 +1,5 @@
+title: A blocked worker's unnamed WIP retains its recorded start boundary through the primary repository identity
+found: '2026-11-09'
+tasks: [cas-7ce5]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SPAWN]

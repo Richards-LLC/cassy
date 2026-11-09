@@ -532,7 +532,7 @@ fn lock_file(path: &Path) -> Result<File> {
 }
 
 fn waiting_for_admission(reason: &str) -> String {
-    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; the daemon can queue one supervisor notice per recorded wait after 20 minutes, subject to normal delivery readiness. Report an actual need for assistance immediately.")
+    format!("Waiting for build admission: {reason}.\nCapacity wait: keep the task in_progress and retain its lease. Do not set blocked or page the supervisor for a routine capacity retry.\nRetry the same capped Cargo command after 120 seconds; priority queues stay quiet, while disk waits share a supervisor notice after 20 minutes that updates only when waiting workers or reclaimable bytes change. Report an actual need for assistance immediately.")
 }
 
 #[derive(Debug)]
@@ -544,8 +544,8 @@ impl std::fmt::Display for CapacityRefusal {
 }
 impl std::error::Error for CapacityRefusal {}
 
-fn recorded_refusal(root: &Path, repo: &Path, cause: &str) -> anyhow::Error {
-    match crate::factory_capacity_wait::record_refusal(root, repo, cause, chrono::Utc::now()) {
+fn recorded_refusal(root: &Path, repo: &Path, cause: &str, kind: crate::factory_capacity_wait::CapacityKind) -> anyhow::Error {
+    match crate::factory_capacity_wait::record_refusal_with_kind(root, repo, cause, kind, chrono::Utc::now()) {
         Ok(Some(wait)) => {
             let mut message = waiting_for_admission(&wait.cause);
             message.push_str(&format!("\nCapacity wait recorded for {}; next retry: {}.", wait.task_id, wait.next_retry.to_rfc3339()));
@@ -1154,7 +1154,8 @@ fn receipt_range_changed_paths(
 /// repair (cas-2bdf) nor a sibling merge after dispatch (cas-a32c) is a change
 /// to reviewed code.
 pub(crate) fn append_only_or_generated(path: &str) -> bool {
-    path == "CHANGELOG.md" || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
+    matches!(path, "CHANGELOG.md" | ".claude/CODEMAP.md" | "cas-cli/src/builtins/reference-history.json")
+        || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
 }
 
 /// Commits on the target refs' own first-parent history.
@@ -2043,7 +2044,11 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
     let violations = snapshot.violations();
     if !violations.is_empty() {
-        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "));
+        let disk_wait = snapshot.disk.as_ref().and_then(|disk| disk.as_ref().ok()).is_some_and(|disk|
+            crate::factory_build_guard::disk_pressure(disk, snapshot.live_cargo_workers.saturating_add(snapshot.requested_builders)));
+        let kind = if disk_wait { crate::factory_capacity_wait::CapacityKind::Disk }
+            else { crate::factory_capacity_wait::CapacityKind::Other };
+        let refusal = recorded_refusal(&cas_root, &repo, &violations.join("; "), kind);
         drop(admission);
         return Err(refusal);
     }
@@ -2057,7 +2062,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         available_slots,
     ) {
         Ok(Some(cause)) => {
-            let refusal = recorded_refusal(&cas_root, &repo, &cause);
+            let refusal = recorded_refusal(&cas_root, &repo, &cause, crate::factory_capacity_wait::CapacityKind::PriorityQueue);
             drop(admission);
             return Err(refusal);
         }
@@ -2074,7 +2079,7 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Ok(slot) => slot,
         Err(error) => {
             if let Some(refusal) = error.downcast_ref::<CapacityRefusal>() {
-                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0);
+                let refusal = recorded_refusal(&cas_root, &repo, &refusal.0, crate::factory_capacity_wait::CapacityKind::Other);
                 drop(admission);
                 return Err(refusal);
             }

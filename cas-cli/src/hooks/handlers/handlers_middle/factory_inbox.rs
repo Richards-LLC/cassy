@@ -469,6 +469,10 @@ fn surface_factory_inbox_with_transport_delivery(
     }
     let session = factory_session();
     let queue = crate::store::open_prompt_queue_store(cas_root).ok()?;
+    if let Err(error) = crate::qa_post_release::refresh_batch_notices(cas_root, queue.as_ref(), &aliases[0], session.as_deref()) {
+        tracing::warn!(%error, "batch notice revalidation deferred before inbox surfacing");
+        return None;
+    }
     let task_store = crate::store::open_task_store_local(cas_root).ok();
 
     let turn_prompt = match &surfacing {

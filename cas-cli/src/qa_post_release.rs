@@ -1087,10 +1087,31 @@ pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::Promp
     if !current {
         // A transported row retains its transport history; skipping its body
         // must not manufacture acknowledgement or rewrite delivered evidence.
-        if row.processed_at.is_none() { queue.mark_superseded(row.id, "Batch notice superseded by current ownership or evidence")?; }
+        if queue.queued_prompt(row.id)?.is_some_and(|fresh| fresh.processed_at.is_none()) {
+            queue.mark_superseded(row.id, "Batch notice superseded by current ownership or evidence")?;
+        }
         notices.ack(id)?;
     }
     Ok(current)
+}
+
+/// Inbox drains stamp receipt/transport evidence before returning rows. Retire
+/// obsolete notices before that transaction, not only before rendering bodies.
+/// The supervisor outbox scopes this scan to this recipient's own notices.
+pub(crate) fn refresh_batch_notices(root: &Path, queue: &dyn cas_store::PromptQueueStore, recipient: &str, session: Option<&str>) -> Result<()> {
+    let agents = crate::store::open_agent_store(root)?.list(None)?;
+    let notices = crate::store::open_supervisor_queue_store(root)?;
+    for agent in agents.iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor && (agent.name == recipient || agent.id == recipient)) {
+        for notice in notices.list_pending(&agent.id)? {
+            if notice.event_type != "supervisor_notice" { continue; }
+            let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+            if payload["kind"] != "qa_batch_overdue" && payload["kind"] != "batch_receipt_offer" { continue; }
+            if let Some(row) = queue.latest_from_source_to_targets(&format!("supervisor-notice:{}", notice.id), &[&agent.name], session)? {
+                batch_notice_deliverable(root, queue, &row)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// cas-4b22: offer, never record, the batch QA receipt for parked deliveries

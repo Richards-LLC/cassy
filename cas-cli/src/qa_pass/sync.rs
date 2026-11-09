@@ -15,7 +15,7 @@ const BATCH_MARKER: &str = "QA_BATCH_RECEIPT_PROOF: ";
 const RELEASE_MARKER: &str = "RELEASE_VERDICT_PROOF: ";
 
 fn receipt_marker(receipt: &QaBatchReceipt) -> &'static str {
-    if receipt.schema_version == cas_store::RELEASE_VERDICT_SCHEMA { RELEASE_MARKER } else { BATCH_MARKER }
+    if matches!(receipt.schema_version, cas_store::RELEASE_VERDICT_SCHEMA | cas_store::RELEASE_TAG_VERDICT_SCHEMA) { RELEASE_MARKER } else { BATCH_MARKER }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -61,7 +61,9 @@ pub(crate) fn record_batch(cas_root: &Path, receipt: &QaBatchReceipt) -> anyhow:
     let store = crate::store::open_task_store(cas_root)?;
     let line = format!("{}{}", receipt_marker(receipt), serde_json::to_string(receipt)?);
     for task_id in receipt.task_heads.keys() {
-        store.append_trusted_note(task_id, &line)?;
+        if !store.get(task_id)?.notes.lines().any(|existing| existing == line) {
+            store.append_trusted_note(task_id, &line)?;
+        }
     }
     Ok(())
 }

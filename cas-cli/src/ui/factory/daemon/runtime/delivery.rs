@@ -934,11 +934,13 @@ pub(super) fn commander_control_from_message(
     match message {
         ClientMessage::SupervisorCommand { client_ref, attribution, .. }
         | ClientMessage::SupervisorCommandStatus { client_ref, attribution }
+        | ClientMessage::SupervisorCommandCancel { client_ref, attribution }
         | ClientMessage::SupervisorCommandStep { client_ref, attribution, .. } => {
             use crate::ui::factory::supervisor_commands::SupervisorCommandRequest as Request;
             let request = match message {
                 ClientMessage::SupervisorCommand { command, confirmed, .. } => Request::Run { command: *command, confirmed: *confirmed },
                 ClientMessage::SupervisorCommandStep { key, .. } => Request::Step { key: *key },
+                ClientMessage::SupervisorCommandCancel { .. } => Request::Cancel,
                 _ => Request::Status,
             };
             let mut attribution = attribution.clone();

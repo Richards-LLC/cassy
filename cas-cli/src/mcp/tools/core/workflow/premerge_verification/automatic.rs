@@ -18,19 +18,24 @@ fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Resul
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
     Ok(format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This transport replaces only the MCP recording step above. Missing evidence requires supervisor_call.\nTask: {}\nParent: {}\nDispatch: {}\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This transport replaces only the MCP recording step above. Missing evidence requires supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
         ),
+        crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
+            &core.cas_root,
+            task,
+        )?
+        .display(),
         serde_json::to_string(task).map_err(|e| e.to_string())?,
         serde_json::to_string(&parent).map_err(|e| e.to_string())?,
         serde_json::to_string(dispatch).map_err(|e| e.to_string())?,
     ))
 }
 
-/// The account spawn_workers would launch (cas-c386). With no eligible Codex
-/// home, refuse with each home's state rather than blame the default home.
+/// The account spawn_workers would launch (cas-c386). With no eligible home,
+/// refuse with each home's state rather than blame the default home.
 fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<String>, String> {
     let provider = match cli {
         cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
@@ -48,9 +53,6 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
     if let Some(choice) = selection.recommended {
         return Ok(Some(choice.account.name.clone()));
     }
-    if provider != crate::accounts::Provider::Codex {
-        return Ok(None);
-    }
     let homes = selection
         .excluded
         .iter()
@@ -58,30 +60,66 @@ fn launch_account(cli: cas_mux::SupervisorCli, root: &Path) -> Result<Option<Str
         .collect::<Vec<_>>()
         .join("; ");
     Err(format!(
-        "no eligible Codex account ({}); launch the task-verifier yourself",
+        "no eligible {} account ({})",
+        provider.name(),
         if homes.is_empty() { "no accounts found" } else { &homes }
     ))
 }
 
-fn command(root: &Path, output: &Path) -> Result<Command, String> {
+/// The verifier command, plus a notice when it fell back to Claude.
+fn command(root: &Path, output: &Path) -> Result<(Command, Option<String>), String> {
     let route = cas_factory::resolve_lane("standard", &cas_factory::CapabilitySnapshot::default())
         .map_err(|e| e.to_string())?;
-    let model = route.spec.model.ok_or("verifier route has no model")?;
-    let effort = route.spec.effort.ok_or("verifier route has no effort")?;
+    let mut cli = route.spec.cli;
+    let mut model = route.spec.model.ok_or("verifier route has no model")?;
+    let mut effort = route.spec.effort.ok_or("verifier route has no effort")?;
     // A daemon may have no provider account selector, even when the host has
     // authenticated named accounts. Choose the account spawn_workers would
     // (cas-c386), then use the checked launch environment supervisors use,
-    // rather than inheriting the daemon's default home.
-    let account = launch_account(route.spec.cli, root)?;
+    // rather than inheriting the daemon's default home. With no eligible
+    // Codex home, the same verifier runs on an eligible Claude account
+    // (cas-bdde); only when neither has one is the supervisor asked.
+    let mut notice = None;
+    let account = match launch_account(cli, root) {
+        Ok(account) => account,
+        Err(codex) if cli == cas_mux::SupervisorCli::Codex => {
+            match launch_account(cas_mux::SupervisorCli::Claude, root) {
+                Ok(Some(account)) => {
+                    let recipe = cas_factory::routing::registry()
+                        .map_err(|e| e.to_string())?
+                        .recipes
+                        .get("claude_opus_5_5")
+                        .ok_or("verifier Claude recipe missing")?;
+                    cli = cas_mux::SupervisorCli::Claude;
+                    model = recipe.model.clone();
+                    effort = recipe.default_effort;
+                    notice = Some(format!(
+                        "Automatic verifier started on Claude account {account} ({model}, {}): {codex}.",
+                        effort.as_str()
+                    ));
+                    Some(account)
+                }
+                Ok(None) => {
+                    return Err(format!(
+                        "{codex}; Claude accounts could not be read; launch the task-verifier yourself"
+                    ));
+                }
+                Err(claude) => {
+                    return Err(format!("{codex}; {claude}; launch the task-verifier yourself"));
+                }
+            }
+        }
+        Err(_) => None,
+    };
     let environment =
-        crate::hub::launch_env::resolve_for_project(route.spec.cli, account.as_deref(), Some(root))
+        crate::hub::launch_env::resolve_for_project(cli, account.as_deref(), Some(root))
             .map_err(|e| e.to_string())?;
     let mut command = Command::new(environment.executable);
     for key in environment.remove {
         command.env_remove(key);
     }
     command.envs(environment.set);
-    match route.spec.cli {
+    match cli {
         cas_mux::SupervisorCli::Codex => {
             command
                 .args(["exec", "--sandbox", "read-only", "--skip-git-repo-check"])
@@ -110,7 +148,7 @@ fn command(root: &Path, output: &Path) -> Result<Command, String> {
     for key in ["CAS_AGENT_ID", "CLAUDECODE", "CODEX_THREAD_ID"] {
         command.env_remove(key);
     }
-    Ok(command)
+    Ok((command, notice))
 }
 
 /// Claim synchronously, then do provider work off the MCP/control loop. The
@@ -127,9 +165,9 @@ pub(super) fn launch(
     let directory = core.cas_root.join("verification-runs").join(&dispatch.id);
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
-    let mut command = command(&core.cas_root, &output)?;
+    let (mut command, notice) = command(&core.cas_root, &output)?;
     command.current_dir(&proof.worktree_root);
-    launch_command(core, task, dispatch, command, output)
+    launch_command(core, task, dispatch, command, output, notice)
 }
 
 fn launch_command(
@@ -138,6 +176,7 @@ fn launch_command(
     dispatch: &VerificationDispatch,
     mut command: Command,
     output: PathBuf,
+    notice: Option<String>,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| e.to_string())?;
@@ -177,18 +216,23 @@ fn launch_command(
         &child,
     )
     .map_err(|e| e.to_string())?;
-    let core = core.clone();
+    let worker = core.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
-        let result = review(&core, &live, &child.id, &mut command, &input, &output);
+        let result = review(&worker, &live, &child.id, &mut command, &input, &output);
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
-        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&core, &live) {
-            let _ = attention(&core, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
+        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
+            let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
         }
-        if let Ok(agents) = core.open_agent_store() {
+        if let Ok(agents) = worker.open_agent_store() {
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
+    if let Some(notice) = notice
+        && let Err(error) = attention(core, dispatch, &notice)
+    {
+        tracing::warn!(dispatch_id = %dispatch.id, %error, "Verifier launched; follow-up notice failed");
+    }
     Ok(Some(handle))
 }
 
@@ -369,6 +413,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cas_ce3e_launched_verifier_survives_attention_failure() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-ce3e-launch".into(), "Launch notification failure".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        crate::store::open_supervisor_queue_store(&root).unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "CREATE TRIGGER fail_notice BEFORE INSERT ON supervisor_queue
+             BEGIN SELECT RAISE(FAIL, 'injected notification failure'); END;",
+        ).unwrap();
+        assert!(attention(&core, &dispatch, "fallback").is_err());
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        // The provider boundary exits immediately; the real launch, dispatch
+        // claim, notice and child cleanup still run against the actual store.
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        let result = launch_command(
+            &core, &task, &dispatch, command, directory.join("verdict.json"),
+            Some("fallback".into()),
+        );
+        let handle = result.expect("a notice failure must not report a failed launch")
+            .expect("the verifier was launched");
+        handle.join().unwrap();
+        let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert!(owns(&root, &claimed));
+        assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+    }
+
+    #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -410,6 +496,14 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // cas-bdde: a logged-in Claude CLI, written before any child runs.
+        let claude = bin.join("claude");
+        std::fs::write(
+            &claude,
+            "#!/bin/sh\n[ \"$1\" = --version ] && { echo '9.9.9 (Claude Code)'; exit 0; }\necho '{\"loggedIn\":true}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         // Registry login probes use the CLI on PATH. Isolate that PATH in a
         // child test process, never mutate the library test process's PATH.
@@ -617,6 +711,10 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert!(body.contains(&candidate.proof.worktree_root));
             assert!(body.contains("preserve drafts"));
             assert!(body.contains("scoped worker proof"));
+            // cas-e17a: the verifier reads the evidence where park wrote it.
+            let base = crate::config::resolved_factory_artifacts_root(None);
+            let [evidence, _] = crate::config::factory_task_artifact_dirs(&root, &base, &task.id);
+            assert!(body.contains(&evidence.display().to_string()), "{status}: {}", evidence.display());
             let prompts = crate::store::open_prompt_queue_store(&root)
                 .unwrap()
                 .peek_all(20)
@@ -684,5 +782,28 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
         for needle in [".codex-review", "100%", " ET", "not logged in", "launch the task-verifier yourself"] {
             assert!(refused.contains(needle), "{needle}: {refused}");
         }
+        // cas-bdde: with every Codex home ineligible, an eligible Claude home
+        // runs the same verifier, and the notice names harness and account.
+        let claude_home = env.home().join(".claude-review");
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let reset = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        std::fs::write(
+            claude_home.join(".cas-claude-usage.json"),
+            serde_json::json!({"identity": null, "observed_at": chrono::Utc::now(), "windows": [
+                {"name": "5h", "used_percent": 10.0, "reset_at": reset, "spend_dollars": null},
+                {"name": "weekly", "used_percent": 20.0, "reset_at": reset, "spend_dollars": null},
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let (fallback, notice) = command(env.home(), &env.home().join("verdict.json")).unwrap();
+        assert!(fallback.get_args().any(|arg| arg == "-p"), "{fallback:?}");
+        assert!(
+            fallback.get_envs().any(|(key, value)| key == "CLAUDE_CONFIG_DIR"
+                && value.is_some_and(|dir| std::path::Path::new(dir) == claude_home)),
+            "{fallback:?}"
+        );
+        let notice = notice.expect("fallback notice");
+        assert!(notice.contains("Claude") && notice.contains("review"), "{notice}");
     }
 }

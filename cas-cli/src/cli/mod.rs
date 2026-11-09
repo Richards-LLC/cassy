@@ -475,6 +475,8 @@ pub enum ReleaseCommands {
     Track(release_automation::TrackArgs),
     /// Notify the owning supervisor after a published release is installed
     Installed(release_automation::InstalledArgs),
+    /// Backfill shipped release trains from their published tags
+    Backfill(release_automation::BackfillArgs),
     /// Validate any commit with the merge queue job set on hosted CI
     Precheck(release_precheck::ReleasePrecheckArgs),
     /// Assemble a Markdown, standalone HTML, and optional PDF release report
@@ -1033,6 +1035,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
+        Commands::Release(ReleaseCommands::Backfill(args)) => release_automation::backfill(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
@@ -1077,6 +1080,9 @@ pub struct ServeArgs {
     control_fd: Option<i32>,
     #[arg(long, hide = true, requires = "backend")]
     standby: bool,
+    /// QA sandbox: serve only a store under this scratch directory, with cloud sync off
+    #[arg(long, value_name = "DIR", conflicts_with = "backend")]
+    sandbox: Option<std::path::PathBuf>,
 }
 
 fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
@@ -1086,6 +1092,11 @@ fn serve_execute(args: &ServeArgs) -> anyhow::Result<()> {
     // Without the harness, stdout writes now fail with EPIPE and the service
     // ends through its normal shutdown path.
     crate::server_signals::ignore_sigpipe_for_server();
+    if let Some(dir) = &args.sandbox {
+        let dir = dir.canonicalize().with_context(|| format!("sandbox directory {} must exist", dir.display()))?;
+        // Single-threaded here: before the runtime starts. The backends inherit it.
+        unsafe { std::env::set_var(crate::mcp::QA_SANDBOX_ENV, dir) };
+    }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     crate::mcp::configure_serve_allocator();
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -1,0 +1,4 @@
+title: Shipped deliveries with lost anchors or implementers can record independent batch evidence before ordinary close
+tasks: [cas-d853]
+invariants: [FACTORY-RECOVER-SHIPPED-IDENTITY]
+journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]

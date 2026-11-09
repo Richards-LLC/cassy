@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-10-26'
+updated: '2026-11-08'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -12,6 +12,21 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  booting-worker-task-admission:
+    title: Tasks assigned during worker startup enter the ordered backlog once and continue after delivery
+    tasks: [cas-d033]
+    invariants: [FACTORY-BOOT-ASSIGNMENT]
+    journeys: [FACTORY-SPAWN]
+  tool-edit-offline-result-binding:
+    title: Offline source edit detail names its own retrieval result while cached sibling evidence remains available
+    tasks: [cas-103c]
+    invariants: [HUB-J25-SOURCE-RETRIEVAL]
+    journeys: [HUB-J25]
+  lazy-media-reader-destination:
+    title: A reader claims the media attachment before lazy preview readiness and expired video resumes playback
+    tasks: [cas-20ab]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]
@@ -274,6 +289,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-RECOVER-SHIPPED-IDENTITY:
+    statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
+    check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
+    bug: {task: cas-d853}
   FACTORY-QA-NOTICE-OWNER:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
@@ -337,9 +356,13 @@ invariants:
     check: Run project-navigation.test.ts focus retention through an unchanged catalog tick, then the long-machine-name keyboard stage in find-conversation.journey.ts with ten repeats and four workers.
     bug: {task: cas-2e1c}
   HUB-J27-CARD-RELOAD:
-    statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, pending dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
+    statement: Older Claude MCP cards expose Reload Cassy directly and the existing conversation-header menu always retains it; ordinary cards add no action line or extra Tab stop; card and typed mcp share the existing command and truthful receipt. Header commands open beside their button. Refused/completed status is dismissable, submitted dismissal does not cancel or duplicate a mutation, and accepted retries clear earlier busy refusals.
     check: Run the reload and dismiss-reload cases in supervisor-commands.journey.ts at desktop and phone, assert card version stays old while queued and changes only with observed receipt/catalog evidence, no chat sends, anchored dropdown bounds, refusal dismissal and post-turn completion. Run ProjectNavigation and SupervisorCommandSession Vitest guards for unsupported harnesses and concurrent commands.
     bug: {task: cas-fd9ff}
+  HUB-J27-DISMISS-CANCEL:
+    statement: Dismiss cancels the caller's queued Finish or interactive receipt daemon-side without PTY input. A closed native chooser releases its stale flag before a later command, while genuinely submitted commands and native modals still prevent unsafe input. Refusals identify the blocking command and its recovery.
+    check: Run queued_finish_can_be_cancelled_without_typing_then_exit_is_accepted_cas_f1a2 and native_dispatch_refuses_busy_and_foreign_callers_and_recovers_a_closed_chooser; run the HUB-J27 queued Finish dismissal before Exit at desktop and 390 px, assert one caller-owned cancel frame, no chat sends, and no dismissal before the daemon receipt.
+    bug: {task: cas-f1a2}
   HUB-J27-GOAL:
     statement: The operator chooses curated supervisor controls from slash input or the header on desktop and phone, confirms destructive commands, and reads a truthful outcome.
     check: Run HUB-J27 in supervisor-commands.journey.ts at desktop and 390 px; read exact semantic command frames, confirmation flags and mutation counts from the double, and retain real native acceptance evidence separately.
@@ -479,6 +502,10 @@ invariants:
     statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
+  FACTORY-BOOT-ASSIGNMENT:
+    statement: Tasks assigned before worker registration remain ordered and dispatch once after the first delivery; canceled or reassigned work is skipped without a manual relay.
+    check: Run booting_worker_assignments_reach_ordered_queue_gh1620 through real spawn receipts, task update, registration, start, park and daemon repair; run worker_task_queue_store::tests::queue_survives_reopen_and_rejects_stale_replacement for idempotent admission and concurrent cursor fencing. On the release candidate, spawn a lane, assign its tail before registration and observe the successor turn after delivery.
+    bug: {task: cas-d033}
   FACTORY-RECORDED-BLOCKER-WAIT:
     statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
     check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'
@@ -639,6 +666,10 @@ invariants:
     statement: A project card reads the project's display name, else its folder name, and never its canonical id; the canonical id still groups the project's sessions across machines and remains available as the name's title.
     check: Run the cross-machine project fixture in HUB-J14 with a canonical id and a display name; verify the card name shows the display name, its title is the canonical id, and both machines' sessions share the card.
     bug: {task: cas-6f79}
+  HUB-J14-PROJECT-SUPERVISOR-NAME:
+    statement: A project card's supervisor row names the supervisor before the machine name, falls back to the role only when no name exists, and fits without clipping at desktop and phone widths.
+    check: Run the name and role-fallback renderer test and the HUB-J14 project-navigation stage; verify the supervisor name, machine name, and fully fitting row at 1280px and 390px.
+    bug: {task: cas-219c}
   HUB-J14-IDLE-OFFLINE-DOT:
     statement: A connected idle supervisor has a solid muted green dot; working is solid green and a machine outage is solid gray. State dots have accessible state names and remain distinguishable in light, dark and forced colors. Stopped sessions are absent from navigation.
     check: Run the project-navigation rendering test and the light, dark and forced-colors stages in HUB-J14; compare computed idle and offline dot treatments, verify idle uses muted green and verify accessible state names. Stopped sessions are absent; compare offline treatment using a running session during a machine outage. HUB-J26 exercises Working beside Idle and Offline through the shared avatar renderer.
@@ -786,6 +817,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the work-event stream is
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
+  HUB-J25-SOURCE-RETRIEVAL:
+    statement: Each expanded changed file exposes the source event and current retrieval state; offline recovery cannot pass by observing a cached sibling diff.
+    check: Run the source-edit controller regression in work-picture.test.ts and the named tool-reported-edits part of HUB-J25; verify offline and recovered states on the selected file, cached sibling availability and no offline request loop.
   HUB-J25-TYPED-TOOL-EVIDENCE:
     statement: A work row names its read, search, command or edit scope, makes failures explicit, and opens operation-specific metadata with exact readable raw evidence; unknown tools remain raw and live updates preserve focus and expansion.
     check: Run the typed work renderer case in work-picture.test.ts and the Read typed work scope stage of HUB-J25 against the production bundle; open each operation and an unknown tool by keyboard and verify metadata, exact output, named failure and stable focus through a same-ID update.
@@ -850,8 +884,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  owners: [cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE
@@ -870,7 +904,7 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs]
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
@@ -880,9 +914,10 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
   invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
+  check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: HUB-J1
   name: First open and pair a machine with a code
@@ -928,6 +963,7 @@ journeys:
   - hub-web/src/connection-state.ts
   - hub-web/src/conversation-history.ts
   - hub-web/src/conversation-list.ts
+  - hub-web/src/project-navigation.ts
   - hub-web/src/conversation-store.ts
   - hub-web/src/conversation-view.ts
   - hub-web/src/dormant-visibility.ts
@@ -2074,6 +2110,7 @@ journeys:
   - HUB-J14-RUNNING-ONLY
   - HUB-J14-STOPPED-DRAFT-REACHABLE
   - HUB-J14-PROJECT-DISPLAY-NAME
+  - HUB-J14-PROJECT-SUPERVISOR-NAME
   - HUB-J14-IDLE-OFFLINE-DOT
   - HUB-J14-MINUTE-RECENCY
   traffic:
@@ -2716,6 +2753,7 @@ journeys:
   - HUB-J25-GOAL
   - HUB-J25-PHONE-TIMELINE-TEXT
   - HUB-J25-TYPED-TOOL-EVIDENCE
+  - HUB-J25-SOURCE-RETRIEVAL
   - HUB-J25-LIVE-PHASE
   traffic:
     share_pct: null
@@ -2805,7 +2843,7 @@ journeys:
   - In Claude, reload from a skewed supervisor card or type /mcp; read the replacement server PID and version. Session actions retains reload; other harnesses name Claude Code.
   - Open the header command dropdown beside its button; dismiss terminal receipts without replaying commands.
   - Read submission separately from an observed native outcome without repeating a mutation.
-  - Finish waits for the active turn, then its reply reaches the conversation
+  - Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)
   - Open quick controls, cancel Clear, and explicitly confirm Exit for the named supervisor.
   - Without pane input, read the permission reason; adjacent Raw output stays usable.
   goal: The operator runs only supported supervisor controls and sees truthful harness outcomes.
@@ -2821,7 +2859,7 @@ journeys:
   - Finish remains queued during a native turn; background footer repaint does not delay it after the turn ends.
   - Clear, Exit and Finish require confirmation; unsupported harnesses offer no commands.
   - A lost outcome stays unconfirmed and never automatically repeats a mutation.
-  invariants: [HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
+  invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-CARD-RELOAD, HUB-J27-GOAL, HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME, HUB-J27-EXIT-END-CONSISTENCY, HUB-J27-EXIT-WORKER-RECOVERY, HUB-J27-REFUSAL-ROW, HUB-J27-CONFIRM-SHEET, HUB-J27-FINISH-NATIVE-TURN, HUB-J27-NATIVE-IDLE-COMMANDS]
   traffic:
     share_pct: null
     basis: New controls; no production traffic attribution yet.

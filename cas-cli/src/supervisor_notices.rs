@@ -299,7 +299,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["premerge_verification", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red"]
+    let valid_kind = ["premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

@@ -144,7 +144,16 @@ impl AssignmentRequest {
             })
             .cloned()
             .collect();
+        // A failed first turn can leave a live registration heartbeating.
+        // Releasing its task does not make that harness usable staffing.
         let mut blocked_workers = HashSet::new();
+        for agent in local.iter().filter(|agent| agent.role == cas_types::AgentRole::Worker
+            && agent.factory_session.as_deref() == Some(self.session.as_str())) {
+            if crate::mcp::tools::service::factory_ops::worker_auth_failure_evidence(&self.cas_dir, agent).failed() {
+                blocked_workers.insert(agent.name.clone());
+                blocked_workers.insert(agent.id.clone());
+            }
+        }
         for (task_id, assignee) in &self.blocked_tasks {
             let Ok(task) = tasks.get(task_id) else { continue };
             if task.status != cas_types::TaskStatus::Blocked {

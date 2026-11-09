@@ -131,21 +131,69 @@ describe("supervisor slash commands", () => {
 });
 
 describe("supervisor command receipts", () => {
-  it("dismisses status without cancelling queued reloads or admitting a second command", async () => {
+  it("cancels queued or interactive receipts on Dismiss and waits for the daemon before allowing Exit (cas-f1a2)", async () => {
     vi.useFakeTimers();
     try {
-      const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send: () => true, changed: () => {} });
-      await commands.run("mcp", false);
-      const ref = [...commands.receipts.keys()][0]!;
-      commands.receive({ client_ref: ref, command: "mcp", phase: "queued", detail: "Wait for the current turn", output: "", interactive: false });
-      commands.dismiss(ref);
-      expect(commands.visibleReceipts).toEqual([]);
-      await expect(commands.run("mcp", false)).rejects.toThrow(Error);
-      commands.receive({ client_ref: ref, command: "mcp", phase: "observed", detail: "Replacement process observed", output: "", interactive: false });
-      expect(commands.receipts.get(ref)?.phase).toBe("observed");
-      expect(commands.visibleReceipts).toEqual([]);
-      await commands.run("mcp", false);
-      expect(commands.visibleReceipts).toHaveLength(1);
+      for (const interactive of [false, true]) {
+        const send = vi.fn().mockReturnValue(true);
+        const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+        await commands.run(interactive ? "model" : "finish", true);
+        const ref = [...commands.receipts.keys()][0]!;
+        const receipt: CommandReceipt = { client_ref: ref, command: interactive ? "model" : "finish", phase: interactive ? "observed" : "queued", detail: "Pending", output: "", interactive };
+        commands.receive(receipt);
+        const row = commandReceiptNode(receipt, () => {}, () => {});
+        expect(row.querySelectorAll("button")).toHaveLength(interactive ? 5 : 1);
+        send.mockReturnValueOnce(false);
+        await expect(Promise.resolve().then(() => commands.dismiss(ref))).rejects.toThrow(Error);
+        expect(commands.visibleReceipts).toHaveLength(1);
+        await commands.dismiss(ref);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommandCancel: { client_ref: ref } });
+        expect(commands.visibleReceipts).toHaveLength(1);
+        await expect(commands.run("exit", true)).rejects.toThrow(Error);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommandStatus: { client_ref: ref } });
+        commands.receive({ ...receipt, phase: "cancelled", interactive: false });
+        expect(commands.visibleReceipts).toEqual([]);
+        await commands.run("exit", true);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "exit", confirmed: true } });
+        const exit = [...commands.receipts.keys()].at(-1)!;
+        send.mockClear();
+        await commands.dismiss(exit);
+        expect(send).not.toHaveBeenCalled();
+        await expect(commands.run("finish", true)).rejects.toThrow(Error);
+      }
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+  it("resumes outcome polling after a refused or timed-out Cancel (cas-5b23)", async () => {
+    vi.useFakeTimers();
+    try {
+      for (const cancellation of ["refused", "timed-out"] as const) {
+        const send = vi.fn().mockReturnValue(true);
+        const commands = new SupervisorCommandSession({ unavailable: () => undefined, control: async () => {}, send, changed: () => {} });
+        await commands.run("finish", true);
+        const ref = [...commands.receipts.keys()][0]!;
+        const receipt: CommandReceipt = { client_ref: ref, command: "finish", phase: "queued", detail: "Pending", output: "", interactive: false };
+        commands.receive(receipt);
+        await commands.dismiss(ref);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommandCancel: { client_ref: ref } });
+        // The daemon advanced Finish before Cancel reached it, but its
+        // submitted receipt has not reached the client yet.
+        if (cancellation === "refused") commands.reject(ref, `${COMMAND_ERROR_PREFIX} already submitted`);
+        else await vi.advanceTimersByTimeAsync(96_000);
+        await expect(commands.run("exit", true)).rejects.toThrow(Error);
+        send.mockClear();
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledExactlyOnceWith({ SupervisorCommandStatus: { client_ref: ref } });
+        commands.receive({ ...receipt, phase: "submitted" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledTimes(2);
+        commands.receive({ ...receipt, phase: "observed" });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(send).toHaveBeenCalledTimes(2);
+        await commands.run("exit", true);
+        expect(send).toHaveBeenLastCalledWith({ SupervisorCommand: { client_ref: expect.any(String), command: "exit", confirmed: true } });
+        vi.clearAllTimers();
+      }
     } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
   it("keeps output open and keyboard focus through receipt updates", () => {

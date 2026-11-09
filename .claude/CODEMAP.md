@@ -85,7 +85,7 @@
 
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution and existing parked-anchor protections.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation for canonical and legacy CI.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - authenticated supervisor import grants and linked-checkout WIP identity; empty checkpoints require explicit task attribution.

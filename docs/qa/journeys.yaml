@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  epic-timeout-recovery:
+    title: Timeout recovery commands record an exact supervisor verdict of the correct type before ordinary close; stale verdicts and unshipped receipts do not authorize the current dispatch
+    tasks: [cas-bf13]
+    invariants: [FACTORY-EXACT-TIMEOUT-RECOVERY]
+    journeys: [FACTORY-CLOSE]
   historical-image-pair-schema:
     title: Close reads historical PNG-sealed pairs without recapture while new captures require both image digests
     tasks: [cas-f499]
@@ -348,6 +353,9 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-EXACT-TIMEOUT-RECOVERY:
+    statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
+    check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
   FACTORY-QA-EVIDENCE-IDENTITY:
     statement: Distinct independent QA heads and passes have separate stable evidence directories; prior bytes survive correction and verdict evidence cannot name another head or pass.
     check: Run independent_pass_paths_preserve_prior_evidence_cas_6813 and round_bundle_must_name_the_reviewed_tip_and_producer; verify generated web/API ledger paths, old capture bytes, explicit-path compatibility and wrong-head/pass refusals. Batch QA walks corrected-head dispatch and recording.
@@ -1018,7 +1026,7 @@ journeys:
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
   owners: [cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

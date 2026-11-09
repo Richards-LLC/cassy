@@ -615,6 +615,30 @@ fn strict_activation_refusal_is_named_and_unmanaged_keeps_legacy() {
     let mut reader = VioletReader::new("factory-session");
     assert_eq!(tick(&mut reader, &cloud), ClaimOutcome::Unmanaged);
     assert!(!reader.managed());
+
+    // A clone has no local binding history yet: only Cloud's explicit
+    // unmanaged answer may send the daemon down its project-wide v1 lane.
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+    queue.init().unwrap();
+    let reader = Mutex::new(VioletReader::new("non-owner-session"));
+    let body = CountingBody(AtomicUsize::new(0));
+    let quarantine = FileQuarantine(temp.path().join("violet/quarantine.jsonl"));
+    let io = ReaderIo { body: &body, typer: &PromptQueueTyper(&queue), quarantine: &quarantine };
+    for code in ["authority_unavailable", "unrecognized_refusal", "strict_activation_required"] {
+        let mut cloud = FixtureCloud::new("nothing pending");
+        cloud.claim = json!({"schema": CONTRACT_SCHEMA, "code": code});
+        let held = read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, Utc::now());
+        assert!(held.is_some_and(|report| report.wakes == 0 && report.errors.len() == 1), "{code}: uncertain routing must hold the legacy lane");
+        assert_eq!(body.0.load(Ordering::Relaxed), 0);
+        assert!(queue.peek_all(10).unwrap().is_empty());
+    }
+    // A positive managed observation stays fenced even if a later response
+    // says unmanaged. A fresh reader may use that explicit legacy answer.
+    let cloud = FixtureCloud::new("binding not activated for v2");
+    assert!(read_managed_on(&reader, &cloud, REGISTRATION, temp.path(), &io, Utc::now()).is_some());
+    let fresh = Mutex::new(VioletReader::new("legacy-session"));
+    assert!(read_managed_on(&fresh, &cloud, REGISTRATION, temp.path(), &io, Utc::now()).is_none());
 }
 
 /// cas-b94d: counts body fetches, so a withheld delivery provably has none.

@@ -379,6 +379,25 @@ mod tests {
         assert!(is_superseded(&entry));
     }
 
+    /// A local successor may have a new supervisor name and factory lifetime.
+    /// Only the machine boundary may prevent it from restoring this project's
+    /// supervisor handoff (GH #1661 review).
+    #[test]
+    fn renamed_supervisor_restores_predecessor_only_on_same_machine_cas_fb21() {
+        let mut predecessor = Agent::new_with_role("before-session".into(), "before-name".into(), AgentRole::Supervisor);
+        predecessor.machine_id = Some("machine-a".into());
+        let mut entry = handoff("predecessor", 1, &["handoff", "role:supervisor"], "approval receipt");
+        HandoffLineage::for_agent(&predecessor).stamp(&mut entry);
+        let entries = vec![entry];
+        for (machine, expected) in [("machine-a", Some("predecessor")), ("machine-b", None)] {
+            let mut successor = Agent::new_with_role("after-session".into(), "after-name".into(), AgentRole::Supervisor);
+            successor.machine_id = Some(machine.into());
+            successor.factory_session = Some("new-factory-lifetime".into());
+            assert_eq!(current_handoff(&entries, "supervisor", Some(&HandoffLineage::for_agent(&successor)))
+                .map(|entry| entry.id.as_str()), expected);
+        }
+    }
+
     #[test]
     fn tagging_a_new_handoff_adds_the_kind_and_the_session_role_once() {
         let mut tags = vec!["summary".to_string()];

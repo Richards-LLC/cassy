@@ -437,7 +437,7 @@ async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
 }
 
 /// GH #1661: replay two supervisors clearing on different machines, then an
-/// explicit same-name factory restart on A. Machine/session ownership must
+/// renamed factory successor on A. Machine/session ownership must
 /// survive both supersession and the real SessionStart context builder.
 #[tokio::test]
 async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
@@ -479,11 +479,9 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     peer_request.tags = Some("role:supervisor,handoff-machine:machine-a,handoff-owner:supervisor:supervisor-a".into());
     let b_id = id(b.cas_remember(Parameters(peer_request)).await.unwrap());
     assert!(!handoff::is_superseded(&memories.get(&a_new).unwrap()));
-    let other = register("a-other", "other-supervisor", "machine-a", "factory-other");
-    let other_id = id(other.cas_remember(Parameters(save("Other local session approval"))).await.unwrap());
-    // Reusing the logical supervisor name is the registry's explicit restart
-    // contract; both the native session and factory process lifetime change.
-    let restarted = register("a-restart", "supervisor-a", "machine-a", "factory-a-restart");
+    let _other = register("a-other", "other-supervisor", "machine-a", "factory-other");
+    // A successor can have both a new name and a new factory process lifetime.
+    let restarted = register("a-restart", "replacement-supervisor", "machine-a", "factory-a-restart");
     assert!(agents.get("b").unwrap().is_alive());
     // Role-only legacy memories have unknown ownership and cannot carry local
     // approvals, even when newer than every scoped handoff.
@@ -504,6 +502,7 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
         };
         let input = HookInput {
             session_id: session_id.into(),
+            hook_event_name: "SessionStart".into(),
             agent_role: Some("supervisor".into()),
             ..Default::default()
         };
@@ -514,7 +513,7 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     for (agent, native_session, expected) in [
         (Some("a-old"), "a-after-clear", Some(a_new.as_str())),
         (Some("b"), "b-after-clear", Some(b_id.as_str())),
-        (Some("a-other"), "a-other", Some(other_id.as_str())),
+        (Some("a-other"), "a-other", Some(a_new.as_str())),
         (Some("a-restart"), "a-restart", Some(a_new.as_str())),
         (None, "unknown-session", None),
     ] {
@@ -523,6 +522,6 @@ async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
     let restart_id = id(restarted.cas_remember(Parameters(save("A restarted approval"))).await.unwrap());
     assert!(handoff::is_superseded(&memories.get(&a_new).unwrap()));
     assert!(!handoff::is_superseded(&memories.get(&b_id).unwrap()));
-    assert!(!handoff::is_superseded(&memories.get(&other_id).unwrap()));
-    assert_eq!(surfaced(Some("a-restart"), "a-restart"), [restart_id]);
+    assert_eq!(surfaced(Some("a-restart"), "a-restart"), [restart_id.clone()]);
+    assert_eq!(surfaced(Some("a-other"), "a-other"), [restart_id]);
 }

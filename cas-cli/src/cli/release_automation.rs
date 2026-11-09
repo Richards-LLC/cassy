@@ -1044,7 +1044,7 @@ mod tests {
                 && receipt.release_tag.as_deref() == Some("v4.3.0")
                 && receipt.ledger_author_id.is_none()
         }));
-        assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no changes"));
+        assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no close changes"));
     }
 
     #[test]

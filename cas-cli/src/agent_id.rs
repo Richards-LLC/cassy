@@ -249,6 +249,31 @@ pub fn get_cc_pid_for_mcp() -> u32 {
     std::process::id()
 }
 
+/// A CLI may be behind shell and timeout wrappers. Stop at the nearest
+/// harness so a nested harness cannot borrow an outer supervisor's identity.
+/// This is only a process hint: the caller still verifies the registry's
+/// live PID/parent fingerprint and role through the canonical owner gate.
+#[cfg(unix)]
+pub(crate) fn get_harness_pid_for_cli() -> u32 {
+    let parent = std::os::unix::process::parent_id();
+    let mut pid = parent;
+    for _ in 0..32 {
+        if is_harness_process(pid) {
+            return pid;
+        }
+        match get_parent_of_pid(pid) {
+            Some(next) if next > 1 && next != pid => pid = next,
+            _ => break,
+        }
+    }
+    parent
+}
+
+#[cfg(not(unix))]
+pub(crate) fn get_harness_pid_for_cli() -> u32 {
+    std::process::id()
+}
+
 /// Get the interactive harness PID from hook context (Claude / Codex / Grok).
 ///
 /// Hooks can run in two modes:

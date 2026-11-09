@@ -1,0 +1,3 @@
+title: Published artifact revocation retains an audit and blocks retrieval while Cloud deletion remains explicit
+tasks: [cas-6d35]
+journeys: [FACTORY-CLOSE, HUB-J26]

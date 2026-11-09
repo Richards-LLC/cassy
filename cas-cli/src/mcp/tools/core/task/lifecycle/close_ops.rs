@@ -29996,6 +29996,7 @@ mod merge_state_gate_tests {
             "head_repository": {"full_name": "acme/epic"},
         });
         match case {
+            "queue-wrapper" | "queue-wrapper-colon" => run["path"] = serde_json::json!(".github/workflows/full-validation.yml"),
             "failed" => run["conclusion"] = serde_json::json!("failure"),
             "pending" => run["status"] = serde_json::json!("in_progress"),
             "wrong-event" => run["event"] = serde_json::json!("pull_request"),
@@ -30060,7 +30061,9 @@ esac
             task.deliverables.green_merge_commit = Some(landed);
         }
         store.add(&task).unwrap();
-        let reason = if case == "no-citation" || automatic { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
+        let reason = if case == "no-citation" || automatic { "Reviewed delivery" }
+            else if case == "queue-wrapper-colon" { "Reviewed delivery; merge_group_run=4386:" }
+            else { "Reviewed delivery; merge_group_run=4386" };
         let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "commit_receipt": delivery,
             "supervisor_override": supervisor_override, "reason": reason,
@@ -30071,16 +30074,18 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn supervisor_close_reuses_landed_queue_proof_cas_4386() {
-        let (task, text) = queue_proof_close_cas_4386("green", true).await;
-        assert_eq!(task.status, TaskStatus::Closed, "{text}");
-        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
-        assert!(task.notes.contains("run=4386"), "{}", task.notes);
+        for case in ["green", "queue-wrapper", "queue-wrapper-colon"] {
+            let (task, text) = queue_proof_close_cas_4386(case, true).await;
+            assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
+            assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
+            assert!(task.notes.contains("run=4386"), "{}", task.notes);
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831() {
-        for case in ["green", "automatic-green"] {
+        for case in ["green", "automatic-green", "automatic-queue-wrapper"] {
             let (task, text) = queue_proof_close_cas_4386(case, false).await;
             assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
             assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);

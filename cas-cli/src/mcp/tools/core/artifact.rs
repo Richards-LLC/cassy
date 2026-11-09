@@ -23,6 +23,64 @@ use crate::artifacts::{
 use crate::cli::render_artifact_line;
 
 impl CasCore {
+    /// Shared CLI/MCP authority boundary. No role environment override is accepted.
+    pub(crate) fn revoke_artifact(&self, id: &str, reason: &str) -> Result<crate::artifacts::RevokeOutcome, McpError> {
+        let actor = self.resolve_live_supervisor_authority().map_err(|error| {
+            use super::task::lifecycle::close_ops::SupervisorAuthorityError;
+            let (stage, cause) = match error {
+                SupervisorAuthorityError::Identity(error) => ("identity", error),
+                SupervisorAuthorityError::Store(error) => ("store", error),
+                SupervisorAuthorityError::NotRegistered { caller_id, error } =>
+                    ("registration", format!("caller {caller_id} is not registered: {error}")),
+                SupervisorAuthorityError::NotLive(caller) =>
+                    ("liveness", format!("caller {} has role {} and status {}", caller.id, caller.role, caller.status)),
+            };
+            McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: format!("Artifact revocation requires a live registered supervisor ({stage}): {cause}").into(),
+                data: Some(serde_json::json!({
+                    "rule_id": "artifact_revoke_supervisor_only", "authority_stage": stage,
+                })),
+            }
+        })?;
+        let id = id.trim();
+        let reason = reason.trim();
+        if id.is_empty() || reason.is_empty() {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "artifact revoke requires id and a non-empty reason"));
+        }
+        let store = self.open_artifact_store()?;
+        if store.get(id).map_err(internal)?.is_none() {
+            // Import only portable metadata; revocation never opens the object's bytes.
+            let metadata = crate::artifacts::lookup_metadata(&self.cas_root, None, id).map_err(metadata_error)?;
+            crate::artifacts::proof::validate(&metadata, &metadata.task_id).map_err(metadata_error)?;
+            store.record_local(&cas_store::NewArtifact {
+                id: metadata.id.clone(), task_id: metadata.task_id, name: metadata.name,
+                mime: metadata.mime, size_bytes: metadata.size_bytes, sha256: metadata.sha256,
+            }).map_err(internal)?;
+            if let Some(cloud_id) = metadata.cloud_artifact_id {
+                store.mark_uploaded(id, &cloud_id).map_err(internal)?;
+                store.mark_committed(id, None).map_err(internal)?;
+            }
+        }
+        crate::artifacts::revoke(&store, upload_client(&self.cas_root).as_ref(), id, &actor.id, reason)
+            .map_err(metadata_error)
+    }
+
+    pub async fn artifact_revoke(&self, Parameters(req): Parameters<ArtifactRequest>) -> Result<CallToolResult, McpError> {
+        let id = req.id.unwrap_or_default();
+        let reason = req.reason.unwrap_or_default();
+        let core = self.clone();
+        let outcome = tokio::task::spawn_blocking(move || core.revoke_artifact(&id, &reason))
+            .await.map_err(internal)??;
+        let mut result = if outcome.cloud_state == "pending" {
+            Self::tool_error(outcome.summary())
+        } else {
+            Self::success(outcome.summary())
+        };
+        result.structured_content = Some(serde_json::to_value(&outcome).map_err(internal)?);
+        Ok(result)
+    }
+
     fn open_artifact_store(&self) -> Result<SqliteArtifactStore, McpError> {
         SqliteArtifactStore::open(&self.cas_root).map_err(|error| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -173,6 +231,13 @@ fn internal(error: impl std::fmt::Display) -> McpError {
 }
 
 fn metadata_error(error: anyhow::Error) -> McpError {
+    if let Some(revoked) = error.downcast_ref::<crate::artifacts::ArtifactRevoked>() {
+        return McpError {
+            code: ErrorCode::INVALID_REQUEST,
+            message: error.to_string().into(),
+            data: Some(serde_json::json!({"state": "artifact_revoked", "artifact_id": revoked.artifact_id})),
+        };
+    }
     if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
         return McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -205,7 +270,7 @@ fn render_publish(outcome: &PublishOutcome) -> String {
         artifact.mime,
         artifact.size_bytes,
         artifact.sha256,
-        artifact.status,
+        artifact.access_status(),
         outcome.disposition.summary(),
         outcome.disposition.metadata_state(),
     );
@@ -232,11 +297,18 @@ fn render_detail(artifact: &PublishedArtifact) -> String {
         artifact.mime,
         artifact.size_bytes,
         artifact.sha256,
-        artifact.status,
+        artifact.access_status(),
         artifact.created_at,
     );
     if let Some(cloud_id) = &artifact.cloud_artifact_id {
         out.push_str(&format!("cloud_artifact_id: {cloud_id}\n"));
+    }
+    if let Some(revocation) = &artifact.revocation {
+        out.push_str(&format!("revocation: {}\n", serde_json::to_string(revocation).unwrap_or_default()));
+        if artifact.cloud_artifact_id.is_some() && revocation.cloud_revoked_at.is_none() {
+            out.push_str("cloud revocation pending: bytes may still be retrievable\n");
+        }
+        return out;
     }
     if let Some(url) = &artifact.cloud_url {
         out.push_str(&format!("cloud_url: {url}\n"));
@@ -265,6 +337,96 @@ mod tests {
             cloud_url: None,
             slack_permalink: None,
             created_at: "2026-09-18T20:00:00Z".to_string(),
+            revocation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_revoke_supervisor_tombstone_cas_6d35() {
+        use crate::test_support::TestEnvGuard;
+        use crate::mcp::tools::service::CasService;
+        use cas_store::{AgentStore, NewArtifact};
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let file = temp.path().join("harmless.txt");
+        std::fs::write(&file, "disposable evidence only\n").unwrap();
+        let (sha256, size_bytes) = crate::artifacts::digest_file(&file).unwrap();
+        let store = SqliteArtifactStore::open(&root).unwrap();
+        for id in ["art-6d35", "art-6d36", "art-6d37", "art-6d38"] {
+            store.record_local(&NewArtifact {
+                id: id.into(), task_id: "cas-6d35".into(), name: "harmless.txt".into(),
+                mime: "text/plain".into(), size_bytes, sha256: sha256.clone(),
+            }).unwrap();
+        }
+        store.mark_uploaded("art-6d37", "cloud-uploaded").unwrap();
+        store.mark_uploaded("art-6d38", "cloud-committed").unwrap();
+        store.mark_committed("art-6d38", None).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&Agent::new_with_role(
+            "revoke-supervisor".into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("revoke-supervisor".into());
+        let service = CasService::new(core, None);
+        let reason = "Disposable fixture cleanup";
+        let request = serde_json::json!({"action":"revoke", "id":"art-6d35", "reason":reason});
+        let response = service.artifact(Parameters(serde_json::from_value(request).unwrap()))
+            .await.expect("registered supervisor can revoke a disposable artifact");
+        let data = response.structured_content.unwrap();
+        assert_eq!(data["local_state"], "revoked");
+        assert_eq!(data["cloud_state"], "not_applicable");
+        let first = serde_json::to_value(store.get("art-6d35").unwrap().unwrap()).unwrap();
+        assert_eq!(first["revocation"]["actor_id"], "revoke-supervisor");
+        assert_eq!(first["revocation"]["reason"], reason);
+        let retry = serde_json::json!({"action":"revoke", "id":"art-6d35", "reason":"Retry cleanup"});
+        service.artifact(Parameters(serde_json::from_value(retry).unwrap())).await.unwrap();
+        let repeated = serde_json::to_value(store.get("art-6d35").unwrap().unwrap()).unwrap();
+        assert_eq!(repeated["revocation"], first["revocation"]);
+        let fetch = serde_json::json!({"action":"fetch", "id":"art-6d35", "task_id":"cas-6d35"});
+        let error = service.artifact(Parameters(serde_json::from_value(fetch).unwrap())).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["state"], "artifact_revoked");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        for (id, role, status) in [
+            ("worker", AgentRole::Worker, AgentStatus::Active),
+            ("retired-supervisor", AgentRole::Supervisor, AgentStatus::Shutdown),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), id.into(), role);
+            agent.status = status;
+            agents.register(&agent).unwrap();
+            let caller = CasCore::with_daemon(root.clone(), None, None);
+            caller.set_agent_id_for_testing(id.into());
+            let unauthorized = CasService::new(caller, None);
+            for artifact_id in ["art-6d35", "art-6d36", "art-6d37", "art-6d38"] {
+                let before = store.get(artifact_id).unwrap().unwrap();
+                let request = serde_json::json!({"action":"revoke", "id":artifact_id, "reason":reason});
+                let error = unauthorized.artifact(Parameters(serde_json::from_value(request).unwrap()))
+                    .await.unwrap_err();
+                let data = error.data.unwrap();
+                assert_eq!(data["rule_id"], "artifact_revoke_supervisor_only");
+                assert_eq!(data["authority_stage"], "liveness");
+                assert_eq!(store.get(artifact_id).unwrap().unwrap(), before);
+            }
+        }
+        let anonymous = CasService::new(CasCore::with_daemon(root.clone(), None, None), None);
+        for artifact_id in ["art-6d35", "art-6d36", "art-6d37", "art-6d38"] {
+            let before = store.get(artifact_id).unwrap().unwrap();
+            let request = serde_json::json!({"action":"revoke", "id":artifact_id, "reason":reason});
+            let error = anonymous.artifact(Parameters(serde_json::from_value(request).unwrap())).await.unwrap_err();
+            let data = error.data.unwrap();
+            assert_eq!(data["rule_id"], "artifact_revoke_supervisor_only");
+            assert_eq!(data["authority_stage"], "identity");
+            assert_eq!(store.get(artifact_id).unwrap().unwrap(), before);
+        }
+        for artifact_id in ["art-6d36", "art-6d37", "art-6d38"] {
+            let request = serde_json::json!({"action":"revoke", "id":artifact_id, "reason":reason});
+            let response = service.artifact(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+            let expected = if artifact_id == "art-6d36" { "not_applicable" } else { "pending" };
+            assert_eq!(response.is_error, Some(expected == "pending"));
+            let data = response.structured_content.unwrap();
+            assert_eq!(data["local_state"], "revoked");
+            assert_eq!(data["cloud_state"], expected);
         }
     }
 

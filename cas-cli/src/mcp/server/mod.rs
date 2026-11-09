@@ -56,6 +56,9 @@ pub struct CasCore {
     pub(crate) agent_id: OnceLock<Option<String>>,
     /// Server-side provenance for `agent_id`; absent is always non-authoritative.
     pub(crate) agent_identity_source: OnceLock<AgentIdentitySource>,
+    /// OS-derived nearest harness for a CLI core; never request/env authority.
+    /// MCP cores retain their private front-harness binding instead.
+    pub(crate) cli_harness: Option<u32>,
     /// One immutable caller per core; clones share its activity rate limit.
     pub(crate) worker_mcp_activity: Arc<Mutex<WorkerMcpActivityState>>,
     /// Peer reference for sending MCP notifications (Claude Code 2.1.0+)
@@ -90,6 +93,12 @@ pub(crate) struct WorkerMcpActivityState {
 }
 
 impl CasCore {
+    pub(crate) fn for_cli(cas_root: PathBuf) -> Self {
+        let mut core = Self::with_daemon(cas_root, None, None);
+        core.cli_harness = Some(crate::agent_id::get_harness_pid_for_cli());
+        core
+    }
+
     pub(crate) fn bind_agent_identity(
         &self,
         agent_id: String,
@@ -564,6 +573,7 @@ impl CasCore {
     /// it. Security-sensitive proof submission uses this read-only variant so
     /// a dead or unknown caller can be rejected before any durable mutation.
     pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        let harness = self.cli_harness.unwrap_or_else(crate::agent_id::get_cc_pid_for_mcp);
         let candidate = self.agent_id.get().and_then(Clone::clone).or_else(|| {
             std::env::var("CAS_SESSION_ID").ok()
                 .map(|id| id.trim().to_string())
@@ -585,9 +595,8 @@ impl CasCore {
             })?;
             id
         } else {
-            let cc_pid = crate::agent_id::get_cc_pid_for_mcp();
             agent_store
-                .get_by_cc_pid(cc_pid)
+                .get_by_cc_pid(harness)
                 .map_err(|error| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -608,7 +617,7 @@ impl CasCore {
         // CAS_SESSION_ID. Validate before caching, without registering/reviving.
         crate::mcp::daemon::ensure_factory_process_owner(
             agent_store.as_ref(), &id, Some(std::process::id()),
-            Some(crate::agent_id::get_cc_pid_for_mcp()),
+            Some(harness),
         ).map_err(|error| McpError {
             code: ErrorCode::INVALID_REQUEST,
             message: Cow::from(error.to_string()),

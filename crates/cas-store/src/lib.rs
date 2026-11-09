@@ -128,7 +128,8 @@ pub use accepted_proposal_store::{
     record_accepted_proposal_target,
 };
 pub use artifact_store::{
-    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, ARTIFACT_REVOCATION_SCHEMA_STATEMENTS,
+    ArtifactRevocation, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,
 };
 pub use code_index_purge::{

@@ -389,6 +389,32 @@ mod tests {
         (temp, root)
     }
 
+    #[test]
+    fn mcp_release_freeze_requires_explicit_confirmation() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, root) = fixture();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let store = crate::store::open_task_store(&root).unwrap();
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+
+        for reason in [Some("Lane CI freeze until run 42582303864 finishes"), None, Some("release-freeze: ")] {
+            let error = core.train_freeze("cas-tr", reason).expect_err("unconfirmed release freeze");
+            eprintln!("{error}");
+            assert_eq!(error.to_string().split(':').next(), Some("TRAIN_FREEZE_CONFIRMATION_REQUIRED"));
+            assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        }
+
+        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release")).unwrap();
+        assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
+        lift(&root, "cas-tr", "operator").unwrap();
+        assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
+    }
+
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,
     /// a feature is refused and a repair is refused until the train is red,
     /// by receipt or by GitHub. A peer reads only the synced task row, and

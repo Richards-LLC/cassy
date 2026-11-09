@@ -137,6 +137,11 @@ pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState
     #[cfg(not(test))]
     let binary = "claude";
     let mut command = Command::new(binary);
+    // Discovery may inspect a supplied home (including disposable profiles).
+    // Default auth uses the legacy store, so its HOME must match that profile.
+    if let Some(home) = profile_dir.parent() {
+        command.env("HOME", home);
+    }
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["auth", "status", "--json"]);
     command.stdout(Stdio::piped());

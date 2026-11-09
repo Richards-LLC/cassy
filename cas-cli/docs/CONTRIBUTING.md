@@ -1427,6 +1427,19 @@ jobs under worker-memory admission, non-Violet Slack writes, publication and
 unfiltered browser runs. Codex workers are unaffected (their trust was
 already pre-seeded by `codex_trust.rs`).
 
+### macOS Claude account linking
+
+`cas accounts link` asks `claude auth status --json` about each macOS Claude
+profile. Both Claude directory selectors bind named profiles; the default
+profile keeps the legacy unscoped Keychain store with its own home. Active
+or unavailable authentication keeps the original directory in place, including
+when a credential file also exists. Only confirmed logged-out profiles follow
+the ordinary rename/retirement rules. Shared items can still link to the base;
+keeping an authenticated default at its original path is not itself drift.
+Link health and launch-time repair use the same preservation rule. No raw
+credential or Keychain secret is read. Account unit fixtures replace only the
+external status executable through `CAS_TEST_CLAUDE_BIN` in test builds.
+
 ### Factory worker account selection
 
 `factory action=spawn_workers` accepts an optional `config_dir` for all

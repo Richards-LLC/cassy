@@ -8,12 +8,11 @@ fn write(path: &Path, text: &str) {
 
 // Claude owns the auth-status protocol; fixtures never invoke an installed client.
 fn claude_status_fixture(body: &str) -> crate::test_support::TestEnvGuard {
-    use std::os::unix::fs::PermissionsExt;
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     let bin = env.home().join("bin");
     let client = bin.join("claude");
-    write(&client, &format!("#!/bin/sh\n{body}\n"));
-    std::fs::set_permissions(&client, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    crate::test_paths::warm_stub(&client, &format!("#!/bin/sh\n{body}\n"));
     env.set("CAS_TEST_CLAUDE_BIN", &client);
     env
 }
@@ -424,7 +423,8 @@ fn cas_e1f4_qa_f02_restore_is_byte_for_byte_on_every_path() {
 #[cfg(target_os = "macos")]
 #[test]
 fn keychain_profiles_keep_their_auth_scope_through_link_and_drift_cas_2fed() {
-    let env = claude_status_fixture(r#"
+    let mut env = claude_status_fixture(r#"
+printf '%s|%s|%s\n' "$HOME" "$CLAUDE_CONFIG_DIR" "$CLAUDE_SECURESTORAGE_CONFIG_DIR" >> "$AUTH_CALLS"
 [ "$*" = "auth status --json" ] || exit 3
 if [ -n "$CLAUDE_CONFIG_DIR" ]; then
     [ "$CLAUDE_CONFIG_DIR" = "$CLAUDE_SECURESTORAGE_CONFIG_DIR" ] || exit 4
@@ -439,19 +439,37 @@ case "$profile" in
     *) printf '%s' '{"loggedIn":true}' ;;
 esac
 "#);
-    let h = env.home();
-    let labels = [".claude", ".claude-alt", ".claude-keychain@x.com", ".claude-unknown@x.com"];
+    let calls = env.home().join("auth-calls");
+    env.set("AUTH_CALLS", &calls);
+    env.set("CLAUDE_CONFIG_DIR", "/foreign-profile");
+    env.set("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/foreign-store");
+    let h = env.home().join("profiles");
+    let h = h.as_path();
+    let labels = [
+        ".claude", ".claude-alt", ".claude-keychain@x.com",
+        ".claude-unknown@x.com", ".claude-file-backed@x.com",
+    ];
     for label in labels {
         write(&h.join(label).join("commands/keep.md"), "shared");
         // Even duplicate email metadata cannot justify moving a path-bound login.
         write(&h.join(label).join(".claude.json"),
               r#"{"oauthAccount":{"emailAddress":"keychain@x.com"}}"#);
     }
+    write(&h.join(".claude-file-backed@x.com/.credentials.json"), "fixture");
     write(&h.join(".claude-logged-out@x.com/commands/old.md"), "old");
     let before = snapshot(h);
     let planned = plan(Provider::Claude, h).unwrap();
     assert_eq!(snapshot(h), before, "dry run writes nothing");
+    let requests = std::fs::read_to_string(&calls).unwrap();
     for label in labels {
+        let folder = h.join(label);
+        let expected = if label == ".claude" {
+            format!("{}||", h.display())
+        } else {
+            format!("{}|{}|{}", h.display(), folder.display(), folder.display())
+        };
+        // Exact subprocess selectors are protocol data, not terminal wording.
+        assert!(requests.lines().any(|request| request == expected));
         assert!(planned.accounts.iter().any(|a| a.label == label && a.has_login));
         assert!(!planned.dir_changes.iter().any(|change| match change {
             DirChange::Retire { label: changed, .. } | DirChange::Rename { label: changed, .. } => changed == label,
@@ -463,7 +481,7 @@ esac
     for label in labels {
         let folder = h.join(label);
         assert!(folder.is_dir());
-        assert!(!folder.join(".credentials.json").exists());
+        assert_eq!(folder.join(".credentials.json").exists(), label == ".claude-file-backed@x.com");
         assert!(crate::account_links::inspect(Provider::Claude, h, &folder).retired.is_none());
     }
     assert!(drift(Provider::Claude, h).unwrap().is_empty());

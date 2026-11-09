@@ -1,0 +1,4 @@
+title: An MCP reconnect after a supervisor /clear keeps pane answers mirrored to Commander
+tasks: [cas-bfe3]
+invariants: [HUB-J5-RECONNECT-ANSWER]
+journeys: [HUB-J5]

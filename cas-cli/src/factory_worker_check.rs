@@ -4846,7 +4846,7 @@ PY"#);
         env.set("GIT_AUTHOR_NAME", "inherited author");
         env.set("GIT_AUTHOR_EMAIL", "author@example.invalid");
         let inherited_home = std::env::var_os("HOME");
-        let home = dir.path().join("isolated home");
+        let home = dir.path().join("isolated cargo home");
         std::fs::create_dir(&home).unwrap();
         let fake = dir.path().join("fake-cargo");
         fake_cargo(&fake, &format!(r#"set -e

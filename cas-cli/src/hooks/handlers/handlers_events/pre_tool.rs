@@ -1767,10 +1767,12 @@ fn worker_check_command(command: &str) -> Option<(Vec<String>, String, Option<st
     if let Some((args, suffix)) = literal_worker_check_command(command) {
         return Some((args, suffix, None, vec![]));
     }
-    let split = command.find(" cargo ")?;
+    let lexed = factory_shell_lex(command, true, 0);
+    let cargo = lexed.tokens.iter().position(|token| matches!(token, ShellToken::Word(word) if word == "cargo"))?;
+    let split = *lexed.ends.get(cargo.checked_sub(1)?)?;
     let prefix = &command[..split];
     if prefix.contains(['$', '`', ';', '|', '&', '>', '<', '(', ')', '\0']) { return None; }
-    let (args, suffix) = literal_worker_check_command(&command[split + 1..])?;
+    let (args, suffix) = literal_worker_check_command(command[split..].trim_start())?;
     if args.first().map(String::as_str) != Some("nextest") { return None; }
     // Preserve the existing complete provider-isolation profile.
     let isolated = (|| {

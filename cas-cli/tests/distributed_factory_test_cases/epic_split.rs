@@ -776,6 +776,18 @@ async fn standalone_source_work_split_keeps_reply_owner_cas_ad2c() {
     builder.factory(json!({"id": id, "decision": "accept"})).await.unwrap();
     assert_eq!(owner.tick().await.delivered, 1);
     builder.task(json!({"action": "update", "id": task_id, "assignee": "pr-w"})).await.unwrap();
+    assert!(builder.task(json!({"action": "update", "id": task_id,
+        "external_ref": "https://acme.slack.com/archives/C08COORD01/p1760616000123457"})).await.is_err());
+    // A third supervisor in the same database cannot consume B's share.
+    let mut stranger = Agent::new("other-supervisor".into(), "other-supervisor".into());
+    stranger.role = AgentRole::Supervisor;
+    open_agent_store(&builder.machine.cas_dir).unwrap().register(&stranger).unwrap();
+    let foreign_core = cas::mcp::CasCore::with_daemon(builder.machine.cas_dir.clone(), None, None);
+    foreign_core.set_agent_id_for_testing(stranger.id);
+    let foreign = cas::mcp::CasService::new(foreign_core, None);
+    assert!(foreign.task(Parameters(serde_json::from_value(json!({
+        "action": "update", "id": task_id, "external_ref": source,
+    })).unwrap())).await.is_err());
     let stored = open_task_store(&builder.machine.cas_dir).unwrap().get(task_id).unwrap();
     assert_eq!(stored.external_ref.as_deref(), Some(source));
     assert_eq!(stored.assignee.as_deref(), Some("pr-w"));

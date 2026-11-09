@@ -345,7 +345,9 @@ export class SupervisorCommandSession {
   reject(ref: string, detail: string): boolean {
     const receipt = this.receipts.get(ref); if (!receipt) return false;
     if (this.cancelling.delete(ref)) {
-      receipt.detail = detail; this.stopPoll(ref); this.options.changed(); return true;
+      // A failed Cancel does not settle the command. Keep reading its actual
+      // outcome, including when it advanced before the cancellation arrived.
+      receipt.detail = detail; this.poll(ref); this.options.changed(); return true;
     }
     if (receipt.phase === "observed" || receipt.phase === "refused" || receipt.phase === "cancelled") return true;
     if (!this.acknowledged.has(ref) && detail.startsWith(COMMAND_ERROR_PREFIX)) {

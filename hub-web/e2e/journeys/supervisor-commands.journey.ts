@@ -269,7 +269,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await input.fill("");
         expect(mutations()).toHaveLength(2);
       });
-      await journey.stage("Finish waits for the active turn, then its reply reaches the conversation", async () => {
+      await journey.stage("Finish keeps polling after a refused Cancel, then its reply reaches the conversation (cas-5b23)", async () => {
         await input.fill("/finish"); await input.press("Enter");
         await page.getByRole("alertdialog").getByRole("button", { name: "Finish", exact: true }).click();
         await expect.poll(() => mutations().length).toBe(3);
@@ -280,6 +280,15 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect(receipt).toHaveAttribute("data-phase", "queued");
         await expect(receipt).toContainText("Nothing has been typed yet");
         expect(mutations()).toHaveLength(3);
+        await receipt.getByRole("button", { name: "Dismiss command status" }).click();
+        await expect.poll(() => hub.frames.filter(frame => frame.kind === "SupervisorCommandCancel").length).toBe(1);
+        const cancelFailure = "supervisor command failed: already submitted";
+        hub.send(PELICAN, { Error: { client_ref: request.client_ref, message: cancelFailure } });
+        // The daemon's error payload must reach the row before counting polls.
+        await expect(receipt.locator("p")).toHaveText(cancelFailure);
+        const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
+        const before = statusReads();
+        await expect.poll(statusReads).toBeGreaterThan(before);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "submitted", detail: "Command submitted; harness execution is not confirmed yet.", output: "", interactive: false } } });
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         hub.send(PELICAN, { OperatorReply: { notification_id: 88001, reply_to: null, message: "Handoff saved and background monitor stopped.", summary: "Finish reply", device_id: "journey-device", kind: "answer", session: PELICAN } });

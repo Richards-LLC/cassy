@@ -51,13 +51,23 @@ defect. Never rerun QA or substitute the children's ledgers for the batch round.
 6. Only then read the close reason. A capture-downgraded row or a ledger `FAIL`
    is incomplete evidence whatever the close reason says.
 
-### NOT EXERCISED rows: the supervisor decides
+### NOT EXERCISED rows: apply the configured QA owner
 
-Neither approve nor reject a ledger because of its `NOT EXERCISED` rows. When
-the gate otherwise passes and at least one row is `NOT EXERCISED` (including
-rows you downgraded), record `status=supervisor_call` with a summary starting
+Read `qa.mode` from the supplied review context, or the project's configuration
+for a manual review. In `qa.mode=batch`, a journey row marked `NOT EXERCISED`
+solely because release batch QA owns its walk is already assigned by policy.
+Record each such row ID, cell and release batch QA owner as deferred in the
+verdict; do not request another supervisor decision for that ownership. If
+these are the only open rows, every other criterion is VERIFIED and no rejection
+condition applies, record `status=approved`. This task approval does not claim
+the journey passed or satisfy the release batch receipt.
+
+In `qa.mode=per_task`, or for any other `NOT EXERCISED` reason (including
+missing captures, unavailable environments, unclear ownership or rows you
+downgraded), the supervisor still decides. When the gate otherwise passes,
+record `status=supervisor_call` with a summary starting
 `SUPERVISOR CALL: <n> NOT EXERCISED row(s)` that lists each row ID, cell and
-reason. The supervisor decides whether they block and answers with
+reason requiring that decision. The supervisor decides whether they block and answers with
 `verification action=add` on the same `dispatch_id`; no re-dispatch is needed.
 
 ## Measurable claims: same-command baseline and treatment

@@ -396,10 +396,10 @@ pub fn build_context_with_stores(
     });
     let lineage = handoff_agent.as_ref()
         .map(handoff::HandoffLineage::for_agent)
-        .or_else(|| handoff::HandoffLineage::for_local_session(&session_role, &input.session_id));
+        .unwrap_or_else(handoff::HandoffLineage::for_local_machine);
     if let Some(store) = stores.primary_store()
         && let Ok(project_entries) = store.list()
-        && let Some(current) = handoff::current_handoff(&project_entries, &session_role, lineage.as_ref())
+        && let Some(current) = handoff::current_handoff(&project_entries, &session_role, Some(&lineage))
     {
         if !context_parts.is_empty() {
             context_parts.push(String::new());

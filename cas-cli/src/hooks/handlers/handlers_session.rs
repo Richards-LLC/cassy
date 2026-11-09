@@ -1397,8 +1397,7 @@ mod large_artifact_staging_tests {
             // an unowned role-wide memory from another session.
             let saved_role = role.unwrap_or("supervisor");
             let mut handoff = store.get(&format!("budget-handoff-{saved_role}")).unwrap();
-            cas_core::memory::handoff::HandoffLineage::for_local_session(saved_role, &input.session_id)
-                .unwrap().stamp(&mut handoff);
+            cas_core::memory::handoff::HandoffLineage::for_local_machine().stamp(&mut handoff);
             store.update(&handoff).unwrap();
             let context =
                 additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());

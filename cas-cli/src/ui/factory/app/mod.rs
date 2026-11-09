@@ -3315,11 +3315,6 @@ fn queue_supervisor_startup_prompt(
     factory_session: Option<&str>,
     preface: Option<&str>,
 ) {
-    // Queued startup context is built in the daemon, before the new harness
-    // necessarily registers. Bind it to the named local supervisor explicitly.
-    let context_env = std::sync::Arc::new(cas_core::env_overlay::HookEnvironment::new()
-        .with_var("CAS_AGENT_NAME", supervisor_name));
-    let _context_scope = context_env.scope();
     let worker_list = if worker_names.is_empty() {
         "(none)".to_string()
     } else {

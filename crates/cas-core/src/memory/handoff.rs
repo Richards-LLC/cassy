@@ -31,10 +31,10 @@ pub const ROLE_TAG_PREFIX: &str = "role:";
 /// existed was a supervisor's session handoff.
 pub const DEFAULT_HANDOFF_ROLE: &str = "supervisor";
 
-/// Ownership carried with a supervisor handoff through Cloud sync. Factory
-/// registration treats a same-name supervisor as an explicit restart; the host
-/// is part of that identity so a peer cannot inherit its approvals (GH #1661).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Project-store and role filtering provide the outer scope; the host is the
+/// remaining supervisor continuity boundary (GH #1661). Names and sessions
+/// change on takeover, so the owner is retained only as an audit stamp.
+#[derive(Debug, Clone)]
 pub struct HandoffLineage {
     machine: String,
     owner: String,
@@ -59,24 +59,12 @@ impl HandoffLineage {
         }
     }
 
-    /// Launch-time context can precede registration. Only this process's local
-    /// identity hints are used; an arbitrary role-matched peer is never a fallback.
-    pub fn for_local_session(role: &str, session_id: &str) -> Option<Self> {
-        let name = (role == DEFAULT_HANDOFF_ROLE)
-            .then(|| crate::env_overlay::var("CAS_AGENT_NAME").ok())
-            .flatten()
-            .filter(|name| !name.trim().is_empty());
-        let owner = if let Some(name) = name {
-            format!("supervisor:{name}")
-        } else if !session_id.is_empty() {
-            format!("session:{session_id}")
-        } else {
-            return None;
-        };
-        Some(Self {
+    /// A fresh local supervisor can restore its predecessor before registration.
+    pub fn for_local_machine() -> Self {
+        Self {
             machine: Agent::get_or_generate_machine_id(),
-            owner,
-        })
+            owner: String::new(),
+        }
     }
 
     pub fn from_entry(entry: &Entry) -> Option<Self> {
@@ -90,7 +78,7 @@ impl HandoffLineage {
         };
         Some(Self {
             machine: tag(MACHINE_PREFIX)?,
-            owner: tag(OWNER_PREFIX)?,
+            owner: tag(OWNER_PREFIX).unwrap_or_default(),
         })
     }
 
@@ -100,14 +88,17 @@ impl HandoffLineage {
             .tags
             .retain(|tag| !tag.starts_with(MACHINE_PREFIX) && !tag.starts_with(OWNER_PREFIX));
         entry.tags.push(format!("{MACHINE_PREFIX}{}", self.machine));
-        entry.tags.push(format!("{OWNER_PREFIX}{}", self.owner));
+        if !self.owner.is_empty() {
+            entry.tags.push(format!("{OWNER_PREFIX}{}", self.owner));
+        }
     }
 }
 
 fn belongs_to_lineage(entry: &Entry, role: &str, lineage: Option<&HandoffLineage>) -> bool {
     role != DEFAULT_HANDOFF_ROLE
-        || lineage
-            .is_some_and(|lineage| HandoffLineage::from_entry(entry).as_ref() == Some(lineage))
+        || lineage.is_some_and(|lineage| {
+            HandoffLineage::from_entry(entry).is_some_and(|saved| saved.machine == lineage.machine)
+        })
 }
 
 /// Whether `entry` is a handoff.
@@ -145,7 +136,7 @@ pub fn is_superseded(entry: &Entry) -> bool {
 
 /// The current handoff for `role` among `entries`: the newest handoff of that
 /// role that is not superseded. Supervisor handoffs require matching machine
-/// and logical owner; legacy unowned entries fail closed. Ties on `created`
+/// within the project store; memories without a machine stamp fail closed. Ties on `created`
 /// go to the larger id, so the
 /// choice is stable.
 pub fn current_handoff<'a>(
@@ -384,17 +375,37 @@ mod tests {
     /// supervisor handoff (GH #1661 review).
     #[test]
     fn renamed_supervisor_restores_predecessor_only_on_same_machine_cas_fb21() {
-        let mut predecessor = Agent::new_with_role("before-session".into(), "before-name".into(), AgentRole::Supervisor);
+        let mut predecessor = Agent::new_with_role(
+            "before-session".into(),
+            "before-name".into(),
+            AgentRole::Supervisor,
+        );
         predecessor.machine_id = Some("machine-a".into());
-        let mut entry = handoff("predecessor", 1, &["handoff", "role:supervisor"], "approval receipt");
+        let mut entry = handoff(
+            "predecessor",
+            1,
+            &["handoff", "role:supervisor"],
+            "approval receipt",
+        );
         HandoffLineage::for_agent(&predecessor).stamp(&mut entry);
         let entries = vec![entry];
         for (machine, expected) in [("machine-a", Some("predecessor")), ("machine-b", None)] {
-            let mut successor = Agent::new_with_role("after-session".into(), "after-name".into(), AgentRole::Supervisor);
+            let mut successor = Agent::new_with_role(
+                "after-session".into(),
+                "after-name".into(),
+                AgentRole::Supervisor,
+            );
             successor.machine_id = Some(machine.into());
             successor.factory_session = Some("new-factory-lifetime".into());
-            assert_eq!(current_handoff(&entries, "supervisor", Some(&HandoffLineage::for_agent(&successor)))
-                .map(|entry| entry.id.as_str()), expected);
+            assert_eq!(
+                current_handoff(
+                    &entries,
+                    "supervisor",
+                    Some(&HandoffLineage::for_agent(&successor))
+                )
+                .map(|entry| entry.id.as_str()),
+                expected
+            );
         }
     }
 

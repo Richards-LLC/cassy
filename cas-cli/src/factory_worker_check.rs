@@ -1154,7 +1154,8 @@ fn receipt_range_changed_paths(
 /// repair (cas-2bdf) nor a sibling merge after dispatch (cas-a32c) is a change
 /// to reviewed code.
 pub(crate) fn append_only_or_generated(path: &str) -> bool {
-    path == "CHANGELOG.md" || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
+    matches!(path, "CHANGELOG.md" | ".claude/CODEMAP.md" | "cas-cli/src/builtins/reference-history.json")
+        || path.starts_with("changelog.d/") || path.starts_with("hub-web/dist/")
 }
 
 /// Commits on the target refs' own first-parent history.

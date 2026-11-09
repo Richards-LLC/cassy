@@ -307,6 +307,10 @@ mod tests {
                 serde_json::from_str::<serde_json::Value>(&row.payload).unwrap()["kind"] == "batch_close_hold"
             }).collect::<Vec<_>>();
         assert_eq!(pending_holds().len(), 2, "{qa}");
+        let prompts = crate::store::open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap();
+        let holds: Vec<_> = prompts.iter().filter(|row| row.prompt.contains("kind=\"batch_close_hold\"")).collect();
+        assert_eq!(holds.len(), 2);
+        assert!(holds.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
         let receipt = cas_store::list_qa_batch_receipts(&cas, "batch-offer-fixture").unwrap().remove(0);
         for id in ["cas-live", "cas-retired"] {
             let task = tasks.get(id).unwrap();
@@ -320,6 +324,9 @@ mod tests {
         for id in ["cas-live", "cas-retired"] {
             assert_eq!(tasks.get(id).unwrap().notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
         }
+        // Re-recording the same QA payload creates audit evidence, not another action for the same gate.
+        service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap();
+        assert_eq!(pending_holds().len(), 2);
         fs::remove_dir_all(cas.join("post-release/batch-offers")).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();

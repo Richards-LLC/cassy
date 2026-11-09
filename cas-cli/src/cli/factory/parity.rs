@@ -501,7 +501,8 @@ mod tests {
                 use crate::store::detect::open_prompt_queue_store;
                 use crate::ui::factory::queue_supervisor_intro_prompt;
 
-                let target = format!("parity-supervisor-{}", harness.backend().name());
+                // Each harness is an alternative launch of the same logical supervisor.
+                let target = "parity-supervisor".to_string();
                 let session_id = format!("parity-session-{}", harness.backend().name());
                 let factory_session = format!("parity-factory-{}", harness.backend().name());
                 queue_supervisor_intro_prompt(

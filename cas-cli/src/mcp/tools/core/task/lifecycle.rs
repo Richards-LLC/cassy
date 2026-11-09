@@ -4251,6 +4251,15 @@ mod related_recall_response_tests {
         let semantic_results = text(semantic_results);
         assert!(semantic_results.contains(&peer_task.id), "{semantic_results}");
 
+        let mut changed_task = peer_task.clone();
+        changed_task.title.push_str(" updated");
+        store.update(&changed_task).expect("update one canonical task");
+        let search_index = core.open_search_index().expect("search index");
+        let refreshed = search_index
+            .refresh_tasks(&store.list(None).expect("list tasks after update"))
+            .expect("refresh changed task");
+        assert_eq!(refreshed, 1, "only the updated task document is rewritten");
+
         let before = store.list(None).expect("list tasks before duplicate").len();
         let mut duplicate = child_request(&peer_task.title, epic.id.clone());
         duplicate.description = Some(peer_task.description.clone());

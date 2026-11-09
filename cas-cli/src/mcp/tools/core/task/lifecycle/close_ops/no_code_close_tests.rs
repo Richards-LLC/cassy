@@ -289,6 +289,84 @@ fn assigned(id: &str, task_type: TaskType, target: &str) -> Task {
     task
 }
 
+/// GH #1577/#1430: losing an implementer cannot waive a task's review,
+/// and an explicit waiver cannot replace an outstanding proof cycle.
+#[tokio::test]
+async fn retired_assignee_keeps_required_verification_cas_8826() {
+    use cas_store::VerificationStore;
+    use cas_types::{Verification, VerificationProvenance, VerificationStatus};
+    let mut env = TestEnvGuard::temp_home();
+    for identity in ["unregistered", "inactive", "unassigned", "active"] {
+        for (prior, override_requested) in [("none", false), ("none", true), ("pending", true), ("error", true)] {
+            let f = fixture(&mut env, "main");
+            let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+            config.set("verification.enabled", "true").unwrap();
+            config.set("code_review.owner", "worker").unwrap();
+            config.save(&f.cas_dir()).unwrap();
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let id = "cas-8826";
+            let mut task = assigned(id, TaskType::Bug, "main");
+            task.priority = cas_types::Priority(0);
+            task.execution_note = Some("no-code".into());
+            task.external_ref = Some(PROOF.into());
+            f.put(&task);
+            let verifications = cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap();
+            if prior != "none" {
+                let dispatch = cas_store::create_verification_dispatch_bound(
+                    &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
+                    &cas_types::VerificationProofBoundary::task(),
+                    chrono::Utc::now() + chrono::Duration::minutes(10), false,
+                ).unwrap();
+                if prior == "error" {
+                    let mut error = Verification::new("ver-prior-error".into(), id.into());
+                    error.status = VerificationStatus::Error;
+                    error.summary = "Verifier could not establish the delivery boundary".into();
+                    error.provenance = VerificationProvenance::SupervisorDirect;
+                    error.agent_id = Some("nocode-supervisor-session".into());
+                    error.issuer_agent_id = error.agent_id.clone();
+                    error.dispatch_id = Some(dispatch.id.clone());
+                    verifications.add(&error).unwrap();
+                    let conn = rusqlite::Connection::open(f.cas_dir().join("cas.db")).unwrap();
+                    cas_store::resolve_verification_dispatch_with_conn(
+                        &conn, &dispatch.id, "nocode-supervisor-session", None, true,
+                    ).unwrap();
+                }
+            }
+            let agents = open_agent_store(&f.cas_dir()).unwrap();
+            match identity {
+                "unregistered" => agents.unregister("nocode-worker-session").unwrap(),
+                "inactive" => {
+                    let mut worker = agents.get("nocode-worker-session").unwrap();
+                    worker.status = cas_types::AgentStatus::Shutdown;
+                    agents.update(&worker).unwrap();
+                }
+                "unassigned" => { task.assignee = None; f.put(&task); }
+                _ => {}
+            }
+            let response = call(&f.supervisor, serde_json::json!({
+                "action":"close", "id":id, "reason":"External repair measured",
+                "supervisor_override":override_requested,
+            })).await;
+            let closed = f.task(id);
+            let latest = verifications.get_latest_for_task(id).unwrap();
+            let waived = override_requested && prior == "none";
+            assert_eq!(closed.status == TaskStatus::Closed, waived,
+                "identity={identity} prior={prior} override={override_requested}: {response}");
+            if waived {
+                let row = latest.expect("explicit waiver is durable");
+                assert_eq!(row.status, VerificationStatus::Skipped);
+                assert_eq!(row.agent_id.as_deref(), Some("nocode-supervisor-session"));
+            } else {
+                assert!(latest.is_none_or(|row| row.status != VerificationStatus::Skipped), "{response}");
+                assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{response}");
+            }
+            if prior == "error" {
+                assert_eq!(verifications.get("ver-prior-error").unwrap().status, VerificationStatus::Error);
+            }
+        }
+    }
+}
+
 fn claim(f: &Fixture, id: &str) {
     open_agent_store(&f.cas_dir())
         .unwrap()

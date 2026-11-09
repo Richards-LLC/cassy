@@ -523,14 +523,15 @@ mod tests {
     #[test]
     fn artifact_revoke_cli_requires_a_reason_cas_6d35() {
         use clap::Parser;
+        let reason = "Harmless fixture cleanup";
         let parsed = crate::cli::Cli::try_parse_from([
-            "cas", "artifact", "revoke", "art-fixture", "--reason", "Harmless fixture cleanup",
+            "cas", "artifact", "revoke", "art-fixture", "--reason", reason,
         ]).unwrap();
         let Some(crate::cli::Commands::Artifact(ArtifactCommands::Revoke(args))) = parsed.command else {
             panic!("revoke command was not routed to its handler");
         };
         assert_eq!(args.id, "art-fixture");
-        assert_eq!(args.reason, "Harmless fixture cleanup");
+        assert_eq!(args.reason, reason);
         assert!(crate::cli::Cli::try_parse_from(["cas", "artifact", "revoke", "art-fixture"]).is_err());
     }
 

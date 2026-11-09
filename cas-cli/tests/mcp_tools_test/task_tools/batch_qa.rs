@@ -546,7 +546,7 @@ async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
             task.deliverables.historical_factory_branch_anchors.push("f".repeat(40));
         }
         tasks.update(&task).unwrap();
-        cas_store::record_qa_batch_deferral(&root, id, "fixture").unwrap();
+        cas_store::defer_qa_batch_evidence(&root, id, "fixture").unwrap();
     }
     assert!(fx.supervisor.verification(Parameters(fx.request())).await.is_err());
     let recovery = |id: &str, head: &str, reason: &str| serde_json::from_value(serde_json::json!({
@@ -555,7 +555,7 @@ async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
     // A real integrated sibling commit is still not this task's delivery.
     let before = tasks.get("cas-bq01").unwrap();
     assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[1], "Reviewed release"))).await.is_err());
-    assert_eq!(tasks.get("cas-bq01").unwrap(), before);
+    assert_eq!(serde_json::to_value(tasks.get("cas-bq01").unwrap()).unwrap(), serde_json::to_value(before).unwrap());
     assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], " "))).await.is_err());
     for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
         fx.supervisor.task(Parameters(recovery(id, head, "Reviewed shipped task identity"))).await.unwrap();

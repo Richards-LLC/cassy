@@ -40,7 +40,7 @@
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable, application modules and command dispatch.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files/` - initialization, provisioning, managed sync and merge-residue recovery.
 - `cas-cli/src/accounts.rs`, `cas-cli/src/account_registry/`, `cas-cli/src/cli/accounts.rs` - account inventory, identity discovery, link planning and native usage.
-- `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded account mutations and link repair.
+- `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded account mutations and link repair. `cas-cli/src/config/` and `cas-cli/src/mcp/tools/service/factory_ops.rs` resolve local `factory.codex_home` preferences before worker recommendations.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/agent_model.rs` - harness launches, account choice and role model observations.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery and receipt cleanup.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs` - health, update receipts and GitHub request budgets.

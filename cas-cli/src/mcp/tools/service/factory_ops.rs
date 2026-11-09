@@ -1677,13 +1677,21 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
 
 /// Fill only unresolved worker accounts. The queue persists the selected directory;
 /// the receipt explains the choice even when no account is eligible. A Codex
-/// lane keeps its requester's account; unscoped slots use the shared policy.
+/// lane keeps its requester's account unless factory.codex_home is configured.
 fn recommend_spawn_accounts(
-    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, _factory: &crate::config::FactoryConfig, policy: &crate::config::AccountsConfig,
+    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, factory: &crate::config::FactoryConfig, policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> String {
     let mut notices = Vec::new();
+    if let Some(directory) = factory.codex_home.as_deref().map(str::trim).filter(|dir| !dir.is_empty()) {
+        for (slot, spec) in specs.iter_mut().enumerate() {
+            if spec.cli == cas_mux::SupervisorCli::Codex && spec.config_dir.is_none() {
+                spec.config_dir = Some(directory.to_string());
+                notices.push(format!("codex slot {} account={directory} source=factory.codex_home", slot + 1));
+            }
+        }
+    }
     let unresolved = |spec: &cas_mux::WorkerSpec| {
         spec.config_dir.is_none()
             && !(lane_request && spec.cli == cas_mux::SupervisorCli::Codex
@@ -3211,11 +3219,6 @@ impl CasService {
                 (specs, String::new(), Vec::new(), sources_notice)
             };
 
-        if let Some(home) = dirs::home_dir() {
-            crate::account_registry::resolve_worker_accounts(&mut specs, &home)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
-        }
-
         // Hosted DashScope is an explicit route with its own auth/model
         // preflight.  This is intentionally after spec resolution and before
         // queue insertion: an invalid hosted key cannot leave an apparently
@@ -3277,6 +3280,13 @@ impl CasService {
         }
         let account_error = |error: String| Self::error(ErrorCode::INVALID_PARAMS,
             format!("{error}{account_selection_notice}{default_sources_notice}"));
+
+        // Resolve configured preferences and recommendations through the same
+        // existing-account validation as explicit config_dir, before queueing.
+        if let Some(home) = dirs::home_dir() {
+            crate::account_registry::resolve_worker_accounts(&mut specs, &home)
+                .map_err(|error| account_error(error.to_string()))?;
+        }
 
         // Preserve the existing install refusal when no Codex CLI is on PATH.
         // The account preflight is meaningful only after a binary can probe it.
@@ -16742,6 +16752,7 @@ mod tests {
         let home = TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::default();
+        crate::config::meta::registry().validate("factory.codex_home", "~/.codex-support").unwrap();
         config.set("factory.codex_home", "~/.codex-support").unwrap();
         config.save(project.path()).unwrap();
         let config = crate::config::Config::load(project.path()).unwrap();

@@ -1354,6 +1354,11 @@ impl CasCore {
 
         let mut changes = Vec::new();
 
+        if let Some(title) = req.title {
+            entry.title = Some(title);
+            changes.push("title");
+        }
+
         if let Some(content) = req.content {
             entry.content = content;
             changes.push("content");
@@ -1398,11 +1403,13 @@ impl CasCore {
             data: None,
         })?;
 
-        Ok(Self::success(format!(
+        let mut result = Self::success(format!(
             "Updated {}: {}",
             req.id,
             changes.join(", ")
-        )))
+        ));
+        result.structured_content = Some(serde_json::json!({"id": req.id, "changes": changes}));
+        Ok(result)
     }
 }
 

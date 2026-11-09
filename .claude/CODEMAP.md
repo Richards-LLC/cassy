@@ -87,6 +87,7 @@
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry.rs` - dispatch/readiness attribution and owned-server process checks.
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - command allowlists, native mappings, caller-owned Finish queue, native turn execution evidence and Claude Cassy reconnect receipts from live process versions.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - task binding, ordered worker backlogs, execution/held-task queue display and optional generation-fenced fresh-context continuation.
+- `cas-cli/src/factory_auth_health.rs` - selected-account Codex catalogue evidence, shared MCP/CLI lane fallback admission, and terminal harness authentication/model failures; `cas-cli/src/ui/factory/app/assignment_evidence.rs` excludes those failures from idle staffing.
 - `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - off-loop reservation of isolated MCP worker names against the actual target repository's local/origin refs, registered identities and pending spawn names before queue/task binding.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - typed requests, runner ownership, bounded sandbox probes and daemon-managed candidate builds.
 - `cas-cli/src/factory_ci_retry.rs` - exact-SHA merge retries, terminal CI notices, expiry and corrupt-intent quarantine.
@@ -138,6 +139,7 @@
 - `crates/cas-store/src/history_store.rs` - batched history provenance repair and indexed worker commit-prefix lookup.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, guarded unread-mail succession, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
+- `cas-cli/src/mcp/tools/service/core.rs`, `cas-cli/src/mcp/tools/core/memory.rs`, `cas-cli/src/mcp/tools/service/memory_lifecycle_tests.rs` - public memory dispatch, partial title/content updates, structured changed-field receipts and real-store lifecycle regressions.
 - `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `cas-cli/src/mcp/tools/service/pattern_ops.rs`. Candidate writes require two independent completed task/verdict citations before atomically recording a bundle.
 - `crates/cas-types/src/entry/behavior.rs`, `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` - temporal validity and stakeholder provenance migration.
 

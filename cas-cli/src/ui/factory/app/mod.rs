@@ -2213,12 +2213,6 @@ impl FactoryApp {
             held_workers.is_some()
                 || !matches!(state, super::director::SupervisorActionableState::AssignReadyWork { .. })
         })?;
-        let has_live_operator_ask = self.factory_session.as_deref().is_some_and(|session| {
-            assignment_evidence::has_live_operator_ask(data, session, &self.supervisor_name, now)
-        });
-        if !has_live_operator_ask {
-            return Some(actionable);
-        }
         match actionable {
             super::director::SupervisorActionableState::AssignReadyWork {
                 task_ids,

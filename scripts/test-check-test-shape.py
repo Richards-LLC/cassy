@@ -29,7 +29,7 @@ class Shapes(unittest.TestCase):
             [(1, 'TEST_ASSERTION_PROSE')])
 
     def test_inline_caller_payload_preservation_cas_0bdc(self):
-        source = '''it("preserves supplied detail", () => {
+        source = '''import { WorkPicture } from "./work-picture"; it("preserves supplied detail", () => { const picture = new WorkPicture();
     picture.detail("m", "s", { event_id: "cached", detail: "cached source" });
     picture.detail("m", "s", { event_id: "edit", detail: "Recovered edit" });
     expect(detail(0).textContent).toContain("cached source");
@@ -49,6 +49,14 @@ it("keeps unrelated copy checked", () => {
                                  [(7, 'TEST_ASSERTION_PROSE'), (11, 'TEST_ASSERTION_PROSE'),
                                   (12, 'TEST_ASSERTION_PROSE')])
                 self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(7, 'exact-text pin')])
+        copy = 'Please try again when the connection to the remote service becomes available.'
+        for preparation in ('screen.getByText("{copy}");', 'const expected = String("{copy}");'):
+            with self.subTest(preparation=preparation):
+                replay = 'import { WorkPicture } from "./work-picture"; it("checks real copy", () => { const picture = new WorkPicture();\n' + preparation.format(copy=copy) + '\n' + (
+                    f'expect(detail.textContent).toBe("{copy}");\n' + '});')
+                self.assertEqual(shape.message_assertions(replay, 'work-picture.test.ts'),
+                                 [(3, 'TEST_ASSERTION_PROSE')])
+                self.assertEqual(shape.lint_text_pins(replay, 'work-picture.test.ts'), [(3, 'exact-text pin')])
 
     def test_human_message_assertions_use_behavior_or_machine_ids(self):
         cases = [

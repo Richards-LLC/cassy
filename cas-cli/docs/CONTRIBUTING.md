@@ -4151,8 +4151,9 @@ The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain
 valid. For JS/TS inline literals, payload readbacks must match bytes supplied to
-a non-assertion call in the same block; test titles and sibling tests do not
-establish payload provenance.
+locally imported application code (or its constructed instances) in the same
+block; test titles, sibling tests, UI text queries and expected-value
+construction do not establish payload provenance.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

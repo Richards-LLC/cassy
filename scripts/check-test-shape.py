@@ -176,11 +176,13 @@ def javascript_bindings(source):
 
 
 def javascript_payload_offsets(source, path):
-    """Literal readbacks of data supplied to a call in the same block.
+    """Literal readbacks of data supplied to application code in the same block.
 
     A callback body starts a new block: test titles, assertions and data in a
     sibling test cannot establish payload provenance. Object literals do not
-    start blocks, so inline call arguments retain their caller's scope.
+    start blocks, so inline call arguments retain their caller's scope. Only
+    local application imports and their constructed instances establish input
+    provenance; querying UI text or constructing an expectation does not.
     """
     if Path(path).suffix not in ('.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'):
         return set()
@@ -192,8 +194,21 @@ def javascript_payload_offsets(source, path):
         if start in literals:
             masked[start] = '\0'
     code = re.sub(r'//[^\n]*|/\*[\s\S]*?\*/', lambda m: ' ' * len(m[0]), ''.join(masked))
+    application = set()
+    for imported in re.finditer(r'\bimport\s+([^;]+?)\s+from\s+\0', code):
+        if not literals[imported.end() - 1][1].startswith('.'):
+            continue
+        for binding in re.finditer(r'(?:^|[,{])\s*(?!type\s)(\w+)(?:\s+as\s+(\w+))?', imported[1]):
+            application.add(binding[2] or binding[1])
+        namespace = re.search(r'\*\s+as\s+(\w+)', imported[1])
+        if namespace:
+            application.add(namespace[1])
+    for instance in re.finditer(r'\b(?:const|let|var)\s+(\w+)\s*=\s*new\s+(\w+)\s*\(', code):
+        if instance[2] in application:
+            application.add(instance[1])
     stack, observed, supplied = [], {}, set()
-    excluded = r'(?:expect|assert|it|test|describe)(?:\.|$)|(?:^|\.)to[A-Z]'
+    excluded = (r'(?:expect|assert|it|test|describe)(?:\.|$)|(?:^|\.)to[A-Z]'
+                r'|(?:.*\.)?(?:get|query|find)(?:All)?By[A-Z]')
     for token in re.finditer(r'[\w$.]+\s*\(|[()[\]{}\0]', code):
         value = token[0]
         if value == '\0':
@@ -202,7 +217,8 @@ def javascript_payload_offsets(source, path):
             key = (scope, literals[token.start()][1])
             observed[token.start()] = key
             calls = [frame[1] for frame in stack[block + 1:] if frame[1]]
-            if calls and not any(re.match(excluded, call) for call in calls):
+            if (any(call.split('.')[0] in application for call in calls)
+                    and not any(re.match(excluded, call) for call in calls)):
                 supplied.add(key)
         elif value[-1] in '([{':
             char = value[-1]

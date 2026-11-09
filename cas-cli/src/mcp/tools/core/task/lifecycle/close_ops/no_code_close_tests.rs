@@ -297,7 +297,7 @@ async fn retired_assignee_keeps_required_verification_cas_8826() {
     use cas_types::{Verification, VerificationProvenance, VerificationStatus};
     let mut env = TestEnvGuard::temp_home();
     for identity in ["unregistered", "inactive", "unassigned", "active"] {
-        for (prior, override_requested) in [("none", false), ("none", true), ("pending", true), ("error", true)] {
+        for (prior, override_requested) in [("none", false), ("none", true), ("pending", true), ("error", true), ("legacy-error", true)] {
             let f = fixture(&mut env, "main");
             let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
             config.set("verification.enabled", "true").unwrap();
@@ -310,7 +310,13 @@ async fn retired_assignee_keeps_required_verification_cas_8826() {
             task.external_ref = Some(PROOF.into());
             f.put(&task);
             let verifications = cas_store::SqliteVerificationStore::open(&f.cas_dir()).unwrap();
-            if prior != "none" {
+            if prior == "legacy-error" {
+                let mut error = Verification::new("ver-prior-error".into(), id.into());
+                error.status = VerificationStatus::Error;
+                error.summary = "Legacy verifier requires supervisor recovery".into();
+                error.provenance = VerificationProvenance::System;
+                cas_store::add_system_verification(&f.cas_dir(), &error).unwrap();
+            } else if prior != "none" {
                 let dispatch = cas_store::create_verification_dispatch_bound(
                     &f.cas_dir(), id, "nocode-supervisor-session", "nocode-supervisor-session",
                     &cas_types::VerificationProofBoundary::task(),
@@ -342,6 +348,15 @@ async fn retired_assignee_keeps_required_verification_cas_8826() {
                 "unassigned" => { task.assignee = None; f.put(&task); }
                 _ => {}
             }
+            let identity_request = serde_json::from_value(serde_json::json!({"id": id})).unwrap();
+            let state = f.supervisor.inner.compute_verification_skip_reason(&task, &identity_request);
+            match identity {
+                "unregistered" => assert_eq!(state, VerificationSkipReason::AssigneeUnregistered { assignee: WORKER.into() }),
+                "inactive" => assert!(matches!(state, VerificationSkipReason::AssigneeInactive { minutes_stale: Some(_) })),
+                "unassigned" => assert_eq!(state, VerificationSkipReason::NoAssignee),
+                _ => assert_eq!(state, VerificationSkipReason::None),
+            }
+            assert!(!state.is_skip(), "identity alone is not waiver authority: {state:?}");
             let response = call(&f.supervisor, serde_json::json!({
                 "action":"close", "id":id, "reason":"External repair measured",
                 "supervisor_override":override_requested,
@@ -359,7 +374,7 @@ async fn retired_assignee_keeps_required_verification_cas_8826() {
                 assert!(latest.is_none_or(|row| row.status != VerificationStatus::Skipped), "{response}");
                 assert!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), id).unwrap().is_some(), "{response}");
             }
-            if prior == "error" {
+            if prior == "error" || prior == "legacy-error" {
                 assert_eq!(verifications.get("ver-prior-error").unwrap().status, VerificationStatus::Error);
             }
         }

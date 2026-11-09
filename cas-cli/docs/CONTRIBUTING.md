@@ -2590,7 +2590,17 @@ An omitted target selects `--lib`; `--test` must name one explicit harness from
 `scripts/cas-test-targets.py`. Select exactly one package and a mandatory
 positive named-test filter (`test(name)` or `test(=name)`, joined by `|`/`&`).
 Empty/all(), regex/glob, negated and binary-wide selectors are refused, as are
-environment prefixes, compound commands, repeated packages and broader flags.
+unapproved environment prefixes, compound commands, repeated packages and broader flags.
+Named tests may carry literal assignments for `HOME`, `CARGO_HOME`, `RUSTUP_HOME`,
+`CI`, Git author/committer name/email and Git global/system configuration inputs.
+`env -u NAME` (also `--unset`) removes those same allowed inputs. Quoted literal
+paths are supported; shell expansions are not. The hook transports these as
+child-only metadata through the capped runner and detached execution. Admission,
+tool discovery and receipt ownership keep the inherited environment; only the
+final test child receives the requested values. Identity, PATH, target-directory,
+compiler and builder-limit overrides remain refused. This does not admit
+environment prefixes on compile-only checks.
+
 For a credential-free CI reproduction, first create a private config directory.
 The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):

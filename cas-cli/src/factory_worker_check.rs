@@ -1781,14 +1781,40 @@ pub(crate) const ISOLATED_TEST_CREDENTIALS: [&str; 6] = [
     "VIKTOR_API_KEY", "VIKTOR_KEY", "NEON_API_KEY", "NEON_TOKEN", "VERCEL_TOKEN", "VERCEL_API_TOKEN",
 ];
 
-pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
-    execute_at_with_scope(
+/// Literal child-only test inputs; admission identity, tool selection and build
+/// limits cannot be changed through this metadata. A leading '-' unsets a key.
+pub(crate) fn test_environment_spec(spec: &str) -> Option<(&str, Option<&str>)> {
+    let (key, value) = match spec.strip_prefix('-') {
+        Some(key) => (key, None),
+        None => {
+            let (key, value) = spec.split_once('=')?;
+            (key, Some(value))
+        }
+    };
+    matches!(key, "HOME" | "CARGO_HOME" | "RUSTUP_HOME" | "CI"
+        | "GIT_CONFIG_GLOBAL" | "GIT_CONFIG_SYSTEM" | "GIT_CONFIG_NOSYSTEM"
+        | "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL")
+        .then_some((key, value))
+}
+
+fn validate_test_environment(args: &[String], test_env: &[String]) -> Result<()> {
+    if !test_env.is_empty()
+        && (targeted_test(args).is_none() || test_env.iter().any(|spec| test_environment_spec(spec).is_none()))
+    {
+        bail!("Test environment overrides require named targeted tests and allowlisted HOME, Rust home, Git identity/config or CI inputs");
+    }
+    Ok(())
+}
+
+pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    execute_at_with_scope_and_environment(
         cas_root,
         args,
         &std::env::current_dir()?,
         Path::new("cargo"),
         cfg!(target_os = "linux").then_some(Path::new("systemd-run")),
         isolated_test_env,
+        test_env,
     )
 }
 
@@ -1801,17 +1827,17 @@ pub(crate) fn execute(cas_root: &Path, args: &[String], isolated_test_env: Optio
 /// session is outside that group. Its stdout and stderr both go to this
 /// process's stdout (the shell's log redirect), never the harness pipe.
 #[cfg(unix)]
-pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Result<()> {
+pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
     if !allowed_args(args) {
         bail!("Only package-scoped cargo check or nextest run -p <crate> [--lib|--test <harness>] -E 'test(name)' is allowed");
     }
+    validate_test_environment(args, test_env)?;
     let repo = std::env::current_dir()?;
     let log = detached_log_path().context("detached worker-check requires a regular output log")?;
     let run = crate::factory_worker_runs::register(cas_root, &repo, &log, chrono::Utc::now())?;
-    let command = match run.as_deref() {
-        Some(id) => detached_runner_command_with_run(&std::env::current_exe()?, cas_root, args, isolated_test_env, Some(id)),
-        None => detached_runner_command(&std::env::current_exe()?, cas_root, args, isolated_test_env),
-    };
+    let command = detached_runner_command_with_run(
+        &std::env::current_exe()?, cas_root, args, isolated_test_env, run.as_deref(), test_env,
+    );
     let mut child = match spawn_detached(command).context("starting the detached worker-check runner") {
         Ok(child) => child,
         Err(error) => {
@@ -1836,13 +1862,13 @@ pub(crate) fn execute_detached(cas_root: &Path, args: &[String], isolated_test_e
 
 /// The detached runner, ending its log with `worker-check: EXIT <code>` so a
 /// refused or failed run is distinguishable from one still running (cas-6591).
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn detached_runner_command(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>) -> Command {
-    detached_runner_command_with_run(executable, cas_root, args, isolated_test_env, None)
+    detached_runner_command_with_run(executable, cas_root, args, isolated_test_env, None, &[])
 }
 
 #[cfg(unix)]
-fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>) -> Command {
+fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[String], isolated_test_env: Option<&Path>, run: Option<&str>, test_env: &[String]) -> Command {
     let mut command = Command::new("/bin/sh");
     command
         .args(["-c", r#""$0" "$@"; echo "worker-check: EXIT $?""#])
@@ -1852,6 +1878,7 @@ fn detached_runner_command_with_run(executable: &Path, cas_root: &Path, args: &[
     if let Some(directory) = isolated_test_env {
         command.arg("--isolated-test-env").arg(directory);
     }
+    for spec in test_env { command.arg("--test-env").arg(spec); }
     if let Some(id) = run { command.arg("--completion-id").arg(id); }
     command.arg("--").args(args);
     command
@@ -1900,7 +1927,7 @@ fn spawn_detached(mut command: Command) -> std::io::Result<std::process::Child> 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>) -> Result<()> {
+pub(crate) fn execute_detached(_cas_root: &Path, _args: &[String], _isolated_test_env: Option<&Path>, _test_env: &[String]) -> Result<()> {
     bail!("worker-check --detach needs a Unix session; run the check in the foreground")
 }
 
@@ -1982,6 +2009,11 @@ fn proof_diff_base(cas_root: &Path, repo: &Path, configured: Option<&str>) -> Re
 }
 
 fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>) -> Result<()> {
+    execute_at_with_scope_and_environment(cas_root, args, cwd, cargo, scope_runner, isolated_test_env, &[])
+}
+
+fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: &Path, cargo: &Path, scope_runner: Option<&Path>, isolated_test_env: Option<&Path>, test_env: &[String]) -> Result<()> {
+    validate_test_environment(args, test_env)?;
     let test = targeted_test(args);
     if let Some(directory) = isolated_test_env {
         if test.is_none() || !directory.is_absolute() || !directory.is_dir() {
@@ -2180,6 +2212,13 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     let temporary = crate::factory_scratch::prepare_test_tmp(&cas_root, &repo)?;
     for key in ["TMPDIR", "TMP", "TEMP"] {
         command.env(key, &temporary);
+    }
+    for spec in test_env {
+        let (key, value) = test_environment_spec(spec).expect("validated test environment");
+        match value {
+            Some(value) => { command.env(key, value); }
+            None => { command.env_remove(key); }
+        }
     }
     // Bootstrap/admission keep their inherited identity and credentials. Only
     // the final Cargo/test child receives this fixed isolation profile.
@@ -4819,39 +4858,80 @@ assert os.environ.get('CARGO_HOME') == '/fixture/cargo'
 assert os.environ.get('RUSTUP_HOME') == '/fixture/rustup'
 assert os.environ.get('GIT_CONFIG_GLOBAL') == '/dev/null'
 assert os.environ.get('CI') == 'true'
-assert 'GIT_AUTHOR_NAME' not in os.environ
-assert 'GIT_AUTHOR_EMAIL' not in os.environ
+assert not os.environ.get('GIT_AUTHOR_NAME')
+assert not os.environ.get('GIT_AUTHOR_EMAIL')
 assert os.environ.get('CAS_SESSION_ID') == 'worker-home-fixture'
 assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target')
 (Path.cwd() / 'target' / 'isolated-home-observed').write_text('done')
 PYENV
 printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
 "#, home=home.to_str().unwrap()));
-        let command = format!("env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL HOME='{}' CARGO_HOME=/fixture/cargo RUSTUP_HOME=/fixture/rustup GIT_CONFIG_GLOBAL=/dev/null CI=true cargo nextest run -p cas --lib -E 'test(worker)' > target/tests.log 2>&1 &", home.display());
-        let request = cas_core::hooks::types::HookInput {
-            cwd: repo.display().to_string(), hook_event_name: "PreToolUse".into(),
-            tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
-            tool_input: Some(serde_json::json!({"command": command})), ..Default::default()
-        };
-        let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
-        let value = serde_json::to_value(output).unwrap();
-        let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command")
-            .and_then(|value| value.as_str()).expect("capped command rewrite");
-        let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
-        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
-        let Some(crate::cli::factory::FactoryCommands::WorkerCheck {
-            cas_root, cargo_args, isolated_test_env, detach, ..
-        }) = factory.command else { panic!("worker-check command") };
-        assert!(detach);
-        assert_eq!(cas_root, root);
-        assert_eq!(cargo_args, ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]);
-        execute_at_with_scope(&root, &cargo_args, &repo, &fake, None, isolated_test_env.as_deref()).unwrap();
-        assert!(repo.join("target/isolated-home-observed").is_file());
+        let scope = dir.path().join("scope");
+        fake_scope(&scope, "while [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"");
+        for (harness, prefix) in [
+            ("claude", format!("env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL HOME='{}'", home.display())),
+            ("codex", format!("HOME='{}' GIT_AUTHOR_NAME='' GIT_AUTHOR_EMAIL=''", home.display())),
+        ] {
+            env.set("CAS_HOOK_HARNESS", harness);
+            let command = format!("{prefix} CARGO_HOME=/fixture/cargo RUSTUP_HOME=/fixture/rustup GIT_CONFIG_GLOBAL=/dev/null CI=true cargo nextest run -p cas --lib -E 'test(worker)' > target/tests.log 2>&1 &");
+            let request = cas_core::hooks::types::HookInput {
+                cwd: repo.display().to_string(), hook_event_name: "PreToolUse".into(),
+                tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
+                tool_input: Some(serde_json::json!({"command": command})), ..Default::default()
+            };
+            let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let decision = value.pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str());
+            assert_ne!(decision, Some("deny"));
+            if harness == "codex" { assert_eq!(decision, Some("allow")); }
+            let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command")
+                .and_then(|value| value.as_str()).expect("capped command rewrite");
+            let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
+            let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+            let Some(crate::cli::factory::FactoryCommands::WorkerCheck {
+                cas_root, cargo_args, isolated_test_env, test_env, detach, ..
+            }) = factory.command else { panic!("worker-check command") };
+            assert!(detach);
+            assert_eq!(cas_root, root);
+            assert_eq!(cargo_args, ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]);
+            assert!(test_env.contains(&format!("HOME={}", home.display())));
+            assert!(test_env.contains(&if harness == "claude" { "-GIT_AUTHOR_NAME" } else { "GIT_AUTHOR_NAME=" }.to_string()));
+            let detached = detached_runner_command_with_run(Path::new("cas"), &root, &cargo_args, isolated_test_env.as_deref(), None, &test_env);
+            let detached_args = detached.get_args().collect::<Vec<_>>();
+            for spec in &test_env {
+                assert!(detached_args.windows(2).any(|pair| pair == [std::ffi::OsStr::new("--test-env"), std::ffi::OsStr::new(spec)]));
+            }
+            for scope in [None, Some(scope.as_path())] {
+                execute_at_with_scope_and_environment(&root, &cargo_args, &repo, &fake, scope, isolated_test_env.as_deref(), &test_env).unwrap();
+            }
+            assert!(repo.join("target/isolated-home-observed").is_file());
+        }
         assert_eq!(std::env::var_os("HOME"), inherited_home);
         assert_eq!(std::env::var("CAS_SESSION_ID").unwrap(), "worker-home-fixture");
         assert_eq!(std::env::var("GIT_AUTHOR_NAME").unwrap(), "inherited author");
         assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)),
             [format!("test: PASS {} cas test(worker) 1", fixture_head(&repo))]);
+        let named = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
+        for spec in ["CAS_SESSION_ID=other", "-CAS_SESSION_ID", "CAS_AGENT_ROLE=supervisor",
+            "CARGO_BUILD_JOBS=64", "CARGO_TARGET_DIR=/tmp", "PATH=/tmp", "RUSTC=/tmp/rustc"] {
+            assert!(execute_at_with_scope_and_environment(&root, &named, &repo, &fake, None, None, &[spec.into()]).is_err());
+        }
+        for command in [
+            "CAS_SESSION_ID=other cargo nextest run -p cas --lib -E 'test(worker)'",
+            "env -u CAS_SESSION_ID cargo nextest run -p cas --lib -E 'test(worker)'",
+            "CARGO_TARGET_DIR=/tmp cargo nextest run -p cas --lib -E 'test(worker)'",
+            "HOME=/tmp cargo nextest run -p cas --lib -E 'all()'",
+            "HOME=/tmp cargo nextest run -p cas --lib --full -E 'test(worker)'",
+            "HOME=/tmp cargo check -p cas --lib",
+        ] {
+            let request = cas_core::hooks::types::HookInput {
+                cwd: repo.display().to_string(), hook_event_name: "PreToolUse".into(),
+                tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
+                tool_input: Some(serde_json::json!({"command": command})), ..Default::default()
+            };
+            let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+            assert_eq!(serde_json::to_value(output).unwrap().pointer("/hookSpecificOutput/permissionDecision").and_then(|value| value.as_str()), Some("deny"));
+        }
     }
 
     #[cfg(unix)]
@@ -4902,7 +4982,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#,
         use clap::Parser;
         let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
         let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
-        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach, completion_id: _ }) = factory.command else { panic!("worker-check command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck { cas_root, cargo_args, isolated_test_env, detach, .. }) = factory.command else { panic!("worker-check command") };
         assert!(detach);
         assert_eq!(cas_root, root);
         assert_eq!(cargo_args, args);

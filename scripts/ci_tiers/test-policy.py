@@ -263,6 +263,9 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
     def test_preflight_restores_only_proven_exact_tree_cli(self):
         job = self.ci()['jobs']['fast-validation-preflight']
         restore = next(step for step in job['steps'] if step.get('id') == 'cli-restore')
+        publication = next(step for step in job['steps'] if step.get('id') == 'cli-publish')
+        receipt = next(step for step in job['steps'] if step.get('id') == 'job-receipt')
+        self.assertEqual(receipt['with']['requires-artifact'], publication['with']['name'])
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
         subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
         subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=test@example.invalid',
@@ -275,6 +278,7 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
         gh.write_text('''#!/usr/bin/env python3
 import os, pathlib, shutil, sys
 args = sys.argv[1:]
+if args[args.index('--name')+1] != os.environ['ARTIFACT_NAME']: sys.exit(2)
 with open(os.environ['DOWNLOADS'], 'a') as log: log.write(args[2]+'\\n')
 if os.environ['AVAILABLE'] != 'true': sys.exit(1)
 out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_ok=True)
@@ -290,6 +294,7 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                    'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': tree}
         for proof, receipt_tree, cached, available, runnable, expected_run in [
             ('full-gate', tree, '', True, True, '101'),
+            ('full-gate', tree, '100', True, True, '100'),
             ('full-gate', '0'*40, '', True, True, ''),
             ('', tree, '', True, True, ''),
             ('full-gate', tree, '', False, True, ''),
@@ -308,12 +313,14 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 runner_temp = self.root/'runner-temp'; runner_temp.mkdir(exist_ok=True)
                 values = {key: str(self.gh_value(value, case)) for key, value in restore['env'].items()}
                 result = self.run_body(restore['run'], {**values, 'GITHUB_OUTPUT': str(output),
-                    'RUNNER_TEMP': str(runner_temp), 'PATH': str(bin_dir)+os.pathsep+os.environ['PATH'],
-                    'DOWNLOADS': str(calls), 'AVAILABLE': str(available).lower(), 'PRODUCER_CLI': str(binary)})
+                    'RUNNER_TEMP': str(runner_temp), 'GITHUB_REPOSITORY': 'fixture/repo', 'PATH': str(bin_dir)+os.pathsep+os.environ['PATH'],
+                    'DOWNLOADS': str(calls), 'AVAILABLE': str(available).lower(), 'PRODUCER_CLI': str(binary),
+                    'ARTIFACT_NAME': publication['with']['name']})
                 self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
                 outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
                 restored = bool(expected_run)
                 self.assertEqual(outputs.get('restored'), str(restored).lower())
+                self.assertEqual((runner_temp/'preflight-cli/cas').exists(), restored)
                 if restored:
                     self.assertEqual(calls.read_text().strip(), expected_run)
                     self.assertEqual(subprocess.run([runner_temp/'preflight-cli/cas', '--version']).returncode, 0)
@@ -386,16 +393,18 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
             for shard in job.get('strategy',{}).get('matrix',{}).get('shard',[None]):
                 for step in job['steps']:
                     # Cheap classification and trust checks still execute.
-                    if (step.get('id') in ('job-receipt','classify-diff') or
+                    if (step.get('id') in ('job-receipt','classify-diff','cli-restore') or
                         step.get('uses')=='actions/checkout@v4' or
                         'SELF_HOSTED_ENABLED' in step.get('env',{})):
                         continue
                     context={'inputs.full-set':True,'steps.job-receipt.outputs.reused':'true',
+                        'steps.cli-restore.outputs.restored':'true',
                         'github.event_name':'push','github.ref':'refs/heads/epic/release-train-fixture'}
                     runs=self.gh_expr(step.get('if','true'),context)
                     # Republish the native train reports restored by job-check
                     # and the shared job receipt. Everything expensive skips.
-                    evidence=(step.get('with',{}).get('phase')=='save' or
+                    evidence=(step.get('id') in ('cli-artifact','cli-publish') or
+                        step.get('with',{}).get('phase')=='save' or
                         step.get('with',{}).get('name','').startswith('train-suite-shard-'))
                     self.assertEqual(runs,evidence,(name,shard,step))
         self.assertEqual(len(cached),8)

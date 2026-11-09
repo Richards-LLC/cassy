@@ -160,7 +160,7 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    only one side goes in `unpaired[]`: it is kept for the record and never rendered.
 
    ```json
-   {"schema": 1, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
+   {"schema": 2, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
     "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": [1280,800], "scheme": "light", "masked": [".avatar"],
       "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
       "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
@@ -171,6 +171,12 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    use the same row shape, with just `before` or `after`; each present side must
    name nonempty `png` and `jpg` files with matching `sha256` and `jpg_sha256`,
    resolved relative to, and confined inside, the directory containing `pairs.json`.
+   New manifests use schema 2, which requires both digests. Close also reads
+   historical schema 1 manifests that sealed only the PNG: it verifies that seal
+   and any supplied JPG seal, still requires both image files, and preserves the
+   original manifest bytes. This does not certify an unsealed historical JPG.
+   Unknown schema versions require a compatible reader or a provenance-preserving
+   migration, never a fabricated seal or a new BEFORE capture.
    Every `pairs[]` row needs both sides; every `unpaired[]` row needs exactly one.
    Keep every baseline cell, including cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
    AFTER must contain every BEFORE id, and may add ids. A partial comparison that

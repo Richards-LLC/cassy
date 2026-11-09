@@ -893,6 +893,11 @@ pub struct FactoryConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts_root: Option<String>,
 
+    /// Default Codex account directory for this project's workers on this machine.
+    /// Explicit spawn config_dir overrides this preference; empty uses recommendation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+
     /// cas-3f93: absolute base for regenerable worker build output. When set,
     /// each managed worker's Cargo target lives at
     /// `<scratch_root>/<project-key>/targets/<worktree>` and target baselines
@@ -1382,6 +1387,7 @@ impl Default for FactoryConfig {
             worker_denied_clis: default_worker_denied_clis(),
             worker_denied_mcp_tools: default_worker_denied_mcp_tools(),
             artifacts_root: None,
+            codex_home: None,
             scratch_root: None,
             worker_local_gate: None,
             release_command: None,

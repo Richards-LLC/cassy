@@ -123,7 +123,7 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
-    if let Some(refusal) = message_assertion_refusal(proof_repo, target) {
+    if let Some(refusal) = message_assertion_refusal(proof_repo, target, task.delivery_mode) {
         refusals.push(refusal);
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -166,15 +166,21 @@ pub(super) fn park_refusals(
 }
 
 /// Read-only source check: a test receipt cannot authorize a new prose pin.
-fn message_assertion_refusal(repo: &Path, target: &str) -> Option<String> {
+fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types::DeliveryMode) -> Option<String> {
     let guard = repo.join("scripts/check-test-shape.py");
     if !guard.is_file() {
         return None;
     }
-    let target_ref = super::freshest_target_ref(repo, target);
-    let Some(target_commit) = super::resolve_branch_sha(repo, &target_ref) else {
+    // A local-merge delivery lands on the local target; otherwise the fresher
+    // of the local and origin target decides (remote-only train refs park).
+    let target_ref = if delivery_mode == cas_types::DeliveryMode::LocalMerge {
+        target.to_string()
+    } else {
+        super::freshest_target_ref(repo, target)
+    };
+    let Some(target_commit) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
         return Some(format!(
-            "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`)."
+            "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`). Fetch the integration target, then retry park."
         ));
     };
     let output = std::process::Command::new("python3")
@@ -953,6 +959,51 @@ mod tests {
         git(&["add", "."]);
         git(&["commit", "--allow-empty", "-qm", subject]);
         git(&["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn park_checks_message_assertions_against_remote_target_cas_f741() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let mut task = Task::new("cas-f741".into(), "source guard".into());
+        let scripts = repo.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("check-test-shape.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/check-test-shape.py"))).unwrap();
+        std::fs::write(scripts.join("rust_test_source.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/rust_test_source.py"))).unwrap();
+        let base = commit_changelog_fixture(repo.path(), "install checker");
+        let output = std::process::Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/epic/target", &base])
+            .current_dir(repo.path()).output().unwrap();
+        assert!(output.status.success());
+        assert!(!super::super::git_ref_exists(repo.path(), "refs/heads/epic/target"));
+
+        for (source, expected) in [
+            ("def test_value():\n    assert 2 + 2 == 4\n", None),
+            ("def test_value():\n    assert 'please try later' in error\n", Some("TEST_ASSERTION_PROSE")),
+        ] {
+            std::fs::write(repo.path().join("test_value.py"), source).unwrap();
+            let head = commit_changelog_fixture(repo.path(), "change test");
+            for (target, mode, code) in [
+                ("epic/target", cas_types::DeliveryMode::PushBranch, expected),
+                ("origin/epic/target", cas_types::DeliveryMode::PushBranch, expected),
+                (base.as_str(), cas_types::DeliveryMode::PushBranch, expected),
+                ("main", cas_types::DeliveryMode::LocalMerge, expected),
+                ("missing-target", cas_types::DeliveryMode::PushBranch, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
+                ("epic/target", cas_types::DeliveryMode::LocalMerge, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
+            ] {
+                task.delivery_mode = mode;
+                let refusal = park_refusal(cas_root.path(), repo.path(), &task,
+                    &["test_value.py".into()], &head, target, None);
+                assert_eq!(refusal.is_some(), code.is_some(), "target={target} mode={mode:?}: {refusal:?}");
+                if let Some(code) = code {
+                    let refusal = refusal.unwrap();
+                    assert!(refusal.contains(code), "target={target} mode={mode:?}: {refusal}");
+                }
+            }
+        }
     }
 
     #[test]

@@ -2318,6 +2318,12 @@ impl CasCore {
             if let Some(target) = retarget {
                 task.deliverables.work_target = Some(target);
                 changes.push("work_target");
+            } else if !already_matches && !epic_id.is_empty() && !work_target_supplied
+                && let Some(target) = task.deliverables.work_target.as_ref()
+            {
+                warnings.push(format!(
+                    "Work target kept: {} @ {}.", target.repo_selector, target.target_branch,
+                ));
             }
         }
 
@@ -3725,6 +3731,60 @@ mod epic_move_work_target_tests {
             .work_target
             .expect("task keeps a WorkTarget")
             .target_branch
+    }
+
+    #[tokio::test]
+    async fn epic_move_rebinds_a_pinned_previous_lane_and_reports_a_distinct_target_cas_0ef5() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let root = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(root.path().to_path_buf(), None, None);
+        let store = core.open_task_store().unwrap();
+        store.init().unwrap();
+        store.add(&epic("cas-0ef5-old", "epic/old")).unwrap();
+        store.add(&epic("cas-0ef5-new", "epic/new")).unwrap();
+        let mut legacy = epic("cas-0ef5-legacy", "epic/legacy");
+        legacy.deliverables.work_target = None;
+        store.add(&legacy).unwrap();
+        let mut failures = Vec::new();
+        for (id, parent, pinned, branch, status, expected) in [
+            ("cas-0ef5-pinned", "cas-0ef5-old", true, "epic/old", TaskStatus::Open, "epic/new"),
+            ("cas-0ef5-inherited", "cas-0ef5-old", false, "epic/old", TaskStatus::InProgress, "epic/new"),
+            ("cas-0ef5-distinct", "cas-0ef5-old", true, "release/selected", TaskStatus::Blocked, "release/selected"),
+            ("cas-0ef5-branch-only", "cas-0ef5-legacy", true, "epic/legacy", TaskStatus::Open, "epic/new"),
+        ] {
+            let mut task = Task::new(id.into(), "Move between release trains".into());
+            task.status = status;
+            task.deliverables.work_target = Some(target(branch));
+            task.deliverables.work_target_pinned = pinned;
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target(branch), assignee: "prior-worker".into(),
+                branch: "factory/prior-worker".into(), base_sha: "a".repeat(40),
+            });
+            store.add(&task).unwrap();
+            store.add_dependency(&Dependency::new(
+                id.into(), parent.into(), DependencyType::ParentChild,
+            )).unwrap();
+            let response = core.cas_task_update(Parameters(serde_json::from_value(
+                serde_json::json!({"id":id,"epic":"cas-0ef5-new"}),
+            ).unwrap())).await.unwrap();
+            assert_ne!(response.is_error, Some(true), "{response:?}");
+            let moved = store.get(id).unwrap();
+            let actual = moved.deliverables.work_target.as_ref().unwrap();
+            if actual != &target(expected) {
+                failures.push(format!("{id}: expected {}, got {}", expected, actual.target_branch));
+            }
+            assert_eq!(parent_of(&store, id), vec!["cas-0ef5-new".to_string()]);
+            assert_eq!(moved.deliverables.factory_branch_start, task.deliverables.factory_branch_start);
+            if branch == expected {
+                let reply = response.content.iter().filter_map(|c| c.as_text())
+                    .map(|c| c.text.as_str()).collect::<String>();
+                if !reply.contains(branch) {
+                    failures.push(format!("{id}: preserved branch {branch} absent from reply"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[tokio::test]

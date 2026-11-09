@@ -204,7 +204,8 @@ struct CellCapture {
     png: String,
     jpg: String,
     sha256: String,
-    jpg_sha256: String,
+    // Schema 1 predates JPG seals; schema 2 requires both image digests.
+    jpg_sha256: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,9 +244,15 @@ fn validate_pairs(
         .map_err(|e| refuse(format!("unreadable files.pairs: {e}")))?;
     let pairs: EvidencePairs =
         serde_json::from_str(&raw).map_err(|e| refuse(format!("malformed files.pairs: {e}")))?;
-    if pairs.schema != 1 || pairs.task_id != ctx.task_id || pairs.head_sha != head {
+    if !matches!(pairs.schema, 1 | 2) {
+        return Err(EvidenceRefusal::new(
+            format!("unsupported files.pairs schema {}", pairs.schema),
+            "use a reader supporting this schema or migrate with explicit provenance; preserve the original capture bytes and manifest",
+        ));
+    }
+    if pairs.task_id != ctx.task_id || pairs.head_sha != head {
         return Err(refuse(
-            "files.pairs must use schema 1 and match bundle task_id/head_sha".into(),
+            "files.pairs must match bundle task_id/head_sha".into(),
         ));
     }
     for cell in &pairs.pairs {
@@ -326,19 +333,28 @@ fn validate_pairs(
         for (id, capture) in cells {
             let key = format!("pairs.{phase}[{id}]");
             for (kind, relative, expected) in [
-                ("png", &capture.png, &capture.sha256),
-                ("jpg", &capture.jpg, &capture.jpg_sha256),
+                ("png", &capture.png, Some(capture.sha256.as_str())),
+                ("jpg", &capture.jpg, capture.jpg_sha256.as_deref()),
             ] {
                 let key = format!("{key}.{kind}");
                 let file = resolve_bundle_file(dir, &key, relative)?;
                 if !std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
                     return Err(refuse(format!("files.{key} must name a nonempty capture")));
                 }
-                if expected.len() != 64
-                    || crate::deliverable::pairs::digest(&file).ok().as_ref() != Some(expected)
-                {
+                // Historical schema 1 authenticated the PNG only. Keep its
+                // original evidence intact and verify any JPG seal it supplies.
+                if let Some(expected) = expected {
+                    if expected.len() != 64
+                        || crate::deliverable::pairs::digest(&file).ok().as_deref() != Some(expected)
+                    {
+                        return Err(refuse(format!(
+                            "files.{key} bytes do not match their SHA-256"
+                        )));
+                    }
+                } else if pairs.schema != 1 {
                     return Err(refuse(format!(
-                        "files.{key} bytes do not match their SHA-256"
+                        "files.{key} requires a SHA-256 in pairs schema {}",
+                        pairs.schema
                     )));
                 }
                 listed.push((key, file));

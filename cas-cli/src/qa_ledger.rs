@@ -91,6 +91,7 @@ pub struct Report {
     pub ok: bool,
     pub schema_version: u32,
     pub rows: Vec<Row>,
+    pub covers: Option<Vec<String>>,
     pub counts: BTreeMap<String, usize>,
     pub labels: BTreeMap<String, usize>,
     pub diagnostics: Vec<Diagnostic>,
@@ -113,6 +114,18 @@ impl Report {
             message: message.into(),
             remedy: remedy.into(),
         });
+    }
+    /// An explicit expected set makes missing metadata a pre-publish error.
+    pub fn require_coverage(&mut self, expected: &[String]) {
+        for id in expected {
+            if !self.covers.as_ref().is_some_and(|ids| ids.contains(id)) {
+                self.error(1, None, "covers", "coverage_missing",
+                    format!("ledger coverage does not include {id}"),
+                    "set covers: to every delivery ID in the intended receipt; check with --covers <ids>");
+            }
+        }
+        self.diagnostics.sort_by_key(|d| d.line);
+        self.ok = self.diagnostics.is_empty();
     }
     pub fn refusal(&self) -> String {
         self.diagnostics
@@ -153,9 +166,64 @@ fn cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Task IDs are protocol data shared by CLI flags and ledger metadata.
+pub fn covered_task_id(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.starts_with("cas-") && value.len() > 4
+        && value.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        Ok(value.to_owned())
+    } else {
+        Err("covered delivery must be a cas-* task ID".into())
+    }
+}
+
+/// Read coverage alone so free-form release reports share the ledger contract.
+/// Missing headers remain compatible with historical receipts; callers that
+/// know the intended batch use require_coverage before publishing.
+pub fn coverage(body: &str) -> Report {
+    let mut report = Report { schema_version: 1, ..Report::default() };
+    let mut fence = None;
+    let mut matrix = false;
+    let expected_header = cells(HEADER);
+    for (index, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = line.chars().next().unwrap();
+            if fence == Some(marker) { fence = None; }
+            else if fence.is_none() { fence = Some(marker); }
+            continue;
+        }
+        if fence.is_some() { continue; }
+        if line.contains('|') && cells(line) == expected_header { matrix = true; }
+        let Some(value) = line.strip_prefix("covers:") else { continue; };
+        if matrix || report.covers.is_some() {
+            report.error(index + 1, None, "covers", "coverage_header",
+                "coverage is duplicated or appears after the evidence matrix",
+                "keep one covers: header before the matrix");
+        }
+        let mut ids = BTreeSet::new();
+        for token in value.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
+            match covered_task_id(token) {
+                Ok(id) if !ids.contains(&id) => { ids.insert(id); }
+                _ => report.error(index + 1, None, "covers", "coverage_id",
+                    format!("invalid or duplicate covered task ID {token:?}"),
+                    "list distinct cas-* task IDs separated by commas or spaces"),
+            }
+        }
+        if ids.is_empty() {
+            report.error(index + 1, None, "covers", "coverage_id", "coverage is empty",
+                "list every delivery ID in the intended receipt");
+        }
+        report.covers = Some(ids.into_iter().collect());
+    }
+    report.ok = report.diagnostics.is_empty();
+    report
+}
+
 /// Parse without filesystem I/O. Journey coverage consumes these same typed rows.
 pub fn parse(body: &str, min_rows: usize) -> Report {
-    let mut report = Report { schema_version: 1, ..Report::default() };
+    let mut report = coverage(body);
     let mut declared_schema = false;
     let cited = regex::Regex::new(r"\b[A-Za-z0-9_./-]+\.[A-Za-z0-9]+:[1-9][0-9]*\b").unwrap();
     let user_outcome = regex::Regex::new(r"(?:^|;\s*)(?:visible|terminal|http):\s*[^;\s]").unwrap();
@@ -517,6 +585,15 @@ pub fn minimum_rows(task: &cas_types::Task) -> usize {
 
 /// Honest starting point. Predicted journeys retain their IDs for G8 coverage.
 pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision: &str) -> String {
+    scaffold_with_coverage(task, journeys, revision, &[])
+}
+
+pub fn scaffold_with_coverage(
+    task: &cas_types::Task,
+    journeys: &[(String, String)],
+    revision: &str,
+    covers: &[String],
+) -> String {
     let no_code = task.execution_note.as_deref() == Some("no-code");
     let mut rows: Vec<_> = journeys
         .iter()
@@ -548,8 +625,10 @@ pub fn scaffold(task: &cas_types::Task, journeys: &[(String, String)], revision:
         "NOT EXERCISED: not run against the named build"
     };
     let clean = |s: &str| s.replace(['\n', '\r'], " ").replace('|', "\\|");
+    let coverage = if covers.is_empty() { String::new() }
+        else { format!("covers: {}\n", covers.join(", ")) };
     let mut out = format!(
-        "# QA evidence: {}\n\nschema: 2\nbuild: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "# QA evidence: {}\n\nschema: 2\n{coverage}build: {}\nscope: {}\nsurface: {}\nbudget: 30 minutes\ncells={}; PASS=0; FAIL=0; NOT EXERCISED={}; NOT A ROUTE={}\nlabels: source-inferred={}\nsweep: not configured\n\n{}\n| --- | --- | --- | --- | --- | --- | --- | --- |\n",
         task.id,
         clean(revision),
         clean(&task.title),

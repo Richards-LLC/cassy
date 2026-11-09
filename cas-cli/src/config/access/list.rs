@@ -197,6 +197,7 @@ impl Config {
                 "factory.scratch_root".to_string(),
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
+            ("factory.codex_home".to_string(), factory.codex_home.clone().unwrap_or_default()),
             (
                 "factory.worker_local_gate".to_string(),
                 factory.worker_local_gate.clone().unwrap_or_default(),

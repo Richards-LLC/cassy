@@ -3486,7 +3486,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-card .conversation-avatar .supervisor-state { width: 8px; height: 8px; border-width: 1px; }
 .project-card .conversation-who { flex-wrap: nowrap; gap: var(--space-1); min-width: 0; overflow: hidden; white-space: nowrap; font: var(--weight-regular) var(--fs-meta)/1.35 var(--font-ui); }
 .conversation-role { flex: none; color: var(--ink); font-weight: var(--weight-medium); }
-.project-card .conversation-machine-name { flex: 0 1 auto; color: var(--ink-mid); font-size: var(--fs-xs); }
+/* cas-d898: in a narrow card the machine name and an unused Most recent slot give way; the supervisor name keeps its width and ellipsizes only when it alone exceeds the line (less its two gaps). */
+.project-card .conversation-role { max-width: calc(100% - var(--space-2)); overflow: hidden; text-overflow: ellipsis; }
+.project-card .conversation-machine-name { flex: 0 1000 auto; color: var(--ink-mid); font-size: var(--fs-xs); }
+.project-card .conversation-session-slot[aria-hidden="true"] { flex: 0 1000 auto; min-width: 0; overflow: hidden; }
 .project-card .conversation-machine-name::before { content: "· "; }
 .project-card .conversation-supervisor-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-soft); font: var(--weight-regular) var(--fs-xs)/1.35 var(--font-mono); }
 .project-card .conversation-when { font-family: var(--font-mono); }

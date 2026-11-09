@@ -30864,7 +30864,7 @@ esac
         let service = CasService::new(core, None);
         let create_dispatch = |deadline| cas_store::create_verification_dispatch_bound(
             &cas_dir, &epic.id, "task-verifier", actor,
-            &VerificationProofBoundary::task(), deadline, false,
+            &VerificationProofBoundary::task(), deadline, true,
         ).unwrap();
         let stale = create_dispatch(chrono::Utc::now() - chrono::Duration::minutes(1));
         cas_store::timeout_verification_dispatch(&cas_dir, &epic.id, chrono::Utc::now()).unwrap();
@@ -30873,7 +30873,8 @@ esac
             "action": "add", "task_id": epic.id, "dispatch_id": stale.id,
             "status": "approved", "verification_type": "epic", "summary": "Reviewed old epic",
         })).unwrap();
-        assert!(service.verification(Parameters(stale_verdict)).await.is_err());
+        let old_result = service.verification(Parameters(stale_verdict)).await.unwrap();
+        assert_ne!(old_result.is_error, Some(true), "{old_result:?}");
         assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &current.id).unwrap().state,
             cas_types::VerificationDispatchState::Pending);
         cas_store::timeout_verification_dispatch(
@@ -30930,7 +30931,7 @@ esac
         }
         assert_eq!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
         assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &stale.id).unwrap().state,
-            cas_types::VerificationDispatchState::TimedOut);
+            cas_types::VerificationDispatchState::Resolved);
     }
 
     /// cas-f01b (GH #1068): the gabber-studio cas-cfd8 sequence through the

@@ -73,6 +73,7 @@
 - `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes and same-account capacity routing.
 - `cas-cli/src/epic_design_review.rs`, `cas-cli/src/cli/factory/queries.rs` - stakeholder defect staffing pauses and explicit message routing.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` - release-train guards, full-set proof and exact-tip retry notices.
+- `crates/cas-core/src/memory/handoff.rs` - per-project/role machine selection and supersession; owner/session stamps are audit metadata.
 - `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs` - context pressure, succession handoffs and startup recovery.
 - `cas-cli/src/supervisor_message_wakes.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/outbox.rs` - typed wake limits and explicit-ask merge holds.
 - `cas-cli/src/worktree/git/rescue.rs`, `cas-cli/src/worktree/retained.rs` - rescue refs and bounded retained-work inventories.
@@ -86,7 +87,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing and queue-proof validation.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - supervisor-granted import exclusions; shared rejection prose carries no grant authority.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - review dispatch, ordinary close recovery and lifecycle outbox.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - review dispatch, read-only backfill admission, ordinary close recovery and lifecycle outbox.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable candidates, plan/evidence binding, target-move rebinding and landed proof promotion.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs` - automatic verifier launch, sealed child authority, exact-child crash recovery and separate attempt diagnostics.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs`, `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - peer approvals and durable portable proof boundaries.
@@ -126,6 +127,7 @@
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/status-words.md`.
+- `cas-cli/src/cli/release_automation.rs` - train context, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py`, `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - **GitHub health:** `cas-cli/src/github_repo.rs`, `scripts/github_queue_health.py`, `scripts/github-queue-health.graphql` - bounded queue health and canonical repository identity.

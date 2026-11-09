@@ -4292,6 +4292,8 @@ mod tests {
         // Exercise launch delivery with evidence the supervisor policy admits.
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("codex-sup-session".into(), "codex-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 
@@ -4371,6 +4373,8 @@ mod tests {
         entry.title = Some("Current Grok release recovery guidance".to_string());
         entry.entry_type = crate::types::EntryType::Learning;
         entry.tags = vec!["handoff".to_string(), "role:supervisor".to_string()];
+        let author = crate::types::Agent::new_with_role("grok-sup-session".into(), "grok-sup".into(), crate::types::AgentRole::Supervisor);
+        cas_core::memory::handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
 

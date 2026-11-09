@@ -67,6 +67,7 @@ impl CasService {
         let inner_req = EntryUpdateRequest {
             valid_until: req.valid_until,
             id: req.id.ok_or_else(|| self.missing_id("memory", "update"))?,
+            title: req.title,
             content: req.content,
             tags: req.tags,
             importance: req.importance,

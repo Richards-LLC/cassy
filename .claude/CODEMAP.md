@@ -137,6 +137,7 @@
 - `crates/cas-store/src/history_store.rs` - batched history provenance repair and indexed worker commit-prefix lookup.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - durable prompts, guarded unread-mail succession, recipient surfacing and QA maintenance.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
+- `cas-cli/src/mcp/tools/service/core.rs`, `cas-cli/src/mcp/tools/core/memory.rs`, `cas-cli/src/mcp/tools/service/memory_lifecycle_tests.rs` - public memory dispatch, partial title/content updates, structured changed-field receipts and real-store lifecycle regressions.
 - `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/mcp/tools/core/rules.rs` - rule comparison, stakeholder attribution, rule source/hold listing and encode chores. `cas-cli/src/mcp/tools/service/core.rs` routes authenticated personal-rule creation through `cas-cli/src/mcp/tools/service/pattern_ops.rs`. Candidate writes require two independent completed task/verdict citations before atomically recording a bundle.
 - `crates/cas-types/src/entry/behavior.rs`, `cas-cli/src/migration/migrations/m294_rules_stakeholder.rs` - temporal validity and stakeholder provenance migration.
 

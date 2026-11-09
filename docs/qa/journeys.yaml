@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  lazy-media-reader-destination:
+    title: A reader claims the media attachment before lazy preview readiness and expired video resumes playback
+    tasks: [cas-20ab]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]

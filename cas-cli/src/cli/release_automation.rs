@@ -455,6 +455,10 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
     crate::qa_batch::release_tag_ships_delivery(repo, anchor, tag_sha, &child.id)
 }
 
+fn preview_release_close_hold(_root: &Path, _child: &cas_types::Task, _repo: &Path) -> Option<String> {
+    None
+}
+
 fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool) -> Result<String> {
     let (repo, _integration) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("release train has no integration branch")?;
@@ -1131,6 +1135,74 @@ mod tests {
                 && receipt.ledger_author_id.is_none()
         }));
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no close changes"));
+    }
+
+    fn published_backfill_fixture() -> (tempfile::TempDir, PathBuf, Task, Task) {
+        let (temp, root, mut train, _, _) = fixture();
+        let repo = temp.path();
+        fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id = 'release-fixture'\n[factory]\nepic_base_branch = 'main'\nrelease_train = true\n[qa]\nmode = 'batch'\n").unwrap();
+        let bare = repo.join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["tag", "v4.3.0"]).unwrap();
+        git(repo, &["push", "origin", "main", train.branch.as_deref().unwrap(), "--tags"]).unwrap();
+        train.labels.push("release-train-cut".into());
+        let store = open_task_store(&root).unwrap();
+        store.update(&train).unwrap();
+        let mut successor = Task::new("cas-next001".into(), "Next train".into());
+        successor.task_type = TaskType::Epic;
+        successor.labels.push("release-train".into());
+        successor.branch = Some("epic/release-train-next001".into());
+        successor.deliverables.work_target = train.deliverables.work_target.clone();
+        store.add(&successor).unwrap();
+        (temp, root, train, successor)
+    }
+
+    #[test]
+    fn backfill_skips_frozen_uncut_successors_cas_e8cc() {
+        let (temp, root, train, mut successor) = published_backfill_fixture();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(temp.path());
+        successor.labels.push(format!("release-train-frozen:1:{}", git(temp.path(), &["rev-parse", "HEAD"]).unwrap()));
+        let store = open_task_store(&root).unwrap();
+        store.update(&successor).unwrap();
+        let child = Task::new("cas-a101".into(), "Unfinished historical work".into());
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        assert!(preview_shipped_train(&root, &train.id, "v4.3.0").is_err());
+        assert!(close_shipped_train(&root, &train.id, "v4.3.0").is_err());
+        assert_eq!(store.get_parent_epic(&child.id).unwrap().unwrap().id, train.id);
+        assert!(store.get_subtasks(&successor.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backfill_preview_checks_release_close_admission_cas_e8cc() {
+        let (temp, root, train, _) = published_backfill_fixture();
+        let repo = temp.path();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        let store = open_task_store(&root).unwrap();
+        let mut child = Task::new("cas-a100".into(), "Shipped dedicated review".into());
+        child.origin_project = Some("release-fixture".into());
+        child.status = TaskStatus::AwaitingMerge;
+        child.deliverables.factory_branch_anchor = Some(git(repo, &["rev-parse", "HEAD"]).unwrap());
+        child.deliverables.work_target = train.deliverables.work_target.clone();
+        store.create_atomic(&child, &[], Some(&train.id), None).unwrap();
+        for gate in ["own-review", "ci-override", "request-changes"] {
+            let mut held = child.clone();
+            if gate == "ci-override" {
+                held.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Override);
+            } else if gate == "request-changes" {
+                held.status = TaskStatus::Open;
+                held.deliverables.historical_factory_branch_anchors = held.deliverables.factory_branch_anchor.take().into_iter().collect();
+            }
+            store.update(&held).unwrap();
+            assert!(preview_release_close_hold(&root, &held, repo).is_some(), "{gate}");
+            preview_shipped_train(&root, &train.id, "v4.3.0").unwrap();
+            assert_eq!(store.get(&held.id).unwrap().status, held.status);
+            assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Open);
+            assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &held.id).unwrap().is_empty());
+        }
     }
 
     #[test]

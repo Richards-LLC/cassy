@@ -424,6 +424,7 @@ impl CasCore {
             daemon,
             agent_id: std::sync::OnceLock::new(),
             agent_identity_source: std::sync::OnceLock::new(),
+            cli_harness: None,
             worker_mcp_activity: Default::default(),
             peer: std::sync::Arc::new(std::sync::RwLock::new(None)),
             cached_store: std::sync::OnceLock::new(),

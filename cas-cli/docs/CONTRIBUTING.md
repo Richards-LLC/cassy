@@ -1197,7 +1197,12 @@ responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
 A live registered supervisor can run `cas artifact revoke <id> --reason <reason>`
 or call `artifact action=revoke id=<id> reason=<reason>`. Both use the same
 registry-backed authority check; a role environment variable alone cannot
-revoke. Cloud authenticates owner/team access but cannot distinguish supervisors
+revoke. The CLI resolves its nearest harness ancestor through shell/timeout
+wrappers and verifies that process against the registered owner's fingerprint;
+a nested harness cannot reuse an outer supervisor's identity. MCP keeps its
+own front-harness binding. Refusals name the underlying authority failure and
+MCP supplies a stable `authority_stage` beside the rule ID.
+Cloud authenticates owner/team access but cannot distinguish supervisors
 from other team members; supervisor-only authority is a client rule. Unknown
 and other-team artifact IDs both return 404. The first immutable local tombstone retains the artifact ID, actor ID,
 reason and revocation time alongside the original upload metadata. Repeats

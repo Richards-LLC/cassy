@@ -25,10 +25,23 @@ use crate::cli::render_artifact_line;
 impl CasCore {
     /// Shared CLI/MCP authority boundary. No role environment override is accepted.
     pub(crate) fn revoke_artifact(&self, id: &str, reason: &str) -> Result<crate::artifacts::RevokeOutcome, McpError> {
-        let actor = self.resolve_live_supervisor_authority().map_err(|_| McpError {
-            code: ErrorCode::INVALID_REQUEST,
-            message: "Artifact revocation requires a live registered supervisor".into(),
-            data: Some(serde_json::json!({"rule_id": "artifact_revoke_supervisor_only"})),
+        let actor = self.resolve_live_supervisor_authority().map_err(|error| {
+            use super::task::lifecycle::close_ops::SupervisorAuthorityError;
+            let (stage, cause) = match error {
+                SupervisorAuthorityError::Identity(error) => ("identity", error),
+                SupervisorAuthorityError::Store(error) => ("store", error),
+                SupervisorAuthorityError::NotRegistered { caller_id, error } =>
+                    ("registration", format!("caller {caller_id} is not registered: {error}")),
+                SupervisorAuthorityError::NotLive(caller) =>
+                    ("liveness", format!("caller {} has role {} and status {}", caller.id, caller.role, caller.status)),
+            };
+            McpError {
+                code: ErrorCode::INVALID_REQUEST,
+                message: format!("Artifact revocation requires a live registered supervisor ({stage}): {cause}").into(),
+                data: Some(serde_json::json!({
+                    "rule_id": "artifact_revoke_supervisor_only", "authority_stage": stage,
+                })),
+            }
         })?;
         let id = id.trim();
         let reason = reason.trim();
@@ -390,7 +403,9 @@ mod tests {
                 let request = serde_json::json!({"action":"revoke", "id":artifact_id, "reason":reason});
                 let error = unauthorized.artifact(Parameters(serde_json::from_value(request).unwrap()))
                     .await.unwrap_err();
-                assert_eq!(error.data.unwrap()["rule_id"], "artifact_revoke_supervisor_only");
+                let data = error.data.unwrap();
+                assert_eq!(data["rule_id"], "artifact_revoke_supervisor_only");
+                assert_eq!(data["authority_stage"], "liveness");
                 assert_eq!(store.get(artifact_id).unwrap().unwrap(), before);
             }
         }
@@ -399,7 +414,9 @@ mod tests {
             let before = store.get(artifact_id).unwrap().unwrap();
             let request = serde_json::json!({"action":"revoke", "id":artifact_id, "reason":reason});
             let error = anonymous.artifact(Parameters(serde_json::from_value(request).unwrap())).await.unwrap_err();
-            assert_eq!(error.data.unwrap()["rule_id"], "artifact_revoke_supervisor_only");
+            let data = error.data.unwrap();
+            assert_eq!(data["rule_id"], "artifact_revoke_supervisor_only");
+            assert_eq!(data["authority_stage"], "identity");
             assert_eq!(store.get(artifact_id).unwrap().unwrap(), before);
         }
         for artifact_id in ["art-6d36", "art-6d37", "art-6d38"] {

@@ -133,7 +133,7 @@ pub fn execute(
         }
         ArtifactCommands::List(args) => execute_list(args, cas_root, cli.json),
         ArtifactCommands::Revoke(args) => {
-            let core = crate::mcp::CasCore::with_daemon(cas_root.to_path_buf(), None, None);
+            let core = crate::mcp::CasCore::for_cli(cas_root.to_path_buf());
             let outcome = core.revoke_artifact(&args.id, &args.reason)
                 .map_err(|error| anyhow::anyhow!("{}", error.message))?;
             if cli.json {

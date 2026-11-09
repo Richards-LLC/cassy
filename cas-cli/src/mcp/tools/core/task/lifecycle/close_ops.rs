@@ -669,9 +669,10 @@ fn validate_completion_artifact_path(
         .map_err(|error| reject(format!("could not load [factory] artifacts_root: {error}")))?;
     let configured_root =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-    let canonical_artifact = artifact_path.canonicalize().map_err(|_| reject(
-        "artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<project-key>/<task-id>/.".to_string()
-    ))?;
+    let canonical_artifact = artifact_path.canonicalize().map_err(|error| reject(format!(
+        "completion artifact path gate: could not resolve {}: {error}. artifact_path must name an existing durable file or directory under configured [factory] artifacts_root/<project-key>/<task-id>/.",
+        artifact_path.display(),
+    )))?;
     let dirs = crate::config::factory_task_artifact_dirs(cas_root, &configured_root, task_id);
     let permitted = dirs
         .iter()
@@ -2160,11 +2161,11 @@ fn read_task_scoped_log(
         .map_err(|error| format!("scoped log path rejected: {error}"))?;
     let path = std::path::Path::new(path);
     let metadata =
-        std::fs::metadata(path).map_err(|error| format!("scoped log unreadable: {error}"))?;
+        std::fs::metadata(path).map_err(|error| format!("scoped log unreadable at {}: {error}", path.display()))?;
     if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
         return Err("scoped log must be a file no larger than 32 MiB".into());
     }
-    std::fs::read_to_string(path).map_err(|error| format!("scoped log unreadable: {error}"))
+    std::fs::read_to_string(path).map_err(|error| format!("scoped log unreadable at {}: {error}", path.display()))
 }
 
 fn validate_inherited_scoped_failures(

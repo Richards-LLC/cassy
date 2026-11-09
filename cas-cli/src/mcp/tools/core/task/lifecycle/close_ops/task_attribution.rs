@@ -46,9 +46,10 @@ pub(super) fn validated_started_delivery(
             &start.work_target.repo_selector,
         )
     };
+    let checkout_identity_matches = repository_matches(repo);
     if task.deliverables.work_target.as_ref() != Some(&start.work_target)
         || task.assignee.as_deref() != Some(start.assignee.as_str())
-        || !(repository_matches(repo)
+        || !(checkout_identity_matches
             || crate::mcp::tools::core::task::repo_context::git_layout(repo)
                 .is_ok_and(|(primary, _)| repository_matches(&primary)))
     {
@@ -207,6 +208,12 @@ pub(super) fn validated_started_delivery(
         if on_lane
             && (merged.is_empty()
                 || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+            // The inherited repository identity can recover real WIP, but
+            // cannot make an unnamed, unrecorded empty checkpoint task-owned.
+            // Such metadata-only commits still need their own attribution.
+            && (checkout_identity_matches
+                || commit_is_task_attributable(repo, sha, &identity)
+                || has_first_parent_tree_effect(repo, sha) == Some(true))
         {
             commits.push(sha.to_string());
         }

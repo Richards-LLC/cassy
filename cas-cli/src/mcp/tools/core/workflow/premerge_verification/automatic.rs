@@ -167,13 +167,7 @@ pub(super) fn launch(
     let output = directory.join("verdict.json");
     let (mut command, notice) = command(&core.cas_root, &output)?;
     command.current_dir(&proof.worktree_root);
-    let handle = launch_command(core, task, dispatch, command, output)?;
-    if handle.is_some()
-        && let Some(notice) = notice
-    {
-        attention(core, dispatch, &notice)?;
-    }
-    Ok(handle)
+    launch_command(core, task, dispatch, command, output, notice)
 }
 
 fn launch_command(
@@ -182,6 +176,7 @@ fn launch_command(
     dispatch: &VerificationDispatch,
     mut command: Command,
     output: PathBuf,
+    notice: Option<String>,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| e.to_string())?;
@@ -221,18 +216,21 @@ fn launch_command(
         &child,
     )
     .map_err(|e| e.to_string())?;
-    let core = core.clone();
+    let worker = core.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
-        let result = review(&core, &live, &child.id, &mut command, &input, &output);
+        let result = review(&worker, &live, &child.id, &mut command, &input, &output);
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
-        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&core, &live) {
-            let _ = attention(&core, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
+        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
+            let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
         }
-        if let Ok(agents) = core.open_agent_store() {
+        if let Ok(agents) = worker.open_agent_store() {
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
+    if let Some(notice) = notice {
+        attention(core, dispatch, &notice)?;
+    }
     Ok(Some(handle))
 }
 
@@ -411,6 +409,48 @@ pub(super) async fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cas_ce3e_launched_verifier_survives_attention_failure() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-ce3e-launch".into(), "Launch notification failure".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        crate::store::open_supervisor_queue_store(&root).unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "CREATE TRIGGER fail_notice BEFORE INSERT ON supervisor_queue
+             BEGIN SELECT RAISE(FAIL, 'injected notification failure'); END;",
+        ).unwrap();
+        assert!(attention(&core, &dispatch, "fallback").is_err());
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        // The provider boundary exits immediately; the real launch, dispatch
+        // claim, notice and child cleanup still run against the actual store.
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        let result = launch_command(
+            &core, &task, &dispatch, command, directory.join("verdict.json"),
+            Some("fallback".into()),
+        );
+        let handle = result.expect("a notice failure must not report a failed launch")
+            .expect("the verifier was launched");
+        handle.join().unwrap();
+        let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert!(owns(&root, &claimed));
+        assert_eq!(claimed.state, cas_types::VerificationDispatchState::Claimed);
+    }
 
     #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {

@@ -1633,6 +1633,40 @@ mod lifecycle_friction_tests {
     }
 
     #[tokio::test]
+    async fn cas_ce3e_dead_active_verifier_allows_supervisor_verdict() {
+        let mut env = TestEnvGuard::temp_home();
+        let (_dir, core, task, dispatch) = fixture(&mut env);
+        let mut process = std::process::Command::new("sh")
+            .args(["-c", "exit 0"]).spawn().unwrap();
+        let mut child = Agent::new_sub_agent(
+            "exited-verifier".into(), "task-verifier".into(), "review-supervisor".into(),
+        );
+        child.pid = Some(process.id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut child, process.id());
+        process.wait().unwrap();
+        core.open_agent_store().unwrap().register(&child).unwrap();
+        let issued = cas_store::issue_verifier_capability(
+            &core.cas_root, &task.id, "review-supervisor",
+        ).unwrap();
+        cas_store::bind_verifier_capability(&core.cas_root, &issued.token, &child.id).unwrap();
+        cas_store::claim_verification_dispatch(
+            &core.cas_root, &task.id, "review-supervisor", &child.id, &issued.capability.id,
+        ).unwrap();
+        let result = core.cas_verification_add(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "task_id":task.id,"dispatch_id":dispatch.id,
+                "status":"rejected","summary":"Recover after verifier exit",
+                "issues":"[{\"file\":\"src/lib.rs\",\"category\":\"correctness\",\"problem\":\"incomplete\"}]"
+            })).unwrap(),
+        )).await.expect("an exited verifier cannot block a supervisor verdict");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
+            .unwrap().unwrap();
+        assert_eq!(recorded.status, VerificationStatus::Rejected);
+        assert_eq!(recorded.provenance, cas_types::VerificationProvenance::SupervisorDirect);
+    }
+
+    #[tokio::test]
     async fn cas_5dc0_first_add_binds_the_unique_active_dispatch_without_retry() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);

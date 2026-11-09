@@ -17,12 +17,18 @@ pub(super) fn owns(root: &Path, dispatch: &VerificationDispatch) -> bool {
 fn prompt(core: &CasCore, task: &Task, dispatch: &VerificationDispatch) -> Result<String, String> {
     let store = core.open_task_store().map_err(|e| e.to_string())?;
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
+    let inherited = candidate_for_dispatch(&core.cas_root, dispatch)?
+        .and_then(|candidate| candidate.inherited_supervisor_call)
+        .map(|call| serde_json::to_string(&call).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_else(|| "none".into());
     Ok(format!(
-        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This transport replaces only the MCP recording step above. Missing evidence requires supervisor_call.\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
+        "{}\n\n{}\n\nDaemon-owned task-verifier invocation. The task and parent below include acceptance criteria, receipts and supervisor adversarial notes. Review the bound candidate using read-only filesystem commands. Do not edit, register, close, spawn agents, or call MCP. Return exactly one JSON object containing the arguments to verification action=add: status (approved, rejected, supervisor_call, or error), summary, confidence, files_reviewed (comma-separated), issues (JSON-encoded array). Omit task_id, dispatch_id and verifier_capability: the daemon supplies the immutable dispatch identity and records your verdict through the existing sealed handoff. This daemon-owned transport replaces the MCP identity check and recording steps above; the daemon authenticates your distinct child and exact dispatch. Missing evidence requires supervisor_call.\nAn inherited supervisor call is present only when the value below is not `none`. It carries a prior answer for an unchanged delivery and must be applied only to that exact NOT EXERCISED row/question. Cite that inherited answer in your verdict; if the current question is different, make a new supervisor_call.\nInherited supervisor call: {}\nTask evidence directory (LEDGER.md, logs and captures; read this exact path instead of deriving <project-key>): {}. If evidence is absent there, name this absolute path in the verdict.\nTask: {}\nParent: {}\nDispatch: {}\n",
         include_str!("../../../../../builtins/agents/task-verifier.body.md"),
         include_str!(
             "../../../../../builtins/skills/cas-qa-craft/references/verifier-evidence-gate.md"
         ),
+        inherited,
         crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(
             &core.cas_root,
             task,
@@ -158,22 +164,23 @@ pub(super) fn launch(
     task: &Task,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
+    if cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+        .map_err(|e| e.to_string())?.state != cas_types::VerificationDispatchState::Pending {
+        return Ok(None);
+    }
     let proof = dispatch
         .repository
         .as_ref()
         .ok_or("candidate proof missing")?;
-    let directory = core.cas_root.join("verification-runs").join(&dispatch.id);
+    // A replacement must not read an earlier attempt's verdict or overwrite
+    // its stderr. The exact dispatch and candidate remain unchanged.
+    let directory = core.cas_root.join("verification-runs").join(&dispatch.id)
+        .join(format!("attempt-{:032x}", rand::random::<u128>()));
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
     let (mut command, notice) = command(&core.cas_root, &output)?;
     command.current_dir(&proof.worktree_root);
-    let handle = launch_command(core, task, dispatch, command, output)?;
-    if handle.is_some()
-        && let Some(notice) = notice
-    {
-        attention(core, dispatch, &notice)?;
-    }
-    Ok(handle)
+    launch_command(core, task, dispatch, command, output, notice)
 }
 
 fn launch_command(
@@ -182,6 +189,7 @@ fn launch_command(
     dispatch: &VerificationDispatch,
     mut command: Command,
     output: PathBuf,
+    notice: Option<String>,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| e.to_string())?;
@@ -192,7 +200,7 @@ fn launch_command(
     let input = output.with_file_name("prompt.txt");
     std::fs::write(&input, body).map_err(|e| e.to_string())?;
     let mut child = cas_types::Agent::new_sub_agent(
-        format!("task-verifier-{}", live.id),
+        format!("task-verifier-{:032x}", rand::random::<u128>()),
         "task-verifier".into(),
         live.owner_agent_id.clone(),
     );
@@ -221,18 +229,43 @@ fn launch_command(
         &child,
     )
     .map_err(|e| e.to_string())?;
-    let core = core.clone();
+    let worker = core.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
-        let result = review(&core, &live, &child.id, &mut command, &input, &output);
+        let result = review(&worker, &live, &child.id, &mut command, &input, &output);
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
-        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&core, &live) {
-            let _ = attention(&core, &live, &format!("Automatic verifier stopped: {error}. Review or recover this exact dispatch."));
+        if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
+            let error = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error);
+            match cas_store::release_failed_verifier_dispatch(&worker.cas_root, &live.id, &child.id, &error) {
+                Ok(true) => {
+                    let retry = candidate_for_dispatch(&worker.cas_root, &live)
+                        .ok().flatten()
+                        .map(|candidate| format!(
+                            "Retry factory action=worktree_merge id={} task_id={}; one replacement will claim this exact dispatch.",
+                            candidate.source_branch, live.task_id
+                        ))
+                        .unwrap_or_else(|| format!(
+                            "Retry the automatic verifier handoff on exact dispatch {}.", live.id
+                        ));
+                    let _ = attention(&worker, &live, &format!(
+                        "Automatic verifier stopped: {error}. Its claim was released and audited. {retry}"
+                    ));
+                }
+                Ok(false) => {} // A verdict, timeout or replacement already owns recovery.
+                Err(recovery) => {
+                    let _ = attention(&worker, &live, &format!("Automatic verifier stopped: {error}. Claim recovery failed: {recovery}. Inspect this exact dispatch before retrying."));
+                }
+            }
         }
-        if let Ok(agents) = core.open_agent_store() {
+        if let Ok(agents) = worker.open_agent_store() {
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
+    if let Some(notice) = notice
+        && let Err(error) = attention(core, dispatch, &notice)
+    {
+        tracing::warn!(dispatch_id = %dispatch.id, %error, "Verifier launched; follow-up notice failed");
+    }
     Ok(Some(handle))
 }
 
@@ -369,6 +402,7 @@ pub(super) async fn approved(
         dispatch.owner_agent_id.clone(),
         crate::mcp::AgentIdentitySource::ServerInternal,
     )?;
+    let _phase = crate::mcp::tools::service::mutation_receipt::phase("verification_auto_merge");
     let result = crate::async_runtime::heap_future(|| {
         owner.worktree_merge(
             &candidate.source_branch,
@@ -413,6 +447,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cas_ce3e_launched_verifier_survives_attention_failure() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-ce3e-launch".into(), "Launch notification failure".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        crate::store::open_supervisor_queue_store(&root).unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute_batch(
+            "CREATE TRIGGER fail_notice BEFORE INSERT ON supervisor_queue
+             BEGIN SELECT RAISE(FAIL, 'injected notification failure'); END;",
+        ).unwrap();
+        assert!(attention(&core, &dispatch, "fallback").is_err());
+        let directory = root.join("verification-runs").join(&dispatch.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        // The provider boundary exits immediately; the real launch, dispatch
+        // claim, notice and child cleanup still run against the actual store.
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        let result = launch_command(
+            &core, &task, &dispatch, command, directory.join("verdict.json"),
+            Some("fallback".into()),
+        );
+        let handle = result.expect("a notice failure must not report a failed launch")
+            .expect("the verifier was launched");
+        handle.join().unwrap();
+        let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert!(!owns(&root, &recovered));
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+    }
+
+    #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -436,8 +512,10 @@ if [ "$1" = login ]; then
     echo 'Logged in using ChatGPT'
     exit 0
 fi
-if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ] || [ "$CAS_TEST_VERIFIER_STATUS" = harness_failed ] || [ "$CAS_TEST_VERIFIER_STATUS" = malformed ]; then
     while [ ! -f "$CAS_TEST_VERIFIER_GATE" ]; do sleep 0.05; done
+fi
+if [ "$CAS_TEST_VERIFIER_STATUS" = late_error ]; then
     echo 'Task is already Closed' >&2
     exit 1
 fi
@@ -589,8 +667,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 .unwrap()
                 .unwrap();
             let candidate = candidate_for_dispatch(&root, &dispatch).unwrap().unwrap();
-            let directory = root.join("verification-runs").join(&dispatch.id);
-            std::fs::create_dir_all(&directory).unwrap();
+            let directory = std::fs::read_dir(root.join("verification-runs").join(&dispatch.id))
+                .unwrap().next().unwrap().unwrap().path();
             let output = directory.join("verdict.json");
             assert!(
                 core.emit_premerge_review_handoff(&task, &dispatch)
@@ -644,7 +722,12 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
             );
             let claimed = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
-            assert!(owns(&root, &claimed));
+            if matches!(status, "harness_failed" | "malformed") {
+                assert_eq!(claimed.state, cas_types::VerificationDispatchState::Pending);
+                assert!(!owns(&root, &claimed));
+            } else {
+                assert!(owns(&root, &claimed));
+            }
             let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
             if matches!(status, "malformed" | "harness_failed" | "late_error") {
                 assert!(verdict.is_none(), "failed transport cannot approve");
@@ -717,6 +800,36 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                             .contains(diagnostics.lines().next().unwrap())
                     );
                 }
+            }
+            if status == "harness_failed" {
+                let old_child = dispatch.verifier_agent_id.as_deref().unwrap();
+                let old_stderr = std::fs::read(output.with_file_name("harness.log")).unwrap();
+                std::fs::write(&response_path, serde_json::json!({
+                    "status":"approved", "summary":"replacement reviewed the candidate",
+                    "confidence":0.95, "files_reviewed":"README.md", "issues":"[]",
+                }).to_string()).unwrap();
+                env.set("CAS_TEST_VERIFIER_STATUS", "approved");
+                // Retry the merge's automatic handoff once, retaining its join
+                // handle so completion needs no new timer or polling loop.
+                let handle = core.emit_premerge_review_handoff(&task, &claimed).unwrap().unwrap();
+                let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+                assert_eq!(replacement.id, dispatch.id);
+                assert_ne!(replacement.verifier_agent_id.as_deref(), Some(old_child));
+                assert!(core.emit_premerge_review_handoff(&task, &replacement).unwrap().is_none());
+                let stale = CasCore::with_daemon(root.clone(), None, core.daemon.clone());
+                stale.bind_agent_identity(old_child.into(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+                let request = serde_json::from_value(serde_json::json!({
+                    "task_id":task.id, "dispatch_id":dispatch.id, "status":"rejected",
+                    "summary":"stale child's competing verdict", "issues":"[]",
+                })).unwrap();
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                assert!(runtime.block_on(stale.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).is_err());
+                handle.join().unwrap();
+                let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap().unwrap();
+                assert_eq!(verdict.status, VerificationStatus::Approved);
+                assert_eq!(verdict.agent_id, replacement.verifier_agent_id);
+                assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().is_some());
+                assert_eq!(std::fs::read(output.with_file_name("harness.log")).unwrap(), old_stderr);
             }
             eprintln!(
                 "AUTOMATIC_VERIFIER row={status} hand_launches=0 dispatch={} candidate={}",

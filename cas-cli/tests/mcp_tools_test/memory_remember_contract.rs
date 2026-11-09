@@ -435,3 +435,93 @@ async fn a_new_handoff_supersedes_the_previous_one_for_its_role_cas_0339() {
         worker.tags
     );
 }
+
+/// GH #1661: replay two supervisors clearing on different machines, then an
+/// renamed factory successor on A. Machine/session ownership must
+/// survive both supersession and the real SessionStart context builder.
+#[tokio::test]
+async fn supervisor_handoffs_stay_in_their_machine_lineage_cas_fb21() {
+    use cas_core::hooks::{DefaultHooksConfig, HookInput};
+    use cas_core::hooks::context::{ContextStores, build_context_with_stores};
+    use cas_core::memory::handoff;
+    use cas::types::{Agent, AgentRole};
+
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, _) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    let agents = cas::store::open_agent_store(&root).unwrap();
+    let memories = open_store(&root).unwrap();
+    let register = |id: &str, name: &str, machine: &str, session: &str| {
+        let mut agent = Agent::new_with_role(id.into(), name.into(), AgentRole::Supervisor);
+        agent.machine_id = Some(machine.into());
+        agent.factory_session = Some(session.into());
+        agents.register(&agent).unwrap();
+        let core = cas::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(id.into());
+        core
+    };
+    let save = |body: &str| {
+        let mut req = base_request(body.into(), "Handoff", "role:supervisor");
+        req.entry_type = "handoff".into();
+        req
+    };
+    let id = |result: rmcp::model::CallToolResult| {
+        assert_eq!(result.is_error, Some(false), "{result:?}");
+        result.structured_content.unwrap()["slug"].as_str().unwrap().to_string()
+    };
+    let a = register("a-old", "supervisor-a", "machine-a", "factory-a");
+    let a_old = id(a.cas_remember(Parameters(save("A approval receipt"))).await.unwrap());
+    let a_new = id(a.cas_remember(Parameters(save("A newest approval receipt"))).await.unwrap());
+    assert!(handoff::is_superseded(&memories.get(&a_old).unwrap()));
+    let b = register("b", "supervisor-a", "machine-b", "factory-b");
+    // Even caller-supplied ownership tags cannot borrow A's authorization.
+    let mut peer_request = save("B production approval receipt");
+    peer_request.tags = Some("role:supervisor,handoff-machine:machine-a,handoff-owner:supervisor:supervisor-a".into());
+    let b_id = id(b.cas_remember(Parameters(peer_request)).await.unwrap());
+    assert!(!handoff::is_superseded(&memories.get(&a_new).unwrap()));
+    let _other = register("a-other", "other-supervisor", "machine-a", "factory-other");
+    // A successor can have both a new name and a new factory process lifetime.
+    let restarted = register("a-restart", "replacement-supervisor", "machine-a", "factory-a-restart");
+    assert!(agents.get("b").unwrap().is_alive());
+    // Role-only legacy memories have unknown ownership and cannot carry local
+    // approvals, even when newer than every scoped handoff.
+    let mut legacy = cas::types::Entry::new("unowned-handoff".into(), "Unattributed approval".into());
+    legacy.tags = vec!["handoff".into(), "role:supervisor".into()];
+    memories.add(&legacy).unwrap();
+    let surfaced = |agent_id: Option<&str>, session_id: &str| {
+        let surfaced = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = surfaced.clone();
+        let callback: cas_core::hooks::context::SurfacedItemCallback = Box::new(move |id, kind, _| {
+            if kind == "handoff" { captured.lock().unwrap().push(id.to_string()); }
+        });
+        let stores = ContextStores {
+            project_store: Some(memories.as_ref()),
+            agent_store: Some(agents.as_ref()),
+            agent_id: agent_id.map(str::to_string),
+            ..ContextStores::empty()
+        };
+        let input = HookInput {
+            session_id: session_id.into(),
+            hook_event_name: "SessionStart".into(),
+            agent_role: Some("supervisor".into()),
+            ..Default::default()
+        };
+        build_context_with_stores(&input, &stores, &DefaultHooksConfig::new(), 10,
+            Some(&callback), "mcp__cs__").unwrap();
+        surfaced.lock().unwrap().clone()
+    };
+    for (agent, native_session, expected) in [
+        (Some("a-old"), "a-after-clear", Some(a_new.as_str())),
+        (Some("b"), "b-after-clear", Some(b_id.as_str())),
+        (Some("a-other"), "a-other", Some(a_new.as_str())),
+        (Some("a-restart"), "a-restart", Some(a_new.as_str())),
+        (None, "unknown-session", None),
+    ] {
+        assert_eq!(surfaced(agent, native_session), expected.into_iter().map(str::to_string).collect::<Vec<_>>());
+    }
+    let restart_id = id(restarted.cas_remember(Parameters(save("A restarted approval"))).await.unwrap());
+    assert!(handoff::is_superseded(&memories.get(&a_new).unwrap()));
+    assert!(!handoff::is_superseded(&memories.get(&b_id).unwrap()));
+    assert_eq!(surfaced(Some("a-restart"), "a-restart"), [restart_id.clone()]);
+    assert_eq!(surfaced(Some("a-other"), "a-other"), [restart_id]);
+}

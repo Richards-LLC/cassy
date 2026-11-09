@@ -826,7 +826,6 @@ fn auto_clear(root: &Path, session: &str, queue: &dyn PromptQueueStore, agent: &
         factory_session: session,
         harness_session: &cursor.source.harness_session,
         transcript: &cursor.path,
-        input_tokens: recorded.iter().filter_map(|(tokens, _)| *tokens).max(),
         at,
         mid_turn: cursor.pending.is_some(),
     };

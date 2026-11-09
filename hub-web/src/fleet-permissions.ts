@@ -30,7 +30,9 @@ export type FleetOperation =
   | "write-access"
   /** cas-2f4d: freeze the release train, or lift its freeze. */
   | "freeze-train"
-  | "lift-freeze";
+  | "lift-freeze"
+  /** cas-e060: pause or resume the train's automatic cut. */
+  | "auto-cut";
 
 /**
  * Operator decision: Stop, Restart and End session are destructive and need
@@ -49,6 +51,7 @@ const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "write-access": FACTORY_MANAGE_SCOPE,
   "freeze-train": FACTORY_OPERATE_SCOPE,
   "lift-freeze": FACTORY_MANAGE_SCOPE,
+  "auto-cut": FACTORY_OPERATE_SCOPE,
 };
 
 export function fleetOperationScope(operation: FleetOperation): Scope {

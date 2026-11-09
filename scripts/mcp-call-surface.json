@@ -553,6 +553,7 @@
         "proposal_reject",
         "ready",
         "rebind_branch",
+        "recover_delivery",
         "release",
         "reopen",
         "request_changes",

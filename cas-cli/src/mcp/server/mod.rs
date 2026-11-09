@@ -139,6 +139,48 @@ impl CasCore {
         Ok(())
     }
 
+    /// Native children can share their parent's MCP connection. Announcing a
+    /// child row there cannot change its immutable caller or authenticate a review.
+    pub(crate) fn ensure_public_child_identity(
+        &self,
+        session_id: &str,
+        parent_id: Option<&str>,
+        agent_type: Option<crate::types::AgentType>,
+    ) -> Result<(), McpError> {
+        if parent_id.is_none() && agent_type != Some(crate::types::AgentType::SubAgent) {
+            return Ok(());
+        }
+        if self.agent_id.get().is_none()
+            && std::env::var("CAS_SESSION_ID").is_ok_and(|id| !id.trim().is_empty())
+        {
+            // Registration can be the first native-child tool call. Establish
+            // the launch identity before considering its requested child row.
+            self.get_agent_id()?;
+        }
+        let Some(Some(bound_id)) = self.agent_id.get() else {
+            return Ok(());
+        };
+        let current = self.open_agent_store()?.get(bound_id).ok();
+        if session_id == bound_id && current.is_some_and(|agent| {
+            agent.agent_type == crate::types::AgentType::SubAgent
+                && agent.role == crate::types::AgentRole::Standard
+                && agent.parent_id.as_deref() == parent_id
+                && parent_id.is_some_and(|parent| parent != bound_id)
+        }) {
+            return Ok(()); // A separately authenticated child can refresh itself.
+        }
+        Err(McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(
+                "Child registration rejected: this MCP connection already belongs to another caller. Native Codex children share the parent's caller and cannot authenticate an independent review by registering. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to the exact dispatch. A registered supervisor may review and submit directly with supervisor_direct provenance. The existing caller is unchanged.",
+            ),
+            data: Some(serde_json::json!({
+                "rule_id": "shared_mcp_child_identity",
+                "caller_id": bound_id,
+            })),
+        })
+    }
+
     /// Helper: get cached store or initialize it.
     /// Safe for concurrent access — if two threads race, one wins and the other
     /// gets the canonical instance from `get()`.
@@ -731,6 +773,7 @@ impl CasCore {
         let agent_store = self.open_agent_store()?;
         if source == AgentIdentitySource::PublicRegistration {
             self.ensure_public_registration_target(&session_id)?;
+            self.ensure_public_child_identity(&session_id, parent_id.as_deref(), agent_type_hint)?;
         }
 
         let environment_role = crate::mcp::daemon::parse_agent_role_hint(
@@ -811,7 +854,14 @@ impl CasCore {
         }
 
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
-        agent.cc_session_id = Some(session_id.clone());
+        // cas-bfe3: server bootstrap reads CAS_SESSION_ID, the pane's launch
+        // session. A SessionStart rebind after /clear is newer, so an MCP
+        // reconnect keeps it instead of pointing the row (and the Commander
+        // mirror) back at the pre-clear transcript.
+        agent.cc_session_id = (source == AgentIdentitySource::ServerInternal)
+            .then(|| agent_store.get(&canonical_id).ok().and_then(|prior| prior.cc_session_id))
+            .flatten()
+            .or_else(|| Some(session_id.clone()));
 
         crate::mcp::daemon::register_with_role_reconciliation(
             agent_store.as_ref(),

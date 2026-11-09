@@ -353,12 +353,32 @@ impl IssuesConfig {
 /// configured here instead of being written into the shipped `cli-routing`
 /// skill (cas-37f6). The list is empty by default and the gate fails closed:
 /// an unconfigured project approves no Claude account at all.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseConfig {
     /// E-mail addresses approved for the one-shot Claude route. Compared
     /// case-insensitively against the probed `email` field.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_account_allowlist: Vec<String>,
+    /// Automatic cuts of a green release train allowed in any 24 hours
+    /// (cas-e060). Zero turns auto-cut off.
+    #[serde(default = "default_auto_cut_max_per_day")]
+    pub auto_cut_max_per_day: u32,
+    /// Minimum hours between one release freeze and the next automatic cut.
+    #[serde(default = "default_auto_cut_min_interval_hours")]
+    pub auto_cut_min_interval_hours: u32,
+}
+
+fn default_auto_cut_max_per_day() -> u32 { 4 }
+fn default_auto_cut_min_interval_hours() -> u32 { 2 }
+
+impl Default for ReleaseConfig {
+    fn default() -> Self {
+        Self {
+            claude_account_allowlist: Vec::new(),
+            auto_cut_max_per_day: default_auto_cut_max_per_day(),
+            auto_cut_min_interval_hours: default_auto_cut_min_interval_hours(),
+        }
+    }
 }
 
 impl ReleaseConfig {
@@ -931,8 +951,8 @@ pub struct FactoryConfig {
     #[serde(default = "default_supervisor_message_wakes_per_hour")]
     pub supervisor_message_wakes_per_hour: u64,
 
-    /// cas-5f67: input tokens one supervisor wake may read before Cassy saves a
-    /// handoff and clears the supervisor's context at the next idle boundary.
+    /// Latest-call input cap for idle-boundary supervisor clearing. When the
+    /// harness reports a window, the threshold is also capped at 80% of it.
     /// 0 disables the automatic clear.
     #[serde(default = "default_supervisor_wake_input_budget")]
     pub supervisor_wake_input_budget: u64,

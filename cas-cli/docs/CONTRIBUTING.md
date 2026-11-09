@@ -1,5 +1,26 @@
 # Contributing to Cassy
 
+## Memory update receipts
+
+`memory action=update id=<id> title=<title>` saves the title alone or together
+with `content`. Omitted fields retain their stored values. A successful edit
+returns `structured_content` with `id` and `changes` (the updated field names),
+alongside the existing text receipt.
+
+## Native Codex verifier identity
+
+An MCP caller belongs to its connection. Native Codex children share the
+parent's connection; choosing a role or receiving a dispatch ID does not create
+independent reviewer authority. `coordination whoami` shows the caller's type,
+role and parent. A shared-connection child registration fails before mutation
+with `rule_id=shared_mcp_child_identity`.
+
+Use the daemon-owned candidate verifier or a separately registered reviewer
+with a sealed handoff for the exact dispatch. A native child that observes its
+parent's identity returns that evidence without recording a verdict, including
+`status=error`. A registered supervisor may perform its own review and record
+the verdict directly; its provenance remains `supervisor_direct`.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to
@@ -130,6 +151,15 @@ to the supervisor/director can establish execution within the configured stall
 window. Heartbeats and other workers' activity cannot. Resolved terminal turns
 and confirmed process exits retain precedence over this fallback.
 
+Supervisor memory handoffs carry a writer-assigned `handoff-machine:` tag.
+Supersession, SessionStart and automatic-clear judgement select by project
+store, machine and role. A local successor can change its name and factory
+session without losing its predecessor's handoff. `handoff-owner:` and author
+session provenance are audit stamps, never selection keys. Registry restart
+reconciliation cannot replace a same-name supervisor on another machine.
+Legacy handoffs without a machine stamp remain readable through memory tools
+but cannot inject approvals into startup.
+
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
 parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in
@@ -239,14 +269,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
-When one newly recorded supervisor turn reads more input than
-`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables), the
-turn scanner hands `supervisor_auto_clear` the turn. It acts only at an idle
+At each newly recorded supervisor turn, `supervisor_auto_clear` reads the
+latest call's input occupancy, including cache reads/writes once. Its threshold
+is 80% of the harness-reported `model_context_window`, capped by
+`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
+a reported window, only that configured per-call cap applies; capacity is never
+inferred from a model name. Cumulative wake billing cannot trigger a clear.
+It acts only at an idle
 boundary: the turn has ended, no newer turn is running, no delivery-target
 lock is held, no release train is frozen, no `release-repair` task is open, and
 no operator ask or operator message is waiting. Otherwise it defers to a later
 turn end. It saves a role-supervisor handoff memory from the session-end lane
-snapshot (with a JSON receipt under `supervisor-handoffs/`). It gives the
+snapshot (with a JSON receipt under `supervisor-handoffs/`). The auto-clear
+projection includes only in-progress and awaiting-merge tasks, active/idle
+workers, recent operator decisions and pending actor/kind/task/age summaries.
+It caps each section at 100 receipt rows, reports omissions, and bounds the
+injected sections separately. Full histories remain in their stores. It gives the
 supervisor one turn to save judgement as a handoff, merges that under the
 facts, and queues the context-reset control to the supervisor pane. When the
 new transcript records the `/clear`, it queues the handoff to the new session.
@@ -264,11 +302,17 @@ receipt. A train queue reservation retains control of that continuation.
 Rejection, a supervisor question, timeout or a failed review transport wakes
 the owning supervisor with findings; none grants a merge override. Review
 prompts, verdict output and harness diagnostics live under
-`.cas/verification-runs/<dispatch>/`. Automatic reviews use the existing
+`.cas/verification-runs/<dispatch>/<attempt>/`. Automatic reviews use the existing
 account-aware launch resolver, including registered named profiles when the
 default home is logged out. Failed harness notices include up to eight stderr
-lines from the final 2 KiB and the full diagnostic log path. A manually claimed dispatch remains
-with its verifier. Non-daemon callers retain the existing manual handoff.
+lines from the final 2 KiB and the full diagnostic log path. If a harness stops
+without a verdict before expiry, one transaction consumes its sealed authority,
+returns only that child's exact current claim to Pending, and records the
+redacted reason in a structured verification retry event. Retry the same
+`factory action=worktree_merge` once: one replacement claims the same dispatch
+and candidate. Earlier attempts keep separate output/log paths. A stale child,
+settled task, completed verdict or expired/reassigned claim cannot be reset.
+A manually claimed dispatch remains with its verifier. Non-daemon callers retain the existing manual handoff.
 
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
@@ -1187,7 +1231,7 @@ availability failures remain unacknowledged for retry.
 
 An existing dispatch or verdict keeps its authority, and the `force-verifier` label keeps a verifier on Tier 0.
 
-A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one.
+A release verdict is one review of the assembled tip. Publish its report, which must name every delivery by task ID, and record it with `verification action=batch_receipt verification_type=release`. It binds each delivery's anchor as a batch receipt does; for release-owned Tier 1 deliveries it also clears deferred batch QA debt. A corrected anchor needs a new verdict, and a worker that has gone does not let a supervisor close without one. Every covered hold also queues an owner-addressed supervisor action with the complete gate and an ordinary close retry command, even after the implementer retires. Replaying the same receipt does not duplicate its task outcome; repeated evidence for the same anchor and gate does not repeat the supervisor action.
 
 Verifier improvements stay in the verdict; verifiers never file or request tasks. A supervisor staffs a follow-up for a reproduced defect affecting someone today, carrying `repro` and `affected` plus severity, reach and journey. Code-read findings remain theoretical P4 backlog, except theoretical money/data loss on a declared main journey is P2. Visible main-journey failures rank ahead of those hypotheses. `cas qa polish --epic <id>` lists an epic's warning findings by file at release prep, for one polish task per release or none. After a release's scope freeze, findings go to the next board unless they lose data, hide state or hurt someone today.
 
@@ -1232,6 +1276,11 @@ callers cannot supply a base that hides commits. The old branch/base/observed ti
 new binding, approving supervisor and reason are recorded together. A missing
 old ref is recorded as unavailable. After a history rewrite, rebinding the same
 branch name refreshes its obsolete base or unreachable anchor with the same audit.
+After a target correction, an empty replacement at the new target is also
+accepted when the same assignee's original branch still equals its recorded
+start base and the task has no parked branch or current/historical delivery
+anchors. Start preserves the old binding until this supervisor approval;
+neither branch needs a placeholder commit.
 Repeating an unchanged binding leaves its base and audit unchanged. Rebinding does
 not change Git, assignment, leases or claims,
 and it does not waive proof, merge, QA or verification. The worker closes normally;
@@ -1418,6 +1467,19 @@ denying things those workers never saw before: raw `cargo`, `&` background
 jobs under worker-memory admission, non-Violet Slack writes, publication and
 unfiltered browser runs. Codex workers are unaffected (their trust was
 already pre-seeded by `codex_trust.rs`).
+
+### macOS Claude account linking
+
+`cas accounts link` asks `claude auth status --json` about each macOS Claude
+profile. Both Claude directory selectors bind named profiles; the default
+profile keeps the legacy unscoped Keychain store with its own home. Active
+or unavailable authentication keeps the original directory in place, including
+when a credential file also exists. Only confirmed logged-out profiles follow
+the ordinary rename/retirement rules. Shared items can still link to the base;
+keeping an authenticated default at its original path is not itself drift.
+Link health and launch-time repair use the same preservation rule. No raw
+credential or Keychain secret is read. Account unit fixtures replace only the
+external status executable through `CAS_TEST_CLAUDE_BIN` in test builds.
 
 ### Factory worker account selection
 
@@ -1950,6 +2012,15 @@ proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log`.
+
+Close measures a delivery's recorded `parked_branch` (local, then origin)
+before deriving branches from its current assignee. Its recorded `work_target`
+remains authoritative after parking, including squash-integrated deliveries;
+a later epic lane does not redefine that proof boundary. Ownership, start-range,
+publication and receipt checks still apply. QA reads project-scoped evidence
+before historical flat task directories. A flat directory is a fallback only
+when the task explicitly cites its historical bundle and no scoped QA evidence
+exists; a colliding short task ID alone never selects another project's ledger.
 
 ## Project capture configuration
 
@@ -2488,9 +2559,14 @@ capped command to be retried; it does not hold a builder slot while waiting.
 Registered workers retain their InProgress task and lease during capacity
 waiting. Each refusal updates one durable worker/task/lease-generation episode,
 with its original start, current cause and next retry (120 seconds). worker_status
-shows that episode once; the background reminder scan queues at most one capacity
-notice after 20 minutes. Its wake request follows normal supervisor readiness
-policy and retains the task's active state. A delivered explicit assistance
+shows that episode once. Higher-priority queue waits never wake the supervisor.
+Disk-watermark waits share one pressure notice per factory session after 20
+minutes, listing waiting workers and reclaimable target caches. The background
+reminder scan persists the pressure snapshot and updates it only when the
+waiting set or reclaimable bytes change; incomplete inventories report an
+unknown total. A resolved pressure episode can recur. Other resource refusals
+retain their one-notice-per-worker escalation after 20 minutes. Notice wakes
+follow normal supervisor readiness policy and retain the task's active state. A delivered explicit assistance
 message consumes that episode's automatic notice even after a gap longer than
 four minutes between retries. A stale retry stops reserving queue position;
 the live task lease still preserves its original wait age and notice state.
@@ -4429,6 +4505,24 @@ frozen train to the next train. The freeze ends when a published release covers 
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
+Auto-cut (`workflow/release_auto_cut.rs`) runs inside the daemon's cut-notice
+poll (`train_guardrails::notify_train_cuts`). For an uncut train whose exact tip
+has a green train-suite receipt, it acts when the tip holds `changelog.d/`
+fragments, no merge-queue run is in flight, the operator has not paused it
+(Commander's `set_auto_cut_paused` operation, a `release-auto-cut-paused`
+label), the train's supervisor is registered on this machine and the cadence
+allows it: fewer than `release.auto_cut_max_per_day` (default 4) other trains
+frozen in 24 hours, the last at least `release.auto_cut_min_interval_hours`
+(default 2) ago. It freezes the train, then waits for the supervisor's
+`release-notes.md` in the train's artifact directory, waking the supervisor
+once per tip with a deadline. With the draft present it runs the
+repository's `scripts/release.sh --notes <draft>` once per tip in a dedicated
+lane worktree and logs to `auto-cut.log` beside it; a nonzero exit wakes the
+supervisor once. `release.sh` arms landing and publication reminders, and the
+post-publish notice has the supervisor post the approved notes. Cassy never
+writes or posts notes. Declined trains get the ordinary ready-to-cut notice,
+which names the reason.
 
 ## Ordered train merge queue
 

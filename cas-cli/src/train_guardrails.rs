@@ -7,7 +7,7 @@
 //!
 //! The daemon sends the supervisor one "train ready to cut" notice when the
 //! train holds reviewed fixes and nothing is in flight, and one when the train
-//! reaches its max age. Cassy never cuts a release on its own.
+//! reaches its max age, for trains auto-cut declines (cas-e060).
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -363,6 +363,15 @@ pub(crate) fn notify_train_cuts(
         if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }
+        let Some(tip) = green_tip(cas_dir, &epic, &train) else { continue };
+        // cas-e060: a green tip with changelog fragments is cut by Cassy;
+        // the notice below only covers trains auto-cut declines.
+        use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
+        let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, !queued.is_empty(), now) {
+            Ok(Outcome::Handled) => continue,
+            Ok(Outcome::Declined(reason)) => format!("Auto-cut: {reason}."),
+            Err(error) => format!("Auto-cut failed: {error:#}."),
+        };
         let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?
             .into_iter()
             .filter(|merge| tasks.get(&merge.task_id).is_ok_and(|t| t.status == TaskStatus::Closed))
@@ -373,7 +382,6 @@ pub(crate) fn notify_train_cuts(
             .iter()
             .filter(|child| matches!(child.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge))
             .count();
-        let Some(tip) = green_tip(cas_dir, &epic, &train) else { continue };
         let age = now - first.created_at;
         let cut = cut_command(
             factory.release_command.as_deref(),
@@ -385,7 +393,7 @@ pub(crate) fn notify_train_cuts(
                 last.merge_commit_sha.clone(),
                 format!(
                     "Release train {train} ({}) is ready to cut: {} reviewed fixes merged, none in \
-                     progress, no queue run in flight. Cut it: {cut}. Cassy never cuts on its own.",
+                     progress, no queue run in flight. Cut it: {cut}. {auto_cut}",
                     epic.id,
                     merged.len()
                 ),
@@ -396,7 +404,7 @@ pub(crate) fn notify_train_cuts(
                 format!(
                     "Release train {train} ({}) reached its {max_age_hours} h max age: {} reviewed \
                      fixes merged, first {} min ago; {in_flight} still in flight remain assigned to this train. \
-                     Cut it: {cut}; retarget unfinished deliveries to the next train before merging them. Cassy never cuts on its own.",
+                     Cut it: {cut}; retarget unfinished deliveries to the next train before merging them. {auto_cut}",
                     epic.id,
                     merged.len(),
                     age.num_minutes()

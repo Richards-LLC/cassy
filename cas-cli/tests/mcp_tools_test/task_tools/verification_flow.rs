@@ -1471,9 +1471,14 @@ async fn release_verdict_closes_a_merged_delivery_after_request_changes_cas_bc15
         "ledger_path": report, "ledger_author": "release-reviewer",
     }))
     .unwrap();
+    let retired = tasks.get(&reworked).unwrap();
     let recorded = extract_text(supervisor.verification(Parameters(verdict)).await.expect("one verdict"));
-    assert!(!recorded.contains("Keeps its own review"), "{recorded}");
-    assert!(recorded.contains(&format!("commit_receipt={staging}")), "{recorded}");
+    // cas-e8cc requires an explicit receipt close for a retired delivery.
+    // Recording its review must preserve that hold and its delivery identity.
+    let held = tasks.get(&reworked).unwrap();
+    assert_eq!(held.status, TaskStatus::InProgress, "{recorded}");
+    assert_eq!(held.deliverables.factory_branch_anchor, None, "{recorded}");
+    assert_eq!(held.deliverables.historical_factory_branch_anchors, retired.deliverables.historical_factory_branch_anchors, "{recorded}");
 
     // Adversarial probe: rework merged after the review is outside its staging.
     let rework = merge_delivery_of(temp.path(), lane.path(), &cas_dir, &reworked, "src/rework.rs", branch);

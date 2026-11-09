@@ -14,6 +14,10 @@ const MIN_AGE_SECS: i64 = 2 * 3600;
 const LARGE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_RECLAIMS_PER_PASS: usize = 16;
 
+fn path_error(path: &Path, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("review scratch {}: {error}", path.display()))
+}
+
 #[derive(Serialize, Deserialize)]
 struct Owner {
     schema_version: u32,
@@ -54,7 +58,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE")
-        .output()?;
+        .output().map_err(|error| path_error(repo, error))?;
     ensure!(
         output.status.success(),
         "git {}: {}",
@@ -72,7 +76,7 @@ fn safe_path(path: &Path) -> Result<()> {
                 "scratch path contains a symlink"
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+            Err(error) => return Err(path_error(ancestor, error).into()),
         }
     }
     Ok(())
@@ -86,10 +90,10 @@ fn private_dir(path: &Path) -> Result<()> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
-            .create(path)?;
+            .create(path).map_err(|error| path_error(path, error))?;
     }
     #[cfg(not(unix))]
-    fs::create_dir_all(path)?;
+    fs::create_dir_all(path).map_err(|error| path_error(path, error))?;
     Ok(())
 }
 
@@ -101,9 +105,11 @@ fn lease(path: &Path, create: bool) -> Result<File> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
     }
-    let file = options.open(path.join("lease"))?;
+    let lease_path = path.join("lease");
+    let file = options.open(&lease_path).map_err(|error| path_error(&lease_path, error))?;
     file.try_lock_exclusive()
-        .context("review checkout is leased")?;
+        .map_err(|error| path_error(&lease_path, error))
+        .with_context(|| format!("review checkout is leased at {}", lease_path.display()))?;
     Ok(file)
 }
 
@@ -118,12 +124,15 @@ fn write_owner_with_directory_sync(
     record: &Owner,
     sync_directory: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
-    let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(file.as_file_mut(), record)?;
-    file.as_file().sync_all()?;
-    file.persist(directory.join("owner.json"))?;
+    let marker = directory.join("owner.json");
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| path_error(directory, error))?;
+    let temporary = file.path().to_path_buf();
+    serde_json::to_writer(file.as_file_mut(), record)
+        .with_context(|| format!("review scratch owner {}", temporary.display()))?;
+    file.as_file().sync_all().map_err(|error| path_error(&temporary, error))?;
+    file.persist(&marker).map_err(|error| path_error(&marker, error.error))?;
     // The synced payload alone does not make the renamed directory entry durable.
-    sync_directory(directory)?;
+    sync_directory(directory).map_err(|error| path_error(directory, error))?;
     Ok(())
 }
 
@@ -137,11 +146,12 @@ fn write_new_checkout_owner_with_parent_sync(
     // sync publishes the checkout, and the scratch base sync publishes its task.
     let parent = directory.parent().context("review store parent missing")?;
     let scratch_base = parent.parent().context("review scratch base missing")?;
-    if let Err(error) = sync_parent(parent).and_then(|()| sync_parent(scratch_base)) {
+    if let Err(error) = sync_parent(parent).map_err(|error| path_error(parent, error))
+        .and_then(|()| sync_parent(scratch_base).map_err(|error| path_error(scratch_base, error))) {
         // Only fresh checkouts reach this helper, before Git creates a worktree.
         // Removal keeps a retry on the fresh path so it repeats both syncs.
         fs::remove_dir_all(directory).with_context(|| {
-            format!("remove incomplete review checkout after parent sync failure: {error}")
+            format!("remove incomplete review checkout {} after parent sync failure: {error}", directory.display())
         })?;
         return Err(error.into());
     }
@@ -183,7 +193,7 @@ fn stale_owner_temp(path: &Path) -> Result<bool> {
 fn inherit_worker_rustflags(repo: &Path, directory: &Path) -> Result<()> {
     let source = repo.join(".cargo/config.toml");
     let mut inherited = toml::Table::new();
-    match fs::read_to_string(source) {
+    match fs::read_to_string(&source) {
         Ok(text) => {
             let config: toml::Table = toml::from_str(&text)?;
             for section in ["build", "target"] {
@@ -216,18 +226,18 @@ fn inherit_worker_rustflags(repo: &Path, directory: &Path) -> Result<()> {
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(path_error(&source, error).into()),
     }
     let config_dir = directory.join(".cargo");
     let destination = config_dir.join("config.toml");
     safe_path(&destination)?;
     if inherited.is_empty() {
         if destination.exists() {
-            fs::remove_file(destination)?;
+            fs::remove_file(&destination).map_err(|error| path_error(&destination, error))?;
         }
     } else {
         private_dir(&config_dir)?;
-        fs::write(destination, toml::to_string(&inherited)?)?;
+        fs::write(&destination, toml::to_string(&inherited)?).map_err(|error| path_error(&destination, error))?;
     }
     Ok(())
 }
@@ -261,7 +271,7 @@ fn task_repository(cas: &Path, task_id: &str) -> Result<PathBuf> {
 }
 
 fn create_inner(cas: &Path, repo: &Path, task_id: &str, dispatch_id: Option<&str>, head: &str, candidate: bool) -> Result<Checkout> {
-    let cas = cas.canonicalize()?;
+    let cas = cas.canonicalize().map_err(|error| path_error(cas, error))?;
     ensure!(component(task_id), "invalid scratch task id");
     crate::store::open_task_store(&cas)?.get(task_id)?;
     ensure!(
@@ -276,13 +286,13 @@ fn create_inner(cas: &Path, repo: &Path, task_id: &str, dispatch_id: Option<&str
         repo,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
+    let common = Path::new(&common).canonicalize().map_err(|error| path_error(Path::new(&common), error))?;
+    let task_common = git(
+        &task_repository(&cas, task_id)?,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?;
     ensure!(
-        Path::new(&common).canonicalize()?
-            == Path::new(&git(
-                &task_repository(&cas, task_id)?,
-                &["rev-parse", "--path-format=absolute", "--git-common-dir"]
-            )?)
-            .canonicalize()?,
+        common == Path::new(&task_common).canonicalize().map_err(|error| path_error(Path::new(&task_common), error))?,
         "checkout must belong to the task's repository"
     );
     if let Some(id) = dispatch_id {
@@ -308,7 +318,7 @@ fn create_inner(cas: &Path, repo: &Path, task_id: &str, dispatch_id: Option<&str
     let fresh = match builder.create(&directory) {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(path_error(&directory, error).into()),
     };
     let lock = lease(&directory, fresh)?;
     if fresh {
@@ -375,7 +385,7 @@ fn owner(cas: &Path, directory: &Path) -> Result<Owner> {
 fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
     safe_path(directory)?;
     let marker = directory.join("owner.json");
-    let metadata = fs::symlink_metadata(&marker)?;
+    let metadata = fs::symlink_metadata(&marker).map_err(|error| path_error(&marker, error))?;
     ensure!(
         metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() < 64 * 1024,
         "invalid review ownership record"
@@ -383,7 +393,7 @@ fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let parent = fs::metadata(directory)?;
+        let parent = fs::metadata(directory).map_err(|error| path_error(directory, error))?;
         // SAFETY: geteuid has no preconditions and only returns this process's effective user ID.
         let effective_uid = unsafe { libc::geteuid() };
         ensure!(
@@ -394,10 +404,10 @@ fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
             "review directory must be private and owned by this user"
         );
     }
-    let owner: Owner = serde_json::from_slice(&fs::read(marker)?)?;
+    let owner: Owner = serde_json::from_slice(&fs::read(&marker).map_err(|error| path_error(&marker, error))?)?;
     ensure!(
         owner.schema_version == 1
-            && owner.cas_root == cas.canonicalize()?
+            && owner.cas_root == cas.canonicalize().map_err(|error| path_error(cas, error))?
             && component(&owner.task_id),
         "review owner does not match project"
     );
@@ -461,7 +471,7 @@ fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> 
     let metadata = match fs::symlink_metadata(&staging) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(path_error(&staging, error).into()),
     };
     ensure!(
         metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -471,7 +481,7 @@ fn discard_legacy_seed_stage(directory: &Path, checkout: &Path, lock: &File) -> 
         !crate::factory_target_cache::review_output_in_use(directory, lock),
         "legacy review seed stage may still be in use"
     );
-    fs::remove_dir_all(staging)?;
+    fs::remove_dir_all(&staging).map_err(|error| path_error(&staging, error))?;
     Ok(())
 }
 

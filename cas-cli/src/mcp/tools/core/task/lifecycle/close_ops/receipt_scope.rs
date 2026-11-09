@@ -123,7 +123,7 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
-    if let Some(refusal) = message_assertion_refusal(proof_repo, target) {
+    if let Some(refusal) = message_assertion_refusal(proof_repo, target, task.delivery_mode) {
         refusals.push(refusal);
     }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -166,14 +166,20 @@ pub(super) fn park_refusals(
 }
 
 /// Read-only source check: a test receipt cannot authorize a new prose pin.
-fn message_assertion_refusal(repo: &Path, target: &str) -> Option<String> {
+fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types::DeliveryMode) -> Option<String> {
     let guard = repo.join("scripts/check-test-shape.py");
     if !guard.is_file() {
         return None;
     }
+    let target_ref = super::preferred_diff_target_ref_for_delivery(repo, target, delivery_mode);
+    let Some(target_sha) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
+        return Some(format!(
+            "TEST_SHAPE_TARGET_UNRESOLVED: cannot resolve test-shape target {target_ref} to a commit. Fetch the integration target, then retry park.",
+        ));
+    };
     let output = std::process::Command::new("python3")
         .arg(&guard)
-        .args(["--messages-only", "--changed-since", target])
+        .args(["--messages-only", "--changed-since", &target_sha])
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .current_dir(repo)
         .output();

@@ -307,3 +307,42 @@ fn operator_ask_does_not_count_workers_holding_blocked_tasks_as_idle() {
         "a worker with no task remains idle capacity"
     );
 }
+
+#[test]
+fn failed_harness_is_not_idle_staffing_capacity_cas_8f40() {
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let project = tempfile::tempdir().unwrap();
+    let cas = crate::store::init_cas_dir(project.path()).unwrap();
+    let stores = DirectorStores::open(&cas).unwrap();
+    stores.task_store.add(&Task::new("cas-ready".into(), "Ready work".into())).unwrap();
+    let now = Utc::now();
+    let clone = cas.join("worktrees/failed-worker");
+    std::fs::create_dir_all(&clone).unwrap();
+    let account = env.home().join(".codex-selected");
+    let sessions = account.join("sessions/2026/11/08");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let rollout = sessions.join("rollout-failed-worker.jsonl");
+    let mut worker = Agent::new("codex-failed-worker-session".into(), "failed-worker".into());
+    worker.role = cas_types::AgentRole::Worker;
+    worker.factory_session = Some("failed-staffing".into());
+    worker.registered_at = now - chrono::Duration::hours(1);
+    worker.metadata.insert("worker_cli".into(), "codex".into());
+    worker.metadata.insert("clone_path".into(), clone.to_string_lossy().into_owned());
+    worker.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into_owned());
+    stores.agent_store.register(&worker).unwrap();
+    let meta = json!({"type":"session_meta", "payload":{"cwd":clone, "id":"failed-worker"}}).to_string();
+    let healthy = json!({"type":"event_msg", "payload":{"type":"task_complete"}}).to_string();
+    let failed = json!({"type":"event_msg", "payload":{"type":"task_complete", "error":{
+        "codex_error_info":"other", "message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account"}}}).to_string();
+    let mut app = FactoryApp::for_test();
+    app.cas_dir = cas.clone();
+    app.factory_session = Some("failed-staffing".into());
+    app.supervisor_name = "supervisor".into();
+    for (terminal, eligible) in [(&healthy, true), (&failed, false), (&healthy, true)] {
+        std::fs::write(&rollout, format!("{meta}\n{terminal}\n")).unwrap();
+        let data = DirectorData::load_fast(&cas).unwrap();
+        let evidence = assignment_evidence::AssignmentRequest::new(cas.clone(), &data, "failed-staffing", "supervisor").unwrap().read();
+        let action = app.supervisor_actionable_from_ownership(&data, &Default::default(), Some(&HashSet::new()), now, &evidence);
+        assert_eq!(action.is_some(), eligible, "{terminal}");
+    }
+}

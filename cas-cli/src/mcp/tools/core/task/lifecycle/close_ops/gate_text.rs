@@ -27,24 +27,24 @@ pub(crate) fn compact_receipt(
     let paths = crate::config::resolved_factory_artifact_paths(cas_root, configured_artifacts_root);
     let dir = paths.task_dirs(task_id)[0].join("receipts");
     std::fs::create_dir_all(&dir)
-        .map_err(|error| format!("could not create receipt detail directory: {error}"))?;
+        .map_err(|error| format!("close receipt detail: could not create directory {}: {error}", dir.display()))?;
     let path = dir.join(format!("{kind}-{digest}.txt"));
     match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
         Ok(mut file) => {
             use std::io::Write as _;
             file.write_all(detail.as_bytes())
-                .map_err(|error| format!("could not persist receipt detail: {error}"))?;
+                .map_err(|error| format!("close receipt detail: could not write {}: {error}", path.display()))?;
             file.sync_all()
-                .map_err(|error| format!("could not sync receipt detail: {error}"))?;
+                .map_err(|error| format!("close receipt detail: could not sync {}: {error}", path.display()))?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             let existing = std::fs::read(&path)
-                .map_err(|error| format!("could not verify existing receipt detail: {error}"))?;
+                .map_err(|error| format!("close receipt detail: could not read {}: {error}", path.display()))?;
             if existing != detail.as_bytes() {
                 return Err("content-addressed receipt detail did not match its path".into());
             }
         }
-        Err(error) => return Err(format!("could not persist receipt detail: {error}")),
+        Err(error) => return Err(format!("close receipt detail: could not create {}: {error}", path.display())),
     }
     Ok(format!(
         "{summary}\nDetails: {} (SHA-256 {digest})",

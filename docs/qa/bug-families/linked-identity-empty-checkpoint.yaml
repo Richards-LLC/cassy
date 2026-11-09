@@ -1,0 +1,5 @@
+title: Inherited project identity does not grant task ownership to an unattributed empty checkpoint
+found: '2026-11-09'
+tasks: [cas-f49a]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SPAWN]

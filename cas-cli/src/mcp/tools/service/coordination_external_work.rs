@@ -66,7 +66,12 @@ impl CasService {
     /// Task creation and staffing reuse the authenticated Slack claim service.
     /// Workers consume the supervisor's receipt; they never acquire authority.
     pub(super) async fn refresh_task_source(&self, source: Option<&str>) -> Result<(), McpError> {
+        self.refresh_task_source_for(source, None).await
+    }
+
+    pub(super) async fn refresh_task_source_for(&self, source: Option<&str>, task_id: Option<&str>) -> Result<(), McpError> {
         let Some(source) = source.filter(|source| crate::mcp::tools::core::task::source_claim::is_slack_source(source)) else { return Ok(()); };
+        if task_id.is_some_and(|id| self.inner.source_split(id, Some(source)).is_some()) { return Ok(()); }
         let Ok(id) = self.inner.get_registered_agent_id_read_only() else { return Ok(()); };
         let agents = self.inner.open_agent_store()?;
         if !agents.get(&id).is_ok_and(|agent| agent.role == crate::types::AgentRole::Supervisor) { return Ok(()); }
@@ -86,7 +91,7 @@ impl CasService {
         let owner = receipt["visible_owner"]["label"].as_str()
             .or(receipt["visible_owner"]["registration_id"].as_str()).unwrap_or("not verified");
         Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
-            "Task source {source}: owner {owner}; {}. No task or staffing change was applied. Use the existing claim/status/handoff before continuing.",
+            "Task source {source}: owner {owner}; {}. No task or staffing change was applied. Ask the owner to offer this task via factory action=epic_split id=<epic-or-standalone-task> target=<your-supervisor> theirs=<task>, then accept it before staffing. Thread reply authority stays with the owner.",
             response["guidance"].as_str().or(response["code"].as_str()).unwrap_or("Slack authority unavailable")
         )))
     }
@@ -96,8 +101,7 @@ impl CasService {
         for id in ids {
             let task = tasks.get(id).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
             if task.execution_note.as_deref() == Some("no-code") { continue; }
-            if crate::mcp::tools::core::task::source_claim::source_split(&self.inner.cas_root, id).is_some() { continue; }
-            self.refresh_task_source(task.external_ref.as_deref()).await?;
+            self.refresh_task_source_for(task.external_ref.as_deref(), Some(id)).await?;
         }
         Ok(())
     }

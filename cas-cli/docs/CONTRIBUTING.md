@@ -1018,6 +1018,16 @@ Grant it with `theirs=<child>` and omit `mine`. Either share may be empty or
 omitted, but not both. The proposer claims only `mine`; acceptance claims only
 the recipient's share. Existing expiry, cancel and start guards apply.
 
+A task with no epic can be its own split scope: its owner offers
+`factory action=epic_split id=<task> target=<builder> theirs=<task>`, and the
+builder accepts the returned split. No parent task or dependency is created.
+For a Slack source, only the current thread claim owner may offer the work.
+After acceptance the builder can assign and start that task with `external_ref`
+intact; the accepted local share grants work without claiming the thread.
+Pending offers and another supervisor's shares grant no work authority. Reply
+intents and Violet posts still require the thread owner's separate authority.
+Changing a delegated task's source requires the ordinary source admission.
+
 Assignments and starts of a peer's split children name the peer and split and
 refuse the change, including `force=true`. To take over one child, a live
 registered supervisor uses `task action=update id=<child> assignee=<worker>

@@ -483,13 +483,20 @@ mod describe_dependency_tests {
                 .map(|dep| dep.dep_type)
                 .collect();
             assert_eq!(stored, vec![expected], "dep_add dep_type={spelling}");
-            core.cas_task_dep_remove(Parameters(DependencyRequest {
+            let removed = core.cas_task_dep_remove(Parameters(DependencyRequest {
                 from_id: from.clone(),
                 to_id: to.clone(),
                 dep_type: spelling.into(),
             }))
             .await
             .unwrap_or_else(|error| panic!("dep_remove {spelling}: {error:?}"));
+            assert_eq!(
+                removed.structured_content,
+                Some(serde_json::json!({
+                    "removed_dependency": { "from_id": from, "to_id": to, "dep_type": expected }
+                })),
+                "the removal receipt identifies the removed edge and type"
+            );
             assert!(
                 store.get_dependencies(&from).unwrap().is_empty(),
                 "dep_remove dep_type={spelling} removes the edge dep_add wrote"

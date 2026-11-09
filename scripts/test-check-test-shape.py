@@ -262,7 +262,7 @@ def test_workflow_command():
             self.assertEqual(clean.returncode, 0)
             (root/'lib.rs').write_text('#[test] fn t() { assert_eq!(run(), 3); }')
             self.assertEqual(subprocess.run(cmd+['--changed-since', base], cwd=root, capture_output=True).returncode, 0)
-            self.assertEqual(subprocess.run(cmd+['--changed-since', 'missing-ref'], cwd=root, capture_output=True).returncode, 1)
+            self.assertEqual(subprocess.run(cmd+['--changed-since', 'missing-ref'], cwd=root, capture_output=True).returncode, 2)
 
     def test_cli_changed_since_scans_non_rust_test_files(self):
         with tempfile.TemporaryDirectory() as root:

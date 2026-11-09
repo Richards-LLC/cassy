@@ -941,20 +941,38 @@ mod tests {
 
     #[test]
     fn park_checks_new_message_assertions_cas_6a3e() {
+        const GUARD: &str = include_str!("../../../../../../../../scripts/check-test-shape.py");
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();
         let task = Task::new("cas-6a3e".into(), "source guard".into());
         let script = repo.path().join("scripts/check-test-shape.py");
         std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        for (exit, rejected) in [(1, true), (0, false)] {
-            std::fs::write(&script, format!("raise SystemExit({exit})\n")).unwrap();
-            let refusal = park_refusal(cas_root.path(), repo.path(), &task,
-                &["docs/guide.md".into()], &"a".repeat(40), "main", None);
-            assert_eq!(refusal.is_some(), rejected);
-            if let Some(refusal) = refusal {
-                assert!(refusal.contains("TEST_ASSERTION_PROSE"));
-            }
-        }
+        std::fs::write(&script, GUARD).unwrap();
+        let head = commit_changelog_fixture(repo.path(), "install actual guard");
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        let base = git(&["rev-parse", "main"]);
+        git(&["update-ref", "refs/remotes/origin/main", &base]);
+        git(&["branch", "-D", "main"]);
+        let refusal = |target: &str| park_refusal(cas_root.path(), repo.path(), &task,
+            &["docs/guide.md".into()], &head, target, None);
+        assert_eq!(refusal("main"), None, "remote-only target runs the actual guard");
+        assert_eq!(refusal("origin/main"), None);
+        assert!(refusal("missing-target").unwrap().starts_with("TEST_ASSERTION_TARGET_UNRESOLVED:"));
+
+        git(&["branch", "main", &base]);
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert_eq!(refusal("main"), None, "local-only target remains supported");
+        let unrelated = git(&["commit-tree", "HEAD^{tree}", "-m", "unrelated root"]);
+        git(&["update-ref", "refs/remotes/origin/unrelated", &unrelated]);
+        assert!(refusal("unrelated").unwrap().starts_with("TEST_ASSERTION_PROSE_UNAVAILABLE:"));
+
+        std::fs::write(repo.path().join("probe.test.ts"), "expect(error.message).toBe('please try later');\n").unwrap();
+        commit_changelog_fixture(repo.path(), "introduce actual prose pin");
+        assert!(refusal("main").unwrap().starts_with("TEST_ASSERTION_PROSE:"));
     }
 
     #[test]

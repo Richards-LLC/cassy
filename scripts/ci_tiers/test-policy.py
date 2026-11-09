@@ -260,6 +260,71 @@ printf 'pip %s\\n' "$*" >> "$CALLS"
                 self.assertEqual(selected(preflight, portable), expected_portable)
                 self.assertEqual(selected(preflight, consumer), expected_portable and not reuse)
 
+    def test_preflight_restores_only_proven_exact_tree_cli(self):
+        job = self.ci()['jobs']['fast-validation-preflight']
+        restore = next(step for step in job['steps'] if step.get('id') == 'cli-restore')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True)
+        subprocess.run(['git', 'add', '.'], cwd=self.root, check=True)
+        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=test@example.invalid',
+                        'commit', '-qm', 'proven source'], cwd=self.root, check=True)
+        tree = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], cwd=self.root, text=True).strip()
+        binary = self.root/'producer-cas'
+        bin_dir = self.root/'bin'; bin_dir.mkdir()
+        calls = self.root/'downloads'
+        gh = bin_dir/'gh'
+        gh.write_text('''#!/usr/bin/env python3
+import os, pathlib, shutil, sys
+args = sys.argv[1:]
+with open(os.environ['DOWNLOADS'], 'a') as log: log.write(args[2]+'\\n')
+if os.environ['AVAILABLE'] != 'true': sys.exit(1)
+out = pathlib.Path(args[args.index('--dir')+1]); out.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
+''')
+        gh.chmod(0o755)
+        check = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-4:] == ['cargo', 'check', '-p', 'cas'])
+        build = next(s for s in job['steps'] if shlex.split(s.get('run', ''))[-5:] == ['cargo', 'build', '-p', 'cas', '--no-default-features'])
+        smoke = next(s for s in job['steps'] if 'npm run --prefix hub-web build' in s.get('run', ''))
+        context = {'steps.job-receipt.outputs.reused': 'false',
+                   'needs.fast-validation-main-push-dedupe.outputs.reuse-source': 'full-gate',
+                   'needs.fast-validation-main-push-dedupe.outputs.validating-run-id': '101',
+                   'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': tree}
+        for proof, receipt_tree, cached, available, runnable, expected_run in [
+            ('full-gate', tree, '', True, True, '101'),
+            ('full-gate', '0'*40, '', True, True, ''),
+            ('', tree, '', True, True, ''),
+            ('full-gate', tree, '', False, True, ''),
+            ('full-gate', tree, '', True, False, ''),
+            ('', '0'*40, '100', True, True, '100'),
+            ('', tree, '100', False, True, ''),
+        ]:
+            with self.subTest(proof=proof, cached=cached, available=available, runnable=runnable):
+                binary.write_text('#!/bin/sh\nexit '+('0' if runnable else '1')+'\n')
+                case = {**context, 'steps.job-receipt.outputs.reused': 'true' if cached else 'false',
+                        'steps.job-receipt.outputs.producer_run': cached,
+                        'needs.fast-validation-main-push-dedupe.outputs.reuse-source': proof,
+                        'needs.fast-validation-main-push-dedupe.outputs.receipt-tree': receipt_tree}
+                output = self.root/'cli-output'; output.write_text('')
+                calls.unlink(missing_ok=True)
+                runner_temp = self.root/'runner-temp'; runner_temp.mkdir(exist_ok=True)
+                values = {key: str(self.gh_value(value, case)) for key, value in restore['env'].items()}
+                result = self.run_body(restore['run'], {**values, 'GITHUB_OUTPUT': str(output),
+                    'RUNNER_TEMP': str(runner_temp), 'PATH': str(bin_dir)+os.pathsep+os.environ['PATH'],
+                    'DOWNLOADS': str(calls), 'AVAILABLE': str(available).lower(), 'PRODUCER_CLI': str(binary)})
+                self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+                outputs = dict(line.split('=', 1) for line in output.read_text().splitlines())
+                restored = bool(expected_run)
+                self.assertEqual(outputs.get('restored'), str(restored).lower())
+                if restored:
+                    self.assertEqual(calls.read_text().strip(), expected_run)
+                    self.assertEqual(subprocess.run([runner_temp/'preflight-cli/cas', '--version']).returncode, 0)
+                route = {**case, 'steps.cli-restore.outputs.restored': outputs['restored'],
+                         'steps.classify-diff.outputs.rust-unaffected': 'false',
+                         'needs.fast-validation-main-push-dedupe.outputs.run-fast-validation': 'false'}
+                self.assertEqual(self.gh_expr(check['if'], route), not restored)
+                self.assertEqual(self.gh_expr(build['if'], route), not restored)
+                if proof == 'full-gate':
+                    self.assertTrue(self.gh_expr(smoke['if'], route))
+
     def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
         def valid(workflow):
             concurrency = workflow.get('concurrency', {})

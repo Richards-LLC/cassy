@@ -268,6 +268,69 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn artifact_revoke_supervisor_tombstone_cas_6d35() {
+        use crate::test_support::TestEnvGuard;
+        use crate::mcp::tools::service::CasService;
+        use cas_store::{AgentStore, NewArtifact};
+        use cas_types::{Agent, AgentRole, AgentStatus};
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let file = temp.path().join("harmless.txt");
+        std::fs::write(&file, "disposable evidence only\n").unwrap();
+        let (sha256, size_bytes) = crate::artifacts::digest_file(&file).unwrap();
+        let store = SqliteArtifactStore::open(&root).unwrap();
+        for id in ["art-6d35", "art-6d36"] {
+            store.record_local(&NewArtifact {
+                id: id.into(), task_id: "cas-6d35".into(), name: "harmless.txt".into(),
+                mime: "text/plain".into(), size_bytes, sha256: sha256.clone(),
+            }).unwrap();
+        }
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&Agent::new_with_role(
+            "revoke-supervisor".into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("revoke-supervisor".into());
+        let service = CasService::new(core, None);
+        let reason = "Disposable fixture cleanup";
+        let request = serde_json::json!({"action":"revoke", "id":"art-6d35", "reason":reason});
+        let response = service.artifact(Parameters(serde_json::from_value(request).unwrap()))
+            .await.expect("registered supervisor can revoke a disposable artifact");
+        let data = response.structured_content.unwrap();
+        assert_eq!(data["local_state"], "revoked");
+        assert_eq!(data["cloud_state"], "not_applicable");
+        let first = serde_json::to_value(store.get("art-6d35").unwrap().unwrap()).unwrap();
+        assert_eq!(first["revocation"]["actor_id"], "revoke-supervisor");
+        assert_eq!(first["revocation"]["reason"], reason);
+        let retry = serde_json::json!({"action":"revoke", "id":"art-6d35", "reason":"Retry cleanup"});
+        service.artifact(Parameters(serde_json::from_value(retry).unwrap())).await.unwrap();
+        let repeated = serde_json::to_value(store.get("art-6d35").unwrap().unwrap()).unwrap();
+        assert_eq!(repeated["revocation"], first["revocation"]);
+        let fetch = serde_json::json!({"action":"fetch", "id":"art-6d35", "task_id":"cas-6d35"});
+        let error = service.artifact(Parameters(serde_json::from_value(fetch).unwrap())).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["state"], "artifact_revoked");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        for (id, role, status) in [
+            ("worker", AgentRole::Worker, AgentStatus::Active),
+            ("retired-supervisor", AgentRole::Supervisor, AgentStatus::Shutdown),
+        ] {
+            let mut agent = Agent::new_with_role(id.into(), id.into(), role);
+            agent.status = status;
+            agents.register(&agent).unwrap();
+            let caller = CasCore::with_daemon(root.clone(), None, None);
+            caller.set_agent_id_for_testing(id.into());
+            let unauthorized = CasService::new(caller, None);
+            let request = serde_json::json!({"action":"revoke", "id":"art-6d36", "reason":reason});
+            let error = unauthorized.artifact(Parameters(serde_json::from_value(request).unwrap()))
+                .await.unwrap_err();
+            assert_eq!(error.data.unwrap()["rule_id"], "artifact_revoke_supervisor_only");
+            let untouched = serde_json::to_value(store.get("art-6d36").unwrap().unwrap()).unwrap();
+            assert!(untouched["revocation"].is_null());
+        }
+    }
+
     #[test]
     fn the_publish_response_leads_with_the_id_a_caller_carries_forward() {
         let outcome = PublishOutcome {

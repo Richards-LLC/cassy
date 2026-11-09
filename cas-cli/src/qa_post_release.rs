@@ -1055,16 +1055,15 @@ fn batch_offer_evidence(root: &Path, task: &Task) -> Result<Option<(String, Stri
 pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::PromptQueueStore, row: &cas_store::QueuedPrompt) -> Result<bool> {
     if row.origin != Some(cas_store::QueueOrigin::Daemon)
         || !row.source.starts_with("supervisor-notice:")
-        || !matches!(row.kind.as_deref(), Some("qa_batch_overdue" | "batch_receipt_offer"))
     { return Ok(true); }
     let id = row.source.strip_prefix("supervisor-notice:").and_then(|id| id.parse::<i64>().ok())
         .context("batch notice identity unavailable")?;
     let notices = crate::store::open_supervisor_queue_store(root)?;
-    let current = if row.kind.as_deref() == Some("qa_batch_overdue") {
+    let notice = notices.get(id)?.context("batch notice unavailable")?;
+    let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+    let current = if payload["kind"] == "qa_batch_overdue" {
         false
-    } else {
-        let notice = notices.get(id)?.context("batch notice unavailable")?;
-        let payload: serde_json::Value = serde_json::from_str(&notice.payload)?;
+    } else if payload["kind"] == "batch_receipt_offer" {
         if let Some(ids) = payload.get("context").and_then(|context| context.get("task_ids")).and_then(|ids| ids.as_array()) {
             let pending = cas_store::pending_qa_batch_deferrals(root)?;
             let tasks = crate::store::open_task_store_local(root)?;
@@ -1083,7 +1082,7 @@ pub(crate) fn batch_notice_deliverable(root: &Path, queue: &dyn cas_store::Promp
         } else {
             false // Pre-upgrade offers have no verifiable task scope.
         }
-    };
+    } else { return Ok(true); };
     if !current {
         // A transported row retains its transport history; skipping its body
         // must not manufacture acknowledgement or rewrite delivered evidence.

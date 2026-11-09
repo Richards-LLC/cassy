@@ -1652,7 +1652,7 @@ mod lifecycle_friction_tests {
         cas_store::claim_verification_dispatch(
             &core.cas_root, &task.id, "review-supervisor", &child.id, &issued.capability.id,
         ).unwrap();
-        let input = crate::hooks::handlers::HookInput {
+        let input = crate::hooks::HookInput {
             hook_event_name: "PreToolUse".into(),
             session_id: "review-supervisor".into(),
             agent_role: Some("supervisor".into()),

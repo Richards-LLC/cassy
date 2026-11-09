@@ -169,7 +169,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE")
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("PREMERGE_GIT_IO: git at {}: {error}", repo.display()))?;
     if !output.status.success() {
         // cas-c5db: `merge-base --is-ancestor` answers "no" with an empty
         // stderr; name the whole command and its exit so a refusal is actionable.
@@ -354,25 +354,26 @@ fn write_once<T: Serialize + serde::de::DeserializeOwned + PartialEq>(
 ) -> Result<(), String> {
     use std::io::Write;
     let directory = path.parent().ok_or("immutable record directory missing")?;
-    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|error| error.to_string())?;
+    let io_error = |error| format!("PREMERGE_CANDIDATE_RECORD_IO: {}: {error}", path.display());
+    let mut file = tempfile::NamedTempFile::new_in(directory).map_err(io_error)?;
     file.write_all(&serde_json::to_vec(value).map_err(|error| error.to_string())?)
-        .map_err(|error| error.to_string())?;
+        .map_err(io_error)?;
     file.as_file()
         .sync_all()
-        .map_err(|error| error.to_string())?;
+        .map_err(io_error)?;
     match file.persist_noclobber(path) {
         Ok(_) => Ok(()),
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
             let previous: T =
-                serde_json::from_slice(&std::fs::read(path).map_err(|error| error.to_string())?)
-                    .map_err(|error| error.to_string())?;
+                serde_json::from_slice(&std::fs::read(path).map_err(io_error)?)
+                    .map_err(|error| format!("PREMERGE_CANDIDATE_RECORD_PARSE: {}: {error}", path.display()))?;
             if &previous == value {
                 Ok(())
             } else {
                 Err("immutable candidate record changed".into())
             }
         }
-        Err(error) => Err(error.error.to_string()),
+        Err(error) => Err(io_error(error.error)),
     }
 }
 
@@ -438,14 +439,14 @@ fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     );
     for directory in crate::config::factory_task_artifact_dirs(root, &paths.base, &task.id) {
         let ledger = directory.join("LEDGER.md");
-        match std::fs::read(ledger) {
+        match std::fs::read(&ledger) {
             Ok(bytes) => {
                 hash.update(b"ledger\0");
                 hash.update((bytes.len() as u64).to_le_bytes());
                 hash.update(bytes);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("PREMERGE_CONTEXT_LEDGER_READ: {}: {error}", ledger.display())),
         }
     }
     Ok(format!("{:x}", hash.finalize()))
@@ -465,9 +466,14 @@ pub(crate) fn candidate_for_dispatch(
         .join("verification-candidates")
         .join(&bound_key)
         .join("candidate.json");
-    let candidate: Candidate =
-        serde_json::from_slice(&std::fs::read(manifest).map_err(|error| error.to_string())?)
-            .map_err(|error| error.to_string())?;
+    let bytes = std::fs::read(&manifest).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_READ: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
+        manifest.display(), dispatch.id,
+    ))?;
+    let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| format!(
+        "VERIFIED_DELIVERY_CANDIDATE_PARSE: candidate manifest {} for dispatch {} (key {bound_key}): {error}",
+        manifest.display(), dispatch.id,
+    ))?;
     let key = candidate_manifest_key(&candidate)?;
     if candidate.proof != *proof
         || candidate.task_id != dispatch.task_id
@@ -660,13 +666,14 @@ impl Candidate {
 impl Approval {
     fn promotion(&self) -> Result<Option<Promotion>, String> {
         let path = self.candidate.directory()?.join("promotion.json");
-        let bytes = match std::fs::read(path) {
+        let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("PREMERGE_PROMOTION_READ: {} for dispatch {}: {error}", path.display(), self.dispatch_id)),
         };
-        let record: Promotion =
-            serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+        let record: Promotion = serde_json::from_slice(&bytes).map_err(|error| format!(
+            "PREMERGE_PROMOTION_PARSE: {} for dispatch {}: {error}", path.display(), self.dispatch_id,
+        ))?;
         let candidate = &self.candidate;
         if record.dispatch_id != self.dispatch_id
             || record.verdict_id != self.verdict_id
@@ -1052,7 +1059,9 @@ impl CasCore {
         }
         refresh_review_target(repo, target).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         let mut inherited_supervisor_call = None;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
@@ -1226,7 +1235,9 @@ impl CasCore {
         else {
             return Ok(None);
         };
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
             || dispatch.receipt_id.is_some()
             || prior.context_digest != digest
@@ -1342,7 +1353,9 @@ impl CasCore {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = review_target(repo, target).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         let key = bound_candidate_key(
             &task.id,
             &repository,
@@ -1363,8 +1376,12 @@ impl CasCore {
         .map_err(fail)?;
         let manifest = directory.join("candidate.json");
         if manifest.exists() {
-            let candidate: Candidate =
-                serde_json::from_slice(&std::fs::read(manifest).map_err(fail)?).map_err(fail)?;
+            let bytes = std::fs::read(&manifest).map_err(|error| {
+                fail(format!("could not read cached candidate manifest {}: {error}", manifest.display()))
+            })?;
+            let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| {
+                fail(format!("could not parse cached candidate manifest {}: {error}", manifest.display()))
+            })?;
             if candidate.task_id != task.id
                 || candidate.repository != repository
                 || candidate.source_branch != source
@@ -1395,16 +1412,19 @@ impl CasCore {
             }
             return Ok(candidate);
         }
-        std::fs::create_dir_all(&directory).map_err(fail)?;
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            fail(format!("could not create candidate directory {}: {error}", directory.display()))
+        })?;
         if let Some(dispatch) =
             cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
             && let Some(proof) = dispatch.repository.as_ref()
             && proof_candidate_key(proof).map_err(fail)?.as_deref()
                 == directory.file_name().and_then(|name| name.to_str())
         {
-            return Err(fail(
-                "candidate manifest missing for an existing dispatch; explicit recovery required",
-            ));
+            return Err(fail(format!(
+                "candidate manifest {} is missing for existing dispatch {}; explicit recovery required",
+                manifest.display(), dispatch.id,
+            )));
         }
         let merged = git(
             repo,
@@ -1464,7 +1484,9 @@ impl CasCore {
         proof.worktree_root = checkout
             .path
             .canonicalize()
-            .map_err(fail)?
+            .map_err(|error| {
+                fail(format!("could not resolve candidate checkout {}: {error}", checkout.path.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let candidate = Candidate {

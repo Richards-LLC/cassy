@@ -1,3 +1,0 @@
-### Fixed — Automatic pre-merge verifier falls back to Claude
-
-- **The automatic verifier runs on Claude when no Codex account can** — Was: when every Codex home was logged out or over its usage threshold, the automatic pre-merge verifier did not start and asked the supervisor to launch the task-verifier by hand, even with an eligible Claude account available. Now: it launches the same verifier, with the same prompt and dispatch, on the eligible Claude account that the spawn account selector picks, and a notice names the harness, account and model it used. The supervisor is asked to launch it only when neither harness has an eligible account; that refusal lists every Codex and Claude home with its reason.

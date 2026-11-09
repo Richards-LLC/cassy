@@ -547,6 +547,17 @@ fn surface_factory_inbox_with_transport_delivery(
             };
             over_budget.extend(found.over_budget);
             for row in found.rows {
+                match crate::qa_post_release::batch_notice_deliverable(cas_root, queue.as_ref(), &row) {
+                    Ok(true) => {}
+                    result => {
+                        if let Err(error) = result {
+                            tracing::warn!(prompt_id = row.id, %error, "batch notice revalidation deferred");
+                            drain_failed = true;
+                        }
+                        withheld.push(row.id);
+                        continue;
+                    }
+                }
                 // Transport-delivered rows remain eligible for this hook
                 // so a wake the harness dropped can recover. Revalidate
                 // assignment/start boilerplate before rendering it: the
@@ -603,6 +614,12 @@ fn surface_factory_inbox_with_transport_delivery(
             ) {
                 Ok(found) => {
                     for row in found.rows {
+                        if !crate::qa_post_release::batch_notice_deliverable(cas_root, queue.as_ref(), &row)
+                            .unwrap_or_else(|error| {
+                                tracing::warn!(prompt_id = row.id, %error, "batch notice revalidation deferred");
+                                drain_failed = true;
+                                false
+                            }) { continue; }
                         if !digest.iter().any(|existing| existing.id == row.id) {
                             digest.push(row);
                         }

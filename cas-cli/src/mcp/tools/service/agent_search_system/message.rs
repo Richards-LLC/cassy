@@ -3806,6 +3806,17 @@ impl CasService {
         let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
+            match crate::qa_post_release::batch_notice_deliverable(&self.inner.cas_root, queue.as_ref(), message) {
+                Ok(true) => {}
+                Ok(false) => {
+                    withheld.push((message.id, "Batch notice superseded by current ownership or evidence".into()));
+                    continue;
+                }
+                Err(error) => {
+                    withheld.push((message.id, format!("Batch notice awaits revalidation: {error}")));
+                    continue;
+                }
+            }
             if message.reference_only {
                 body.push_str(&format!("**[{}] From: {}**\n{}\n\n", message.id, message.source, message.prompt));
                 rendered += 1;

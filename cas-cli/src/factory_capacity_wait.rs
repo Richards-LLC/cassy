@@ -1,6 +1,7 @@
 //! Capacity waiting is a worker admission episode, never a task lifecycle state.
 //! Readers fence episodes with the current task lease. The existing notice
 //! outbox makes deadline reconciliation safe across retries and daemon restarts.
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
@@ -21,6 +22,7 @@ const LOWEST_PRIORITY: i32 = 4;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CapacityKind {
     #[default]
+    Unclassified,
     Other,
     PriorityQueue,
     Disk,
@@ -47,6 +49,51 @@ pub(crate) struct CapacityWait {
     notified: bool,
     #[serde(default)]
     kind: CapacityKind,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct PressureNotice {
+    episode: String,
+    revision: u64,
+    workers: Vec<(String, String, String)>,
+    reclaimable_bytes: Option<u64>,
+    notified: bool,
+}
+
+fn write_pressure(root: &Path, notices: &BTreeMap<String, PressureNotice>) -> Result<()> {
+    let mut file = tempfile::NamedTempFile::new_in(directory(root))?;
+    serde_json::to_writer(file.as_file_mut(), notices)?;
+    file.persist(directory(root).join("pressure.state"))?;
+    Ok(())
+}
+
+/// Reuse the bounded, read-only GC inventory; incomplete scans never claim an
+/// exact reclaimable total or turn changing partial scans into new notices.
+fn reclaimable_caches(root: &Path) -> Result<ReclaimableCaches> {
+    use crate::factory_target_cache::{CacheDisposition, TargetCachePolicy};
+    let config = crate::config::Config::load(root)?;
+    let agents = open_agent_store(root)?.list(None)?;
+    let mut known = Vec::new();
+    let mut live = Vec::new();
+    for agent in agents {
+        let path = agent.metadata.get("clone_path").map(PathBuf::from)
+            .unwrap_or_else(|| root.join("worktrees").join(&agent.name));
+        known.push(path.clone());
+        if agent.is_alive() { live.push(path); }
+    }
+    known.extend(crate::store::open_worktree_store(root)?.list()?.into_iter().map(|worktree| worktree.path));
+    if let Some(repo) = root.parent() {
+        if let Ok(entries) = std::fs::read_dir(config.worktrees().resolve_base_path(repo)) {
+            known.extend(entries.flatten().map(|entry| entry.path()));
+        }
+    }
+    let report = crate::factory_target_cache::inspect_until(root, TargetCachePolicy::from(config.factory()),
+        &known, &live, std::time::Instant::now() + std::time::Duration::from_secs(2))?;
+    Ok(ReclaimableCaches {
+        caches: report.caches.into_iter().filter(|cache| matches!(cache.disposition,
+            CacheDisposition::Eligible | CacheDisposition::Selected)).map(|cache| (cache.path, cache.bytes)).collect(),
+        complete: report.inventory_complete,
+    })
 }
 
 fn effective_priority(priority: i32, since: DateTime<Utc>, now: DateTime<Utc>) -> i32 {
@@ -237,6 +284,7 @@ fn binding(root: &Path, repo: &Path, now: DateTime<Utc>) -> Result<Option<Capaci
 
 /// Called only for typed admission-capacity refusals, not dirty trees,
 /// compiler/test failures or I/O errors. First refusal survives each retry.
+#[cfg(test)]
 pub(crate) fn record_refusal(
     root: &Path,
     repo: &Path,
@@ -433,20 +481,21 @@ pub(crate) fn assistance_queued(
 /// Runs on the daemon's existing background reminder-scan lane, even with no
 /// retry or database change. Existing idempotent outbox owns crash recovery.
 pub(crate) fn reconcile(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> Result<usize> {
-    reconcile_with_inventory(root, session, now, || Ok(ReclaimableCaches::default()))
+    reconcile_with_inventory(root, session, now, || reclaimable_caches(root))
 }
 
 fn reconcile_with_inventory(
     root: &Path,
     session: Option<&str>,
     now: DateTime<Utc>,
-    _inventory: impl FnOnce() -> Result<ReclaimableCaches>,
+    inventory: impl FnOnce() -> Result<ReclaimableCaches>,
 ) -> Result<usize> {
     if !directory(root).exists() {
         return Ok(0);
     }
     let _lock = lock(root)?;
     let mut notified = 0;
+    let mut disk_groups: BTreeMap<String, Vec<CapacityWait>> = BTreeMap::new();
     for (file, mut wait) in entries(root)? {
         if session.is_some() && wait.session.as_deref() != session {
             continue;
@@ -455,7 +504,14 @@ fn reconcile_with_inventory(
             std::fs::remove_file(file)?;
             continue;
         }
-        if wait.notified || now - wait.since < Duration::seconds(ESCALATE_SECONDS) {
+        if matches!(wait.kind, CapacityKind::PriorityQueue | CapacityKind::Unclassified) || wait.notified {
+            continue;
+        }
+        if wait.kind == CapacityKind::Disk {
+            disk_groups.entry(serde_json::to_string(&wait.session)?).or_default().push(wait);
+            continue;
+        }
+        if now - wait.since < Duration::seconds(ESCALATE_SECONDS) {
             continue;
         }
         let agents = open_agent_store(root)?.list(None)?;
@@ -476,6 +532,51 @@ fn reconcile_with_inventory(
         )?;
         wait.notified = true;
         write(root, &wait).context("persist delivered capacity escalation")?;
+        notified += 1;
+    }
+    let state_path = directory(root).join("pressure.state");
+    let mut pressure: BTreeMap<String, PressureNotice> = match std::fs::read(&state_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let selected_session = session.map(|session| serde_json::to_string(&Some(session))).transpose()?;
+    let previous_count = pressure.len();
+    pressure.retain(|key, _| selected_session.as_ref().is_some_and(|selected| selected != key)
+        || disk_groups.contains_key(key));
+    if pressure.len() != previous_count { write_pressure(root, &pressure)?; }
+    if disk_groups.values().all(|waits| waits.iter().all(|wait| now - wait.since < Duration::seconds(ESCALATE_SECONDS))) {
+        return Ok(notified);
+    }
+    let inventory = inventory()?;
+    let reclaimable_bytes = inventory.complete.then(|| inventory.caches.iter()
+        .fold(0u64, |total, (_, bytes)| total.saturating_add(*bytes)));
+    let agents = open_agent_store(root)?.list(None)?;
+    for (key, waits) in disk_groups {
+        if waits.iter().all(|wait| now - wait.since < Duration::seconds(ESCALATE_SECONDS)) { continue; }
+        let workers = waits.iter().map(|wait| (wait.worker_id.clone(), wait.task_id.clone(), wait.episode.clone())).collect::<Vec<_>>();
+        let previous = pressure.entry(key.clone()).or_insert_with(|| PressureNotice {
+            episode: uuid::Uuid::new_v4().to_string(), revision: 0, workers: workers.clone(), reclaimable_bytes, notified: false,
+        });
+        if previous.workers != workers || previous.reclaimable_bytes != reclaimable_bytes {
+            previous.workers = workers;
+            previous.reclaimable_bytes = reclaimable_bytes;
+            previous.revision += 1;
+            previous.notified = false;
+        }
+        if previous.notified { continue; }
+        let occurrence = format!("{}:{}", previous.episode, previous.revision);
+        // Persist the outbox identity first, so a crash after enqueue can only
+        // retry the same idempotent notice, including snapshot reversions.
+        write_pressure(root, &pressure)?;
+        let workers = waits.iter().map(|wait| format!("- {} ({}): {}", wait.worker_name, wait.task_id, wait.cause)).collect::<Vec<_>>().join("\n");
+        let caches = inventory.caches.iter().map(|(path, bytes)| format!("- {}: {bytes} bytes", path.display())).collect::<Vec<_>>().join("\n");
+        let total = reclaimable_bytes.map_or_else(|| "unknown (inventory incomplete)".to_string(), |bytes| format!("{bytes} bytes"));
+        let detail = format!("Disk pressure is delaying builds. Waiting workers:\n{workers}\nReclaimable target caches (logical bytes): {total}\n{}\nThis notice updates only when waiting workers or reclaimable bytes change; tasks and leases remain active.", if caches.is_empty() { "- none found" } else { &caches });
+        let recipient = crate::supervisor_notices::resolve(&agents, None, waits[0].session.as_deref());
+        crate::supervisor_notices::enqueue(root, &recipient, "capacity_wait", &detail, &occurrence)?;
+        pressure.get_mut(&key).expect("pressure episode").notified = true;
+        write_pressure(root, &pressure)?;
         notified += 1;
     }
     Ok(notified)
@@ -522,6 +623,13 @@ mod tests {
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later,
             || panic!("a priority queue has no disk inventory to inspect")).unwrap(), 0);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 0);
+        // Old wait records have no typed cause; wait for a retry to classify
+        // them rather than turning unknown legacy queues into fresh pages.
+        let first = path(&root, "capacity-first");
+        let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&first).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("kind");
+        std::fs::write(first, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(reconcile(&root, Some("capacity-session"), later).unwrap(), 0);
         for repo in &repos {
             record_refusal_with_kind(&root, repo, "disk_fixture", CapacityKind::Disk, later).unwrap();
         }
@@ -535,6 +643,7 @@ mod tests {
         }
         // Same snapshot after another deadline (or daemon restart) is quiet.
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later + Duration::minutes(21), || inventory(10)).unwrap(), 0);
+        let later = later + Duration::minutes(21);
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(20)).unwrap(), 1);
         admitted(&root, &repos[1]).unwrap();
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(20)).unwrap(), 1);
@@ -545,5 +654,16 @@ mod tests {
         record_refusal_with_kind(&root, &repos[0], "disk_fixture", CapacityKind::Disk, later).unwrap();
         assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later + Duration::minutes(25), || inventory(20)).unwrap(), 1);
         assert_eq!(notices.pending_count("capacity-lead").unwrap(), 4);
+        // Walk the production read-only inventory too: this fixture has no
+        // target caches, so its complete zero-byte snapshot is a real change.
+        assert_eq!(reconcile(&root, Some("capacity-session"), later + Duration::minutes(25)).unwrap(), 1);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 5);
+        // Admission can finish an episode between daemon scans. An identical
+        // worker set in a fresh wait must still get its new episode notice.
+        let restart = later + Duration::minutes(25);
+        admitted(&root, &repos[0]).unwrap();
+        record_refusal_with_kind(&root, &repos[0], "disk_fixture", CapacityKind::Disk, restart).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), restart + Duration::minutes(25), || inventory(0)).unwrap(), 1);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 6);
     }
 }

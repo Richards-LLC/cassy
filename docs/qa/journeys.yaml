@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  capacity-notice-pressure-episodes:
+    title: Priority queues stay quiet and disk-pressure notices aggregate waiting workers with change-based deduplication
+    tasks: [cas-ed71]
+    invariants: [FACTORY-CAPACITY-NOTICES]
+    journeys: [FACTORY-SUPERVISE]
   booting-worker-task-admission:
     title: Tasks assigned during worker startup enter the ordered backlog once and continue after delivery
     tasks: [cas-d033]
@@ -289,6 +294,9 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-CAPACITY-NOTICES:
+    statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
+    check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
   FACTORY-RECOVER-SHIPPED-IDENTITY:
     statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
     check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
@@ -861,7 +869,7 @@ journeys:
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
   owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE

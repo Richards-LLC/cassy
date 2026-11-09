@@ -17,6 +17,21 @@ const RETRY_SECONDS: i64 = 120;
 const ESCALATE_SECONDS: i64 = 20 * 60;
 const LOWEST_PRIORITY: i32 = 4;
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CapacityKind {
+    #[default]
+    Other,
+    PriorityQueue,
+    Disk,
+}
+
+#[derive(Default)]
+struct ReclaimableCaches {
+    caches: Vec<(PathBuf, u64)>,
+    complete: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct CapacityWait {
     episode: String,
@@ -30,6 +45,8 @@ pub(crate) struct CapacityWait {
     pub next_retry: DateTime<Utc>,
     pub(crate) cause: String,
     notified: bool,
+    #[serde(default)]
+    kind: CapacityKind,
 }
 
 fn effective_priority(priority: i32, since: DateTime<Utc>, now: DateTime<Utc>) -> i32 {
@@ -204,6 +221,7 @@ fn binding(root: &Path, repo: &Path, now: DateTime<Utc>) -> Result<Option<Capaci
                 next_retry: now + Duration::seconds(RETRY_SECONDS),
                 cause: String::new(),
                 notified: false,
+                kind: CapacityKind::Other,
             });
         }
     }
@@ -225,6 +243,16 @@ pub(crate) fn record_refusal(
     cause: &str,
     now: DateTime<Utc>,
 ) -> Result<Option<CapacityWait>> {
+    record_refusal_with_kind(root, repo, cause, CapacityKind::Other, now)
+}
+
+pub(crate) fn record_refusal_with_kind(
+    root: &Path,
+    repo: &Path,
+    cause: &str,
+    kind: CapacityKind,
+    now: DateTime<Utc>,
+) -> Result<Option<CapacityWait>> {
     let Some(mut wait) = binding(root, repo, now)? else {
         return Ok(None);
     };
@@ -238,6 +266,7 @@ pub(crate) fn record_refusal(
     let priority = open_task_store(root)?.get(&wait.task_id)?.priority.0;
     let priority = effective_priority(priority, wait.since, now);
     wait.cause = format!("priority=P{priority} {cause}");
+    wait.kind = kind;
     wait.next_retry = now + Duration::seconds(RETRY_SECONDS);
     write(root, &wait)?;
     Ok(Some(wait))
@@ -404,6 +433,15 @@ pub(crate) fn assistance_queued(
 /// Runs on the daemon's existing background reminder-scan lane, even with no
 /// retry or database change. Existing idempotent outbox owns crash recovery.
 pub(crate) fn reconcile(root: &Path, session: Option<&str>, now: DateTime<Utc>) -> Result<usize> {
+    reconcile_with_inventory(root, session, now, || Ok(ReclaimableCaches::default()))
+}
+
+fn reconcile_with_inventory(
+    root: &Path,
+    session: Option<&str>,
+    now: DateTime<Utc>,
+    _inventory: impl FnOnce() -> Result<ReclaimableCaches>,
+) -> Result<usize> {
     if !directory(root).exists() {
         return Ok(0);
     }
@@ -441,4 +479,71 @@ pub(crate) fn reconcile(root: &Path, session: Option<&str>, now: DateTime<Utc>) 
         notified += 1;
     }
     Ok(notified)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{open_supervisor_queue_store, open_prompt_queue_store};
+    use cas_types::{Agent, Task};
+
+    #[test]
+    fn capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let mut supervisor = Agent::new_with_role("capacity-lead".into(), "capacity-lead".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some("capacity-session".into());
+        agents.register(&supervisor).unwrap();
+        let now = Utc::now();
+        let mut repos = Vec::new();
+        for name in ["capacity-first", "capacity-second"] {
+            let mut worker = Agent::new_with_role(name.into(), name.into(), AgentRole::Worker);
+            worker.factory_session = supervisor.factory_session.clone();
+            agents.register(&worker).unwrap();
+            let mut task = Task::new(format!("cas-{name}"), "capacity fixture".into());
+            task.status = TaskStatus::InProgress;
+            task.assignee = Some(name.into());
+            tasks.add(&task).unwrap();
+            agents.try_claim(&task.id, name, 7200, Some("working")).unwrap();
+            let repo = root.join("worktrees").join(name);
+            std::fs::create_dir_all(&repo).unwrap();
+            record_refusal_with_kind(&root, &repo, "priority_fixture", CapacityKind::PriorityQueue, now).unwrap();
+            repos.push(repo);
+        }
+        let later = now + Duration::minutes(25);
+        let notices = open_supervisor_queue_store(&root).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later,
+            || panic!("a priority queue has no disk inventory to inspect")).unwrap(), 0);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 0);
+        for repo in &repos {
+            record_refusal_with_kind(&root, repo, "disk_fixture", CapacityKind::Disk, later).unwrap();
+        }
+        let inventory = |bytes| Ok(ReclaimableCaches { caches: vec![(PathBuf::from("/fixture/retired-cache"), bytes)], complete: true });
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(10)).unwrap(), 1);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 1);
+        let prompts = open_prompt_queue_store(&root).unwrap().peek_all(100).unwrap();
+        let prompt = &prompts.iter().find(|prompt| prompt.source.starts_with("supervisor-notice:")).unwrap().prompt;
+        for name in ["capacity-first", "capacity-second", "/fixture/retired-cache"] {
+            assert!(prompt.contains(name)); // Fixture identities, not human-readable wording.
+        }
+        // Same snapshot after another deadline (or daemon restart) is quiet.
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later + Duration::minutes(21), || inventory(10)).unwrap(), 0);
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(20)).unwrap(), 1);
+        admitted(&root, &repos[1]).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(20)).unwrap(), 1);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 3);
+        // A resolved episode can later recur with an identical waiting set.
+        admitted(&root, &repos[0]).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later, || inventory(20)).unwrap(), 0);
+        record_refusal_with_kind(&root, &repos[0], "disk_fixture", CapacityKind::Disk, later).unwrap();
+        assert_eq!(reconcile_with_inventory(&root, Some("capacity-session"), later + Duration::minutes(25), || inventory(20)).unwrap(), 1);
+        assert_eq!(notices.pending_count("capacity-lead").unwrap(), 4);
+    }
 }

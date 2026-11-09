@@ -16162,7 +16162,7 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// Normally that is the assignee's own `factory/<assignee>`. After a
 /// handoff (worker → supervisor) the new assignee has no such branch; the
 /// commits live on the original worker's branch instead. Candidates, in
-/// order: the assignee's branch, the commit-time `parked_branch`, recorded
+/// order: the commit-time `parked_branch`, the assignee's branches, recorded
 /// handoff branches (most recent first), then branches named by transfer
 /// audit notes — each checked locally, then as `origin/<branch>`. Returns
 /// `None` when none of the recorded candidates resolves. A released task
@@ -16174,31 +16174,24 @@ pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> 
         return Some(branch);
     }
     let unique = task_delivery_branch_candidates(task);
-    unique
-        .iter()
-        .find(|branch| git_ref_exists(repo_path, branch))
-        .cloned()
-        .or_else(|| {
-            unique
-                .iter()
-                .map(|branch| format!("origin/{branch}"))
-                .find(|branch| git_ref_exists(repo_path, branch))
-        })
+    unique.into_iter().find_map(|branch| {
+        [branch.clone(), format!("origin/{branch}")].into_iter()
+            .find(|reference| git_ref_exists(repo_path, reference))
+    })
 }
 
 /// The branch names that may hold `task`'s commits, in
 /// [`task_delivery_branch`] order, deduplicated and refname-safe: the
-/// assignee's per-task and own branches, the recorded parked branch, then
+/// recorded parked branch, the assignee's per-task and own branches, then
 /// handoff branches and prior holders' branches.
 fn task_delivery_branch_candidates(task: &Task) -> Vec<String> {
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<String> = task.deliverables.parked_branch.clone().into_iter().collect();
     if let Some(assignee) = task.assignee.as_deref() {
         // cas-73b8: the per-task branch, when the worker used one, holds
         // exactly this task's commits.
         candidates.push(crate::factory_isolation::worker_task_branch(assignee, &task.id));
         candidates.push(format!("factory/{assignee}"));
     }
-    candidates.extend(task.deliverables.parked_branch.clone());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
     candidates.extend(
         handoff_prior_holders(&task.notes)
@@ -16267,30 +16260,30 @@ fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> Strin
     )
 }
 
-/// Prefer a preservation ref to a reused lane only while its immutable anchor
-/// is integrated. A moved local branch must be measured live, never hidden by
-/// a stale origin ref; an unmerged old anchor cannot displace a current receipt.
-fn anchored_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Option<String> {
-    let parked = task.deliverables.parked_branch.as_deref()?;
-    let anchor = task.deliverables.factory_branch_anchor.as_deref()?;
-    if !is_safe_git_refname(parked) {
-        return None;
-    }
-    let branch = if git_ref_exists(repo, &format!("refs/heads/{parked}")) {
-        parked.to_string()
-    } else {
-        format!("origin/{parked}")
+/// A persisted park identifies the delivery before any current lane inference.
+/// Squash integration need not retain the anchor's ancestry on the target.
+/// Selection does not authorize close: start attribution, publication, receipt
+/// and content gates still validate the selected delivery.
+fn recorded_parked_delivery_branch(repo: &std::path::Path, task: &Task) -> Result<Option<String>, String> {
+    let Some(parked) = task.deliverables.parked_branch.as_deref().filter(|branch| is_safe_git_refname(branch)) else {
+        return Ok(None);
     };
-    if resolve_branch_sha(repo, &branch).as_deref() != Some(anchor) {
-        return None;
+    let Some(branch) = [parked.to_string(), format!("origin/{parked}")].into_iter()
+        .find(|branch| git_ref_exists(repo, branch)) else {
+        return Ok(None);
+    };
+    let identity = task_commit_identity(task, None);
+    let holds_anchor = task.deliverables.factory_branch_anchor.as_deref()
+        .is_some_and(|anchor| git_commit_is_ancestor(repo, anchor, &branch));
+    if !holds_anchor && matches!(task_attribution::branch_task_claims(repo, &branch, &identity), Some((None, Some(_)))) {
+        return Err(format!("DELIVERY BRANCH UNRESOLVED: recorded parked branch {branch} belongs to another task"));
     }
-    let target = task.deliverables.work_target.as_ref()?.target_branch.trim();
-    if !is_safe_git_refname(target) {
-        return None;
+    let mut measured = task.clone();
+    if let Some(start) = measured.deliverables.factory_branch_start.as_mut() {
+        start.branch = parked.to_string();
     }
-    [target.to_string(), format!("origin/{target}")].into_iter()
-        .any(|target| git_commit_is_ancestor(repo, anchor, &target))
-        .then_some(branch)
+    task_attribution::started_delivery(repo, &measured)?;
+    Ok(Some(branch))
 }
 
 /// [`close_measured_factory_branch`], refusing instead of binding to another
@@ -16319,6 +16312,9 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(task_attribution::started_delivery(repo_path, &measured)?
             .map(|delivery| delivery.branch).unwrap_or(parked));
     }
+    if let Some(branch) = recorded_parked_delivery_branch(repo_path, task)? {
+        return Ok(branch);
+    }
     // GH #1353: older starts recorded the reusable lane before the worker
     // cut its own per-task branch. That lane may still back another task's
     // open PR. Measure the task lane, keeping the original base and all
@@ -16335,9 +16331,6 @@ pub(crate) fn resolve_close_delivery_branch(
     }
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
-    }
-    if let Some(branch) = anchored_parked_delivery_branch(repo_path, task) {
-        return Ok(branch);
     }
     if let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
         return Ok(branch);
@@ -18519,6 +18512,13 @@ pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {
+    // A parked delivery's target is a recorded proof boundary. Normalizing
+    // it against a later epic lane would measure a different delivery.
+    if task.deliverables.parked_branch.is_some()
+        && let Some(target) = task.deliverables.work_target.as_ref()
+    {
+        return Some(target.clone());
+    }
     crate::mcp::tools::core::task::repo_context::effective_task_work_target(task, parent_epic)
 }
 

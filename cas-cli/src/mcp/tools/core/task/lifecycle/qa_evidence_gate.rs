@@ -179,9 +179,9 @@ pub(crate) fn qa_evidence_close_gate(
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     let [scoped, legacy] = crate::config::factory_task_artifact_dirs(cas_root, base, &task.id);
     let cited = crate::qa_evidence::cited_bundle_path(&task.notes);
-    // Explicit historical citations remain valid. Otherwise prefer new QA
-    // evidence; a namespace created only for issue attachments must not hide
-    // an existing legacy ledger or terminal receipt.
+    // Project evidence wins even over a historical citation. A flat task id
+    // alone cannot identify its project; legacy evidence requires an explicit
+    // task citation rather than an implicit same-id lookup.
     let legacy_cited = cited.as_deref().is_some_and(|path| {
         let path = crate::qa_evidence::expand_home(path);
         path.starts_with(&legacy) && std::fs::symlink_metadata(path).is_ok()
@@ -189,7 +189,7 @@ fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
     let scoped_evidence = scoped.join("LEDGER.md").exists()
         || scoped.join("qa").exists()
         || scoped.join("terminal-qa").exists();
-    if (legacy_cited || (cited.is_none() && !scoped_evidence))
+    if !scoped_evidence && legacy_cited
         && crate::config::canonical_factory_task_artifact_dir(base, &legacy).is_some()
     {
         legacy

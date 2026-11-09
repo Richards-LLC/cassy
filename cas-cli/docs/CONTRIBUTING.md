@@ -1972,6 +1972,15 @@ file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log`.
 
+Close measures a delivery's recorded `parked_branch` (local, then origin)
+before deriving branches from its current assignee. Its recorded `work_target`
+remains authoritative after parking, including squash-integrated deliveries;
+a later epic lane does not redefine that proof boundary. Ownership, start-range,
+publication and receipt checks still apply. QA reads project-scoped evidence
+before historical flat task directories. A flat directory is a fallback only
+when the task explicitly cites its historical bundle and no scoped QA evidence
+exists; a colliding short task ID alone never selects another project's ledger.
+
 ## Project capture configuration
 
 `cas config list --section qa.capture` lists the project capture settings.

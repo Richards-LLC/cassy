@@ -913,7 +913,9 @@ impl CasCore {
         }
         refresh_review_target(repo, target).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         if let Some(dispatch) = latest.as_ref()
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
@@ -1054,7 +1056,9 @@ impl CasCore {
         else {
             return Ok(None);
         };
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
             || dispatch.receipt_id.is_some()
             || prior.context_digest != digest
@@ -1168,7 +1172,9 @@ impl CasCore {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = review_target(repo, target).map_err(fail)?;
-        let repository = repo.canonicalize().map_err(fail)?;
+        let repository = repo.canonicalize().map_err(|error| {
+            fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
+        })?;
         let key = candidate_key(
             &task.id,
             &repository,
@@ -1188,8 +1194,12 @@ impl CasCore {
         .map_err(fail)?;
         let manifest = directory.join("candidate.json");
         if manifest.exists() {
-            let candidate: Candidate =
-                serde_json::from_slice(&std::fs::read(manifest).map_err(fail)?).map_err(fail)?;
+            let bytes = std::fs::read(&manifest).map_err(|error| {
+                fail(format!("could not read cached candidate manifest {}: {error}", manifest.display()))
+            })?;
+            let candidate: Candidate = serde_json::from_slice(&bytes).map_err(|error| {
+                fail(format!("could not parse cached candidate manifest {}: {error}", manifest.display()))
+            })?;
             if candidate.task_id != task.id
                 || candidate.repository != repository
                 || candidate.source_branch != source
@@ -1219,16 +1229,19 @@ impl CasCore {
             }
             return Ok(candidate);
         }
-        std::fs::create_dir_all(&directory).map_err(fail)?;
+        std::fs::create_dir_all(&directory).map_err(|error| {
+            fail(format!("could not create candidate directory {}: {error}", directory.display()))
+        })?;
         if let Some(dispatch) =
             cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id).map_err(fail)?
             && let Some(proof) = dispatch.repository.as_ref()
             && proof_candidate_key(proof).map_err(fail)?.as_deref()
                 == directory.file_name().and_then(|name| name.to_str())
         {
-            return Err(fail(
-                "candidate manifest missing for an existing dispatch; explicit recovery required",
-            ));
+            return Err(fail(format!(
+                "candidate manifest {} is missing for existing dispatch {}; explicit recovery required",
+                manifest.display(), dispatch.id,
+            )));
         }
         let merged = git(
             repo,
@@ -1288,7 +1301,9 @@ impl CasCore {
         proof.worktree_root = checkout
             .path
             .canonicalize()
-            .map_err(fail)?
+            .map_err(|error| {
+                fail(format!("could not resolve candidate checkout {}: {error}", checkout.path.display()))
+            })?
             .to_string_lossy()
             .into_owned();
         let candidate = Candidate {

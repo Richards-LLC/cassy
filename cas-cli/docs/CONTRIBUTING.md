@@ -2440,6 +2440,15 @@ records live under `.cas/worker-runs/`; no migration or authority capability is
 created. Linux and macOS resolve the actual stdout log file, and detached calls
 without a regular log are refused.
 
+Before recycling a worker, Cassy sends TERM to each of its registered,
+fingerprinted detached producers and lets the capped runner drain its guard
+and Cargo descendants. It checks the inherited target lease before retiring
+the worker or killing its cgroup. A producer that cannot settle within eight
+seconds, or a surviving lease holder, refuses recycle while the worker remains
+running. Completed runs retain their recorded result; retries can acquire the
+target after the original work ends. Lease refusals omit the contender's own
+descriptor when reporting the remaining holders.
+
 Live registered runs and worker/session-matched candidate requests suppress
 worker-idle relays. A completed run ID, task or delivery-condition change can
 start a new idle episode; elapsed time, changing message ages and temporary wait

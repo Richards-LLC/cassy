@@ -228,8 +228,10 @@ fn launch_command(
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
-    if let Some(notice) = notice {
-        attention(core, dispatch, &notice)?;
+    if let Some(notice) = notice
+        && let Err(error) = attention(core, dispatch, &notice)
+    {
+        tracing::warn!(dispatch_id = %dispatch.id, %error, "Verifier launched; follow-up notice failed");
     }
     Ok(Some(handle))
 }

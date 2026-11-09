@@ -1533,7 +1533,7 @@ fn handle_pre_tool_use_inner(
         && let Ok(Some(dispatch)) = cas_store::get_latest_verification_dispatch(cas_root, &task_id)
         && dispatch.state == cas_types::VerificationDispatchState::Claimed
         && let Some(verifier) = dispatch.verifier_agent_id.as_deref()
-        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| agent.is_alive()))
+        && stores.agents().is_some_and(|agents| agents.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent)))
     {
         return Ok(HookOutput::with_pre_tool_permission(
             "deny",

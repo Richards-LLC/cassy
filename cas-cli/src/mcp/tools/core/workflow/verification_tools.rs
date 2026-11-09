@@ -767,7 +767,7 @@ impl CasCore {
                 cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed
             )
             && let Some(verifier) = proof_dispatch.verifier_agent_id.as_deref().filter(|id| *id != caller_id)
-            && agent_store.get(verifier).is_ok_and(|agent| agent.is_alive())
+            && agent_store.get(verifier).is_ok_and(|agent| crate::mcp::tools::service::agent_liveness::verifier_is_running(&agent))
         {
             let existing = cas_store::get_verification_for_dispatch(&self.cas_root, &requested_dispatch_id)
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
@@ -1652,6 +1652,20 @@ mod lifecycle_friction_tests {
         cas_store::claim_verification_dispatch(
             &core.cas_root, &task.id, "review-supervisor", &child.id, &issued.capability.id,
         ).unwrap();
+        let input = crate::hooks::handlers::HookInput {
+            hook_event_name: "PreToolUse".into(),
+            session_id: "review-supervisor".into(),
+            agent_role: Some("supervisor".into()),
+            cwd: core.cas_root.parent().unwrap().to_string_lossy().into_owned(),
+            tool_name: Some("Agent".into()),
+            tool_use_id: Some("replacement-verifier".into()),
+            tool_input: Some(serde_json::json!({
+                "subagent_type":"task-verifier", "prompt":format!("Verify task {}", task.id),
+            })),
+            ..Default::default()
+        };
+        let hook = crate::hooks::handlers::handle_pre_tool_use(&input, Some(&core.cas_root)).unwrap();
+        assert_ne!(serde_json::to_value(hook).unwrap()["hookSpecificOutput"]["permissionDecision"], "deny");
         let result = core.cas_verification_add(Parameters(
             serde_json::from_value(serde_json::json!({
                 "task_id":task.id,"dispatch_id":dispatch.id,

@@ -45,7 +45,7 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery, receipts and ref cleanup.
 - `cas-cli/src/cli/init.rs`, `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - initialization, provisioning, content-based managed sync commits and merge-residue recovery.
 - `cas-cli/src/accounts.rs`, `cas-cli/src/cli/accounts.rs`, `cas-cli/src/account_registry/` - account inventory, authentication-scope-safe link planning, identity discovery and native usage snapshots.
-- `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded mutations and shared-link repair.
+- `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded mutations and shared-link repair. `cas-cli/src/config/` and `cas-cli/src/mcp/tools/service/factory_ops.rs` resolve local `factory.codex_home` preferences before worker recommendations.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/cli/limits.rs` - harness launch, login, account choice and capacity reports.
 - `cas-cli/src/agent_model.rs` - role-scoped model/effort observations used by hooks, Commander and status.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs`, `cas-cli/src/gh_budget_tests.rs` - GitHub request budgets and health (including retired MCP guidance), update receipts and account/root readiness.

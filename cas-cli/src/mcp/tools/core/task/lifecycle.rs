@@ -966,11 +966,18 @@ fn task_similarity(
 /// One open task that overlaps a task being created.
 type SimilarTask = (String, String, f64, Vec<String>);
 
+fn normalize_task_scope(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 /// The overlap checks for a new task, split by whether they may block it.
 #[derive(Debug, Default)]
 struct OpenTaskOverlap {
-    /// The best-scoring overlap with any open task other than the new task's
-    /// own parent epic and its siblings. This one requires confirmation.
+    /// The best-scoring overlap that requires confirmation, including exact
+    /// duplicates among siblings.
     blocking: Option<SimilarTask>,
     /// The best-scoring overlap with a sibling under the same epic. Children
     /// of one epic naturally share its identifiers, so this only warns.
@@ -1050,7 +1057,9 @@ fn open_task_similarity(
         else {
             continue;
         };
-        let slot = if siblings.contains(&task.id) {
+        let identical_scope = normalize_task_scope(&task.title) == normalize_task_scope(title)
+            && normalize_task_scope(&task.description) == normalize_task_scope(description);
+        let slot = if siblings.contains(&task.id) && !identical_scope {
             &mut overlap.sibling
         } else {
             &mut overlap.blocking
@@ -4191,6 +4200,79 @@ mod related_recall_response_tests {
             )))
             .await
             .expect_err("a matching task outside the epic still needs confirmation");
+    }
+
+    #[tokio::test]
+    async fn peer_created_task_searches_by_id_and_blocks_identical_sibling_recreation() {
+        let temp = TempDir::new().expect("temporary project");
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let store = core.open_task_store().expect("task store");
+        store.init().expect("initialize task store");
+
+        let mut epic = Task::new("cas-ep16".into(), "Search freshness epic".into());
+        epic.task_type = TaskType::Epic;
+        store.add(&epic).expect("add epic");
+        let peer_task = Task::new(
+            "cas-1668".into(),
+            "Quasar marigold dependency reconciliation".into(),
+        );
+        store
+            .create_atomic(
+                &peer_task,
+                &[],
+                Some(&epic.id),
+                None,
+            )
+            .expect("persist peer-created task and parent edge");
+
+        let id_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: peer_task.id.clone(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search by canonical task ID");
+        let id_results = text(id_results);
+        assert!(id_results.contains(&peer_task.id), "{id_results}");
+
+        let semantic_results = core
+            .cas_search(Parameters(SearchRequest {
+                query: "quasar marigold dependency".to_string(),
+                limit: 10,
+                doc_type: Some("task".to_string()),
+                scope: "all".to_string(),
+                tags: None,
+            }))
+            .await
+            .expect("search peer-created task by content");
+        let semantic_results = text(semantic_results);
+        assert!(semantic_results.contains(&peer_task.id), "{semantic_results}");
+
+        let mut changed_task = peer_task.clone();
+        changed_task.title.push_str(" updated");
+        store.update(&changed_task).expect("update one canonical task");
+        let search_index = core.open_search_index().expect("search index");
+        let refreshed = search_index
+            .refresh_tasks(&store.list(None).expect("list tasks after update"))
+            .expect("refresh changed task");
+        assert_eq!(refreshed, 1, "only the updated task document is rewritten");
+
+        let before = store.list(None).expect("list tasks before duplicate").len();
+        let mut duplicate = child_request(&changed_task.title, epic.id.clone());
+        duplicate.description = Some(changed_task.description.clone());
+        let error = core
+            .cas_task_create(Parameters(duplicate))
+            .await
+            .expect_err("identical sibling work must offer reuse before writing");
+        assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains(&peer_task.id), "{}", error.message);
+        assert_eq!(
+            store.list(None).expect("list tasks after duplicate").len(),
+            before
+        );
     }
 
     #[tokio::test]

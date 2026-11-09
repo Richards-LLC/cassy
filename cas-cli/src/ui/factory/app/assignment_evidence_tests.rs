@@ -1,5 +1,5 @@
 use super::*;
-use cas_store::{AgentStore, TaskStore};
+use cas_store::{AgentStore, ReminderStore, TaskStore};
 use cas_types::{Agent, Dependency, DependencyType, Task, TaskStatus, TaskType};
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -172,11 +172,137 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         app.current_epic_id = None;
         assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
             "without focus, production evidence must still cover ready tasks and filter the live peer claim");
-        let request = assignment_evidence::AssignmentRequest::new(cas.clone(), &app.unfiltered_director_data).unwrap();
+        let request = assignment_evidence::AssignmentRequest::new(
+            cas.clone(),
+            &app.unfiltered_director_data,
+            "fixture",
+            "supervisor",
+        )
+        .unwrap();
         let mut closed = stores.task_store.get("cas-loose-free").unwrap();
         closed.status = TaskStatus::Closed;
         stores.task_store.update(&closed).unwrap();
         assert!(!request.read().allows("cas-loose-free"), "live terminal state must override a stale ready snapshot");
 
     }).await.unwrap();
+}
+
+#[test]
+fn operator_ask_does_not_count_workers_holding_blocked_tasks_as_idle() {
+    let now = Utc::now();
+    let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "operator-ask-stall")]);
+    let dir = tempfile::tempdir().unwrap();
+    let cas = crate::store::init_cas_dir(dir.path()).unwrap();
+    let stores = DirectorStores::open(&cas).unwrap();
+
+    let mut supervisor = cas_types::Agent::new("id-supervisor".into(), "supervisor".into());
+    supervisor.role = cas_types::AgentRole::Supervisor;
+    supervisor.factory_session = Some("operator-ask-stall".into());
+    stores.agent_store.register(&supervisor).unwrap();
+    for (name, owner) in [("blocked-owl", "operator"), ("blocked-fox", "supervisor")] {
+        let mut worker = cas_types::Agent::new(format!("id-{name}"), name.into());
+        worker.role = cas_types::AgentRole::Worker;
+        worker.factory_session = Some("operator-ask-stall".into());
+        worker.registered_at = now - chrono::Duration::hours(1);
+        stores.agent_store.register(&worker).unwrap();
+
+        let mut blocked =
+            Task::new(format!("cas-{name}"), "waiting for the operator".into());
+        blocked.status = TaskStatus::Blocked;
+        blocked.assignee = Some(name.into());
+        blocked.notes = format!(
+            "[2026-11-08 17:00] 🚫 BLOCKER owner: {owner}; waiting for the missing rustc link."
+        );
+        stores.task_store.add(&blocked).unwrap();
+    }
+    stores
+        .task_store
+        .add(&Task::new(
+            "cas-ready".into(),
+            "unassigned backlog".into(),
+        ))
+        .unwrap();
+    stores
+        .reminder_store
+        .as_ref()
+        .unwrap()
+        .create_with_scope(
+            &supervisor.id,
+            Some(&supervisor.id),
+            "Operator ask deadline",
+            cas_store::ReminderTriggerType::Time,
+            Some(now + chrono::Duration::hours(1)),
+            None,
+            Some(&json!({"operator_ask": 4232719})),
+            0,
+            Some("operator-ask-stall"),
+            Some("supervisor-session"),
+            false,
+            None,
+        )
+        .unwrap();
+
+    let mut app = FactoryApp::for_test();
+    app.cas_dir = cas.clone();
+    app.factory_session = Some("operator-ask-stall".into());
+    app.supervisor_name = "supervisor".into();
+    let data = DirectorData::load_fast(&cas).unwrap();
+    let assignment = assignment_evidence::AssignmentRequest::new(
+        cas.clone(),
+        &data,
+        "operator-ask-stall",
+        "supervisor",
+    )
+    .unwrap()
+    .read();
+    app.unfiltered_director_data = data.clone();
+    app.assignment_evidence = assignment.clone();
+    app.session_progress = SessionProgressRead {
+        progress: Some((Some(now - chrono::Duration::minutes(30)), Default::default())),
+        held_workers: Some(HashSet::new()),
+    };
+    assert!(
+        app.detect_supervisor_stall().is_none(),
+        "a supervisor silent past the threshold must not receive a supervisor_stalled event"
+    );
+    assert_eq!(
+        app.supervisor_actionable_from_ownership(
+            &data,
+            &Default::default(),
+            Some(&HashSet::new()),
+            now,
+            &assignment,
+        ),
+        None,
+        "the live operator ask leaves neither supervisor- nor operator-blocked workers as assignment capacity"
+    );
+
+    let mut free = cas_types::Agent::new("id-free-worker".into(), "free-worker".into());
+    free.role = cas_types::AgentRole::Worker;
+    free.factory_session = Some("operator-ask-stall".into());
+    free.registered_at = now - chrono::Duration::hours(1);
+    stores.agent_store.register(&free).unwrap();
+    let data = DirectorData::load_fast(&cas).unwrap();
+    let assignment = assignment_evidence::AssignmentRequest::new(
+        cas,
+        &data,
+        "operator-ask-stall",
+        "supervisor",
+    )
+    .unwrap()
+    .read();
+    assert_eq!(
+        app.supervisor_actionable_from_ownership(
+            &data,
+            &Default::default(),
+            Some(&HashSet::new()),
+            now,
+            &assignment,
+        ),
+        Some(super::super::director::SupervisorActionableState::AssignReadyWork {
+            task_ids: vec!["cas-ready".into()],
+            idle_workers: vec!["free-worker".into()],
+        }),
+        "a worker with no task remains idle capacity"
+    );
 }

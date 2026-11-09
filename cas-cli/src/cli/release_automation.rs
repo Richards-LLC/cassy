@@ -1161,6 +1161,7 @@ mod tests {
         git(repo, &["tag", "v4.3.0"]).unwrap();
         git(repo, &["push", "origin", "main", train.branch.as_deref().unwrap(), "--tags"]).unwrap();
         train.labels.push("release-train-cut".into());
+        train.deliverables.work_target.as_mut().unwrap().repo_selector = "project:release-fixture".into();
         let store = open_task_store(&root).unwrap();
         store.update(&train).unwrap();
         let mut successor = Task::new("cas-next001".into(), "Next train".into());

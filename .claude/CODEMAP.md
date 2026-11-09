@@ -65,6 +65,8 @@
 
 ## Factory runtime and terminals
 
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - fresh park binds a pushed source tip to the task's recorded start identity; parked deliveries retain their attribution/anchor fences.
+
 - `cas-cli/src/cli/factory/queries.rs` - factory queries and explicit message destination/store validation; `cas-cli/tests/cli_test.rs` covers inherited-context routing and conflict refusal.
 - `cas-cli/src/epic_design_review.rs` - per-epic stakeholder defect trigger, durable staffing pause, supervisor prompt and operator-only reasoned lift; wired through task mutations, starts, spawn admission and off-loop provisioning.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_guardrails_tests.rs` - release-train guardrails: `cas factory train drop` (revert one child's merge, reopen it for its worker, re-enqueue the train; one repair cycle) and the daemon's once-per-state "train ready to cut" and max-age notices, which first offer each green tip to auto-cut.
@@ -86,7 +88,7 @@
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake, ordered wakes routed to the reader's owner session and per-session receipts.
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry.rs` - dispatch/readiness attribution and owned-server process checks.
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - command allowlists, native mappings, caller-owned Finish queue and no-input dismissal cancellation, stale chooser recovery, native turn execution evidence and Claude Cassy reconnect receipts from live process versions.
-- `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - task binding, ordered worker backlogs, execution/held-task queue display and optional generation-fenced fresh-context continuation.
+- `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - task binding, ordered worker backlogs with pre-registration assignment admission, execution/held-task queue display and optional generation-fenced fresh-context continuation.
 - `cas-cli/src/factory_auth_health.rs` - selected-account Codex catalogue evidence, shared MCP/CLI lane fallback admission, and terminal harness authentication/model failures; `cas-cli/src/ui/factory/app/assignment_evidence.rs` excludes those failures from idle staffing.
 - `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - off-loop reservation of isolated MCP worker names against the actual target repository's local/origin refs, registered identities and pending spawn names before queue/task binding.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/factory_candidate_queue_tests.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - typed requests, runner ownership, bounded sandbox probes and daemon-managed candidate builds.

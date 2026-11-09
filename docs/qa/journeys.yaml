@@ -517,6 +517,10 @@ invariants:
     statement: A message consumed during a same-name Claude replacement appears live as an answer to the original paired-device send and remains one answer after reload.
     check: 'Send during startup on a real candidate Claude daemon; require a native consumed queued_command or UserPromptSubmit incoming-message attachment and read back kind=answer, reply_to=original send id and the paired device id. Include an actual background task notification before completion, plus a typed question and two Commander sends consumed in one native turn: one visible answer binds the latest verified send, including a hook batch, every consumed send remains Delivered, and reload adds no duplicates. A standalone machine task notification produces a status reply without claiming an operator input. Run commander_mirror::tests with machine-origin, queue-bookkeeping, unrelated-hook/attachment, foreign-session and foreign-recipient controls.'
     bug: {task: cas-33e6}
+  HUB-J5-RECONNECT-ANSWER:
+    statement: After a supervisor /clear and a later Cassy MCP reconnect, its pane answer to a verified Commander send still appears as an answer to that send on the paired device.
+    check: Run commander_mirror::tests::mcp_reconnect_after_clear_keeps_answers_mirrored_cas_bfe3; on a real candidate, /clear a supervisor, run /mcp reconnect cas, send from Commander and read back kind=answer, reply_to and the device id in conversation history.
+    bug: {task: cas-bfe3}
   HUB-J5-UNREAD-SUCCESSION:
     statement: Unread Commander and daemon-stamped Violet messages survive supervisor exit with their content and routing intact; a same-name replacement in a new session can read each once, while live recipients and received or unrelated mail stay protected.
     check: Run supervisor_handoff_tests::gated_operator_and_violet_messages_survive_supervisor_exit through SessionEnd, SessionStart and normal inbox polling, plus violet_succession_preserves_live_ownership_and_releases_only_unconfirmed_claims for the alias liveness and receipt guards.
@@ -1420,6 +1424,7 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
+  - HUB-J5-RECONNECT-ANSWER
   - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE

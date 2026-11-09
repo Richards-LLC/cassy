@@ -2388,6 +2388,42 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
         .collect::<Vec<_>>().join("\n")
 }
 
+/// GH #1670: a held execution retains its queue cursor while another task
+/// runs. Display execution from task state without moving that durable cursor.
+#[tokio::test]
+async fn worker_queue_reports_execution_separately_from_held_cursor_cas_600b() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let held_id = "cas-8488-current";
+    let pending_id = "cas-8488-one";
+    let _ = queue_control(&f, Some(vec![pending_id])).await;
+    let _ = call(&f.worker, serde_json::json!({
+        "action":"update", "id":held_id, "status":"blocked",
+    })).await;
+    assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+    let mut active = assigned("cas-600b-active", TaskType::Task, "main");
+    active.status = TaskStatus::Open;
+    active.execution_note = Some("no-code".into());
+    active.external_ref = Some(PROOF.into());
+    f.put(&active);
+    let _ = call(&f.worker, serde_json::json!({"action":"start", "id":active.id})).await;
+    assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    for ids in [None, Some(vec![pending_id])] {
+        let report = queue_control(&f, ids).await;
+        // Assert task identity and grouping order, independent of display prose.
+        let reported = report.split_whitespace().filter(|token| token.starts_with("cas-"))
+            .collect::<Vec<_>>();
+        assert_eq!(reported, vec![active.id.as_str(), held_id, pending_id], "{report}");
+        let queue = queues.get("queue-session", WORKER).unwrap();
+        assert_eq!(queue.current_task.as_deref(), Some(held_id));
+        assert!(queue.current_started);
+        assert_eq!(queue.pending, vec![pending_id]);
+        assert_eq!(f.task(held_id).status, TaskStatus::Blocked);
+        assert_eq!(f.task(&active.id).status, TaskStatus::InProgress);
+    }
+}
+
 /// Queue edits are supervisor operations and only affect pending work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {

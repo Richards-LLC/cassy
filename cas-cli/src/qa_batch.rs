@@ -435,11 +435,82 @@ pub(crate) fn prepare_receipt(
         task_heads: heads,
         recorder_agent_id: recorder.id.clone(),
         recorded_at: chrono::Utc::now().to_rfc3339(),
+        release_tag: None,
         ledger_author_id: Some(author_id),
         ledger_author_role: Some(author_role),
         author_overrides: overrides,
         imported: false,
     })
+}
+
+/// Prepare a receipt whose explicit verdict kind is a published tag. The tag
+/// must contain each named delivery's tree effect; no QA ledger or ledger
+/// author is invented for this evidence.
+pub(crate) fn prepare_release_tag_receipt(
+    root: &Path,
+    task_ids: &[String],
+    tag: &str,
+) -> Result<QaBatchReceipt, String> {
+    if task_ids.is_empty() || task_ids.len() > 500 {
+        return Err("release tag verdict needs 1 to 500 task IDs".into());
+    }
+    if tag.is_empty() || tag.starts_with('-') {
+        return Err("release tag is invalid".into());
+    }
+    let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
+    let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let mut heads = BTreeMap::new();
+    let mut tag_sha = None;
+    for id in task_ids {
+        let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
+        if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
+            return Err(format!("task {id} belongs to another project or has no project binding"));
+        }
+        let (repo, target) = task_context(root, &task)?;
+        let candidate = commit(&repo, &format!("refs/tags/{tag}"))
+            .ok_or_else(|| format!("published release tag {tag} is unavailable in {}", repo.display()))?;
+        if tag_sha.as_ref().is_some_and(|prior| prior != &candidate) {
+            return Err(format!("release tag {tag} resolves differently across task repositories"));
+        }
+        tag_sha.get_or_insert(candidate.clone());
+        let anchor = resolved_delivery_anchor(&repo, &task, &target)
+            .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
+        if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
+            return Err(format!("release tag {tag} does not contain task {id}'s delivery tree effect"));
+        }
+        heads.insert(id.clone(), anchor);
+    }
+    Ok(QaBatchReceipt {
+        schema_version: cas_store::RELEASE_TAG_VERDICT_SCHEMA,
+        id: format!("qtag-{}", uuid::Uuid::new_v4().simple()),
+        project_id: project,
+        ledger_artifact_id: String::new(),
+        ledger_path: String::new(),
+        ledger_sha256: String::new(),
+        ledger_size_bytes: 0,
+        staging_sha: tag_sha.ok_or("release tag verdict has no tasks")?,
+        task_heads: heads,
+        recorder_agent_id: "release-automation".into(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        release_tag: Some(tag.to_string()),
+        ledger_author_id: None,
+        ledger_author_role: None,
+        author_overrides: BTreeMap::new(),
+        imported: false,
+    })
+}
+
+/// A release tag contains a delivery when it carries the delivery commit or
+/// preserves the delivery's tree effect, including a later edit to its files.
+pub(crate) fn release_tag_ships_delivery(repo: &Path, anchor: &str, tag_sha: &str, task_id: &str) -> bool {
+    ancestor(repo, anchor, tag_sha) == Some(true)
+        || matches!(
+            crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target_for_task(
+                repo, anchor, tag_sha, task_id,
+            ),
+            crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
+        )
 }
 
 /// The QA receipt covering this delivery.
@@ -580,6 +651,18 @@ fn covering_receipt(
     for receipt in receipts {
         let Some(reviewed) = receipt.task_heads.get(&task.id) else { continue };
         let known = *reviewed == anchor || retired.contains(reviewed);
+        if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
+            let Some(tag) = receipt.release_tag.as_deref() else { continue };
+            let tag_ref = format!("refs/tags/{tag}");
+            if !known
+                || ![anchor.as_str(), head].contains(&reviewed.as_str())
+                || commit(repo, &tag_ref).as_deref() != Some(receipt.staging_sha.as_str())
+                || !release_tag_ships_delivery(repo, reviewed, &receipt.staging_sha, &task.id)
+            {
+                continue;
+            }
+            return Ok(Some(receipt));
+        }
         let inside_review = active == Some(reviewed.as_str())
             || head == reviewed
             || ancestor(repo, head, &receipt.staging_sha) == Some(true);

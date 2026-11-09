@@ -2770,3 +2770,81 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
     assert!(queue.notes.iter().any(|note| note.contains("cas-8488-three: status blocked")), "{queue:?}");
     assert!(!queue.starting);
 }
+
+/// GH #1596/#1597: refusing A must leave B editable and preserve its owner
+/// across the supervisor's correction round; a foreign descendant is refused.
+#[tokio::test]
+async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
+    for foreign in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture(&mut env, "main");
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        git(&checkout, &["reset", "--hard", "origin/main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), checkout.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+        for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
+            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+            config.set(key, value).unwrap();
+        }
+        config.save(&f.cas_dir()).unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let id = "cas-56f1";
+        let mut task = assigned(id, TaskType::Bug, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        let start = f.task(id).deliverables.factory_branch_start.unwrap();
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(checkout.join("docs/qa/bug-families")).unwrap();
+        std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
+        std::fs::write(checkout.join("docs/qa/bug-families/correction.yaml"), "title: Flow correction\ntasks: [cas-56f1]\ninvariants: [INV]\njourneys: [FLOW]\n").unwrap();
+        git(&checkout, &["add", "."]);
+        git(&checkout, &["commit", "-qm", "fix: repair flow"]);
+        let a = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        // The commit hook may retain A as work-cycle identity. It is not a park.
+        let mut task = f.task(id);
+        task.deliverables.factory_branch_anchor = Some(a.clone());
+        f.put(&task);
+        let close = |tip: &str| serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")});
+        let refused = call(&f.worker, close(&a)).await;
+        let after = f.task(id);
+        assert_eq!(after.status, TaskStatus::InProgress, "{refused}");
+        assert!(after.deliverables.parked_branch.is_none(), "{refused}");
+        assert!(!after.pending_verification);
+        assert!(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap().is_none());
+        git(&checkout, &["rm", "docs/qa/bug-families/correction.yaml"]);
+        git(&checkout, &["commit", "-qm", "docs: keep one canonical flow family"]);
+        let b = git(&checkout, &["rev-parse", "HEAD"]);
+        git(&checkout, &["push", "-q", "origin", LANE]);
+        let parked = call(&f.worker, close(&b)).await;
+        assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
+        assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{parked}");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Resume the owned corrected delivery"})).await;
+        env.set("CAS_AGENT_ROLE", "worker");
+        if foreign {
+            std::fs::write(checkout.join("foreign.ts"), "foreign work\n").unwrap();
+            git(&checkout, &["add", "foreign.ts"]);
+            git(&checkout, &["commit", "-qm", "fix(cas-dead): another task's work"]);
+            git(&checkout, &["push", "-q", "origin", LANE]);
+        }
+        let before = git(&checkout, &["rev-parse", "HEAD"]);
+        let request = || Parameters(serde_json::from_value(serde_json::json!({"action":"start", "id":id})).unwrap());
+        // The supported recovery first surfaces the unread supervisor decision.
+        assert!(f.worker.task(request()).await.is_err());
+        if foreign {
+            assert!(f.worker.task(request()).await.is_err());
+            assert_eq!(f.task(id).status, TaskStatus::Open);
+        } else {
+            let resumed = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{resumed}");
+            assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&start));
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), before);
+    }
+}

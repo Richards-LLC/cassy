@@ -676,18 +676,26 @@ mod tests {
         let server = MockServer::start().await;
         let calls = Arc::new(AtomicUsize::new(0));
         let seen = calls.clone();
+        Mock::given(method("GET"))
+            .and(path("/api/artifacts/cloud-fixture/url"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error":"artifact_revoked",
+            }))).mount(&server).await;
         Mock::given(method("POST"))
             .and(path("/api/artifacts/cloud-fixture/revoke"))
             .and(body_json(serde_json::json!({"actor_id":"supervisor", "reason":"Harmless fixture cleanup"})))
             .respond_with(move |_: &wiremock::Request| match seen.fetch_add(1, Ordering::SeqCst) {
                 0 => ResponseTemplate::new(404),
-                1 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                1 => ResponseTemplate::new(503).set_body_json(serde_json::json!({
+                    "error":"artifact_delete_failed",
+                })),
+                2 => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "artifact_id":"another-object", "revoked":true, "revoked_at":"2026-11-09T21:00:00Z",
                 })),
                 _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "artifact_id":"cloud-fixture", "revoked":true, "revoked_at":"2026-11-09T21:00:00Z",
                 })),
-            }).expect(3).mount(&server).await;
+            }).expect(4).mount(&server).await;
         let endpoint = server.uri();
         tokio::task::spawn_blocking(move || {
             let f = fixture();
@@ -698,12 +706,17 @@ mod tests {
             f.store.mark_uploaded(&id, "cloud-fixture").unwrap();
             f.store.mark_committed(&id, None).unwrap();
             let client = ArtifactUploadClient::new(&endpoint, "fixture-token");
+            assert_eq!(slack::fetch_verified(&f.store, Some(&client), &id).unwrap_err().code, "artifact_revoked");
             let first = revoke(&f.store, Some(&client), &id, "supervisor", "Harmless fixture cleanup").unwrap();
             assert_eq!(first.local_state, "revoked");
             assert_eq!(first.cloud_state, "pending");
             assert!(first.revocation.cloud_revoked_at.is_none());
             assert!(matches!(signed_view(&f.store, Some(&client), &id), Err(ViewError::Revoked(_))));
             assert_eq!(slack::fetch_verified(&f.store, Some(&client), &id).unwrap_err().code, "artifact_revoked");
+            let failed_delete = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
+            assert_eq!(failed_delete.cloud_state, "pending");
+            assert!(failed_delete.cloud_error.is_some());
+            assert_eq!(failed_delete.revocation, first.revocation);
             let wrong = revoke(&f.store, Some(&client), &id, "another-supervisor", "Retry cleanup").unwrap();
             assert_eq!(wrong.cloud_state, "pending");
             assert_eq!(wrong.revocation, first.revocation);
@@ -717,10 +730,10 @@ mod tests {
             assert_eq!(repeated.revocation, confirmed.revocation);
             assert_eq!(repeated.cloud_state, "revoked");
         }).await.unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         let requests = server.received_requests().await.unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|request| request.method.as_str() == "POST"));
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.iter().filter(|request| request.method.as_str() == "GET").count(), 1);
     }
 
     #[test]

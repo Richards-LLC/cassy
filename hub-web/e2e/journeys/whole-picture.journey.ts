@@ -79,14 +79,24 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
     hub.hold(PELICAN); hub.drop(PELICAN);
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", /^(?:backoff|resolving|dialing|auth|attaching|failed)$/);
     await card.getByRole("button", { name: `${files[1]} edit`, exact: true }).click();
-    await expect(card.locator(".changed-file-detail").last()).toBeVisible();
+    const offline = card.locator(".changed-file").filter({ has: page.getByText(files[1]!, { exact: true }) }).locator(".changed-file-detail");
+    await expect(offline).toHaveAttribute("data-source-event-id", "edit-1");
+    await expect(offline).toHaveAttribute("data-retrieval-state", "offline");
+    await expect(offline.locator(".rich-diff, .work-record")).toHaveCount(0);
+    const cached = card.locator(".changed-file").filter({ has: page.getByText(files[0]!, { exact: true }) }).locator(".changed-file-detail");
+    await expect(cached).toHaveAttribute("data-source-event-id", "edit-0");
+    await expect(cached).toHaveAttribute("data-retrieval-state", "ready");
+    await expect(cached.getByLabel("Unified diff")).toContainText("+compact edit summary");
     await expect(card.locator('[aria-busy="true"]')).toHaveCount(0);
     expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(1);
   });
   await journey.stage("A source without a unified diff stays exact and selectable", async () => {
     hub.release(PELICAN);
     await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
-    await expect(card.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
+    const recovered = card.locator(".changed-file").filter({ has: page.getByText(files[1]!, { exact: true }) }).locator(".changed-file-detail");
+    await expect(recovered).toHaveAttribute("data-source-event-id", "edit-1");
+    await expect(recovered).toHaveAttribute("data-retrieval-state", "ready");
+    await expect(recovered.locator(".work-record")).toHaveText("Exact edit input and output <b>as text</b>");
     await expect(card.locator("b")).toHaveCount(0);
   });
   for (const width of [1440, 390]) for (const colorScheme of ["light", "dark"] as const) {

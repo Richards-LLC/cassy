@@ -495,6 +495,11 @@ impl Config {
                 let root = value.trim();
                 factory.artifacts_root = (!root.is_empty()).then(|| root.to_string());
             }
+            "factory.codex_home" => {
+                let factory = self.factory.get_or_insert_with(FactoryConfig::default);
+                let directory = value.trim();
+                factory.codex_home = (!directory.is_empty()).then(|| directory.to_string());
+            }
             "factory.worker_local_gate" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
                 let gate = value.trim();

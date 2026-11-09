@@ -528,16 +528,21 @@ and retires the old automatic-close intent. The worker can start, commit the
 source repair and re-deliver with a fresh anchor. Verification and QA waits
 keep their existing dispatch ownership.
 
-A supervisor message to a blocked worker records ownership of that wait only
-when sent with `kind=answer` or `in_reply_to` the worker's blocker message.
-An unrelated ping or a reply to ordinary status leaves blocker alerts armed.
+A supervisor message to a blocked worker records ownership of that wait when
+sent with `kind=answer`, `in_reply_to` the worker's blocker message, or as a
+legacy direct message without a kind or reply reference. A supervisor decision
+note also records ownership using its activity event ID. An unbound message
+must identify a single blocked task assigned to that worker; a task-bound
+answer cannot clear another task. Typed status pings and replies to ordinary
+status leave blocker alerts armed.
 Repeated idle and blocked alerts stay quiet while the assignee, supervisor,
 structured hold reason and blocker question remain unchanged, including a
-verification rejection followed by the same block. A new blocker question or
-hold re-arms alerts; an explicit Open transition clears the answer. Existing
+verification rejection followed by the same block. A new blocker question
+starts a fresh five-minute deadline; a new hold re-arms alerts, and an explicit
+Open transition clears the answer. Existing
 queued alerts remain readable without waking the supervisor again. The receipt
-and question fingerprint are maintained by authenticated coordination messages,
-not hand-written execution-state patches.
+and question fingerprint are maintained by authenticated coordination messages
+and supervisor decision notes, not hand-written execution-state patches.
 
 For Claude supervisors in Teams factories, an authenticated action event whose
 complete framed payload fits the hook budget travels in one PTY turn, with its
@@ -4386,6 +4391,17 @@ root. The layers are:
 
 A process that deliberately hides a same-user write from these checks is out
 of reach. A hard boundary needs agents running as a separate Unix user.
+
+## Default Codex worker account
+
+Set `factory.codex_home` with `cas config set factory.codex_home "~/.codex-work"`
+from the project on each machine that should use that account. This local
+project setting accepts an existing account path or alias. `spawn_workers`
+uses it for Codex slots whose `config_dir` was omitted, including lane requests,
+before inherited accounts or quota recommendations. Explicit batch and per-worker
+`config_dir` values take precedence. The spawn receipt names
+`source=factory.codex_home`; invalid accounts are refused before queueing. Clear
+it with `cas config set factory.codex_home ""` to restore account recommendations.
 
 ## Cloud reader slots
 

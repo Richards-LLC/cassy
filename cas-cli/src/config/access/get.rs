@@ -151,6 +151,7 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
+            "factory.codex_home" => Some(factory.codex_home.clone().unwrap_or_default()),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
             "factory.worker_local_gate" => Some(factory.worker_local_gate.clone().unwrap_or_default()),
             "factory.release_command" => Some(factory.release_command.clone().unwrap_or_default()),

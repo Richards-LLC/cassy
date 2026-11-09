@@ -1882,7 +1882,14 @@ request-scoped commit evidence. A timeout after an observed commit reports
 `COMMITTED`; message receipts include `notification_id`. `UNKNOWN` means this
 request's commit was not confirmed. Re-query state before retrying either case.
 The error's structured data includes `mutation_outcome`, `notification_id`,
-`elapsed_ms` and `budget_ms`.
+`elapsed_ms` and `budget_ms`. A read-only `search action=search` deadline
+reports `mutation_outcome=NOT_APPLICABLE` without write-reconciliation advice.
+Its `timings` field and tracing retain inclusive `search_index_open`,
+`search_task_load`, `search_task_refresh` and `search_lookup` measurements;
+`+` marks a stage still running. Even exact task-ID queries currently load all
+canonical tasks and reconcile the task index before lookup, with a full task
+rewrite on the first request in each server process. `include_source` applies
+to code search, not this context search action.
 
 Factory merge and task-close handlers run synchronous Git/store work on the
 blocking pool. Once publication or the checked Closed/AwaitingMerge disposition

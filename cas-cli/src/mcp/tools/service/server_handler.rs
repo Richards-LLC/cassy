@@ -651,7 +651,9 @@ impl CasService {
                     self.mutation_timeout_outcome(tool_name, arguments, commit)
                 };
                 let timings = receipt.timings();
-                let timing_suffix = if tool_name == "verification" && receipt.action() == "add" {
+                let include_timings = (tool_name == "search" && action == "search")
+                    || (tool_name == "verification" && receipt.action() == "add");
+                let timing_suffix = if include_timings {
                     format!(" Timing (inclusive, + running): {timings}")
                 } else {
                     String::new()
@@ -665,7 +667,7 @@ impl CasService {
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
                         "budget_ms": budget.as_millis() as u64,
-                        "timings": if tool_name == "verification" && receipt.action() == "add" { Some(timings) } else { None },
+                        "timings": if include_timings { Some(timings) } else { None },
                     })),
                 })
             }
@@ -988,6 +990,9 @@ pub(crate) fn potentially_mutating_call(tool_name: &str, action: &str) -> bool {
             "show" | "list" | "ready" | "blocked" | "dep_list" | "available" | "mine"
         ),
         "memory" => !matches!(action, "get" | "list" | "recent"),
+        // Search also has write actions (observe, feedback, entity extraction).
+        // Only the known retrieval action is non-mutating for this receipt.
+        "search" => action != "search",
         "factory" => !matches!(
             action,
             "worker_status"

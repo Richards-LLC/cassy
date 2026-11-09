@@ -89,7 +89,7 @@
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution and existing parked-anchor protections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation for canonical and legacy CI.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - authenticated supervisor import grants and linked-checkout WIP identity; empty checkpoints require explicit task attribution.
 - `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs` - bounded close-reason proof assertions and clause-specific receipt checks.
@@ -141,7 +141,7 @@
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
 - `cas-cli/src/cli/release_automation.rs` - train context, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
-- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
+- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.
 

@@ -1728,6 +1728,7 @@ mod tests {
                 head_commit: String::new(), state_digest: String::new(), target_branch: None,
                 anchor_commits: Vec::new(),
             },
+            inherited_supervisor_call: None,
             preparation_ms: 0,
         }
     }

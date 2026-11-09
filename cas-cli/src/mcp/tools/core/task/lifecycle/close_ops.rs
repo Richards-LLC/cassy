@@ -5307,53 +5307,24 @@ mod supervisor_override_tests {
     }
 }
 
-/// Why the close path decided to skip (or not skip) the task-verifier step
-/// for a given close attempt.
-///
-/// Carried through to the response message so the audit trail cites the
-/// real reason instead of the catch-all "assignee inactive" phrase that
-/// surfaced cas-3bd4.
-///
-/// The pre-cas-3bd4 implementation represented this as a single
-/// `assignee_inactive: bool`. Every lookup failure — including the
-/// very-common name-vs-id mismatch described below — defaulted to `true`
-/// and the success message confidently lied that the assignee was inactive.
-/// This enum preserves the same skip *behavior* (supervisor still closes
-/// orphaned or genuinely-stale tasks without a verifier hop) but forces
-/// every skip reason to be named.
-///
-/// ## Why the old `agent_store.get(task.assignee)` kept returning "inactive"
-///
-/// `task.assignee` is set by `task_claiming.rs:89` to
-/// `Some(agent_name.clone())` — the human-readable display name, e.g.
-/// `"mighty-viper-52"`. But `AgentStore::get(id)` runs `WHERE id = ?` in
-/// `ops_agent.rs:79`, and `id` is the session-id (a UUID-like
-/// identifier), not the name. The lookup never found the row, so
-/// `unwrap_or(true)` treated the worker as inactive even though it was
-/// actively holding a fresh lease. `compute_verification_skip_reason`
-/// fixes this by consulting the task's active lease first — `TaskLease`
-/// stores the real `agent_id`, not the name.
+/// Close-time identity state and explicit verification exemptions.
+/// Unavailable implementers remain useful recovery evidence, never authority
+/// to waive review. Resolve display names through task leases before falling
+/// back to the registry's id/name lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VerificationSkipReason {
     /// The assignee is alive and no bypass flag was set. Verification
     /// runs normally; this is *not* a skip.
     None,
-    /// The task has no assignee at all. Treated as orphaned; legacy
-    /// callers reached this via the same skip path.
+    /// No implementer is recorded; this does not waive required review.
     NoAssignee,
     /// The assignee exists and is registered, but their heartbeat or
     /// lease is stale. `minutes_stale` is the observed staleness if we
     /// could measure it.
     AssigneeInactive { minutes_stale: Option<i64> },
-    /// `task.assignee` is set but we cannot resolve it through the
-    /// lease *or* a direct id lookup. The agent may have been GC'd or
-    /// the assignee row holds an old display name no longer in the
-    /// agent store. Skip verification and cite the real reason.
-    AssigneeUnknown,
-    /// Supervisor is closing a task whose assignee is still alive and
-    /// has explicitly requested a verification skip via
-    /// `supervisor_override=true`. Separate from `AssigneeInactive` so
-    /// the audit note reflects supervisor intent, not worker state.
+    /// A named implementer is no longer in the agent registry.
+    AssigneeUnregistered { assignee: String },
+    /// A live registered supervisor explicitly requested a verification waiver.
     SupervisorBypass,
     /// A live registered supervisor accepted a measured negative result with
     /// durable evidence and a closed-unmerged PR/branch receipt. No delivery
@@ -5368,7 +5339,10 @@ pub(crate) enum VerificationSkipReason {
 impl VerificationSkipReason {
     /// Whether this reason short-circuits the verification gate.
     pub(crate) fn is_skip(&self) -> bool {
-        !matches!(self, VerificationSkipReason::None)
+        matches!(self,
+            Self::SupervisorBypass | Self::SupervisorNegativeResult
+                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision
+        )
     }
 
     /// Short human-readable suffix appended to the `Closed task:` line.
@@ -5376,26 +5350,15 @@ impl VerificationSkipReason {
     /// format string.
     pub(crate) fn response_suffix(&self, verification_enabled: bool) -> String {
         match self {
-            VerificationSkipReason::None => {
+            VerificationSkipReason::None
+                | VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnregistered { .. } => {
                 if verification_enabled {
                     " (verified)".to_string()
                 } else {
                     String::new()
                 }
-            }
-            VerificationSkipReason::NoAssignee => {
-                " (verification skipped — orphaned task, no assignee)".to_string()
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: Some(m),
-            } => {
-                format!(" (verification skipped — assignee inactive for {m}m)")
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: None,
-            } => " (verification skipped — assignee lease expired)".to_string(),
-            VerificationSkipReason::AssigneeUnknown => {
-                " (verification skipped — assignee unknown)".to_string()
             }
             VerificationSkipReason::SupervisorBypass => {
                 " (verification skipped — supervisor override via supervisor_override=true)"
@@ -5414,32 +5377,30 @@ impl VerificationSkipReason {
         }
     }
 
+    fn assignee_suffix(&self) -> String {
+        match self {
+            Self::NoAssignee => " (no assignee recorded)".into(),
+            Self::AssigneeInactive { minutes_stale: Some(minutes) } =>
+                format!(" (assignee inactive for {minutes}m)"),
+            Self::AssigneeInactive { minutes_stale: None } => " (assignee lease expired)".into(),
+            Self::AssigneeUnregistered { assignee } =>
+                format!(" (assignee `{assignee}` is no longer registered)"),
+            _ => String::new(),
+        }
+    }
+
     /// Reason text written to the `Skipped` verification row so the
     /// audit trail records the accurate reason alongside the row, not
     /// just in the response text.
     pub(crate) fn audit_reason(&self) -> String {
         match self {
-            VerificationSkipReason::None => String::new(),
-            VerificationSkipReason::NoAssignee => {
-                "Closed via supervisor bypass — task had no assignee (orphaned).".to_string()
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: Some(m),
-            } => format!(
-                "Closed via supervisor bypass — assignee inactive for {m} minute(s) at close time."
-            ),
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: None,
-            } => "Closed via supervisor bypass — assignee lease had expired at close time."
-                .to_string(),
-            VerificationSkipReason::AssigneeUnknown => {
-                "Closed via supervisor bypass — assignee row not found in agent store (likely \
-                 a stale or renamed agent)."
-                    .to_string()
-            }
+            VerificationSkipReason::None
+                | VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnregistered { .. } => String::new(),
             VerificationSkipReason::SupervisorBypass => {
                 "Closed via supervisor override — supervisor_override=true explicitly set by \
-                 supervisor while assignee was still active."
+                 supervisor with a recorded close reason."
                     .to_string()
             }
             VerificationSkipReason::SupervisorEvidenceOnly => {
@@ -8436,7 +8397,7 @@ impl CasCore {
             && !supervisor_closing_merged_receipt
             && !supervisor_closing_merged_anchor
             && matches!(self.compute_verification_skip_reason(&task, &req),
-                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnknown)
+                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnregistered { .. })
         {
             match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
                 (Some(context), Some(receipt)) => {
@@ -9741,32 +9702,17 @@ impl CasCore {
             decision.tier == super::review_tier::VerificationTier::Adversarial
         });
 
-        // Skip verification for orphaned tasks: if caller is supervisor and the
-        // task's assignee is inactive (heartbeat expired or lease gone), allow
-        // close without verification. cas-3bd4: compute the reason as a typed
-        // enum so the response message cites the actual state instead of
-        // defaulting to "assignee inactive" for every lookup failure.
+        let assignee_state = self.compute_verification_skip_reason(&task, &req);
         let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
             VerificationSkipReason::SupervisorDecision
         } else if close_disposition == TaskCloseDisposition::EvidenceOnly {
             VerificationSkipReason::SupervisorEvidenceOnly
         } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
-        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
-            // cas-eda0: Cassy's own post-merge close never takes the
-            // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic || tier_two {
-                // Ownership admits this caller; the assembled epic still needs
-                // its own dispatch/verdict, as does a Tier 2 delivery whose
-                // assignee has retired. Only an explicit override waives it.
-                if req.supervisor_override.unwrap_or(false) {
-                    VerificationSkipReason::SupervisorBypass
-                } else {
-                    VerificationSkipReason::None
-                }
-            } else {
-                self.compute_verification_skip_reason(&task, &req)
-            }
+        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close()
+            && req.supervisor_override.unwrap_or(false)
+        {
+            VerificationSkipReason::SupervisorBypass
         } else {
             VerificationSkipReason::None
         };
@@ -9777,23 +9723,18 @@ impl CasCore {
             cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id),
             Ok(None)
                 | Ok(Some(cas_types::VerificationDispatch {
-                    state: cas_types::VerificationDispatchState::Resolved
-                        | cas_types::VerificationDispatchState::Invalidated,
+                    state: cas_types::VerificationDispatchState::Invalidated,
                     ..
                 }))
         );
-        // cas-ce5e: with no per-task dispatch to protect it, a merged delivery whose
-        // worker has gone must not lose its release review to the orphan convenience.
-        // The explicit supervisor bypass and non-delivery dispositions are unaffected.
-        let orphan_skip_of_release_verdict = matches!(
-            skip_reason,
-            VerificationSkipReason::NoAssignee
-                | VerificationSkipReason::AssigneeInactive { .. }
-                | VerificationSkipReason::AssigneeUnknown
-        ) && !depth_light
-            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
-        let skip_verification =
-            skip_reason.is_skip() && exact_dispatch_allows_skip && !orphan_skip_of_release_verdict;
+        // Legacy errors also retain their authority when no typed dispatch exists.
+        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip
+            && self.open_verification_store().is_ok_and(|store| {
+                store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
+                    row.dispatch_id.is_some()
+                        || matches!(row.status, VerificationStatus::Approved | VerificationStatus::Skipped)
+                }))
+            });
 
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
@@ -10297,7 +10238,7 @@ impl CasCore {
                             && matches!(self.compute_verification_skip_reason(&task, &req),
                                 VerificationSkipReason::NoAssignee
                                     | VerificationSkipReason::AssigneeInactive { .. }
-                                    | VerificationSkipReason::AssigneeUnknown);
+                                    | VerificationSkipReason::AssigneeUnregistered { .. });
                         // A retired worker's recorded delivery is the recovery
                         // boundary even when close supplies no new receipt.
                         // It must still be proven on the declared target below.
@@ -11856,8 +11797,7 @@ impl CasCore {
         }
         task.deliverables = deliverables;
 
-        // When closing via the supervisor bypass (assignee inactive / orphaned /
-        // supervisor-forced), we skip the verification gate but MUST still
+        // Explicit exemptions skip the verification gate but MUST still
         // write a durable `Skipped` verification row. Without this row, the
         // exact-task close gate treats the task as unverified on retry.
         //
@@ -12422,11 +12362,23 @@ impl CasCore {
 
         crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.id).await;
 
-        // cas-3bd4: use the typed skip reason so the audit suffix cites
-        // the real reason (e.g. "assignee unknown" for name/id mismatches,
-        // "supervisor bypass" for explicit overrides) instead of always
-        // saying "assignee inactive".
-        let verification_note = skip_reason.response_suffix(verification_enabled);
+        // Report the exemption actually applied, separately from implementer state.
+        let verification_note = if skip_verification {
+            skip_reason.response_suffix(verification_enabled)
+        } else if !verification_enabled {
+            String::new()
+        } else if depth_light {
+            " (verification not required — light-depth policy)".into()
+        } else if tier_skips_verifier {
+            " (verification not required — measured Tier 0 docs/tests delivery)".into()
+        } else if rapid_unsampled {
+            " (verification deferred — recorded rapid-response sampling policy)".into()
+        } else if shipped_timeout_waiver.is_some() {
+            " (verification waived — recorded shipped-timeout recovery)".into()
+        } else {
+            VerificationSkipReason::None.response_suffix(verification_enabled)
+        };
+        let verification_note = format!("{verification_note}{}", assignee_state.assignee_suffix());
 
         // Note about worktree status (merge already handled by worktree-merger agent)
         let worktree_msg = if let Some(worktree_id) = &task.worktree_id {
@@ -12781,13 +12733,9 @@ impl CasCore {
         )
     }
 
-    /// Compute why (if at all) the task-verifier step should be skipped
-    /// for this close attempt.
-    ///
-    /// Only invoked after the caller has been identified as a supervisor
-    /// and `verification_enabled` is true — the `VerificationSkipReason::None`
-    /// cases here represent "supervisor is closing, but the assignee is
-    /// still alive and no bypass flag was set, so run the verifier".
+    /// Resolve implementer availability for reporting and receipt recovery.
+    /// Identity states do not waive review. A requested bypass is applied only
+    /// by the separate authenticated close policy and exact-proof checks.
     ///
     /// Resolution order:
     ///
@@ -12802,7 +12750,7 @@ impl CasCore {
     ///    the referenced agent is dead → `AssigneeInactive`.
     /// 3. No lease — resolve either the legacy agent id or display name from
     ///    the registry. Same liveness logic as above.
-    /// 4. Everything failed → `AssigneeUnknown` (never falsely reported
+    /// 4. Everything failed → `AssigneeUnregistered` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
     pub(crate) fn compute_verification_skip_reason(
         &self,
@@ -12849,7 +12797,7 @@ impl CasCore {
                 }
                 // Lease is valid but the referenced agent row is gone —
                 // agent was unregistered but the lease wasn't cleaned up.
-                return VerificationSkipReason::AssigneeUnknown;
+                return VerificationSkipReason::AssigneeUnregistered { assignee: assignee.into() };
             }
             // Lease exists but expired.
             return VerificationSkipReason::AssigneeInactive {
@@ -12872,9 +12820,12 @@ impl CasCore {
             };
         }
 
-        // 3) No lease, no matching agent row. The assignee is unknown
-        //    to the store — do not falsely report "inactive".
-        VerificationSkipReason::AssigneeUnknown
+        // Only report registry absence when the registry can actually be read.
+        if agent_store.list(None).is_err() {
+            return VerificationSkipReason::None;
+        }
+        // A named assignee remains known even after its registration is gone.
+        VerificationSkipReason::AssigneeUnregistered { assignee: assignee.into() }
     }
 
     /// End planned work without claiming a delivery.
@@ -30760,7 +30711,7 @@ esac
     fn worker_task_close_skipped_for_no_assignee() {
         // Orphan tasks have no factory branch convention to resolve.
         // The guard must Proceed (covered by NoAssignee verification
-        // skip elsewhere; here we just need it not to false-reject).
+        // policy elsewhere; here we just need it not to false-reject).
         let dir = init_factory_repo("worker");
         // Stranded commits exist on factory/worker, but our task has no assignee.
         std::fs::write(dir.path().join("d.rs"), "// d\n").unwrap();

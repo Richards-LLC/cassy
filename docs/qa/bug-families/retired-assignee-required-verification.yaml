@@ -1,0 +1,3 @@
+title: Retired implementer recovery preserves required review and reports known missing registrations accurately
+tasks: [cas-8826]
+journeys: [FACTORY-CLOSE, FACTORY-MERGE]

@@ -437,6 +437,9 @@ pub(crate) fn run_claim_for_inject(
         if fresh.processed_at.is_some() || fresh.target != target {
             return Ok((ClaimOutcome::Stale, retargeted));
         }
+        if !crate::qa_post_release::batch_notice_deliverable(cas_dir, queue.as_ref(), &fresh)? {
+            return Ok((ClaimOutcome::Stale, retargeted));
+        }
         let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
             Some(token) => ClaimOutcome::Claimed(token),
             // An explicit ACK/answer retires this member without claiming any

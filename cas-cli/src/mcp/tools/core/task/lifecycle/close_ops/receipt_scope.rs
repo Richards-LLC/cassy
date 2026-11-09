@@ -961,18 +961,19 @@ mod tests {
             &["docs/guide.md".into()], &head, target, None);
         assert_eq!(refusal("main"), None, "remote-only target runs the actual guard");
         assert_eq!(refusal("origin/main"), None);
-        assert!(refusal("missing-target").unwrap().starts_with("TEST_ASSERTION_TARGET_UNRESOLVED:"));
+        let code = |target| refusal(target).unwrap().split_once(':').unwrap().0.to_string();
+        assert_eq!(code("missing-target"), "TEST_ASSERTION_TARGET_UNRESOLVED");
 
         git(&["branch", "main", &base]);
         git(&["update-ref", "-d", "refs/remotes/origin/main"]);
         assert_eq!(refusal("main"), None, "local-only target remains supported");
         let unrelated = git(&["commit-tree", "HEAD^{tree}", "-m", "unrelated root"]);
         git(&["update-ref", "refs/remotes/origin/unrelated", &unrelated]);
-        assert!(refusal("unrelated").unwrap().starts_with("TEST_ASSERTION_PROSE_UNAVAILABLE:"));
+        assert_eq!(code("unrelated"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
 
         std::fs::write(repo.path().join("probe.test.ts"), "expect(error.message).toBe('please try later');\n").unwrap();
         commit_changelog_fixture(repo.path(), "introduce actual prose pin");
-        assert!(refusal("main").unwrap().starts_with("TEST_ASSERTION_PROSE:"));
+        assert_eq!(code("main"), "TEST_ASSERTION_PROSE");
     }
 
     #[test]

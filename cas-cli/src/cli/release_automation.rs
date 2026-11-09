@@ -1012,7 +1012,7 @@ mod tests {
         let _cwd = env.enter_dir(repo);
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().id, shipped.id);
+        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         let preview = preview_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
         assert!(preview.contains("cas-a100: CLOSE; gate verdict PASS"), "{preview}");
@@ -1020,9 +1020,9 @@ mod tests {
         assert!(preview.contains("cas-a101: MOVE -> cas-next001"), "{preview}");
         assert!(preview.contains("no writes"), "{preview}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().id, shipped.id);
+        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
-        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().id, shipped.id);
+        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap().is_empty());
         let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
@@ -1034,9 +1034,9 @@ mod tests {
         assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         assert_eq!(store.get(&open_child.id).unwrap().status, TaskStatus::Open);
         assert!(first.contains("cas-526e"), "{first}");
-        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().id, current.id);
+        assert_eq!(store.get_parent_epic(&another_open_child.id).unwrap().unwrap().id, current.id);
         assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, next_lane);
-        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().id, shipped.id);
+        assert_eq!(store.get_parent_epic(&open_child.id).unwrap().unwrap().id, shipped.id);
         assert_eq!(store.get(&open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         let receipts = cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap();
         assert!(receipts.iter().any(|receipt| {

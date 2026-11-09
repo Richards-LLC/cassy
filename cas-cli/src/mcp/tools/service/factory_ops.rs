@@ -13830,6 +13830,7 @@ mod spawn_lifecycle_tests {
             &mut unresolved,
             false, // Direct Codex spawn without a lane or explicit account.
             &Default::default(),
+            &Default::default(),
             chrono::Utc::now(),
             |provider| crate::account_registry::collect_for(provider, env.home(), false),
         );

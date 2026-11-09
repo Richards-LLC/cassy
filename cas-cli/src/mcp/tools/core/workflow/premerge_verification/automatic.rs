@@ -463,6 +463,9 @@ mod tests {
         ).unwrap();
         for mode in [crate::config::QaMode::Batch, crate::config::QaMode::PerTask] {
             std::fs::write(root.join("config.toml"), format!("[qa]\nmode = '{mode}'\n")).unwrap();
+            // Each configured server loads its mode once; this is not a
+            // hot-reload contract for an already-running server.
+            let core = CasCore::with_daemon(root.clone(), None, None);
             let input = prompt(&core, &task, &dispatch).unwrap();
             let context = input.lines()
                 .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())

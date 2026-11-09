@@ -11922,10 +11922,12 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
     let obfuscated_akia = "at=AKIAIOSFODNN7EXAMPLE";
 
     let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let summary = format!("verified; evidence at={embedded_path}; accept this exception or rerun?");
+    let expected_summary = summary.replace(embedded_path, "[REDACTED_PATH]");
     let mut verdict = Verification::approved(
         "ver-embedded-boundary".to_string(),
         task_id.clone(),
-        format!("verified; evidence at={embedded_path}"),
+        summary,
     );
     verdict.issues = vec![cas::types::VerificationIssue::blocking(
         format!("[proof]({embedded_path})"),
@@ -11968,11 +11970,11 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         .expect("stored issue row");
     drop(conn);
 
-    assert_eq!(stored_summary, "[REDACTED_PATH]");
-    assert_eq!(stored_file, "[REDACTED_PATH]");
+    assert_eq!(stored_summary, expected_summary);
+    assert_eq!(stored_file, "[proof]([REDACTED_PATH])");
     assert_eq!(stored_code, "[REDACTED_SECRET]");
     assert_eq!(stored_problem, "[REDACTED_SECRET]");
-    assert_eq!(stored_suggestion, "[REDACTED_PATH]");
+    assert_eq!(stored_suggestion, "share=[REDACTED_PATH]");
     assert!(
         stored_files.contains("src/lib.rs"),
         "portable identifier must survive durable persistence: {stored_files}"
@@ -11982,11 +11984,12 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         .get_latest_for_task(&task_id)
         .expect("lookup")
         .expect("verification row");
+    assert_eq!(row.summary, expected_summary);
     assert_eq!(
         row.files_reviewed,
         vec![
-            "[REDACTED_PATH]".to_string(),
-            "[REDACTED_PATH]".to_string(),
+            "evidence=[REDACTED_PATH]".to_string(),
+            "at=[REDACTED_PATH]".to_string(),
             "[REDACTED_SECRET]".to_string(),
             "src/lib.rs".to_string(),
         ]
@@ -12048,6 +12051,8 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
             .await
             .expect("latest"),
     );
+
+    assert!(show_text.contains(&expected_summary));
 
     for (surface, payload) in [
         ("stored_summary", stored_summary),

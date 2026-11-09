@@ -660,7 +660,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory: workers, queues, epics, worktrees, servers, loops, notices, leases, GC. train_freeze: RELEASE freeze, not a temporary CI hold; only the operator in Commander or a published release can lift it. Confirm with reason=\"release-freeze: <reason>\". train_merge id=<epic>: queue parked task_ids in order (default updated time); hold single merges, resume after review. worker_queue: list/reorder/clear pending task_ids; ordered spawns isolate checkouts. clear_context requires transcript reset. Workers: own servers only. Neon: supervisor only, one branch/task, delete at close; DATABASE_URL in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent: supervisor auth required. Identity/messages/reminders: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\": only Commander operator/publication lifts; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,

@@ -328,12 +328,19 @@ pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
 }
 
 impl crate::mcp::CasCore {
-    /// MCP `factory action=train_freeze id=<train>`: a live supervisor freezes.
+    /// MCP release freeze: a live supervisor explicitly confirms the lift policy.
     pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
             .map_err(|_| anyhow::anyhow!("train_freeze requires a live registered supervisor"))?;
-        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), reason)
+        let reason = reason
+            .and_then(|reason| reason.trim().strip_prefix("release-freeze:"))
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .ok_or_else(|| anyhow::anyhow!(
+                "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. Only the operator can lift it in Commander; a published release covering its tip also ends it. A supervisor cannot lift it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
+            ))?;
+        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason))
     }
 }
 

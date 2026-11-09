@@ -4415,8 +4415,12 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 
 ## Release freeze
 
-`factory action=train_freeze id=<train> [reason=...]` needs a live registered
-supervisor. Commander's `freeze_train` operation (factory:operate) does the
+`factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
+needs a live registered supervisor and a nonempty reason after that explicit
+confirmation prefix. Without it the call refuses before freezing. This is a
+release freeze, not a temporary CI hold: only the operator can lift it in
+Commander, or a published release covering its tip ends it.
+Commander's `freeze_train` operation (factory:operate) does the
 same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
 label on the train epic, which syncs to peer machines with the task row. One
 gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
@@ -4429,6 +4433,16 @@ frozen train to the next train. The freeze ends when a published release covers 
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
 `lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+
+### Temporary CI merge hold follow-up
+
+A supervisor-reversible, peer-synced merge hold tied to a CI run is a separate
+follow-up, not an existing `train_freeze` mode. That route should let the owner
+clear the hold and end it when the named CI run completes, without freezing
+staffing or CI retries. Until available, leave the train unfrozen, record the
+CI wait on the train, and coordinate peer supervisors to defer `train_merge`
+and `worktree_merge`; resume those calls after the run. This manual wait does
+not enforce a shared hold across machines.
 
 ## Ordered train merge queue
 

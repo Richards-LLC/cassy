@@ -442,7 +442,7 @@ RULES IN FORCE:
         let temp = tempfile::tempdir().unwrap();
         let store = SqliteStore::open(temp.path()).unwrap();
         store.init().unwrap();
-        let handoff = Entry {
+        let mut handoff = Entry {
             id: "handoff-new".into(),
             content:
                 "Resume https://example.slack.com/archives/C123/p1793712000000000 in #project-chat"
@@ -451,6 +451,7 @@ RULES IN FORCE:
             tags: vec!["handoff".into(), "role:supervisor".into()],
             ..Default::default()
         };
+        cas_core::memory::handoff::HandoffLineage::for_local_machine().stamp(&mut handoff);
         let mut older = handoff.clone();
         older.id = "handoff-old".into();
         older.created -= chrono::Duration::hours(1);

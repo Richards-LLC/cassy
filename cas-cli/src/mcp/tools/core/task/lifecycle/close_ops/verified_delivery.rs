@@ -19,6 +19,9 @@ mod missing_manifest_tests {
             assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
         };
         run(&["init", "-q", "-b", "main"]);
+        // Candidate preparation runs git independently of the fixture helper.
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@example.invalid"]);
         std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
         run(&["add", ".gitignore"]);
         run(&["commit", "-qm", "base"]);

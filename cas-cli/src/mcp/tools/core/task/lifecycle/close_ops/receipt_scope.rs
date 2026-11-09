@@ -940,19 +940,46 @@ mod tests {
     }
 
     #[test]
-    fn park_checks_new_message_assertions_cas_6a3e() {
+    fn park_checks_message_assertions_against_remote_target_cas_f741() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();
-        let task = Task::new("cas-6a3e".into(), "source guard".into());
-        let script = repo.path().join("scripts/check-test-shape.py");
-        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        for (exit, rejected) in [(1, true), (0, false)] {
-            std::fs::write(&script, format!("raise SystemExit({exit})\n")).unwrap();
-            let refusal = park_refusal(cas_root.path(), repo.path(), &task,
-                &["docs/guide.md".into()], &"a".repeat(40), "main", None);
-            assert_eq!(refusal.is_some(), rejected);
-            if let Some(refusal) = refusal {
-                assert!(refusal.contains("TEST_ASSERTION_PROSE"));
+        let mut task = Task::new("cas-f741".into(), "source guard".into());
+        let scripts = repo.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("check-test-shape.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/check-test-shape.py"))).unwrap();
+        std::fs::write(scripts.join("rust_test_source.py"),
+            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/rust_test_source.py"))).unwrap();
+        let base = commit_changelog_fixture(repo.path(), "install checker");
+        let output = std::process::Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/epic/target", &base])
+            .current_dir(repo.path()).output().unwrap();
+        assert!(output.status.success());
+        assert!(!super::super::git_ref_exists(repo.path(), "refs/heads/epic/target"));
+
+        for (source, expected) in [
+            ("def test_value():\n    assert 2 + 2 == 4\n", None),
+            ("def test_value():\n    assert 'please try later' in error\n", Some("TEST_ASSERTION_PROSE")),
+        ] {
+            std::fs::write(repo.path().join("test_value.py"), source).unwrap();
+            let head = commit_changelog_fixture(repo.path(), "change test");
+            for (target, mode, code) in [
+                ("epic/target", cas_types::DeliveryMode::PushBranch, expected),
+                ("origin/epic/target", cas_types::DeliveryMode::PushBranch, expected),
+                (base.as_str(), cas_types::DeliveryMode::PushBranch, expected),
+                ("main", cas_types::DeliveryMode::LocalMerge, expected),
+                ("missing-target", cas_types::DeliveryMode::PushBranch, Some("TEST_SHAPE_TARGET_UNRESOLVED")),
+                ("epic/target", cas_types::DeliveryMode::LocalMerge, Some("TEST_SHAPE_TARGET_UNRESOLVED")),
+            ] {
+                task.delivery_mode = mode;
+                let refusal = park_refusal(cas_root.path(), repo.path(), &task,
+                    &["test_value.py".into()], &head, target, None);
+                assert_eq!(refusal.is_some(), code.is_some(), "target={target} mode={mode:?}: {refusal:?}");
+                if let Some(code) = code {
+                    let refusal = refusal.unwrap();
+                    assert!(refusal.contains(code), "target={target} mode={mode:?}: {refusal}");
+                }
             }
         }
     }

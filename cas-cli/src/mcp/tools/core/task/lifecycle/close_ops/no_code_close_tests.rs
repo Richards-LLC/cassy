@@ -2779,7 +2779,10 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
         let checkout = f.cas_dir().join("worktrees").join(WORKER);
-        git(&checkout, &["reset", "--hard", "origin/main"]);
+        // Integrate the fixture's previous delivery before this task starts,
+        // keeping every subsequent task push a fast-forward.
+        git(f.dir.path(), &["merge", "-q", "--ff-only", LANE]);
+        git(f.dir.path(), &["push", "-q", "origin", "main"]);
         let agents = open_agent_store(&f.cas_dir()).unwrap();
         let mut agent = agents.get("nocode-worker-session").unwrap();
         agent.metadata.insert("clone_path".into(), checkout.display().to_string());
@@ -2824,6 +2827,11 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         let parked = call(&f.worker, close(&b)).await;
         assert_eq!(f.task(id).status, TaskStatus::AwaitingMerge, "{parked}");
         assert_eq!(f.task(id).deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{parked}");
+        // Reproduce recovery of an old runtime's stale A park while B is
+        // already pushed; request_changes must retain this task's start graph.
+        let mut legacy = f.task(id);
+        legacy.deliverables.factory_branch_anchor = Some(a.clone());
+        f.put(&legacy);
         env.set("CAS_AGENT_ROLE", "supervisor");
         call(&f.supervisor, serde_json::json!({"action":"request_changes", "id":id, "reason":"Resume the owned corrected delivery"})).await;
         env.set("CAS_AGENT_ROLE", "worker");

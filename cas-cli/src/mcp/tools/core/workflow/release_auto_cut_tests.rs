@@ -14,7 +14,9 @@ fn run(repo: &Path, args: &[&str]) -> String {
 fn commit(repo: &Path, path: &str) {
     let file = repo.join(path);
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(&file, format!("{path}\n")).unwrap();
+    if !file.exists() {
+        std::fs::write(&file, format!("{path}\n")).unwrap();
+    }
     run(repo, &["add", path]);
     run(repo, &["commit", "-qm", path]);
 }

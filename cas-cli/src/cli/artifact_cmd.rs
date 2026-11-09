@@ -535,6 +535,79 @@ mod tests {
         assert!(crate::cli::Cli::try_parse_from(["cas", "artifact", "revoke", "art-fixture"]).is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn artifact_revoke_cli_shell_identity_cas_6d35() {
+        use clap::Parser;
+        use cas_store::AgentStore;
+        use std::os::unix::process::CommandExt;
+        use std::process::{Command, Stdio};
+        const MODE: &str = "CAS_TEST_REVOKE_CLI_MODE";
+        const TEST: &str = "cli::artifact_cmd::tests::artifact_revoke_cli_shell_identity_cas_6d35";
+        let executable = std::env::current_exe().unwrap();
+        let mode = std::env::var(MODE).unwrap_or_default();
+        if mode == "cli" {
+            let cli = crate::cli::Cli::try_parse_from([
+                "cas", "--json", "artifact", "revoke", "art-cli-fixture", "--reason", "Disposable fixture cleanup",
+            ]).unwrap();
+            let Some(crate::cli::Commands::Artifact(command)) = &cli.command else { unreachable!() };
+            let root = PathBuf::from(std::env::var("CAS_ROOT").unwrap());
+            let result = execute(command, &cli, &root);
+            assert_eq!(result.is_ok(), std::env::var("CAS_TEST_REVOKE_ALLOW").unwrap() == "yes", "{result:?}");
+            return;
+        }
+        if mode == "owner" || mode == "nested" {
+            // Preserve both timeout and shell, reproducing Claude Bash's
+            // harness -> bash -> timeout -> CLI ancestry.
+            let run_cli = |allow: &str| {
+                let output = Command::new("sh")
+                    .args(["-c", "timeout 120 \"$@\"; exit $?", "revoke-shell"])
+                    .arg(&executable).args(["--exact", TEST, "--nocapture"])
+                    .env(MODE, "cli").env("CAS_TEST_REVOKE_ALLOW", allow)
+                    .output().unwrap();
+                assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            };
+            if mode == "nested" {
+                run_cli("no");
+                return;
+            }
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            let root = crate::store::init_cas_dir(env.home()).unwrap();
+            env.set("CAS_ROOT", &root);
+            env.set("CAS_SESSION_ID", "cli-owner");
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            struct Mcp(std::process::Child);
+            impl Drop for Mcp {
+                fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+            }
+            let mcp = Mcp(Command::new("sh").args(["-c", "read line"])
+                .stdin(Stdio::piped()).spawn().unwrap());
+            let agents = crate::store::open_agent_store(&root).unwrap();
+            let mut owner = cas_types::Agent::new_with_role("cli-owner".into(), "cli-owner".into(), cas_types::AgentRole::Supervisor);
+            owner.pid = Some(mcp.0.id());
+            owner.ppid = Some(std::process::id());
+            crate::mcp::daemon::stamp_pid_fingerprint(&mut owner, mcp.0.id());
+            crate::mcp::daemon::stamp_harness_parent_fingerprint(&mut owner, std::process::id());
+            agents.register(&owner).unwrap();
+            let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
+            store.record_local(&cas_store::NewArtifact {
+                id: "art-cli-fixture".into(), task_id: "cas-cli-fixture".into(), name: "harmless.txt".into(),
+                mime: "text/plain".into(), size_bytes: 1, sha256: "a".repeat(64),
+            }).unwrap();
+            run_cli("yes");
+            assert_eq!(store.get("art-cli-fixture").unwrap().unwrap().revocation.unwrap().actor_id, owner.id);
+            let nested = Command::new(&executable).arg0("codex")
+                .args(["--exact", TEST, "--nocapture"]).env(MODE, "nested")
+                .output().unwrap();
+            assert!(nested.status.success(), "{}\n{}", String::from_utf8_lossy(&nested.stdout), String::from_utf8_lossy(&nested.stderr));
+            return;
+        }
+        let output = Command::new(&executable).arg0("claude")
+            .args(["--exact", TEST, "--nocapture"]).env(MODE, "owner")
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
     #[test]
     fn legacy_top_level_dirs_are_reclaimed_only_when_provably_this_projects_cas_6162() {
         let env = crate::test_env_guard::TestEnvGuard::temp_home();

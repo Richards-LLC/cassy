@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  supervisor-live-context-pressure:
+    title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
+    tasks: [cas-bb0d]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   peer-release-wait-progress-watchdog:
     title: Contained deliveries, binding peer handoffs and operator-owned blocked checks do not page the operator while genuine local stalls still do
     tasks: [cas-c1fb, cas-e239]
@@ -2699,6 +2704,10 @@ journeys:
   - hub-web/src/main.ts
   - hub-web/src/styles.css
   - cas-cli/src/agent_model.rs
+  - cas-cli/src/supervisor_auto_clear.rs
+  - cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs
+  - cas-cli/src/ui/factory/daemon/runtime/supervisor_auto_clear_tests.rs
+  - crates/cas-store/src/agent_store/continuity.rs
   - cas-cli/src/cli/factory/wedged.rs
   - cas-cli/src/mcp/tools/service/worker_liveness.rs
   - cas-cli/src/mcp/tools/service/worker_liveness/tests.rs

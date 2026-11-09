@@ -12886,9 +12886,9 @@ fn render_transcript_block(
 /// A transcript's latest prompt occupancy and, where the harness reports it,
 /// its model's actual context window. Never infer the latter from a model name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ContextUsage {
-    input_tokens: u64,
-    model_context_window: Option<u64>,
+pub(crate) struct ContextUsage {
+    pub(crate) input_tokens: u64,
+    pub(crate) model_context_window: Option<u64>,
 }
 
 /// Classify live prompt occupancy against the harness-reported context window.
@@ -13067,67 +13067,41 @@ fn transcript_path_fast_in(
 /// Returns `None` when the file can't be opened, the tail has no parseable
 /// assistant entry with a `usage` field, or any I/O error occurs.
 pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64> {
-    // cas-b76b: the shared bounded reader survives a mid-character seek.
-    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
-
-    // Scan in reverse: the last assistant entry with usage is the freshest.
-    for line in buf.lines().rev() {
-        // Quick pre-filter before full parse to avoid repeated serde overhead.
-        if !line.contains("\"type\":\"assistant\"") {
-            continue;
-        }
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
-            continue;
-        }
-        let usage = v.get("message")?.get("usage")?;
-        let input = usage
-            .get("input_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0);
-        let cache_create = usage
-            .get("cache_creation_input_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0);
-        let cache_read = usage
-            .get("cache_read_input_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0);
-        return Some(input + cache_create + cache_read);
-    }
-    None
+    read_context_usage_from_tail_for_cli(path, cas_mux::SupervisorCli::Claude)
+        .map(|usage| usage.input_tokens)
 }
 
-/// Harness-aware live-context reader. Claude has no reported window, so its
-/// observed input is deliberately not classified as remaining capacity. Codex
+/// Harness-aware live-context reader. Without a reported window, observed
+/// input is deliberately not classified as remaining capacity. Codex
 /// reports both the latest prompt occupancy and its actual context window in
 /// each rollout `token_count` event. Grok has no equivalent parser yet.
-fn read_context_usage_from_tail_for_cli(
+pub(crate) fn read_context_usage_from_tail_for_cli(
     path: &std::path::Path,
     cli: cas_mux::SupervisorCli,
 ) -> Option<ContextUsage> {
-    if cli != cas_mux::SupervisorCli::Codex {
-        return read_context_usage_from_tail(path).map(|input_tokens| ContextUsage {
-            input_tokens,
-            model_context_window: None,
-        });
-    }
-
     // cas-189b: the shared bounded reader drops the line the seek cut, so a
     // split code point there cannot hide usage.
     let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     for line in buf.lines().rev() {
-        if !line.contains("\"type\":\"token_count\"") {
-            continue;
-        }
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(value) => value,
             Err(_) => continue,
         };
+        if cli != cas_mux::SupervisorCli::Codex {
+            if value["type"] != "assistant" { continue; }
+            let Some(usage) = value.pointer("/message/usage") else { continue };
+            let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0)
+                .saturating_add(usage["cache_creation_input_tokens"].as_u64().unwrap_or(0))
+                .saturating_add(usage["cache_read_input_tokens"].as_u64().unwrap_or(0));
+            return Some(ContextUsage {
+                input_tokens,
+                // Use only explicit harness metadata, never a model-name guess.
+                model_context_window: value.get("model_context_window")
+                    .or_else(|| usage.get("model_context_window"))
+                    .and_then(|window| window.as_u64()),
+            });
+        }
         if value.pointer("/payload/type").and_then(|v| v.as_str()) != Some("token_count") {
             continue;
         }

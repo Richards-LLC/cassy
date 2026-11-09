@@ -239,14 +239,22 @@ reads `unmeasured`. Claude input includes cache reads and writes; Codex usage is
 the cumulative input/output delta across that turn. Transport alone never proves
 that a model started or consumed tokens.
 
-When one newly recorded supervisor turn reads more input than
-`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables), the
-turn scanner hands `supervisor_auto_clear` the turn. It acts only at an idle
+At each newly recorded supervisor turn, `supervisor_auto_clear` reads the
+latest call's input occupancy, including cache reads/writes once. Its threshold
+is 80% of the harness-reported `model_context_window`, capped by
+`factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
+a reported window, only that configured per-call cap applies; capacity is never
+inferred from a model name. Cumulative wake billing cannot trigger a clear.
+It acts only at an idle
 boundary: the turn has ended, no newer turn is running, no delivery-target
 lock is held, no release train is frozen, no `release-repair` task is open, and
 no operator ask or operator message is waiting. Otherwise it defers to a later
 turn end. It saves a role-supervisor handoff memory from the session-end lane
-snapshot (with a JSON receipt under `supervisor-handoffs/`). It gives the
+snapshot (with a JSON receipt under `supervisor-handoffs/`). The auto-clear
+projection includes only in-progress and awaiting-merge tasks, active/idle
+workers, recent operator decisions and pending actor/kind/task/age summaries.
+It caps each section at 100 receipt rows, reports omissions, and bounds the
+injected sections separately. Full histories remain in their stores. It gives the
 supervisor one turn to save judgement as a handoff, merges that under the
 facts, and queues the context-reset control to the supervisor pane. When the
 new transcript records the `/clear`, it queues the handoff to the new session.

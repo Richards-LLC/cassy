@@ -252,11 +252,11 @@ fn snapshot(
         handoff.pending = rows(
             conn,
             "prompt_queue",
-            "SELECT id,source,target,prompt FROM prompt_queue WHERE processed_at IS NULL AND (target=?1 OR source=?1 OR target=?2 OR source=?2) ORDER BY id",
+            "SELECT id,source,target,prompt,kind,created_at FROM prompt_queue WHERE processed_at IS NULL AND (target=?1 OR source=?1 OR target=?2 OR source=?2) ORDER BY id",
             &[&name, &id],
         )?;
-        handoff.pending.extend(rows(conn, "supervisor_queue", "SELECT id,event_type,payload FROM supervisor_queue WHERE supervisor_id=? AND processed_at IS NULL ORDER BY id", &[&id])?);
-        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event,trigger_filter FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
+        handoff.pending.extend(rows(conn, "supervisor_queue", "SELECT id,event_type,payload,created_at FROM supervisor_queue WHERE supervisor_id=? AND processed_at IS NULL ORDER BY id", &[&id])?);
+        handoff.pending.extend(rows(conn, "reminders", "SELECT id,message,trigger_type,trigger_at,trigger_event,trigger_filter,created_at,task_id FROM reminders WHERE supervisor_id=? AND status IN ('pending','suspended') ORDER BY id", &[&id])?);
         // A delivered Commander ask is still open while its deadline reminder
         // is pending. Include its original body even after transport processed it.
         let mut asks = Vec::new();
@@ -268,7 +268,7 @@ fn snapshot(
                 asks.extend(rows(
                     conn,
                     "prompt_queue",
-                    "SELECT id,source,target,prompt FROM prompt_queue WHERE id=?",
+                    "SELECT id,source,target,prompt,kind,created_at FROM prompt_queue WHERE id=?",
                     &[&ask_id],
                 )?);
             }

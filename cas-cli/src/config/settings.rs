@@ -931,8 +931,8 @@ pub struct FactoryConfig {
     #[serde(default = "default_supervisor_message_wakes_per_hour")]
     pub supervisor_message_wakes_per_hour: u64,
 
-    /// cas-5f67: input tokens one supervisor wake may read before Cassy saves a
-    /// handoff and clears the supervisor's context at the next idle boundary.
+    /// Latest-call input cap for idle-boundary supervisor clearing. When the
+    /// harness reports a window, the threshold is also capped at 80% of it.
     /// 0 disables the automatic clear.
     #[serde(default = "default_supervisor_wake_input_budget")]
     pub supervisor_wake_input_budget: u64,

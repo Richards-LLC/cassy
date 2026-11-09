@@ -463,8 +463,7 @@ impl SearchIndex {
                 }
             }
             for task in tasks {
-                if previous_by_id.get(task.id.as_str()) == Some(&task.updated_at.timestamp_micros())
-                {
+                if previous_by_id.get(task.id.as_str()) == Some(&task.updated_at.timestamp_micros()) {
                     continue;
                 }
                 Self::add_task_document(&mut writer, self, task)?;
@@ -1030,10 +1029,14 @@ fn prepare_versioned_index_dir(index_dir: &Path) -> Result<(), MemError> {
     // The suffix is deterministic for the normal one-time migration, while
     // the loop preserves an old process that recreated `index/tantivy` after
     // an earlier migration.
-    let mut quarantine = index_parent.join(format!("tantivy-legacy-v{existing_field_count}"));
+    let mut quarantine = index_parent.join(format!(
+        "tantivy-legacy-v{existing_field_count}"
+    ));
     let mut ordinal = 2;
     while quarantine.exists() {
-        quarantine = index_parent.join(format!("tantivy-legacy-v{existing_field_count}-{ordinal}"));
+        quarantine = index_parent.join(format!(
+            "tantivy-legacy-v{existing_field_count}-{ordinal}"
+        ));
         ordinal += 1;
     }
     match std::fs::rename(&legacy_dir, &quarantine) {

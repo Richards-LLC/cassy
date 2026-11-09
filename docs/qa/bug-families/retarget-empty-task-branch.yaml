@@ -1,0 +1,4 @@
+title: Retargeted tasks can bind a clean empty replacement before committing without abandoning existing work
+tasks: [cas-a4a7]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SPAWN]

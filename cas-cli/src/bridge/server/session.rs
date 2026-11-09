@@ -108,6 +108,7 @@ pub(crate) fn task_summary_json(
         updated_at: t.updated_at.map(|at| at.to_rfc3339()),
         tip,
         freeze: None,
+        auto_cut_paused: None,
     }
 }
 
@@ -188,11 +189,14 @@ pub(crate) fn build_status_json(
                 let split = counts.get(&epic.id).copied().unwrap_or_default();
                 // Only a release-train lane can carry a freeze; skip the
                 // store read for every other epic in the catalog.
-                let freeze = epic.branch.as_deref()
+                let train = epic.branch.as_deref()
                     .filter(|branch| branch.contains("release-train"))
                     .and_then(|_| task_store.get(&epic.id).ok())
-                    .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::card(cas_root, &train));
-                TaskSummaryJson { counts: Some(split), freeze, ..to_task(epic) }
+                    .filter(crate::mcp::tools::core::task::release_train::is_release_train);
+                let freeze = train.as_ref()
+                    .and_then(|train| crate::mcp::tools::core::workflow::release_freeze::card(cas_root, train));
+                let auto_cut_paused = train.as_ref().map(crate::mcp::tools::core::workflow::release_auto_cut::paused);
+                TaskSummaryJson { counts: Some(split), freeze, auto_cut_paused, ..to_task(epic) }
             })
             .collect(),
         focused_epic: crate::ops::fleet::pinned_epic(&session.name),

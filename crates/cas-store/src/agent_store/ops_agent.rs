@@ -25,7 +25,7 @@ const FACTORY_SESSION_REHOMED_AT_KEY: &str = "factory_session_rehomed_at";
 ///
 /// Factory session ids identify one supervisor *process lifetime*, not the
 /// durable supervisor.  A restart therefore changes `factory_session` while
-/// preserving `(project database, supervisor name, role)`.  Leaving the old
+/// preserving `(project database, machine, supervisor name, role)`.  Leaving the old
 /// rows active makes session-scoped status, activity, and prompt delivery lose
 /// workers that never stopped running; later maintenance also mistakes the old
 /// supervisor rows for dead workers.  Reconcile while registration still owns
@@ -50,11 +50,12 @@ fn reconcile_restarted_factory_supervisor(
          WHERE id <> ?1
            AND name = ?2
            AND role = ?3
+           AND machine_id IS ?4
            AND status IN ('active', 'idle')
            AND factory_session IS NOT NULL",
     )?;
     let prior_sessions = prior_stmt
-        .query_map(params![agent.id, agent.name, role], |row| {
+        .query_map(params![agent.id, agent.name, role, agent.machine_id], |row| {
             row.get::<_, String>(0)
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -64,8 +65,8 @@ fn reconcile_restarted_factory_supervisor(
         return Ok(());
     }
 
-    let mut prior = conn.prepare("SELECT id FROM agents WHERE id<>?1 AND name=?2 AND role=?3 AND status IN ('active','idle')")?;
-    let prior_ids = prior.query_map(params![agent.id,agent.name,role], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut prior = conn.prepare("SELECT id FROM agents WHERE id<>?1 AND name=?2 AND role=?3 AND machine_id IS ?4 AND status IN ('active','idle')")?;
+    let prior_ids = prior.query_map(params![agent.id,agent.name,role,agent.machine_id], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(prior);
     for id in prior_ids { super::continuity::capture(conn, &id, Some("supervisor_restart"))?; }
 
@@ -119,8 +120,9 @@ fn reconcile_restarted_factory_supervisor(
          WHERE id <> ?1
            AND name = ?2
            AND role = ?3
+           AND machine_id IS ?4
            AND status IN ('active', 'idle')",
-        params![agent.id, agent.name, role],
+        params![agent.id, agent.name, role, agent.machine_id],
     )?;
 
     Ok(())

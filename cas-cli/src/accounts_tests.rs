@@ -6,6 +6,17 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+// Claude owns the auth-status protocol; fixtures never invoke an installed client.
+fn claude_status_fixture(body: &str) -> crate::test_support::TestEnvGuard {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let bin = env.home().join("bin");
+    let client = bin.join("claude");
+    std::fs::create_dir_all(&bin).unwrap();
+    crate::test_paths::warm_stub(&client, &format!("#!/bin/sh\n{body}\n"));
+    env.set("CAS_TEST_CLAUDE_BIN", &client);
+    env
+}
+
 fn login(dir: &Path, email: &str) {
     write(&dir.join(".credentials.json"), "{\"claudeAiOauth\":{}}");
     write(
@@ -16,6 +27,7 @@ fn login(dir: &Path, email: &str) {
 
 #[test]
 fn discover_follows_directory_symlinks_and_skips_unreadable_entries() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     let home = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     for provider in Provider::ALL {
@@ -98,6 +110,7 @@ fn claude_home() -> tempfile::TempDir {
 
 #[test]
 fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     let home = claude_home();
     let h = home.path();
     let plan = plan(Provider::Claude, h).unwrap();
@@ -176,6 +189,7 @@ fn cas_e1f4_dry_run_lists_planned_links_merges_and_conflicts() {
 
 #[test]
 fn cas_e1f4_apply_links_shared_items_keeps_logins_merges_and_backs_up() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     let home = claude_home();
     let h = home.path();
     let plan = plan(Provider::Claude, h).unwrap();
@@ -249,6 +263,7 @@ fn cas_e1f4_apply_links_shared_items_keeps_logins_merges_and_backs_up() {
 
 #[test]
 fn cas_e1f4_new_account_comes_out_linked_and_doctor_flags_drift() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     let home = claude_home();
     let h = home.path();
     apply(&plan(Provider::Claude, h).unwrap(), h, "20261016T150002Z").unwrap();
@@ -283,6 +298,7 @@ fn cas_e1f4_new_account_comes_out_linked_and_doctor_flags_drift() {
 
 #[test]
 fn codex_keeps_the_default_home_when_email_is_only_in_a_credential() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     use base64::Engine as _;
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
@@ -340,6 +356,7 @@ fn snapshot(home: &Path) -> BTreeMap<String, String> {
 
 #[test]
 fn cas_e1f4_qa_f01_second_run_is_a_no_op_with_empty_shared_folders() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     let home = claude_home();
     let h = home.path();
     // Codex homes with empty agents/ and memories/, as on soundwave.
@@ -361,6 +378,7 @@ fn cas_e1f4_qa_f01_second_run_is_a_no_op_with_empty_shared_folders() {
 
 #[test]
 fn cas_e1f4_qa_f02_restore_is_byte_for_byte_on_every_path() {
+    let _env = claude_status_fixture(r#"printf '%s' '{"loggedIn":false}'"#);
     // The soundwave layout (retire path) ...
     let home = claude_home();
     let h = home.path();
@@ -400,4 +418,72 @@ fn cas_e1f4_qa_f02_restore_is_byte_for_byte_on_every_path() {
     assert_eq!(std::fs::read_to_string(renamed.join(".credentials.json")).unwrap(), "CRED-default");
     assert!(std::process::Command::new("bash").arg(&applied.restore).status().unwrap().success());
     assert_eq!(snapshot(h), before, "every login file comes back byte for byte");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_profiles_keep_their_auth_scope_through_link_and_drift_cas_2fed() {
+    let mut env = claude_status_fixture(r#"
+printf '%s|%s|%s\n' "$HOME" "$CLAUDE_CONFIG_DIR" "$CLAUDE_SECURESTORAGE_CONFIG_DIR" >> "$AUTH_CALLS"
+[ "$*" = "auth status --json" ] || exit 3
+if [ -n "$CLAUDE_CONFIG_DIR" ]; then
+    [ "$CLAUDE_CONFIG_DIR" = "$CLAUDE_SECURESTORAGE_CONFIG_DIR" ] || exit 4
+    profile="$CLAUDE_CONFIG_DIR"
+else
+    [ -z "$CLAUDE_SECURESTORAGE_CONFIG_DIR" ] || exit 5
+    profile="$HOME/.claude"
+fi
+case "$profile" in
+    *logged-out*) printf '%s' '{"loggedIn":false}' ;;
+    *unknown*) printf '%s' 'unavailable' ;;
+    *) printf '%s' '{"loggedIn":true}' ;;
+esac
+"#);
+    let calls = env.home().join("auth-calls");
+    env.set("AUTH_CALLS", &calls);
+    env.set("CLAUDE_CONFIG_DIR", "/foreign-profile");
+    env.set("CLAUDE_SECURESTORAGE_CONFIG_DIR", "/foreign-store");
+    let h = env.home().join("profiles");
+    let h = h.as_path();
+    let labels = [
+        ".claude", ".claude-alt", ".claude-keychain@x.com",
+        ".claude-unknown@x.com", ".claude-file-backed@x.com",
+    ];
+    for label in labels {
+        write(&h.join(label).join("commands/keep.md"), "shared");
+        // Even duplicate email metadata cannot justify moving a path-bound login.
+        write(&h.join(label).join(".claude.json"),
+              r#"{"oauthAccount":{"emailAddress":"keychain@x.com"}}"#);
+    }
+    write(&h.join(".claude-file-backed@x.com/.credentials.json"), "fixture");
+    write(&h.join(".claude-logged-out@x.com/commands/old.md"), "old");
+    let before = snapshot(h);
+    let planned = plan(Provider::Claude, h).unwrap();
+    assert_eq!(snapshot(h), before, "dry run writes nothing");
+    let requests = std::fs::read_to_string(&calls).unwrap();
+    for label in labels {
+        let folder = h.join(label);
+        let expected = if label == ".claude" {
+            format!("{}||", h.display())
+        } else {
+            format!("{}|{}|{}", h.display(), folder.display(), folder.display())
+        };
+        // Exact subprocess selectors are protocol data, not terminal wording.
+        assert!(requests.lines().any(|request| request == expected));
+        assert!(planned.accounts.iter().any(|a| a.label == label && a.has_login));
+        assert!(!planned.dir_changes.iter().any(|change| match change {
+            DirChange::Retire { label: changed, .. } | DirChange::Rename { label: changed, .. } => changed == label,
+        }));
+    }
+    assert!(planned.dir_changes.iter().any(|change| matches!(change,
+        DirChange::Retire { label, .. } if label == ".claude-logged-out@x.com")));
+    apply(&planned, h, "keychain-fixture").unwrap();
+    for label in labels {
+        let folder = h.join(label);
+        assert!(folder.is_dir());
+        assert_eq!(folder.join(".credentials.json").exists(), label == ".claude-file-backed@x.com");
+        assert!(crate::account_links::inspect(Provider::Claude, h, &folder).retired.is_none());
+    }
+    assert!(drift(Provider::Claude, h).unwrap().is_empty());
+    assert!(plan(Provider::Claude, h).unwrap().is_empty());
 }

@@ -422,8 +422,8 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub priority: Option<u8>,
 
-    /// Add labels
-    #[schemars(description = "Comma-separated labels to add")]
+    /// Add labels, replace supplied triage axes, or reset user labels.
+    #[schemars(description = "Comma-separated labels to add; severity:, reach: and journey: replace that axis. Empty clears user labels; findings retain provenance and reset to broken/theoretical.")]
     #[serde(default)]
     pub labels: Option<String>,
 
@@ -594,7 +594,7 @@ pub struct DependencyRequest {
     /// Dependency type: blocks close-gates and warn on start; requires_start
     /// remains a hard start gate.
     #[schemars(
-        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', or 'duplicate'"
+        description = "Type: 'blocks' (default; close-gates and warns on start), 'requires_start' (hard start gate), 'related', 'parent', 'discovered', or 'extracted'. Unsupported types are rejected."
     )]
     #[serde(default = "default_dep_type")]
     pub dep_type: String,

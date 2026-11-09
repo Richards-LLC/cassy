@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use cas_store::{AgentStore, PromptQueueStore, SqliteAgentStore, SqlitePromptQueueStore};
-use cas_types::{Agent, AgentRole, Task};
+use cas_types::{Agent, AgentRole, Task, TaskStatus};
 use serde_json::json;
 
 use super::commander_mirror::{MirrorScanState, scan_supervisor_replies};
@@ -33,7 +33,7 @@ impl Lane {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("config.toml"),
-            "[factory]\ncommander_mirror_enabled = false\nsupervisor_wake_input_budget = 1000\n",
+            "[factory]\ncommander_mirror_enabled = false\nsupervisor_wake_input_budget = 1000000\n",
         )
         .unwrap();
         let queue = SqlitePromptQueueStore::open(&root).unwrap();
@@ -50,6 +50,7 @@ impl Lane {
         let tasks = crate::store::open_task_store(&root).unwrap();
         let mut epic = Task::new("cas-train".into(), "Release train v9.99.1".into());
         epic.epic_verification_owner = Some(supervisor.id.clone());
+        epic.status = TaskStatus::InProgress;
         tasks.add(&epic).unwrap();
         tasks.append_note("cas-train", APPROVAL).unwrap();
         let transcript = account
@@ -102,7 +103,7 @@ impl Lane {
 
     fn current_handoff(&self) -> cas_types::Entry {
         let handoffs = self.handoffs();
-        cas_core::memory::handoff::current_handoff(&handoffs, "supervisor").unwrap().clone()
+        cas_core::memory::handoff::current_handoff(&handoffs, "supervisor", Some(&cas_core::memory::handoff::HandoffLineage::for_agent(&self.agents[0]))).unwrap().clone()
     }
 
     fn deliver_notice(&self) {
@@ -136,6 +137,7 @@ fn over_budget_wake_at_idle_boundary_hands_off_and_clears_once() {
     crate::store::open_store(&lane.root).unwrap().add(&{
         let mut judgement = cas_types::Entry::new("mem-judgement".into(), "Next: merge the no-op wake fix first.".into());
         judgement.tags = vec!["handoff".into(), "role:supervisor".into()];
+        cas_core::memory::handoff::HandoffLineage::for_agent(&lane.agents[0]).stamp(&mut judgement);
         judgement
     }).unwrap();
     lane.turn(40_000, true);
@@ -194,4 +196,89 @@ fn over_budget_wake_waits_for_idle_and_never_clears_mid_turn() {
     lane.turn(20_000, true);
     lane.scan();
     assert_eq!(lane.rows(CONTEXT_RESET_CONTROL).len(), 1, "clear queued at the idle boundary");
+}
+
+/// GH #1665: repeated cache reads measure billing, not live context pressure.
+#[test]
+fn cached_wake_replay_uses_latest_call_and_reported_window() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut lane = Lane::new();
+    lane.turn(0, false);
+    let at = chrono::Utc::now().to_rfc3339();
+    let mut file = std::fs::OpenOptions::new().append(true).open(&lane.transcript).unwrap();
+    // 78 calls, first 62,490, peak 116,844, cumulative 7,627,334.
+    for call in 0..78 {
+        let input = match call { 0 => 62_490, 77 => 116_844, _ => 98_000 };
+        writeln!(file, "{}", json!({"type":"assistant","timestamp":at,"message":{
+            "id":format!("cached-{call}"),"role":"assistant",
+            "usage":{"input_tokens":100,"cache_read_input_tokens":input - 200,
+                "cache_creation_input_tokens":100,"output_tokens":5},
+            "content":[{"type":"text","text":"ok"}],
+            "stop_reason":if call == 77 { "end_turn" } else { "tool_use" }
+        }})).unwrap();
+    }
+    let legacy_dir = lane.root.join(SOURCE);
+    std::fs::create_dir_all(&legacy_dir).unwrap();
+    std::fs::write(legacy_dir.join(format!("{}.json", lane.agents[0].id)), json!({
+        "agent_id":lane.agents[0].id, "harness_session":"native-5f67", "trigger_tokens":7_627_334,
+        "budget":1_000_000, "triggered_at":at, "phase":{"phase":"deferred"}
+    }).to_string()).unwrap();
+    lane.scan();
+    assert!(lane.handoffs().is_empty());
+    assert!(lane.rows(CONTEXT_RESET_CONTROL).is_empty());
+
+    // A prompt at 85% of a harness-reported 200K window triggers even
+    // though the absolute cap is 1M. Reuse the daemon scanner, not a helper.
+    lane.turn(0, false);
+    writeln!(file, "{}", json!({"type":"assistant","timestamp":at,"model_context_window":200_000,
+        "message":{"id":"near-window","role":"assistant",
+            "usage":{"input_tokens":100,"cache_read_input_tokens":169_800,
+                "cache_creation_input_tokens":100,"output_tokens":5},
+            "content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}
+    })).unwrap();
+    lane.scan();
+    assert_eq!(lane.handoffs().len(), 1);
+
+}
+
+#[test]
+fn handoff_receipt_and_injection_keep_only_live_work_and_readable_pending_rows() {
+    use cas_store::{SqliteSupervisorQueueStore, SupervisorQueueStore};
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut lane = Lane::new();
+    let tasks = crate::store::open_task_store(&lane.root).unwrap();
+    for index in 0..150 {
+        let mut task = Task::new(format!("cas-stale-{index}"), "old task".into());
+        task.assignee = Some(lane.agents[0].id.clone());
+        task.notes = "old history ".repeat(1000);
+        tasks.add(&task).unwrap();
+    }
+    let mut parked = Task::new("cas-parked".into(), "delivery".into());
+    parked.assignee = Some(lane.agents[0].id.clone());
+    parked.status = TaskStatus::AwaitingMerge;
+    tasks.add(&parked).unwrap();
+    let pending = SqliteSupervisorQueueStore::open(&lane.root).unwrap();
+    pending.init().unwrap();
+    for _ in 0..89 {
+        pending.notify(&lane.agents[0].id, "task_blocked", &json!({
+            "actor":"nimble-badger-37", "task_id":"cas-parked",
+            "message":"unneeded payload ".repeat(100)
+        }).to_string(), cas_store::NotificationPriority::Normal).unwrap();
+    }
+    lane.turn(1_300_000, true);
+    lane.scan();
+    let receipt_path = std::fs::read_dir(lane.root.join("supervisor-handoffs")).unwrap()
+        .next().unwrap().unwrap().path();
+    let bytes = std::fs::read(receipt_path).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
+    assert!(bytes.len() < 30_000, "receipt bytes: {}", bytes.len());
+    let content = lane.current_handoff().content;
+    assert!(content.len() < 8_000, "injection bytes: {}", content.len());
+    assert!(!content.contains("cas-stale-"));
+    let row = content.lines().find(|line| line.contains("nimble-badger-37")).unwrap();
+    for data in ["task_blocked", "cas-parked"] { assert!(row.contains(data)); }
+    assert!(!row.contains('{'));
+    assert!(snapshot["pending"][0]["age_minutes"].as_u64().is_some());
+    assert!(content.contains(APPROVAL));
 }

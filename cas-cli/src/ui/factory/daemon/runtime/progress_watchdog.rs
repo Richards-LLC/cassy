@@ -61,13 +61,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
             use crate::mcp::tools::core::task::block_hold;
             let reason = block_hold::latest_blocker_reason(&task.notes)
                 .or_else(|| block_hold::read(store.as_ref(), &task.id).ok().flatten().map(|hold| hold.reason));
-            if reason.is_some_and(|reason| {
-                let words: Vec<_> = reason.split(|c: char| !c.is_alphanumeric())
-                    .filter(|word| !word.is_empty()).map(str::to_ascii_lowercase).collect();
-                // An explicit owner wins over incidental mentions elsewhere.
-                words.windows(2).find(|pair| pair[0] == "owner")
-                    .map_or_else(|| words.iter().any(|word| word == "operator"), |pair| pair[1] == "operator")
-            }) {
+            if reason.is_some_and(|reason| block_hold::reason_is_operator_owned(&reason)) {
                 return false;
             }
         }

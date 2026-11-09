@@ -229,6 +229,10 @@ mod tests {
 
     #[test]
     fn doctor_reports_drift_links_missing_and_backs_up_real_items_only_with_consent() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let client = env.home().join("claude");
+        crate::test_paths::warm_stub(&client, "#!/bin/sh\nprintf '%s' '{\"loggedIn\":false}'\n");
+        env.set("CAS_TEST_CLAUDE_BIN", &client);
         for provider in Provider::ALL {
             let home = tempfile::tempdir().unwrap();
             let h = home.path();

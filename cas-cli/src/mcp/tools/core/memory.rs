@@ -844,6 +844,16 @@ impl CasCore {
             share: None,
         };
 
+        if handoff_role.is_some() {
+            let author_id = self.get_agent_id()?;
+            let author = self.open_agent_store()?.get(&author_id).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(e.to_string()),
+                data: None,
+            })?;
+            handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
+        }
+
         entry.expire_if_superseded(Utc::now());
         store.add(&entry).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -856,8 +866,8 @@ impl CasCore {
         }
 
         // A new handoff supersedes the previous current handoff for its role
-        // in this project: the old one keeps its content as history but is
-        // marked superseded and leaves the active tier (cas-0339).
+        // in this project's machine lineage: the old one keeps its content as
+        // history, is marked superseded and leaves the active tier (cas-0339).
         let mut superseded_ids: Vec<String> = Vec::new();
         if let Some(role) = handoff_role.as_deref()
             && let Ok(existing) = store.list()
@@ -1344,6 +1354,11 @@ impl CasCore {
 
         let mut changes = Vec::new();
 
+        if let Some(title) = req.title {
+            entry.title = Some(title);
+            changes.push("title");
+        }
+
         if let Some(content) = req.content {
             entry.content = content;
             changes.push("content");
@@ -1388,11 +1403,13 @@ impl CasCore {
             data: None,
         })?;
 
-        Ok(Self::success(format!(
+        let mut result = Self::success(format!(
             "Updated {}: {}",
             req.id,
             changes.join(", ")
-        )))
+        ));
+        result.structured_content = Some(serde_json::json!({"id": req.id, "changes": changes}));
+        Ok(result)
     }
 }
 

@@ -31,6 +31,10 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    Commit the regenerated `.claude/CODEMAP.md` and the previous release's
    report there too; no docs PR follows. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.
+   Auto-cut: when the exact train tip is green with changelog fragments,
+   Cassy freezes the train and runs `scripts/release.sh --notes` itself with
+   the draft at the `release-notes.md` path its wake names. Write that draft;
+   Cassy never writes or posts notes. The operator pauses auto-cut in Commander.
 2. Read the train CI receipt and complete log artifact; fix every red first.
    The existing CI suite at the newest train tip replaces a local pre-cut full
    run. A known red holds `train_merge`; any override is a visible decision for

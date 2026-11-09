@@ -1660,6 +1660,71 @@ pub fn rebind_approved_verification_dispatch(
     Ok((dispatch, verification))
 }
 
+/// Release only the exact failed child's current claim for a supported retry.
+/// Revocation, claim reset and failure audit share the verdict transaction lock:
+/// a late verdict, replacement claim or settled task can never be overwritten.
+pub fn release_failed_verifier_dispatch(
+    cas_dir: &Path,
+    dispatch_id: &str,
+    verifier_agent_id: &str,
+    reason: &str,
+) -> Result<bool> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let dispatch = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
+    let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?;
+    let task_active: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1 AND status NOT IN ('closed', 'cancelled'))",
+        params![dispatch.task_id], |row| row.get(0),
+    )?;
+    let has_verdict: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM verifications WHERE dispatch_id = ?1)",
+        params![dispatch_id],
+        |row| row.get(0),
+    )?;
+    if dispatch.state != VerificationDispatchState::Claimed
+        || dispatch.verifier_agent_id.as_deref() != Some(verifier_agent_id)
+        || dispatch.deadline_at <= Utc::now()
+        || latest.as_ref().map(|d| d.id.as_str()) != Some(dispatch_id)
+        || !task_active
+        || has_verdict
+    {
+        tx.commit()?;
+        return Ok(false);
+    }
+    let now = Utc::now().to_rfc3339();
+    if let Some(capability) = &dispatch.capability_id {
+        tx.execute(
+            "UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE id = ?1",
+            params![capability, now],
+        )?;
+        tx.execute(
+            "UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
+             WHERE capability_id = ?1 AND state IN ('pending', 'bound')",
+            params![capability, now],
+        )?;
+    }
+    tx.execute(
+        "UPDATE verification_dispatches SET state = 'pending', verifier_agent_id = NULL, capability_id = NULL
+         WHERE id = ?1 AND state = 'claimed' AND verifier_agent_id = ?2",
+        params![dispatch_id, verifier_agent_id],
+    )?;
+    let event = Event::new(
+        EventType::VerificationStarted,
+        EventEntityType::Task,
+        &dispatch.task_id,
+        "Automatic verifier failed; the exact dispatch is ready for retry",
+    )
+    .with_metadata(serde_json::json!({
+        "code": "automatic_verifier_retry_ready", "dispatch_id": dispatch_id,
+        "verifier_agent_id": verifier_agent_id, "reason": reason,
+        "state": "pending", "recovery_action": "worktree_merge",
+    }));
+    record_event_with_conn(&tx, &event)?;
+    tx.commit()?;
+    Ok(true)
+}
+
 /// Invalidate a reusable resolved proof cycle when task rework begins.
 pub fn invalidate_verification_dispatch_for_new_cycle(
     cas_dir: &Path,
@@ -4609,6 +4674,153 @@ mod tests {
             live_pending, 1,
             "restart/expiry recovery must leave exactly the replacement pending"
         );
+    }
+
+    #[test]
+    fn failed_verifier_release_fences_claims_and_preserves_audit_cas_4271() {
+        use crate::EventStore;
+        use VerificationDispatchState::*;
+        let mut cases = Vec::new();
+        for state in [Pending, Claimed, Resolved, TimedOut, Invalidated] {
+            for caller in ["failed-child", "other-child"] {
+                cases.push((state, caller, false, false));
+            }
+        }
+        cases.extend([
+            (Claimed, "failed-child", true, false),
+            (Claimed, "failed-child", false, true),
+        ]);
+        for (state, caller, expired, terminal) in cases {
+            let (_store, dir) = create_test_store();
+            let tasks = SqliteTaskStore::open(dir.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-retry".into(), "Verifier retry".into());
+            task.status = if terminal {
+                TaskStatus::Closed
+            } else {
+                TaskStatus::AwaitingMerge
+            };
+            tasks.add(&task).unwrap();
+            let events = SqliteEventStore::open(dir.path()).unwrap();
+            let dispatch = create_verification_dispatch(
+                dir.path(),
+                &task.id,
+                "owner",
+                "owner",
+                Utc::now() + Duration::minutes(10),
+            )
+            .unwrap();
+            let capability = issue_server_verifier_handoff(
+                dir.path(),
+                &task.id,
+                &dispatch.id,
+                "owner",
+                "first-attempt",
+            )
+            .unwrap();
+            bind_server_verifier_handoff(dir.path(), "owner", "failed-child").unwrap();
+            let conn = Connection::open(dir.path().join("cas.db")).unwrap();
+            conn.execute(
+                "UPDATE verification_dispatches SET state=?2, deadline_at=?3 WHERE id=?1",
+                params![
+                    dispatch.id,
+                    state.to_string(),
+                    if expired {
+                        Utc::now() - Duration::seconds(1)
+                    } else {
+                        dispatch.deadline_at
+                    }
+                    .to_rfc3339(),
+                ],
+            )
+            .unwrap();
+            let expected = state == Claimed && caller == "failed-child" && !expired && !terminal;
+            let released = release_failed_verifier_dispatch(
+                dir.path(),
+                &dispatch.id,
+                caller,
+                "synthetic stderr: exit 1",
+            )
+            .unwrap();
+            assert_eq!(
+                released, expected,
+                "{state:?}/{caller}/{expired}/{terminal}"
+            );
+            let current = get_verification_dispatch(dir.path(), &dispatch.id).unwrap();
+            let audit = events.list_by_type(EventType::VerificationStarted, 10).unwrap();
+            assert_eq!(audit.len(), usize::from(expected));
+            if !expected {
+                assert_eq!(current.state, state);
+                assert_eq!(current.verifier_agent_id.as_deref(), Some("failed-child"));
+                continue;
+            }
+            assert_eq!(current.state, Pending);
+            assert_eq!(current.repository, dispatch.repository);
+            assert_eq!(current.deadline_at, dispatch.deadline_at);
+            assert!(current.verifier_agent_id.is_none() && current.capability_id.is_none());
+            let metadata = audit[0].metadata.as_ref().unwrap();
+            assert_eq!(metadata["code"], "automatic_verifier_retry_ready");
+            assert_eq!(metadata["dispatch_id"], dispatch.id);
+            assert_eq!(metadata["reason"], "synthetic stderr: exit 1");
+            assert!(
+                consume_server_verifier_handoff_with_conn(
+                    &conn,
+                    &capability.id,
+                    &task.id,
+                    "failed-child"
+                )
+                .is_err()
+            );
+            assert!(
+                !release_failed_verifier_dispatch(
+                    dir.path(),
+                    &dispatch.id,
+                    "failed-child",
+                    "duplicate callback"
+                )
+                .unwrap()
+            );
+            issue_server_verifier_handoff(dir.path(), &task.id, &dispatch.id, "owner", "retry-attempt")
+                .unwrap();
+            let replacement =
+                bind_server_verifier_handoff(dir.path(), "owner", "replacement-child").unwrap();
+            assert!(bind_server_verifier_handoff(dir.path(), "owner", "competing-child").is_err());
+            assert!(
+                !release_failed_verifier_dispatch(
+                    dir.path(),
+                    &dispatch.id,
+                    "failed-child",
+                    "late callback"
+                )
+                .unwrap()
+            );
+            assert!(
+                resolve_verification_dispatch_with_conn(
+                    &conn,
+                    &dispatch.id,
+                    "failed-child",
+                    Some(&capability.id),
+                    false
+                )
+                .is_err()
+            );
+            consume_server_verifier_handoff_with_conn(
+                &conn,
+                &replacement.id,
+                &task.id,
+                "replacement-child",
+            )
+            .unwrap();
+            resolve_verification_dispatch_with_conn(
+                &conn,
+                &dispatch.id,
+                "replacement-child",
+                Some(&replacement.id),
+                false,
+            )
+            .unwrap();
+            assert_eq!(events.list_by_type(EventType::VerificationStarted, 10).unwrap().len(), 1);
+        }
     }
 
     #[test]

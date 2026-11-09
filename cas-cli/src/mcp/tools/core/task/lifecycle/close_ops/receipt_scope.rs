@@ -1087,6 +1087,44 @@ mod tests {
     }
 
     #[test]
+    fn corrected_fragment_counts_at_final_delivery_tip_gh1690() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-8c58".into(), "worker account preference".into());
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        let fragment = "changelog.d/cas-8c58.md";
+        std::fs::write(repo.path().join(fragment),
+            "### Honor the configured Codex worker account\n\nUse the configured account before recommendations.\n").unwrap();
+        let original = commit_changelog_fixture(repo.path(),
+            "fix: honor configured Codex worker account before recommendations");
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                start_base: Some(base), task_id: Some(task.id.clone()),
+                known_commits: vec![original.clone()],
+            },
+        };
+        let refusal = |head: &str| {
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(head)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(head)).unwrap();
+            assert!(paths.iter().any(|path| path == fragment));
+            changelog_refusal(repo.path(), &task, &paths, head, "main", Some(&ranges))
+        };
+        assert!(refusal(&original).is_some());
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Worker accounts\n\n- **Honor the configured Codex worker account** — Use the configured account before recommendations.\n").unwrap();
+        let corrected = commit_changelog_fixture(repo.path(),
+            "docs: use the required worker account changelog fragment format");
+        assert!(refusal(&corrected).is_none());
+    }
+
+    #[test]
     fn merge_authored_task_fragment_counts_without_crediting_imports_cas_28f8() {
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();

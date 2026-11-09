@@ -237,7 +237,8 @@ mod tests {
         epic.task_type = TaskType::Epic;
         epic.epic_verification_owner = Some(supervisor.id.clone());
         tasks.add(&epic).unwrap();
-        for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed)] {
+        let unavailable_anchor = "0".repeat(40);
+        for (id, head) in [("cas-live", &live), ("cas-unpushed", &unpushed), ("cas-unavailable", &unavailable_anchor)] {
             let mut task = Task::new(id.into(), id.into());
             task.status = cas_types::TaskStatus::AwaitingMerge;
             task.assignee = Some(worker.id.clone());
@@ -1109,7 +1110,14 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
     for id in pending {
         let Ok(task) = tasks.get(&id) else { continue };
         let Some(recipient) = batch_owner(cas_root, &task, &agents)? else { continue };
-        let Some((target, tip)) = batch_offer_evidence(cas_root, &task)? else { continue };
+        let (target, tip) = match batch_offer_evidence(cas_root, &task) {
+            Ok(Some(evidence)) => evidence,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(task_id = id, %error, "batch offer evidence unavailable");
+                continue;
+            }
+        };
         live.entry((target, tip, recipient.id, recipient.name, recipient.session)).or_default().push(id);
     }
     let offered = cas_root.join("post-release").join("batch-offers");

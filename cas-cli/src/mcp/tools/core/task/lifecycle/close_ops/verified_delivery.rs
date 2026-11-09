@@ -58,6 +58,24 @@ mod missing_manifest_tests {
         assert!(refusal.contains(manifest.to_str().unwrap()), "{refusal}");
         assert!(refusal.contains(&dispatch.id), "{refusal}");
         assert!(refusal.contains("VERIFIED_DELIVERY_CANDIDATE_READ"), "{refusal}");
+
+        // Completion-receipt close also prepares/reuses this candidate.
+        // Missing metadata and filesystem failures must retain its location.
+        let missing = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(missing.code, ErrorCode::INVALID_PARAMS);
+        assert!(missing.message.contains(manifest.to_str().unwrap()), "{missing}");
+        assert!(missing.message.contains(&dispatch.id), "{missing}");
+        std::fs::create_dir(&manifest).unwrap();
+        let unreadable = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(unreadable.code, ErrorCode::INVALID_PARAMS);
+        assert!(unreadable.message.contains(manifest.to_str().unwrap()), "{unreadable}");
+        std::fs::remove_dir(&manifest).unwrap();
+        let directory = manifest.parent().unwrap();
+        std::fs::remove_dir(directory).unwrap();
+        std::fs::write(directory, "blocks candidate directory creation").unwrap();
+        let blocked = core.build_completion_candidate(&task, repo, "factory/worker", "main").unwrap_err();
+        assert_eq!(blocked.code, ErrorCode::INVALID_PARAMS);
+        assert!(blocked.message.contains(directory.to_str().unwrap()), "{blocked}");
     }
 }
 

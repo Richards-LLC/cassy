@@ -1696,7 +1696,7 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
 /// the receipt explains the choice even when no account is eligible. A Codex
 /// lane keeps its requester's account; unscoped slots use the shared policy.
 fn recommend_spawn_accounts(
-    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, policy: &crate::config::AccountsConfig,
+    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, _factory: &crate::config::FactoryConfig, policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> String {
@@ -3269,7 +3269,7 @@ impl CasService {
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
-        let account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &account_policy, chrono::Utc::now(), |provider| {
+        let account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &factory_config, &account_policy, chrono::Utc::now(), |provider| {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
@@ -16643,6 +16643,42 @@ mod tests {
     }
 
     #[test]
+    fn configured_worker_account_overrides_recommendation_cas_8c58() {
+        let home = TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.set("factory.codex_home", "~/.codex-support").unwrap();
+        config.save(project.path()).unwrap();
+        let config = crate::config::Config::load(project.path()).unwrap();
+        assert_eq!(config.get("factory.codex_home").as_deref(), Some("~/.codex-support"));
+        assert!(config.list().contains(&("factory.codex_home".into(), "~/.codex-support".into())));
+        let support = home.home().join(".codex-support");
+        let explicit = home.home().join(".codex-explicit");
+        for path in [&support, &explicit] { std::fs::create_dir(path).unwrap(); }
+        let now = "2026-10-27T12:00:00Z".parse().unwrap();
+        for lane in [false, true] {
+            let mut specs = build_spawn_specs_with_project_config(4, Some("codex"), None, None, None,
+                Some(r#"[{},{},{"config_dir":"~/.codex-explicit"},{"cli":"claude"}]"#), None).unwrap();
+            specs[1].requester_config_dir = Some("/fixture/.codex-personal".into());
+            let receipt = recommend_spawn_accounts(&mut specs, lane, &config.factory(), &Default::default(), now, |provider| {
+                Ok(vec![crate::account_selection::tests::row(provider, "personal", 6, 0.0, 0.0)])
+            });
+            assert_eq!(specs[0].config_dir.as_deref(), Some("~/.codex-support"));
+            assert_eq!(specs[1].config_dir, specs[0].config_dir);
+            assert_eq!(specs[2].config_dir.as_deref(), Some("~/.codex-explicit"));
+            assert_eq!(specs[3].config_dir.as_deref(), Some("/fixture/.claude-personal"));
+            // The config key is a machine identifier for selection provenance.
+            assert!(receipt.contains("factory.codex_home"));
+            crate::account_registry::resolve_worker_accounts(&mut specs[..3], home.home()).unwrap();
+            assert_eq!(specs[0].config_dir.as_deref(), support.to_str());
+        }
+        let mut config = config;
+        config.set("factory.codex_home", "").unwrap();
+        assert!(config.factory().codex_home.is_none());
+        assert!(crate::config::Config::load(tempfile::tempdir().unwrap().path()).unwrap().factory().codex_home.is_none());
+    }
+
+    #[test]
     fn recommended_spawn_accounts_preserve_explicit_and_override_inherited() {
         let now = "2026-10-27T12:00:00Z".parse().unwrap();
         let mut specs = Vec::new();
@@ -16652,7 +16688,7 @@ mod tests {
             let mut requester = base.clone(); requester.requester_config_dir = Some("/requester/account".into());
             specs.extend([base, explicit, requester]);
         }
-        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(), now, |provider| {
             let mut idle = crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 0.0);
             idle.windows.remove(0);
             Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0)])
@@ -16669,7 +16705,7 @@ mod tests {
         assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));
         specs[0].config_dir = None;
         specs[0].requester_config_dir = Some("/fallback/account".into());
-        let fallback = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
+        let fallback = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(), now, |provider| {
             let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
             row.login_state = crate::account_registry::LoginState::LoggedIn;
             Ok(vec![row])
@@ -16688,7 +16724,7 @@ mod tests {
         }
         specs[0].config_dir = None;
         specs[3].config_dir = None;
-        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), &Default::default(), now, |provider| {
             let mut rows = crate::account_registry::discover_with(provider, home.path(), false,
                 |_, _| crate::account_registry::LoginState::LoggedIn)?;
             for row in &mut rows {
@@ -16714,7 +16750,7 @@ mod tests {
         let mut lane_specs = build_lane_spawn_specs(2, "standard", None, None,
             &cas_factory::CapabilitySnapshot::default()).unwrap().0;
         lane_specs[0].requester_config_dir = Some("/fixture/.codex-a-low".into());
-        let receipt = recommend_spawn_accounts(&mut lane_specs, true, &Default::default(), now, |p| {
+        let receipt = recommend_spawn_accounts(&mut lane_specs, true, &Default::default(), &Default::default(), now, |p| {
             assert_eq!(p, provider);
             Ok(vec![crate::account_selection::tests::row(p, "a-low", 6, 84.0, 0.0),
                 crate::account_selection::tests::row(p, "z-headroom", 6, 34.0, 0.0)])

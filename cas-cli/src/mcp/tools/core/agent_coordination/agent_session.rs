@@ -177,6 +177,19 @@ mod tests {
         assert_eq!(error.data.unwrap()["rule_id"], "shared_mcp_child_identity");
         assert_eq!(lazy.get_agent_id().unwrap(), "lazy-parent");
         assert!(lazy.open_agent_store().unwrap().get("lazy-child").is_err());
+
+        // A supported independent session keeps its typed name without
+        // replacing the shared process's parent launch hint.
+        env.set("CAS_AGENT_ROLE", "standard");
+        env.set("CAS_AGENT_NAME", "parent-launch-hint");
+        let independent = crate::mcp::CasCore::with_daemon(lazy.cas_root.clone(), None, None);
+        independent.cas_agent_session_start(Parameters(SessionStartRequest {
+            session_id: Some("independent-session".into()), name: Some("independent-reviewer".into()),
+            agent_type: Some("primary".into()), parent_id: None,
+            permission_mode: None, cwd: None, limit: Some(1),
+        })).await.expect("independent session start");
+        assert_eq!(independent.open_agent_store().unwrap().get("independent-session").unwrap().name, "independent-reviewer");
+        assert_eq!(std::env::var("CAS_AGENT_NAME").unwrap(), "parent-launch-hint");
     }
 }
 
@@ -254,12 +267,6 @@ impl CasCore {
         )?;
         self.ensure_public_registration_target(&session_id)?;
 
-        // Best-effort name hint for session registration
-        if let Some(ref name) = req.name {
-            unsafe { std::env::set_var("CAS_AGENT_NAME", name) };
-        } else if std::env::var("CAS_AGENT_NAME").is_err() {
-            unsafe { std::env::set_var("CAS_AGENT_NAME", &agent_name) };
-        }
         let cwd = req.cwd.unwrap_or_else(|| {
             self.cas_root
                 .parent()
@@ -293,9 +300,8 @@ impl CasCore {
             agent_id: None,
             agent_type: None,
             subagent_prompt: None,
-            // Carry the role explicitly so downstream handlers don't depend on
-            // the process-global env mutation above (which races under shared
-            // MCP process dispatch).
+            // Carry the role explicitly; process-global hints belong to the
+            // launching parent, not a public session registration request.
             agent_role: requested_role.map(|r| r.to_string()),
             message: None,
             message_is_final: None,

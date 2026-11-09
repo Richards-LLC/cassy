@@ -253,6 +253,7 @@ fn validate_receipt(
         context_digest: String::new(),
         proof: proof.clone(),
         preparation_ms: 0,
+        inherited_supervisor_call: None,
     };
     candidate
         .verify_landing(&receipt.landed_sha)

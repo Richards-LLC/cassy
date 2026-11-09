@@ -1,0 +1,4 @@
+title: A finished supervisor command reports its one-line outcome as a self-clearing toast instead of leaving a card that needs Dismiss; failed, refused and unconfirmed commands keep their card until dismissed
+tasks: [cas-95ea]
+invariants: [HUB-J27-CARD-RELOAD]
+journeys: [HUB-J27]

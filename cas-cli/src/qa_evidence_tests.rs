@@ -298,6 +298,11 @@ fn visual_pairs_validate_sides_hashes_and_status_cas_4f82() {
     std::fs::create_dir_all(&dir).unwrap();
     for case in [
         "valid",
+        "legacy-png-seal",
+        "modern",
+        "modern-missing-jpg-seal",
+        "legacy-png-tamper",
+        "unknown-schema",
         "png-tamper",
         "jpg-tamper",
         "missing-file",
@@ -315,6 +320,18 @@ fn visual_pairs_validate_sides_hashes_and_status_cas_4f82() {
         let mut pairs = serde_json::json!({"schema":1, "task_id":TASK, "base_sha":fx.head, "head_sha":fx.head, "origin":"fixture",
             "pairs":[{"id":"goal", "surface":"/", "viewport":[1280,800], "scheme":"light", "before":before, "after":after}], "unpaired":[]});
         match case {
+            "legacy-png-seal" | "modern-missing-jpg-seal" | "legacy-png-tamper" => {
+                for side in ["before", "after"] {
+                    pairs["pairs"][0][side].as_object_mut().unwrap().remove("jpg_sha256");
+                }
+                if case == "modern-missing-jpg-seal" {
+                    pairs["schema"] = 2.into();
+                } else if case == "legacy-png-tamper" {
+                    std::fs::write(dir.join("goal.after.png"), "tampered").unwrap();
+                }
+            }
+            "modern" => pairs["schema"] = 2.into(),
+            "unknown-schema" => pairs["schema"] = 3.into(),
             "png-tamper" => std::fs::write(dir.join("goal.after.png"), "tampered").unwrap(),
             "jpg-tamper" => std::fs::write(dir.join("goal.after.jpg"), "tampered").unwrap(),
             "missing-file" => std::fs::remove_file(dir.join("goal.before.jpg")).unwrap(),
@@ -338,7 +355,8 @@ fn visual_pairs_validate_sides_hashes_and_status_cas_4f82() {
             }
             _ => {}
         }
-        std::fs::write(dir.join("pairs.json"), serde_json::to_vec(&pairs).unwrap()).unwrap();
+        let original = serde_json::to_vec(&pairs).unwrap();
+        std::fs::write(dir.join("pairs.json"), &original).unwrap();
         let ctx = EvidenceContext {
             task_id: TASK,
             task_artifacts_dir: &fx.task_dir,
@@ -350,7 +368,10 @@ fn visual_pairs_validate_sides_hashes_and_status_cas_4f82() {
             rebind_scope: None,
         };
         let result = validate_bundle(&ctx);
-        assert_eq!(result.is_ok(), case == "valid", "{case}: {result:?}");
+        let accepted = matches!(case, "valid" | "legacy-png-seal" | "modern");
+        assert_eq!(result.is_ok(), accepted, "{case}: {result:?}");
+        assert_eq!(validate_cited_pair_coverage(&ctx).is_ok(), accepted, "{case}");
+        assert_eq!(std::fs::read(dir.join("pairs.json")).unwrap(), original);
     }
 }
 

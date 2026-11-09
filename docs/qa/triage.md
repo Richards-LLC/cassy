@@ -2,7 +2,11 @@
 
 Declare a project's main flows with `main_journeys: [save, chat]` at the top of its existing journey registry. Each ID must name a live journey in that registry. Other journeys are secondary; an undeclared main journey cannot claim main reach.
 
+Main flows can be factory or CLI workflows as well as browser routes. Cassy's registry declares `FACTORY-SUPERVISE`, `FACTORY-MERGE`, `FACTORY-CLOSE`, `CLI-RELEASE`, `FACTORY-SPAWN` and `FACTORY-QA-RECEIPT`. A reproduced broken supervisor workflow uses `severity:broken,reach:main,journey:FACTORY-SUPERVISE` and derives P1. Only reproduced money or data loss on a declared main journey derives P0; requesting P0 alone cannot promote a broken workflow.
+
 File a finding using the existing task labels: `severity:money|data_loss|broken|awkward|cosmetic`, `reach:main|secondary|theoretical`, and `journey:<id>`. Supply the existing `repro` field with the command or steps and observed wrong outcome, plus `affected`. Intake records runtime evidence; labels and priority are normalized together. Update the labels to reclassify a finding; a manual priority cannot override the axes. Ordinary tasks without triage keep their current priority.
+
+On `task action=update`, ordinary labels are additive; a supplied `severity:`, `reach:` or `journey:` label replaces the previous value for that axis. Omitted axes stay unchanged. An explicit empty `labels=""` clears user labels and resets an existing finding to broken/theoretical, retaining `from-finding` provenance and runtime evidence from its notes. Normalization restores the canonical axes, so clearing labels cannot turn a finding into manually prioritized work. To correct a stale P4 finding with a recorded repro, update `labels="severity:broken,reach:main,journey:FACTORY-SUPERVISE"`; the stored priority becomes P1. CLI workflow findings use the same MCP task handler and registry.
 
 Verification and QA issue objects carry `triage`, for example:
 

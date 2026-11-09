@@ -30081,7 +30081,7 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831() {
-        for case in ["green", "automatic-green"] {
+        for case in ["green", "automatic-green", "automatic-queue-wrapper"] {
             let (task, text) = queue_proof_close_cas_4386(case, false).await;
             assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
             assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);

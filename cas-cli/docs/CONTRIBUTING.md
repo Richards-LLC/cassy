@@ -2378,6 +2378,13 @@ an old daemon requires its normal update/relaunch before Commander can use it.
 Codex, Grok and unknown harnesses are refused by name. This action does not
 replace the factory daemon or implement automatic in-place server updates.
 
+Merge-queue proof reuse accepts successful completed `merge_group` runs from
+`.github/workflows/full-validation.yml` (the canonical queue wrapper) and legacy
+`.github/workflows/ci.yml`. The current close reason may cite
+`merge_group_run=<id>` followed by ordinary separator punctuation, including a
+colon. Repository identities, queue branch, exact tree receipt and landed
+containment remain mandatory.
+
 Tool and CLI status text follows [Status words and their evidence](../../docs/status-words.md).
 Name cached or recorded state as such; a successful mutation does not establish
 that its follow-up, release publication, or installation on another host completed.

@@ -359,6 +359,10 @@ invariants:
   FACTORY-CAPACITY-NOTICES:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
+  FACTORY-MERGE-QUEUE-CI-IDENTITY:
+    statement: Successful canonical or legacy merge-group CI evidence can prove an exact landed delivery, including punctuated run citations, while unrelated or failed runs remain refused.
+    check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
+    bug: {task: cas-f448}
   FACTORY-REFUSED-CLOSE-CORRECTION:
     statement: A validation refusal does not park stale delivery A; corrected pushed B parks as B, and supervisor request_changes preserves owned restart lineage while foreign descendants remain refused.
     check: Run refused_registry_close_keeps_correction_tip_and_restart_cas_56f1 through worker and supervisor MCP on a shared factory lane. Refuse duplicate inline/file journey metadata at A, remove only the duplicate and push B, verify exact B park, seed a historical stale A park and request changes, then verify owned restart and foreign-descendant refusal without moving refs.
@@ -1005,8 +1009,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION]
+  owners: [cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-MERGE-QUEUE-CI-IDENTITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

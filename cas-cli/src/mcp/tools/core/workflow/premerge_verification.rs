@@ -947,6 +947,44 @@ impl CasCore {
         Ok(format!("\n{action}"))
     }
 
+    fn inherited_supervisor_call_for_target(
+        &self,
+        task: &Task,
+        repo: &Path,
+        source: &str,
+        target: &str,
+        digest: &str,
+        prior_dispatch: &VerificationDispatch,
+        prior_candidate: &Candidate,
+    ) -> Result<Option<InheritedSupervisorCall>, McpError> {
+        let repository = repo.canonicalize().map_err(fail)?;
+        let preview = Candidate {
+            cas_root: self.cas_root.clone(),
+            task_id: task.id.clone(),
+            repository,
+            source_branch: source.into(),
+            source_sha: git(repo, &["rev-parse", source]).map_err(fail)?,
+            target_branch: target.into(),
+            target_sha: review_target(repo, target).map_err(fail)?,
+            tree: String::new(),
+            context_digest: digest.into(),
+            proof: prior_candidate.proof.clone(),
+            preparation_ms: 0,
+            inherited_supervisor_call: None,
+        };
+        let verifications = self
+            .open_verification_store()?
+            .get_for_task(&task.id)
+            .map_err(fail)?;
+        Ok(inherited_supervisor_call_for_candidate(
+            task,
+            prior_dispatch,
+            prior_candidate,
+            &preview,
+            &verifications,
+        ))
+    }
+
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
     pub(crate) fn prepare_premerge_verification(

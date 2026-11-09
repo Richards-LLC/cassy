@@ -161,10 +161,17 @@ mod tests {
     use super::validate_claims;
 
     #[test]
-    fn close_reason_slash_prose_is_not_a_receipt_path() {
+    fn close_reason_requires_receipts_only_for_proof_assertions() {
         let cas_root = tempfile::tempdir().expect("temporary Cassy root");
         let receipt_root = tempfile::tempdir().expect("temporary receipt root");
         std::fs::write(receipt_root.path().join("receipt.log"), "proof").expect("receipt file");
+
+        validate_claims(
+            "Only journeys.yaml manually resolved: supervisor-handoff-machine-lineage, both complete blocks verbatim.",
+            cas_root.path(),
+            receipt_root.path(),
+        )
+        .expect("local documentation integrity is not an external completion claim");
 
         let error = validate_claims(
             "CI reported 10312 tests passed / 1 failed",

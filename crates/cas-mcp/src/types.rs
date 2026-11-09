@@ -461,7 +461,7 @@ pub struct TaskRequest {
     /// effect on the current target. It is only needed
     /// when no commit-time factory anchor was captured.
     #[schemars(
-        description = "Task commit SHA or unambiguous prefix for merged work lacking a factory anchor. Stores full ID; checks non-empty diff, target ancestry and preserved or explicitly evolved tree effect."
+        description = "Task commit SHA or unambiguous prefix for merged work lacking a factory anchor. recover_delivery: live supervisor + reason, restores integrated task identity before independent batch QA; preserves close/review gates. Stores full ID; checks non-empty diff, target ancestry and preserved or explicitly evolved tree effect."
     )]
     #[serde(default)]
     pub commit_receipt: Option<String>,

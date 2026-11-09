@@ -108,6 +108,32 @@ anchor and matching QA. This
 recovers delivery identity for QA; it does not restore declined merge authority
 or clear deferred evidence without its receipt or passed independent round.
 
+If a shipped historical or conflict-recovered task has lost its usable anchor
+and implementer, a live registered supervisor can bind its integrated identity
+before recording the batch receipt:
+
+```json
+{
+  "action": "recover_delivery",
+  "id": "cas-a123",
+  "commit_receipt": "<integrated task commit>",
+  "reason": "Inspected the released task and its integrated content"
+}
+```
+
+This task MCP action requires an attributable commit with a nonempty diff,
+preserved content and containment on the configured target. A known source's
+tree-equivalent integrated squash can also establish attribution. An unrelated
+target commit cannot. Recovery refuses active task leases, replacement of a
+resolvable active anchor and identities owned by immutable delivery transactions.
+It retains previous anchors, records the supervisor and reason, and binds the
+full integrated SHA using a guarded task write. Replaying that binding is a no-op.
+Assignment and task status stay unchanged; existing lease, branch and receipt
+actors remain in the implementation lineage, joined by the recovered commit's
+Git actors. The independent recorder and author checks still apply. Recovery
+neither records a QA PASS nor waives deferred batch evidence or release review:
+record the independent receipt, then retry ordinary close.
+
 The runtime verifies nonempty UTF-8 ledger bytes against the published
 artifact's size and SHA-256. It stores an immutable receipt with project,
 recorder, time, staging commit, ledger binding and deduplicated task anchors.

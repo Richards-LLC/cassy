@@ -552,11 +552,23 @@ async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
     let recovery = |id: &str, head: &str, reason: &str| serde_json::from_value(serde_json::json!({
         "action":"recover_delivery", "id":id, "commit_receipt":head, "reason":reason,
     })).unwrap();
+    let worker = CasService::new(fx.core.clone(), None);
+    assert!(worker.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
     // A real integrated sibling commit is still not this task's delivery.
     let before = tasks.get("cas-bq01").unwrap();
     assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[1], "Reviewed release"))).await.is_err());
     assert_eq!(serde_json::to_value(tasks.get("cas-bq01").unwrap()).unwrap(), serde_json::to_value(before).unwrap());
     assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], " "))).await.is_err());
+    // Leased work and a task-owned commit outside its target stay refused.
+    let agents = open_agent_store(&root).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    agents.try_claim("cas-bq01", &worker_id, 600, Some("active implementation")).unwrap();
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
+    agents.release_lease("cas-bq01", &worker_id).unwrap();
+    let seed = git(&fx.repo, &["rev-parse", &format!("{}^", heads[0])]);
+    git(&fx.repo, &["branch", "-f", "main", &seed]);
+    assert!(fx.supervisor.task(Parameters(recovery("cas-bq01", &heads[0], "Reviewed release"))).await.is_err());
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     for (id, head) in ["cas-bq01", "cas-bq02"].into_iter().zip(&heads) {
         fx.supervisor.task(Parameters(recovery(id, head, "Reviewed shipped task identity"))).await.unwrap();
         let task = tasks.get(id).unwrap();
@@ -565,6 +577,8 @@ async fn shipped_identity_recovery_unblocks_batch_close_cas_d853() {
         assert_eq!(task.assignee, None);
         assert!(task.notes.contains(head)); // Immutable audit data, not prose.
         assert!(cas_store::has_qa_batch_deferral(&root, id).unwrap());
+        fx.supervisor.task(Parameters(recovery(id, head, "Replay recovery"))).await.unwrap();
+        assert_eq!(tasks.get(id).unwrap().updated_at, task.updated_at);
     }
     // Git actors recovered with the identity cannot become the independent author.
     let actor = git(&fx.repo, &["show", "-s", "--format=%an", &heads[0]]);

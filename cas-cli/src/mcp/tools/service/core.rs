@@ -847,6 +847,17 @@ impl CasService {
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_recover_delivery(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("task", "recover_delivery"))?;
+        let receipt = req.commit_receipt.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "commit_receipt required for recover_delivery"))?;
+        let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for recover_delivery"))?;
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.recover_task_delivery(&id, &receipt, &reason)
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("Delivery recovery failed: {error}"))))
+    }
+
     pub(super) async fn task_rebind_branch(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
         let id = req.id.ok_or_else(|| self.missing_id("task", "rebind_branch"))?;
         let branch = req.branch.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "branch required for rebind_branch"))?;

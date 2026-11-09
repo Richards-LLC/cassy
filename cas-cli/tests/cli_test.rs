@@ -3262,6 +3262,11 @@ fn qa_ledger_init_check_and_no_overwrite() {
         (without_coverage, "cas-delivery-a", Some("coverage_missing")),
         (original_text.clone(), "cas-delivery", Some("coverage_missing")),
         (original_text.replace("cas-delivery-b", "cas-other"), "cas-delivery-b", Some("coverage_missing")),
+        (original_text.replace("covers: cas-delivery-a, cas-delivery-b", "covers:"), "cas-delivery-a", Some("coverage_id")),
+        (original_text.replace("covers:", "covers: cas-delivery-a,"), "cas-delivery-a", Some("coverage_id")),
+        (original_text.replace("covers:", "covers: invalid-id,"), "cas-delivery-a", Some("coverage_id")),
+        (format!("{original_text}\ncovers: cas-delivery-a\n"), "cas-delivery-a", Some("coverage_header")),
+        (original_text.replace("covers: cas-delivery-a, cas-delivery-b", "```\ncovers: cas-delivery-a, cas-delivery-b\n```"), "cas-delivery-a", Some("coverage_missing")),
     ] {
         std::fs::write(path, body).unwrap();
         let checked = cas_cmd(root).current_dir(root).args([
@@ -3321,6 +3326,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
         if succeeds {
             let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(init["rows"][0]["id"], "FLOW-J1", "target registry remains authoritative");
+            assert_eq!(init["covers"], serde_json::json!([sourced.id]));
             let body = std::fs::read_to_string(init["path"].as_str().unwrap()).unwrap();
             assert!(body.contains(&format!("build: {source_head}")), "{suffix} used another checkout's HEAD: {body}");
             assert!(!body.contains(&format!("build: {primary_head}")));

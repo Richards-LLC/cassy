@@ -113,7 +113,7 @@
 ## QA, Commander and services
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - journey registry validation and diff selection.
-- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - ledger grammar, captures, deployed origins and walk progress.
+- `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - ledger grammar and declared batch coverage, captures, deployed origins and walk progress.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - independent QA, release verdicts, owner-scoped receipt offers and live notice revalidation at queue/inbox boundaries.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.

@@ -66,6 +66,11 @@ bug_families:
     tasks: [cas-bdda]
     invariants: [HUB-J27-CARD-RELOAD]
     journeys: [HUB-J27]
+  automatic-verifier-crash-retry:
+    title: A crashed automatic verifier releases only its own claim so one merge retry starts one replacement without accepting a stale verdict
+    tasks: [cas-4271]
+    invariants: [FACTORY-VERIFIER-CRASH-RETRY]
+    journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
     title: Approved dispatch and batch receipt recovery accept the first landed reviewed tree while retaining exact delivery and dedicated review gates
     tasks: [cas-abb0, cas-e06c]
@@ -320,6 +325,10 @@ invariants:
     statement: Shipped historical deliveries recover only attributable integrated identity through audited supervisor authority, preserving independent batch evidence and ordinary close gates.
     check: Run shipped_identity_recovery_unblocks_batch_close_cas_d853 through task recover_delivery and verification batch_receipt; require unchanged debt and status, no-op replay, unrelated-content refusal and independent author enforcement.
     bug: {task: cas-d853}
+  FACTORY-VERIFIER-CRASH-RETRY:
+    statement: A harness exit without a verdict returns its exact dispatch to a retryable audited state; one replacement owns the retry, stale children cannot publish, and the stderr reason remains readable after success.
+    check: Run automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f through the real merge preparation and automatic handoff, plus failed_verifier_release_fences_claims_and_preserves_audit_cas_4271. Batch QA forces a disposable verifier harness to exit 1, retries the same merge once and checks one replacement, unchanged proof, stale-child refusal, preserved stderr and exact candidate landing.
+    bug: {task: cas-4271}
   FACTORY-QA-NOTICE-OWNER:
     statement: Batch receipt offers reach only the current epic verification owner while QA-covered waits and obsolete hourly overdue notices are withheld without deleting history.
     check: Run batch_receipt_offer_names_live_parked_deliveries_once_per_set_cas_3a25 and legacy_batch_overdue_is_withheld_at_inbox_boundaries_cas_0f7b through real stores, transport claims, MCP inbox and hook reads; transfer ownership after queueing, keep an absent remote owner off unrelated local supervisors, and retain evidence waits only until a valid QA receipt covers the anchor.
@@ -920,7 +929,8 @@ journeys:
   - cas-cli/src/mcp/tools/service/server_handler.rs
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
-  invariants: [FACTORY-FINDING-PRIORITY]
+  - crates/cas-store/src/verification_store.rs
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE

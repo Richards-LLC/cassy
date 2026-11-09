@@ -1,6 +1,6 @@
 # Cassy — Codemap
 
-> Regenerated from the merged release train: 18 Rust workspace members and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Regenerated from the synchronized source tree: 18 Rust workspace members and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -66,6 +66,7 @@
 - `cas-cli/src/mcp/tools/core/rules.rs`, `cas-cli/src/mcp/tools/core/rule_drift.rs`, `cas-cli/src/rule_refs.rs` — rule provenance, drift and source-reference navigation.
 - `crates/cas-core/src/memory/handoff.rs`, `crates/cas-core/src/hooks/context/build_start.rs` — project/role handoff succession and startup ownership filtering.
 - `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/agent_store/continuity.rs` — provenance repair and retirement snapshots.
+- `crates/cas-store/src/verification_store.rs` — durable review dispatches, verifier claims and attempt recovery.
 
 ## Factory runtime and terminals
 
@@ -98,10 +99,13 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs`, `cas-cli/src/mcp/tools/core/task/block_hold.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` — lifecycle outbox, task-scoped blocker answers, supervisor decisions and fresh-question deadlines.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs`, `cas-cli/src/mcp/tools/core/workflow/premerge_verification/` — immutable candidates, review, target-only verdict carry-forward and guarded restoration.
 - `cas-cli/src/factory_review_scratch.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` — managed review checkouts and exact-dispatch verdict submission.
+- `cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs` — account-aware verifier launch, sealed child authority and crash recovery.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs` — reviewed merge operations and close reconciliation.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs` — lane adoption and explicit cited-code dependency guidance.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` — ordered integration and release admission.
-- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` — branch identity, recovery and train assignment.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` — branch identity, empty retargeted-lane replacement, delivery recovery and train assignment.
+- `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/repo_context.rs` — epic moves, corrected work targets and repository resolution.
+- `cas-cli/src/mcp/tools/core/task/lifecycle.rs` — recorded-start graph, retained-branch attribution and resumed task branches.
 - `cas-cli/src/epic_design_review.rs`, `cas-cli/src/finding_triage.rs`, `crates/cas-types/src/verification.rs` — design holds, finding severity and review types.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handoff_updates.rs` — native hooks, policy and handoff reads.
 - `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference history.

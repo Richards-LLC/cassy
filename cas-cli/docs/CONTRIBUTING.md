@@ -302,11 +302,17 @@ receipt. A train queue reservation retains control of that continuation.
 Rejection, a supervisor question, timeout or a failed review transport wakes
 the owning supervisor with findings; none grants a merge override. Review
 prompts, verdict output and harness diagnostics live under
-`.cas/verification-runs/<dispatch>/`. Automatic reviews use the existing
+`.cas/verification-runs/<dispatch>/<attempt>/`. Automatic reviews use the existing
 account-aware launch resolver, including registered named profiles when the
 default home is logged out. Failed harness notices include up to eight stderr
-lines from the final 2 KiB and the full diagnostic log path. A manually claimed dispatch remains
-with its verifier. Non-daemon callers retain the existing manual handoff.
+lines from the final 2 KiB and the full diagnostic log path. If a harness stops
+without a verdict before expiry, one transaction consumes its sealed authority,
+returns only that child's exact current claim to Pending, and records the
+redacted reason in a structured verification retry event. Retry the same
+`factory action=worktree_merge` once: one replacement claims the same dispatch
+and candidate. Earlier attempts keep separate output/log paths. A stale child,
+settled task, completed verdict or expired/reassigned claim cannot be reset.
+A manually claimed dispatch remains with its verifier. Non-daemon callers retain the existing manual handoff.
 
 A nontransactional task merge records a recovery intent before Git changes and
 an immutable observation afterward. Once that observation is durable, advisory
@@ -1275,6 +1281,11 @@ callers cannot supply a base that hides commits. The old branch/base/observed ti
 new binding, approving supervisor and reason are recorded together. A missing
 old ref is recorded as unavailable. After a history rewrite, rebinding the same
 branch name refreshes its obsolete base or unreachable anchor with the same audit.
+After a target correction, an empty replacement at the new target is also
+accepted when the same assignee's original branch still equals its recorded
+start base and the task has no parked branch or current/historical delivery
+anchors. Start preserves the old binding until this supervisor approval;
+neither branch needs a placeholder commit.
 Repeating an unchanged binding leaves its base and audit unchanged. Rebinding does
 not change Git, assignment, leases or claims,
 and it does not waive proof, merge, QA or verification. The worker closes normally;

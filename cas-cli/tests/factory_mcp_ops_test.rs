@@ -12357,6 +12357,10 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
     std::fs::write(worker_path.join("first.txt"), "first hotfix\n").unwrap();
     git_stdout(&worker_path, &["add", "first.txt"]);
     git_stdout(&worker_path, &["commit", "-m", "fix(cas-aaaa): first hotfix"]);
+    let older_delivery = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+    std::fs::write(worker_path.join("later.txt"), "later delivery\n").unwrap();
+    git_stdout(&worker_path, &["add", "later.txt"]);
+    git_stdout(&worker_path, &["commit", "-m", "fix(cas-dddd): later delivery"]);
     let lane_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
     std::fs::write(project.join("first.txt"), "first hotfix\n").unwrap();
     git_stdout(&project, &["add", "first.txt"]);
@@ -12367,6 +12371,10 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
         serde_json::from_value(serde_json::json!({ "action": "start", "id": id })).unwrap()
     };
     let store = env.task_store();
+    let mut held = Task::new("cas-dddd".into(), "later delivery awaiting integration".into());
+    held.assignee = Some(worker.into());
+    held.status = TaskStatus::Blocked;
+    store.add(&held).unwrap();
     let mut started_on = Vec::new();
     for id in ["cas-bbbb", "cas-cccc"] {
         let mut task = Task::new(id.into(), format!("independent hotfix {id}"));
@@ -12384,6 +12392,11 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
         );
         let own = format!("factory/{worker}-{id}");
         assert!(started.contains(&own), "{started}");
+        if id == "cas-bbbb" {
+            assert!(started.contains(&lane_tip), "retained ref identity: {started}");
+            assert!(started.contains(&older_delivery), "older delivery identity: {started}");
+            assert!(started.contains("cas-dddd") && started.contains("cas-aaaa"), "{started}");
+        }
         assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
         assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), target_tip);
         assert_eq!(

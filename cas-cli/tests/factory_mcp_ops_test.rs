@@ -12367,7 +12367,7 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
         serde_json::from_value(serde_json::json!({ "action": "start", "id": id })).unwrap()
     };
     let store = env.task_store();
-    let mut started_on = Vec::new();
+    let mut started_on: Vec<(String, String)> = Vec::new();
     for id in ["cas-bbbb", "cas-cccc"] {
         // cas-ce0d / GH #1677: the supervisor preserves the held delivery
         // and hands the successor a clean detached target checkout.
@@ -12381,6 +12381,30 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
             target_branch: "main".into(),
         });
         store.add(&task).unwrap();
+        if id == "cas-cccc" {
+            // Off-target detached work and tracked edits must refuse before
+            // acquiring a lease, changing refs or accepting the successor.
+            for dirty in [false, true] {
+                if !dirty {
+                    git_stdout(&worker_path, &["checkout", "--detach", &started_on.first().unwrap().0]);
+                } else {
+                    git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
+                    std::fs::write(worker_path.join("README"), "held tracked edit\n").unwrap();
+                }
+                let refs = git_stdout(&worker_path, &["show-ref"]);
+                let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+                let status = git_stdout(&worker_path, &["status", "--porcelain"]);
+                let refused = env.service.task(Parameters(start(id))).await
+                    .expect_err("unsafe detached checkout must refuse before accepting start");
+                assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+                assert_eq!(store.get(id).unwrap().status, TaskStatus::Open);
+                assert!(env.agent_store().get_lease(id).unwrap().is_none());
+                assert_eq!(git_stdout(&worker_path, &["show-ref"]), refs);
+                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+                assert_eq!(git_stdout(&worker_path, &["status", "--porcelain"]), status);
+            }
+            git_stdout(&worker_path, &["restore", "README"]);
+        }
         let started = get_text(
             &env.service
                 .task(Parameters(start(id)))
@@ -12391,25 +12415,35 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
         assert!(started.contains(&own), "{started}");
         assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
         assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), target_tip);
+        assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(
             store.get(id).unwrap().deliverables.factory_branch_start.map(|start| start.branch),
             Some(own.clone())
         );
+        if id == "cas-cccc" {
+            git_stdout(&worker_path, &["checkout", "--detach", "HEAD"]);
+            let refused = env.service.task(Parameters(start(id))).await
+                .expect_err("a detached resume must name its existing task branch");
+            assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), "");
+            git_stdout(&worker_path, &["checkout", &own]);
+        }
         // This hotfix's PR is pushed and parked; the next one must not wait.
         std::fs::write(worker_path.join(format!("{id}.txt")), "hotfix\n").unwrap();
         git_stdout(&worker_path, &["add", "."]);
         git_stdout(&worker_path, &["commit", "-m", &format!("fix({id}): hotfix")]);
         let mut parked = store.get(id).unwrap();
         parked.status = TaskStatus::AwaitingMerge;
-        parked.deliverables.factory_branch_anchor =
-            Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+        let tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        parked.deliverables.factory_branch_anchor = Some(tip.clone());
         store.update(&parked).unwrap();
-        started_on.push(own);
+        started_on.push((own, tip));
     }
     // Each PR keeps its own branch, and the lane keeps the first hotfix.
     assert_eq!(git_stdout(&worker_path, &["rev-parse", &format!("factory/{worker}")]), lane_tip);
-    for own in &started_on {
-        assert_ne!(git_stdout(&worker_path, &["rev-parse", own]), target_tip, "{own}");
+    for (own, tip) in &started_on {
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", own]), *tip, "{own}");
     }
 }
 

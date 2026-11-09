@@ -276,8 +276,13 @@ mod tests {
         );
         assert!(rows.iter().all(|row| !row.payload.contains("cas-unpushed")), "{rows:?}");
 
+        // GH #1656: both delivered tasks remain covered after their worker retires.
+        let mut retired = tasks.get("cas-live").unwrap();
+        retired.id = "cas-retired".into();
+        tasks.add(&retired).unwrap();
+        crate::store::open_agent_store(&cas).unwrap().unregister(&worker.id).unwrap();
         let ledger = project.join("LEDGER.md");
-        fs::write(&ledger, "# Batch walk\ncas-live PASS\n").unwrap();
+        fs::write(&ledger, "# Batch walk\ncas-live PASS\ncas-retired PASS\n").unwrap();
         let store = cas_store::SqliteArtifactStore::open(&cas).unwrap();
         let context = crate::artifacts::PublishContext {
             store: &store,
@@ -290,16 +295,31 @@ mod tests {
         let service = crate::mcp::CasService::new(core, None);
         let request = |kind: &str| serde_json::from_value(serde_json::json!({
             "action": "batch_receipt", "verification_type": kind,
-            "task_ids": ["cas-live"], "staging_sha": target_tip,
+            "task_ids": ["cas-live", "cas-retired"], "staging_sha": target_tip,
             "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
         })).unwrap();
         let text = |response: rmcp::model::CallToolResult| response.content.iter()
             .filter_map(|content| match &content.raw { rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None })
             .collect::<Vec<_>>().join("\n");
         let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
-        // pin: a QA walk must name the remaining release-review gate rather than silently doing nothing.
-
-        assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::AwaitingMerge);
+        let pending_holds = || crate::store::open_supervisor_queue_store(&cas).unwrap()
+            .list_pending(&supervisor.id).unwrap().into_iter().filter(|row| {
+                serde_json::from_str::<serde_json::Value>(&row.payload).unwrap()["kind"] == "batch_close_hold"
+            }).collect::<Vec<_>>();
+        assert_eq!(pending_holds().len(), 2, "{qa}");
+        let receipt = cas_store::list_qa_batch_receipts(&cas, "batch-offer-fixture").unwrap().remove(0);
+        for id in ["cas-live", "cas-retired"] {
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, cas_types::TaskStatus::AwaitingMerge);
+            assert_eq!(task.notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
+            assert!(pending_holds().iter().any(|row| row.payload.contains(id)));
+        }
+        // A continuation replay retries ordinary gates without duplicating its notice or outcome.
+        service.inner.close_release_covered_deliveries(&receipt).await;
+        assert_eq!(pending_holds().len(), 2);
+        for id in ["cas-live", "cas-retired"] {
+            assert_eq!(tasks.get(id).unwrap().notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
+        }
         fs::remove_dir_all(cas.join("post-release/batch-offers")).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&supervisor.id).unwrap();
@@ -307,7 +327,12 @@ mod tests {
             .max_by_key(|row| row.id).unwrap();
         assert!(!latest.payload.contains("cas-live"), "covered anchor cannot be re-offered: {latest:?}");
         let reviewed = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("release"))).await.unwrap());
-        assert_eq!(tasks.get("cas-live").unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
+        for id in ["cas-live", "cas-retired"] {
+            assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
+        }
+        let verdict = cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().remove(0);
+        service.inner.close_release_covered_deliveries(&verdict).await;
+        assert_eq!(pending_holds().len(), 2);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "closed delivery has no further QA offer");
 
     }

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  booting-worker-task-admission:
+    title: Tasks assigned during worker startup enter the ordered backlog once and continue after delivery
+    tasks: [cas-d033]
+    invariants: [FACTORY-BOOT-ASSIGNMENT]
+    journeys: [FACTORY-SPAWN]
   supervisor-live-context-pressure:
     title: Cached supervisor calls do not trigger clears; near-window calls hand off only live work with readable pending summaries
     tasks: [cas-bb0d]
@@ -475,6 +480,10 @@ invariants:
     statement: Clean idle workers with queued or awaiting-merge tasks can accept a fresh task behind its target; workers holding in-progress work remain guarded.
     check: 'Run factory_mcp_ops_test::test_clean_idle_worker_behind_target_assigns_and_starts_cas_c54f through task update and start, covering AwaitingMerge/Open acceptance and InProgress refusal for worker name and session ID on reusable and per-task branches; preserve checkout state and dirty/foreign/anchored-task guards.'
     bug: {task: cas-8aa1}
+  FACTORY-BOOT-ASSIGNMENT:
+    statement: Tasks assigned before worker registration remain ordered and dispatch once after the first delivery; canceled or reassigned work is skipped without a manual relay.
+    check: Run booting_worker_assignments_reach_ordered_queue_gh1620 through real spawn receipts, task update, registration, start, park and daemon repair; run worker_task_queue_store::tests::queue_survives_reopen_and_rejects_stale_replacement for idempotent admission and concurrent cursor fencing. On the release candidate, spawn a lane, assign its tail before registration and observe the successor turn after delivery.
+    bug: {task: cas-d033}
   FACTORY-RECORDED-BLOCKER-WAIT:
     statement: A blocking dependency recorded during an explicit hold suppresses repeated deadline wakes until all blockers close or cancel, then emits one named restart wake without clearing the hold; a linked supervisor answer cannot hide completion.
     check: 'Run recorded_dependency_owns_blocker_deadline_until_closed_cas_f8c7 through real task, agent and prompt stores with an injected clock; cover post-hold and older edges, related edges, multiple blockers, cancellation and linked-answer delivery revalidation. In batch QA, block a worker on an in-flight task, pass the deadline and finish the prerequisite; require one completion wake.'

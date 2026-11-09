@@ -1204,12 +1204,13 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         }
         let detail = format!(
             "{} parked deliver{} already live on origin/{target} at {tip}: {}. {batch_close} \
-             Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
+             Initialize with cas qa ledger init --task <qa-task> --covers {covered}; keep every delivery ID in its covers: header. Before publishing, run cas qa ledger check <path> --task <qa-task> --covers {covered}. Walk and publish the ledger, then record: verification action=batch_receipt task_ids=[{}] staging_sha={tip} ledger_artifact_id=<id> ledger_path=<path> ledger_author=<walker>. \
              Cassy did not record it: a receipt needs a supervisor recorder and an independent ledger author.",
             ids.len(),
             if ids.len() == 1 { "y is" } else { "ies are" },
             ids.join(", "),
             ids.join(","),
+            covered = ids.join(","),
             batch_close = crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::BATCH_CLOSE_RULE,
         );
         let recipient = crate::supervisor_notices::Recipient { id, name, session };

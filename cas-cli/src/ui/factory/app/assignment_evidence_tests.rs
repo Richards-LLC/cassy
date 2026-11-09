@@ -222,6 +222,7 @@ fn operator_ask_does_not_count_workers_holding_blocked_tasks_as_idle() {
             "unassigned backlog".into(),
         ))
         .unwrap();
+    stores.reminder_store.as_ref().unwrap().init().unwrap();
     stores
         .reminder_store
         .as_ref()

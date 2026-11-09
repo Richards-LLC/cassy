@@ -5455,16 +5455,13 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
-    for (caller, message, refusal, reassign_to_caller) in [
-        ("test-agent", "unnamed WIP before review", None, false),
-        // pin: this exact refusal phrase identifies the commit-ownership gate.
-        ("test-agent", "fix(cas-abcd): another task's work", Some("foreign commit"), false),
-        // pin: the unauthorized caller must reach the assignment gate.
-        ("other-worker", "unnamed WIP before review", Some("not you"), false),
+    for (caller, message, allowed, reassign_to_caller) in [
+        ("test-agent", "WIP: carry supervisor answers across target movement", true, false),
+        ("test-agent", "fix(cas-abcd): another task's work", false, false),
+        ("other-worker", "unnamed WIP before review", false, false),
         // Reassignment makes this caller authorized, so the old worker's
         // branch history must be refused by commit ownership instead.
-        // pin: reassignment must reject the unattributed old-worker commit.
-        ("other-worker", "unnamed WIP before review", Some("unattributed commit"), true),
+        ("other-worker", "unnamed WIP before review", false, true),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -5475,10 +5472,14 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
         branch_transfer_git(root, &["add", ".gitignore"]);
         branch_transfer_git(root, &["commit", "-m", "base"]);
-        branch_transfer_git(root, &["switch", "-c", "factory/test-agent"]);
         let cas_dir = root.join(".cas");
         std::fs::write(cas_dir.join("config.toml"),
             "[project]\ncanonical_id = \"resume-fixture\"\n").unwrap();
+        // Factory checkouts share the primary repository's project pin;
+        // their local .cas directory need not contain configuration.
+        let checkout = tempfile::TempDir::new().unwrap();
+        branch_transfer_git(root, &["worktree", "add", "-b", "factory/test-agent", checkout.path().to_str().unwrap()]);
+        let root = checkout.path();
         let agents = open_agent_store(&cas_dir).unwrap();
         let worker_id = format!("test-session-{}", std::process::id());
         let mut worker = agents.get(&worker_id).unwrap();
@@ -5497,19 +5498,25 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         })).unwrap();
         service.task(Parameters(start())).await.expect("initial start");
         let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
-        // No delivery anchor or task-naming subject: the server's start
-        // boundary must retain this worker's WIP across the hold.
+        branch_transfer_git(root, &["commit", "--allow-empty", "-m", "test(cas-8ca7): reproduce blocked work"]);
+        let mut held = tasks.get(&task.id).unwrap();
+        held.deliverables.factory_branch_anchor = Some(branch_transfer_git(root, &["rev-parse", "HEAD"]));
+        tasks.update(&held).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task.id, "status": "blocked",
+        })).unwrap();
+        service.task(Parameters(request)).await.expect("block task");
+        // An unnamed WIP child of the attributed red commit, made while
+        // blocked, still belongs to the same recorded start boundary.
         std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
         branch_transfer_git(root, &["add", "delivery.txt"]);
         branch_transfer_git(root, &["commit", "-m", message]);
         let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
         let content = std::fs::read(root.join("delivery.txt")).unwrap();
-        for status in ["blocked", "open"] {
-            let request = serde_json::from_value(serde_json::json!({
-                "action": "update", "id": task.id, "status": status,
-            })).unwrap();
-            service.task(Parameters(request)).await.expect("hold transition");
-        }
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "update", "id": task.id, "status": "open",
+        })).unwrap();
+        service.task(Parameters(request)).await.expect("reopen task");
         if reassign_to_caller {
             let mut reassigned = tasks.get(&task.id).expect("task after review hold");
             reassigned.assignee = Some(caller.into());
@@ -5533,16 +5540,14 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             other_core.set_agent_id_for_testing(other.id);
             CasService::new(other_core, None).task(Parameters(start())).await
         };
-        if refusal.is_none() {
+        if allowed {
             result.unwrap_or_else(|error| panic!("same worker's WIP must resume: {error}"));
         } else {
             let error = result.expect_err("foreign worker or foreign commits must refuse");
-            // pin: distinguish commit ownership from the assignment gate.
-            assert!(error.message.contains(refusal.unwrap()),
-                "{caller}, {message}: expected {refusal:?}, got {error}");
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS, "{caller}, {message}: {error}");
         }
         let saved = tasks.get(&task.id).unwrap();
-        assert_eq!(saved.status, if refusal.is_none() { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
+        assert_eq!(saved.status, if allowed { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
         assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);

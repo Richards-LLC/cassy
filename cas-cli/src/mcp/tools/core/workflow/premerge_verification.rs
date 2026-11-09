@@ -107,6 +107,10 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 /// to `if !ok` two lines away); only full-context identity may rebind. An
 /// empty or unreadable patch is an error, never a match.
 pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Result<String, String> {
+    delivered_patch_id_for_paths(repo, target, tree, &[])
+}
+
+fn delivered_patch_id_for_paths(repo: &Path, target: &str, tree: &str, paths: &[&str]) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
     let patch_id = |context: &str| -> Result<String, String> {
@@ -124,6 +128,8 @@ pub(crate) fn delivered_patch_id(repo: &Path, target: &str, tree: &str) -> Resul
         let diff = diff
             .args(["diff", "--binary", "--no-color", "--no-renames", "--no-ext-diff"])
             .args(["--no-textconv", context, target, tree])
+            .arg("--")
+            .args(paths)
             .output()
             .map_err(|error| error.to_string())?;
         if !diff.status.success() || diff.stdout.is_empty() {
@@ -426,11 +432,12 @@ impl Candidate {
         // move that recomputes the exact reviewed tree, such as a ref fast-
         // forward or a queue merge of commits the source already carries,
         // changes no reviewed content, whatever the path overlap says.
-        if let Ok(merged) = git(
+        let merged = git(
             &self.repository,
             &["merge-tree", "--write-tree", target, &self.source_sha],
-        ) && merged.lines().next() == Some(self.tree.as_str())
-        {
+        )?;
+        let tree = merged.lines().next().ok_or("merge tree missing")?.to_string();
+        if tree == self.tree {
             return Ok(self.tree.clone());
         }
         git(
@@ -441,35 +448,37 @@ impl Candidate {
             &self.repository,
             &["merge-base", &self.target_sha, &self.source_sha],
         )?;
-        let changed = repository_proof::delivery_paths_changed(
+        // Shared overview additions may touch the same file while leaving
+        // every delivered hunk and its context unchanged. Compare the actual
+        // clean merge's full-context patch, never waive the whole document.
+        let overview = "docs/PRODUCT_OVERVIEW.md";
+        let unchanged_overview = delivered_patch_id_for_paths(
+            &self.repository, &self.target_sha, &self.tree, &[overview],
+        ).ok().zip(delivered_patch_id_for_paths(
+            &self.repository, target, &tree, &[overview],
+        ).ok()).is_some_and(|(reviewed, current)| reviewed == current);
+        let reviewed_changes = |paths: Vec<String>| paths.into_iter()
+            .filter(|path| path != overview || !unchanged_overview).collect::<Vec<_>>();
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.target_sha,
             target,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "target changed reviewed delivery files: {}; review the new candidate",
                 changed.join(", ")
             ));
         }
-        let merged = git(
-            &self.repository,
-            &["merge-tree", "--write-tree", target, &self.source_sha],
-        )?;
-        let tree = merged
-            .lines()
-            .next()
-            .ok_or("merge tree missing")?
-            .to_string();
-        let changed = repository_proof::delivery_paths_changed(
+        let changed = reviewed_changes(repository_proof::delivery_paths_changed(
             &self.repository,
             &base,
             &self.source_sha,
             &self.tree,
             &tree,
-        )?;
+        )?);
         if !changed.is_empty() {
             return Err(format!(
                 "recomputed merge changed reviewed delivery content: {}",
@@ -1336,6 +1345,79 @@ mod tests {
         run(repo, &["add", "-A"]);
         run(repo, &["commit", "-q", "-m", message]);
         run(repo, &["rev-parse", "HEAD"])
+    }
+
+    fn parked_candidate(repo: &Path, source: &str, target: &str) -> Candidate {
+        let source_sha = run(repo, &["rev-parse", source]);
+        let tree = run(repo, &["merge-tree", "--write-tree", target, source])
+            .lines().next().unwrap().to_string();
+        Candidate {
+            cas_root: repo.to_path_buf(), task_id: source.into(), repository: repo.to_path_buf(),
+            source_branch: source.into(), source_sha, target_branch: "main".into(),
+            target_sha: target.into(), tree, context_digest: String::new(),
+            proof: RepositoryProofBoundary {
+                peer_premerge: None, repository_root: String::new(), worktree_root: String::new(),
+                head_commit: String::new(), state_digest: String::new(), target_branch: None,
+                anchor_commits: Vec::new(),
+            },
+            preparation_ms: 0,
+        }
+    }
+
+    #[test]
+    fn shared_upkeep_keeps_back_to_back_candidate_approvals_cas_e79d() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let body = (0..24).map(|n| format!("section {n}\n")).collect::<String>();
+        for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+            "cas-cli/src/builtins/reference-history.json"]
+        {
+            commit_file(repo, path, &body, "base upkeep");
+        }
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        for (branch, marker) in [("factory/a", 2), ("factory/b", 20)] {
+            run(repo, &["checkout", "-q", "-b", branch, &base]);
+            for path in [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md",
+                "cas-cli/src/builtins/reference-history.json"]
+            {
+                let edited = body.replace(&format!("section {marker}\n"),
+                    &format!("section {marker}\nadded by {branch}\n"));
+                commit_file(repo, path, &edited, "delivery upkeep");
+            }
+        }
+        let first = parked_candidate(repo, "factory/a", &base);
+        let second = parked_candidate(repo, "factory/b", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        for candidate in [&first, &second] {
+            let target = run(repo, &["rev-parse", "main"]);
+            let tree = candidate.tree_on(&target).expect("unchanged reviewed doc hunks keep approval");
+            run(repo, &["merge", "-q", "--no-ff", &candidate.source_branch, "-m", "land delivery"]);
+            let landed = run(repo, &["rev-parse", "main"]);
+            assert_eq!(run(repo, &["rev-parse", "main^{tree}"]), tree);
+            assert_eq!(candidate.verify_landing(&landed), Ok(()));
+        }
+        let overview = std::fs::read_to_string(repo.join("docs/PRODUCT_OVERVIEW.md")).unwrap();
+        assert!(overview.contains("added by factory/a") && overview.contains("added by factory/b"));
+    }
+
+    #[test]
+    fn overlapping_code_still_holds_candidate_cas_e79d() {
+      for path in ["src/lib.rs", "docs/PRODUCT_OVERVIEW.md"] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        let base = commit_file(repo, path, "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/a"]);
+        commit_file(repo, path, "delivered\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+        let candidate = parked_candidate(repo, "factory/a", &base);
+        run(repo, &["checkout", "-q", "main"]);
+        let target = commit_file(repo, path, "first\nsecond\nthird\nchanged\nfifth\nlast\n", "sibling edit");
+        assert!(git(repo, &["merge-tree", "--write-tree", &target, &candidate.source_sha]).is_ok(),
+            "the review guard must hold even a clean merge when reviewed context changed");
+        assert!(candidate.tree_on(&target).is_err());
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+      }
     }
 
     /// cas-bfa8: a train created on another machine exists only on origin

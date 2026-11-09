@@ -38,12 +38,19 @@ pub(super) fn validated_started_delivery(
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
     };
-    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
-        || task.assignee.as_deref() != Some(start.assignee.as_str())
-        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(
-            repo,
+    // Linked factory checkouts may have no local project pin. The shared
+    // primary repository still supplies their identity, as it does at start.
+    let repository_matches = |root: &Path| {
+        crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            root,
             &start.work_target.repo_selector,
         )
+    };
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !(repository_matches(repo)
+            || crate::mcp::tools::core::task::repo_context::git_layout(repo)
+                .is_ok_and(|(primary, _)| repository_matches(&primary)))
     {
         return Ok(None);
     }

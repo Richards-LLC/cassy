@@ -385,7 +385,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle. Workers start/close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (note_type optional). create project= files a Cloud proposal_* entry, never a task row. Supervisor cancel: ended work without delivery; reason required, superseded_by optional. request_changes reopens failed parked deliveries, retaining assignee. Supervisor rebind_branch: fresh branch, reason and old-tip audit. recover_delivery: integrated commit_receipt + reason restores historical delivery identity before independent QA."
+        description = "Task lifecycle, dependencies and delivery. Workers start/close and honor verification guidance. notes: id reads, notes appends. create project= proposes to Cloud. Supervisor recovery/cancel/rebind requires reason. get=show."
     )]
     pub async fn task(
         &self,

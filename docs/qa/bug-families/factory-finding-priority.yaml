@@ -1,0 +1,4 @@
+title: Primary factory and CLI findings retain derived priority and label corrections replace stale triage axes
+tasks: [cas-7129]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]

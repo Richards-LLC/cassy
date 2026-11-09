@@ -422,8 +422,8 @@ pub struct TaskUpdateRequest {
     #[serde(default)]
     pub priority: Option<u8>,
 
-    /// Add labels
-    #[schemars(description = "Comma-separated labels to add")]
+    /// Add labels, replace supplied triage axes, or reset user labels.
+    #[schemars(description = "Comma-separated labels to add; severity:, reach: and journey: replace that axis. Empty clears user labels; findings retain provenance and reset to broken/theoretical.")]
     #[serde(default)]
     pub labels: Option<String>,
 

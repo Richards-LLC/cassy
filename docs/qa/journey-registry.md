@@ -63,6 +63,7 @@ regardless of status. Ignore filters affect impact selection, not schema checks.
 | `fixtures` | Optional `name: {description, provider, labels?}` map. When present, journey fixture references must resolve. `labels` maps a criterion ID to that fixture's expected value. |
 | `bug_families` | Optional `key: {title, found?, fixed_by: [], tasks: [], invariants: [], journeys: []}` map. Journey and invariant references must resolve. |
 | `safety` | Optional `{mode, forbidden_hosts?, protected_credentials?}` QA policy every journey inherits. `mode` is `fixture-only`, `staging` or `production-read-back`; any other value is a validation problem and renders as fixture-only. `forbidden_hosts` takes hosts, `*.domain` or URLs; `protected_credentials` names environment variables. The QA preflight refuses a round whose environment sets a protected credential or whose `qa.deployed_origins` names a forbidden host. |
+| `main_journeys` | Optional list of live journey IDs admitted for main-reach finding triage. Factory and CLI workflows use the same declaration as browser journeys; see [triage](triage.md). |
 | `journeys` | Required non-empty list. |
 
 ### Bug family files

@@ -7390,6 +7390,69 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn current_assignee_followups_survive_send_and_inbox_gh1421() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let root = &service.inner.cas_root;
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("worker-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let worker = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let worker = CasService::new(core);
+
+        for owner in ["eager-cobra-57", "worker-id"] {
+            for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+                for task_id in [None, Some("cas-fba9")] {
+                    for kind in [None, Some("answer")] {
+                        let mut task = tasks.get("cas-fba9").unwrap();
+                        task.status = status;
+                        task.assignee = Some(owner.into());
+                        tasks.update(&task).unwrap();
+                        let before = serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap();
+                        let body = format!(
+                            "Continue the assigned task; repair its recorded branch boundary. {owner}/{status}/{task_id:?}/{kind:?}"
+                        );
+                        let request = serde_json::from_value(serde_json::json!({
+                            "action": "message", "target": "eager-cobra-57", "task_id": task_id,
+                            "kind": kind, "wake": false,
+                            "summary": "branch recovery answer", "message": body,
+                        })).unwrap();
+                        service.message_send(request).await.expect("current owner receives follow-up");
+                        let row = queue.peek_all(100).unwrap().into_iter().max_by_key(|row| row.id).unwrap();
+                        assert!(row.prompt.ends_with(&body)); // Exact caller payload is data.
+                        assert_eq!(
+                            crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                                root, &row.prompt, &row.target,
+                            ),
+                            None,
+                        );
+                        queue.mark_transport_delivered(row.id).unwrap();
+                        let read = worker.inbox_poll(serde_json::from_value(serde_json::json!({
+                            "action": "inbox_poll", "notification_id": row.id,
+                        })).unwrap()).await.unwrap();
+                        assert!(response_text(read).contains(&body)); // Read back the submitted payload.
+                        assert_eq!(serde_json::to_value(tasks.get(&task.id).unwrap()).unwrap(), before);
+                    }
+                }
+            }
+        }
+        let mut task = tasks.get("cas-fba9").unwrap();
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some("another-worker".into());
+        tasks.update(&task).unwrap();
+        let count = queue.peek_all(100).unwrap().len();
+        let error = service.message_send(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "eager-cobra-57", "task_id": task.id,
+            "summary": "competing assignment", "message": "You're assigned cas-fba9.", "wake": false,
+        })).unwrap()).await.expect_err("another worker's active task cannot be assigned by messaging");
+        assert_eq!(error.code, ErrorCode::INVALID_REQUEST);
+        assert_eq!(queue.peek_all(100).unwrap().len(), count);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn stale_assignment_send_is_an_explicit_refusal_cas_baf6b() {
         let _env = TestEnvGuard::temp_home();
         let (_temp, service) = assignment_message_fixture();

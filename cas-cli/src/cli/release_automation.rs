@@ -774,6 +774,9 @@ mod tests {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();
+        // CI runners have no global identity; annotated tags and merges need one.
+        git(repo, &["config", "user.name", "Fixture"]).unwrap();
+        git(repo, &["config", "user.email", "fixture@example.invalid"]).unwrap();
         git(
             repo,
             &[
@@ -885,6 +888,13 @@ mod tests {
                     .unwrap()
             )
         );
+        // Installing reconciles the train from its published tag, so publish it.
+        let bare = repo.join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        let tag = format!("v{}", args.version);
+        git(repo, &["tag", "-a", &tag, "-m", "release", &sha]).unwrap();
+        git(repo, &["push", "origin", train.branch.as_deref().unwrap(), &tag]).unwrap();
         // Core may roll to the next train before the host installs.
         train.status = cas_types::TaskStatus::Closed;
         train.epic_verification_owner = None;

@@ -7,6 +7,20 @@ with `content`. Omitted fields retain their stored values. A successful edit
 returns `structured_content` with `id` and `changes` (the updated field names),
 alongside the existing text receipt.
 
+## Native Codex verifier identity
+
+An MCP caller belongs to its connection. Native Codex children share the
+parent's connection; choosing a role or receiving a dispatch ID does not create
+independent reviewer authority. `coordination whoami` shows the caller's type,
+role and parent. A shared-connection child registration fails before mutation
+with `rule_id=shared_mcp_child_identity`.
+
+Use the daemon-owned candidate verifier or a separately registered reviewer
+with a sealed handoff for the exact dispatch. A native child that observes its
+parent's identity returns that evidence without recording a verdict, including
+`status=error`. A registered supervisor may perform its own review and record
+the verdict directly; its provenance remains `supervisor_direct`.
+
 ## Commander message and terminal permissions
 
 `MessageQueued.operator_label` additively carries the paired person's name to

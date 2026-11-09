@@ -83,7 +83,7 @@ mod tests {
         use crate::types::{Agent, Task, VerificationProvenance};
         use rmcp::model::ErrorCode;
 
-        let _env = TestEnvGuard::temp_home();
+        let mut env = TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Standard] {
@@ -94,21 +94,27 @@ mod tests {
             agents.register(&parent).unwrap();
             core.set_agent_id_for_testing(parent_id.clone());
             let before = serde_json::to_value(agents.get(&parent_id).unwrap()).unwrap();
+            let whoami = core.cas_agent_whoami(Parameters(crate::mcp::tools::IdRequest {
+                id: core.get_agent_id().unwrap(),
+            })).await.unwrap();
+            let whoami = serde_json::to_value(whoami).unwrap();
+            assert!(whoami["content"][0]["text"].as_str().unwrap().contains(&parent_id));
 
             // Generic and typed native children use the parent's MCP connection.
             // Neither a new ID nor the inherited ID may change its identity.
             for name in ["default", "task-verifier"] {
+                let native_type = if name == "default" { "primary" } else { "sub_agent" };
                 for session_id in [format!("child-{role}-{name}"), parent_id.clone()] {
                     for entry in ["register", "session_start"] {
                         let result = if entry == "register" {
                             core.cas_agent_register(Parameters(AgentRegisterRequest {
-                                name: name.into(), agent_type: "sub_agent".into(),
+                                name: name.into(), agent_type: native_type.into(),
                                 session_id: Some(session_id.clone()), parent_id: Some(parent_id.clone()),
                             })).await
                         } else {
                             core.cas_agent_session_start(Parameters(SessionStartRequest {
                                 session_id: Some(session_id.clone()), name: Some(name.into()),
-                                agent_type: Some("sub_agent".into()), parent_id: Some(parent_id.clone()),
+                                agent_type: Some(native_type.into()), parent_id: Some(parent_id.clone()),
                                 permission_mode: None, cwd: None, limit: None,
                             })).await
                         };
@@ -147,6 +153,30 @@ mod tests {
                 assert!(record.is_none());
             }
         }
+
+        // A child on its own authenticated connection can refresh its identity.
+        let child = Agent::new_sub_agent("official-child".into(), "task-verifier".into(), "parent-supervisor".into());
+        let child_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        child_core.open_agent_store().unwrap().register(&child).unwrap();
+        child_core.set_agent_id_for_testing(child.id.clone());
+        child_core.cas_agent_register(Parameters(AgentRegisterRequest {
+            name: child.name, agent_type: "sub_agent".into(), session_id: Some(child.id.clone()),
+            parent_id: child.parent_id,
+        })).await.expect("separate child refresh");
+        assert_eq!(child_core.get_agent_id().unwrap(), child.id);
+
+        // A native child cannot capture an as-yet lazy factory connection.
+        env.set("CAS_SESSION_ID", "lazy-parent");
+        env.set("CAS_AGENT_NAME", "lazy-parent");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let lazy = crate::mcp::CasCore::with_daemon(root, None, None);
+        let error = lazy.cas_agent_register(Parameters(AgentRegisterRequest {
+            name: "task-verifier".into(), agent_type: "sub_agent".into(),
+            session_id: Some("lazy-child".into()), parent_id: Some("lazy-parent".into()),
+        })).await.unwrap_err();
+        assert_eq!(error.data.unwrap()["rule_id"], "shared_mcp_child_identity");
+        assert_eq!(lazy.get_agent_id().unwrap(), "lazy-parent");
+        assert!(lazy.open_agent_store().unwrap().get("lazy-child").is_err());
     }
 }
 
@@ -219,6 +249,9 @@ impl CasCore {
 
         let (requested_agent_type, requested_role) =
             public_registration_hints(req.agent_type.as_deref())?;
+        self.ensure_public_child_identity(
+            &session_id, req.parent_id.as_deref(), requested_agent_type,
+        )?;
         self.ensure_public_registration_target(&session_id)?;
 
         // Best-effort name hint for session registration

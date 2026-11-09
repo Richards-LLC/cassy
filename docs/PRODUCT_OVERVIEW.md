@@ -176,6 +176,13 @@ verifiers keep their existing handoff and authority. Automatic reviews select
 a provider account through the shared launch resolver; failed harness notices
 include the stderr tail and full log path.
 
+Native Codex children share their parent's MCP caller. Shared connections refuse
+child registration before changing caller or session state. Initial dispatches
+and verifier instructions identify the supported alternatives: a daemon-owned
+candidate reviewer, a separately registered reviewer bound to the dispatch, or
+a supervisor's own review recorded with supervisor_direct provenance. A native
+child returns identity evidence without submitting even an error verdict.
+
 Factory turn costs are recorded locally for Claude, Codex and Grok supervisors and workers, independently of Commander mirroring. `cas ledger report --release vX.Y.Z --offline` reads release-window ledger rows to show wakes, no-op wakes, input/output tokens and minutes by channel, with counts for missing measurements. Wake channels come from authenticated queue provenance, including a session-less daemon row addressed to that exact agent. Without a row, a Claude background-task notification counts as the agent's own role, CAS's fixed worker startup and delivery-watchdog texts count as daemon, and any other input counts as terminal (unauthenticated pane input). A no-op means no successful supported action was observed. Prose counts as an answer only for an authenticated operator wake or a question verified against its authenticated queue row; Teams wrappers and pointer wakes use the original row provenance, and launch-context messages do not take the wake slot. For other wakes, only typed tool actions count: task, coordination and edit writes, factory and verification writes such as merges and spawns, and subagent launches. Reads, waits, receipt-only replies and status restatements do not count. Shell actions are conservatively recognized only for explicit commit, push and check commands, including the patches and commands inside a Codex code-mode `exec` script. OpenCode turns are not recorded yet. Unsupported Cloud Turn events remain queued locally behind their own push cursor and six-hour kind cooldown; other ledger kinds keep pushing, and every sync round attempts pull even if push fails.
 
 ## Authoritative Sources

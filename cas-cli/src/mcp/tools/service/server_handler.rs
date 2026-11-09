@@ -1601,16 +1601,13 @@ mod tests {
         let core = CasCore::with_daemon(root, None, None);
         let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
         let arguments = serde_json::json!({"action":"add", "task_id":task.id});
-        let receipt = super::super::mutation_receipt::Receipt::new(
-            "verification", "add", Some("cas-add-response"),
-        );
-        let request = super::super::mutation_receipt::scope(receipt, async {
+        let request = async {
             super::super::mutation_receipt::verification_add_committed(
                 "cas-add-response", "ver-recorded",
             );
             let _phase = super::super::mutation_receipt::phase("verification_auto_merge");
             std::future::pending::<super::ToolResult>().await
-        });
+        };
         let answered = service.call_with_deadline_and_grace(
             "verification",
             arguments.as_object(),

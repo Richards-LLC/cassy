@@ -4794,6 +4794,68 @@ PY"#);
 
     #[cfg(unix)]
     #[test]
+    fn isolated_home_prefix_reaches_capped_test_child_gh1694() {
+        use clap::Parser;
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        env.set("CAS_SESSION_ID", "worker-home-fixture");
+        env.set("CAS_CLONE_PATH", &repo);
+        env.set("CAS_HOOK_HARNESS", "claude");
+        env.set("GIT_AUTHOR_NAME", "inherited author");
+        env.set("GIT_AUTHOR_EMAIL", "author@example.invalid");
+        let inherited_home = std::env::var_os("HOME");
+        let home = dir.path().join("isolated home");
+        std::fs::create_dir(&home).unwrap();
+        let fake = dir.path().join("fake-cargo");
+        fake_cargo(&fake, &format!(r#"set -e
+python3 - <<'PYENV'
+import os
+from pathlib import Path
+assert os.environ.get('HOME') == {home:?}
+assert os.environ.get('CARGO_HOME') == '/fixture/cargo'
+assert os.environ.get('RUSTUP_HOME') == '/fixture/rustup'
+assert os.environ.get('GIT_CONFIG_GLOBAL') == '/dev/null'
+assert os.environ.get('CI') == 'true'
+assert 'GIT_AUTHOR_NAME' not in os.environ
+assert 'GIT_AUTHOR_EMAIL' not in os.environ
+assert os.environ.get('CAS_SESSION_ID') == 'worker-home-fixture'
+assert os.environ.get('CARGO_TARGET_DIR') == str(Path.cwd() / 'target')
+(Path.cwd() / 'target' / 'isolated-home-observed').write_text('done')
+PYENV
+printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
+"#, home=home.to_str().unwrap()));
+        let command = format!("env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL HOME='{}' CARGO_HOME=/fixture/cargo RUSTUP_HOME=/fixture/rustup GIT_CONFIG_GLOBAL=/dev/null CI=true cargo nextest run -p cas --lib -E 'test(worker)' > target/tests.log 2>&1 &", home.display());
+        let request = cas_core::hooks::types::HookInput {
+            cwd: repo.display().to_string(), hook_event_name: "PreToolUse".into(),
+            tool_name: Some("Bash".into()), agent_role: Some("worker".into()),
+            tool_input: Some(serde_json::json!({"command": command})), ..Default::default()
+        };
+        let output = crate::hooks::handlers::handle_pre_tool_use(&request, Some(&root)).unwrap();
+        let value = serde_json::to_value(output).unwrap();
+        let rewritten = value.pointer("/hookSpecificOutput/updatedInput/command")
+            .and_then(|value| value.as_str()).expect("capped command rewrite");
+        let cli = crate::cli::Cli::try_parse_from(shell_words::split(rewritten.split_once(" >>").unwrap().0).unwrap()).unwrap();
+        let Some(crate::cli::Commands::Factory(factory)) = cli.command else { panic!("factory command") };
+        let Some(crate::cli::factory::FactoryCommands::WorkerCheck {
+            cas_root, cargo_args, isolated_test_env, detach, ..
+        }) = factory.command else { panic!("worker-check command") };
+        assert!(detach);
+        assert_eq!(cas_root, root);
+        assert_eq!(cargo_args, ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"]);
+        execute_at_with_scope(&root, &cargo_args, &repo, &fake, None, isolated_test_env.as_deref()).unwrap();
+        assert!(repo.join("target/isolated-home-observed").is_file());
+        assert_eq!(std::env::var_os("HOME"), inherited_home);
+        assert_eq!(std::env::var("CAS_SESSION_ID").unwrap(), "worker-home-fixture");
+        assert_eq!(std::env::var("GIT_AUTHOR_NAME").unwrap(), "inherited author");
+        assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)),
+            [format!("test: PASS {} cas test(worker) 1", fixture_head(&repo))]);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn targeted_runner_guards_counts_dirty_trees_and_failed_retries() {
         let mut env =
             crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);

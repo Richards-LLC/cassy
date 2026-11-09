@@ -3448,6 +3448,9 @@ impl FactoryApp {
                 && !crate::mcp::tools::service::agent_liveness::has_live_agent_named(matching.iter().copied(), name)
             {
                 if preserve_worktree {
+                    crate::factory_worker_runs::stop_before_recycle(
+                        self.cas_dir(), matching.iter().map(|agent| agent.id.clone()).collect(),
+                    ).await?;
                     // Recycle must finish retiring the old identities before
                     // launching the same-name replacement. Deferred shutdown
                     // cleanup could cancel its resume brief before registration.
@@ -3513,6 +3516,12 @@ impl FactoryApp {
                 }
             )
         })?;
+
+        if preserve_worktree {
+            crate::factory_worker_runs::stop_before_recycle(
+                &cas_dir, matching_agents.iter().map(|agent| agent.id.clone()).collect(),
+            ).await?;
+        }
 
         // `graceful_shutdown` revokes leases. Preserve this snapshot so the
         // death relay can enumerate and park leased tasks even if no assignee

@@ -74,7 +74,8 @@
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs` - runner ownership and bounded candidate builds.
 - `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs` - capped proof admission, aggregated capacity retries, owned scratch and child-only test environments.
 - `cas-cli/src/factory_review_scratch.rs` - owned review-checkout creation, reuse and lifecycle cleanup.
-- `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes and same-account capacity routing.
+- `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes, pre-recycle producer shutdown and same-account capacity routing.
+- `cas-cli/src/factory_target_cache/owner.rs` - inherited target leases, generation/inode ownership and holder diagnostics.
 - `cas-cli/src/epic_design_review.rs`, `cas-cli/src/cli/factory/queries.rs` - stakeholder defect staffing pauses and explicit message routing.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` - release-train guards, full-set proof and exact-tip retry notices.
 - `crates/cas-core/src/memory/handoff.rs` - per-project/role machine selection and supersession; owner/session stamps are audit metadata.

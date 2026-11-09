@@ -181,6 +181,11 @@ bug_families:
     tasks: [cas-35f6]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
+  detached-capped-run-recycle:
+    title: Worker recycle settles detached producers and inherited target leases before scope teardown
+    tasks: [cas-9f7b]
+    invariants: [HUB-J26-DETACHED-RECYCLE]
+    journeys: [HUB-J26]
   private-worker-startup-briefs:
     title: Worker briefs stay private and readable inside the worktree on initial launch and continuation
     tasks: [cas-2453]
@@ -886,6 +891,10 @@ invariants:
     statement: Tasks & progress shows the selected session's project's live epics only, joined across paired machines by epic id, after the release header; each row and the train header show the TUI's open / in progress / merged split with a segmented bar, untitled epics and placeholder counts never render, and nothing sits between the conversation tabs and the conversation. Phone reads the same section in the Tasks & progress sheet with focus return.
     check: Run the HUB-J26 project epics cases in team.journey.ts at 1280x800 and 390x844 in light and dark; confirm the foreign project's epic is absent from this list (its status is read only for its own project card), expand the peer epic, observe a merge event update its split, and inspect forced colors, reduced motion and overflow.
     bug: {task: cas-9b99}
+  HUB-J26-DETACHED-RECYCLE:
+    statement: Worker recycle stops its fingerprinted detached capped producer and verifies the inherited target lease is free before retiring the worker; surviving guards or Cargo refuse recycle, and lease diagnostics exclude the contender.
+    check: 'Run recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b through detached producer launch, real worker recycle, target ownership and retry. In batch QA recycle a worker during a capped build; require the complete build tree to settle or recycle to refuse before teardown, then retry successfully.'
+    bug: {task: cas-9f7b}
   HUB-J26-GOAL:
     statement: The Team tab shows the selected supervisor's real staffing and epic progress without raw output, and a lifecycle change appears within five seconds without reload.
     check: Walk HUB-J26 at desktop and phone with keyboard, reduced motion and forced colors; compare real-hub worker lanes and epic metrics with factory readbacks at capture time. Missing lifecycle evidence stays unreported.
@@ -2927,7 +2936,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE]
+  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

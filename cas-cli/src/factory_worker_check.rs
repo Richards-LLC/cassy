@@ -2325,6 +2325,104 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b() {
+        use std::time::{Duration, Instant};
+        const NAME: &str = "factory_worker_check::tests::recycle_cleans_detached_capped_run_and_reports_real_lease_holder_cas_9f7b";
+        const CHILD: &str = "CAS_9F7B_RUNNER";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(root);
+            let repo = root.join("worktrees/respawn-worker");
+            let mut env = crate::test_support::TestEnvGuard::new();
+            env.set_current_dir(&repo);
+            let id = std::fs::read_to_string(root.join("run-id")).unwrap();
+            let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(respawn)"].map(str::to_owned);
+            let result = crate::factory_worker_runs::monitor(&root, &id, || {
+                execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None)
+            });
+            assert!(result.is_err(), "recycle must interrupt the owned build");
+            return;
+        }
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_DISABLE_TARGET_SEED", "1");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        let repo = root.join("worktrees/respawn-worker");
+        fixture_commit(&repo);
+        env.set_current_dir(&repo);
+        fake_cargo(&root.join("cargo"), r#"exec python3 -c '
+import os, pathlib, subprocess
+root = pathlib.Path.cwd().parent.parent
+if (root / "retry").exists():
+    print("     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped", flush=True)
+else:
+    child = subprocess.Popen(["sleep", "120"], close_fds=False)
+    marker = root / "pids.ready"
+    marker.write_text(f"{os.getpid()} {child.pid} {os.getpgid(os.getppid())}")
+    marker.replace(root / "pids")
+    child.wait()
+'"#);
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut worker = cas_types::Agent::new_with_role("respawn-id".into(), "respawn-worker".into(), cas_types::AgentRole::Worker);
+        worker.machine_id = Some(cas_types::Agent::get_or_generate_machine_id());
+        worker.metadata.insert("clone_path".into(), repo.display().to_string());
+        agents.register(&worker).unwrap();
+        let log = root.join("run.log");
+        std::fs::write(&log, "").unwrap();
+        let id = crate::factory_worker_runs::register(&root, &repo, &log, chrono::Utc::now()).unwrap().unwrap();
+        std::fs::write(root.join("run-id"), &id).unwrap();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(CHILD, &root).env_remove("VERIFIED_TEST_LOG");
+        struct Owned {
+            child: std::process::Child,
+            marker: PathBuf,
+        }
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                if let Ok(text) = std::fs::read_to_string(&self.marker) {
+                    let pids: Vec<i32> = text.split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+                    // Only groups created by this fixture; never a host name scan.
+                    for group in [pids[0], pids[2]] { unsafe { libc::killpg(group, libc::SIGKILL); } }
+                }
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+            }
+        }
+        let mut owned = Owned { child: spawn_detached(command).unwrap(), marker: root.join("pids") };
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !owned.marker.exists() && Instant::now() < deadline {
+            assert!(owned.child.try_wait().unwrap().is_none(), "detached producer exited before Cargo");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let pids: Vec<u32> = std::fs::read_to_string(&owned.marker).unwrap().split_whitespace().map(|pid| pid.parse().unwrap()).collect();
+        let refusal = crate::factory_target_cache::owner::for_retirement(&root, &repo).err().expect("active build holds its target");
+        assert_eq!(refusal.kind(), std::io::ErrorKind::WouldBlock);
+        #[cfg(target_os = "linux")]
+        {
+            assert!(refusal.to_string().contains(&pids[0].to_string()), "{refusal}");
+            assert!(!refusal.to_string().contains(&std::process::id().to_string()), "contender named as holder: {refusal}");
+        }
+        let mut app = crate::ui::factory::FactoryApp::for_test_at(root.clone());
+        let pty = cas_mux::Pty::spawn("respawn-worker", cas_mux::PtyConfig {
+            command: "sleep".into(), args: vec!["120".into()], cwd: Some(repo.clone()),
+            env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty("respawn-worker", cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex).unwrap());
+        app.shutdown_worker_for_recycle("respawn-worker").await.unwrap();
+        assert!(!worker_group_has_live_members(pids[0] as i32), "Cargo descendants survived recycle");
+        assert!(!worker_group_has_live_members(pids[2] as i32), "guard survived recycle");
+        assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
+        let run: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("worker-runs").join(format!("{id}.json"))).unwrap()).unwrap();
+        assert!(run["finished_at"].is_string());
+        assert_eq!(run["exit_code"], 1);
+        std::fs::write(root.join("retry"), "").unwrap();
+        let args = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(respawn)"].map(str::to_owned);
+        execute_at_with_scope(&root, &args, &repo, &root.join("cargo"), None, None).unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn term_to_worker_check_parent_cleans_cargo_descendants() {
         use std::os::unix::process::CommandExt;

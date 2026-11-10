@@ -158,6 +158,19 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
             service
         };
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let session = daemon.session_name.clone();
+        let supervisor = daemon.app.supervisor_name().to_string();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap();
+        let held_by_policy = |id| {
+            let mut rows = vec![queue.queued_prompt(id).unwrap().unwrap()];
+            let mut facts = std::collections::HashMap::from([(id, super::queue_and_events::RowFacts::default())]);
+            crate::supervisor_message_wakes::schedule(
+                &cas_dir, &session, &supervisor, &agents, &mut rows, &mut facts,
+                chrono::Utc::now() + chrono::Duration::seconds(21),
+            ).unwrap();
+            rows.is_empty()
+        };
         let last_row = |body: &str| conn.query_row(
             "SELECT MAX(id) FROM prompt_queue WHERE instr(prompt, ?1) > 0", [body], |row| row.get::<_, i64>(0),
         ).unwrap();
@@ -172,12 +185,10 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         };
         worker.coordination(Parameters(request(None))).await.unwrap();
         let unsolicited = last_row(evidence);
-        age(&daemon, unsolicited, 21);
-        assert_eq!(wake_attempt(&mut daemon, unsolicited).await, cas_store::WakeAttempt::NotAttempted,
-            "unsolicited {kind:?} traffic stays capped");
+        assert!(held_by_policy(unsolicited), "unsolicited {kind:?} traffic stays capped");
         worker.coordination(Parameters(request(Some(unsolicited)))).await.unwrap();
         let thread_reference = last_row(evidence);
-        assert_eq!(wake_attempt(&mut daemon, thread_reference).await, cas_store::WakeAttempt::NotAttempted,
+        assert!(held_by_policy(thread_reference),
             "citing the worker's own {kind:?} message grants no answer authority");
 
         let instruction = serde_json::from_value(serde_json::json!({
@@ -188,12 +199,14 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         let instructed = last_row("Continue the assigned implementation.");
         for attempt in 0..2 {
             let mut status: cas_mcp::types::CoordinationRequest = request(Some(instructed));
+            if attempt == 1 {
+                status.kind = Some("answer".into());
+            }
             let body = format!("{evidence} Instruction update {attempt}.");
             status.message = Some(body.clone());
             worker.coordination(Parameters(status)).await.unwrap();
             let update = last_row(&body);
-            age(&daemon, update, 21);
-            assert_eq!(wake_attempt(&mut daemon, update).await, cas_store::WakeAttempt::NotAttempted,
+            assert!(held_by_policy(update),
                 "repeated {kind:?} replies to non-ask instructions stay capped");
         }
         let ask_request = |body: &str| serde_json::from_value(serde_json::json!({
@@ -213,7 +226,7 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
             }
             worker.coordination(Parameters(quiet)).await.unwrap();
             let quiet_answer = last_row(evidence);
-            assert_eq!(wake_attempt(&mut daemon, quiet_answer).await, cas_store::WakeAttempt::NotAttempted,
+            assert!(held_by_policy(quiet_answer),
                 "linked {kind:?} reply stays quiet with receipt={receipt}");
         }
         let body = "Which artifact contains the updated evidence?";
@@ -221,23 +234,29 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         let asked = last_row(body);
         worker.coordination(Parameters(request(Some(asked)))).await.unwrap();
         let answer = last_row(evidence);
-        assert_eq!(wake_attempt(&mut daemon, answer).await, cas_store::WakeAttempt::Fired,
-            "linked {kind:?} answer must bypass the cap and burst debounce");
+        let mut attempt = wake_attempt(&mut daemon, answer).await;
+        let report = queue.message_delivery_report(answer).unwrap().unwrap();
+        // Selection and the durable transport claim can land on successive
+        // daemon passes. A policy hold must still fail the first-answer check.
+        if attempt == cas_store::WakeAttempt::NotAttempted
+            && report.stage == cas_store::DeliveryStage::Selected
+            && report.retry.next_attempt_at.is_none()
+        {
+            attempt = wake_attempt(&mut daemon, answer).await;
+        }
+        assert_eq!(attempt, cas_store::WakeAttempt::Fired,
+            "linked {kind:?} answer must bypass the cap and burst debounce: {:?}",
+            queue.message_delivery_report(answer).unwrap());
         for attempt in 0..2 {
             let mut repeated: cas_mcp::types::CoordinationRequest = request(Some(asked));
+            if attempt == 1 {
+                repeated.kind = Some("answer".into());
+            }
             let body = format!("{evidence} Repeated answer {attempt}.");
             repeated.message = Some(body.clone());
             worker.coordination(Parameters(repeated)).await.unwrap();
-            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
             let id = last_row(&body);
-            let mut rows = vec![queue.queued_prompt(id).unwrap().unwrap()];
-            let mut facts = std::collections::HashMap::from([(id, super::queue_and_events::RowFacts::default())]);
-            let agents = crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap();
-            crate::supervisor_message_wakes::schedule(
-                &cas_dir, &daemon.session_name, daemon.app.supervisor_name(), &agents,
-                &mut rows, &mut facts, chrono::Utc::now() + chrono::Duration::seconds(21),
-            ).unwrap();
-            assert!(rows.is_empty(), "only the first {kind:?} answer to an ask gets a cap exemption");
+            assert!(held_by_policy(id), "only the first {kind:?} answer to an ask gets a cap exemption");
         }
     }
 }

@@ -1,4 +1,5 @@
 //! Release script adapters. Train selection and notice delivery stay in core.
+use crate::qa_batch::{ReleaseInventory, ReleaseScope};
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -17,6 +18,23 @@ pub struct ContextArgs {
     #[arg(long)]
     version: Option<String>,
 }
+#[derive(Debug, Args)]
+pub struct InventoryArgs {
+    /// Portable ReleaseScope JSON identifying an exact released commit
+    #[arg(long)]
+    scope: PathBuf,
+}
+
+/// The CLI and trusted release adapters share the same read-only resolver.
+pub fn inventory(args: &InventoryArgs, root: &Path) -> Result<()> {
+    let scope: ReleaseScope = serde_json::from_slice(&fs::read(&args.scope)?)?;
+    let repo = root.parent().context("project checkout unavailable")?;
+    let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &scope)
+        .map_err(anyhow::Error::msg)?;
+    println!("{}", serde_json::to_string(&inventory)?);
+    Ok(())
+}
+
 #[derive(Debug, Args)]
 pub struct TrackArgs {
     #[arg(long)]
@@ -56,6 +74,10 @@ struct ReleaseContext {
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     release_inputs: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_scope: Option<ReleaseScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_inventory: Option<ReleaseInventory>,
 }
 
 fn version_ok(version: &str) -> bool {
@@ -155,6 +177,8 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         landing_reminder: None,
         publish_reminder: None,
         release_inputs: None,
+        release_scope: None,
+        release_inventory: None,
     })
 }
 
@@ -924,11 +948,256 @@ mod tests {
             "project_id": "release-fixture", "repository": "Example/Repo",
             "release_id": "v9.99.2", "reviewed_sha": args.commit,
             "final_release_sha": args.commit, "promotion_pr": null, "release_tag": "v9.99.2",
-            "constituent_epic_ids": [], "no_code_members": {}, "proof_refs": []
+            "constituent_epic_ids": [], "included_task_ids": [], "no_code_members": {}, "proof_refs": []
         });
         value["release_scope"] = scope.clone();
         let restored: ReleaseContext = serde_json::from_value(value).unwrap();
         assert_eq!(serde_json::to_value(restored).unwrap()["release_scope"], scope);
+    }
+
+    #[test]
+    fn release_inventory_resolves_nested_and_unclosed_structured_deliveries() {
+        use crate::qa_batch::{
+            ReleaseInventoryCode as Code, ReleaseMembership as Membership, ReleaseProofKind,
+        };
+        let (temp, root, train, _, _) = fixture();
+        let repo = temp.path();
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "-b", "factory/inventory"]).unwrap();
+        fs::write(repo.join("delivered.txt"), "delivered\n").unwrap();
+        git(repo, &["add", "delivered.txt"]).unwrap();
+        git(repo, &["commit", "-m", "delivery without a task ID"]).unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["checkout", "main"]).unwrap();
+        git(repo, &["merge", "--squash", "factory/inventory"]).unwrap();
+        git(repo, &["commit", "-m", "promotion"]).unwrap();
+        let mapped = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(repo.join("release.txt"), "release\n").unwrap();
+        git(repo, &["add", "release.txt"]).unwrap();
+        git(repo, &["commit", "-m", "release"]).unwrap();
+        let final_sha = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["tag", "v9.99.2"]).unwrap();
+        let store = open_task_store(&root).unwrap();
+        let mut nested = Task::new("cas-a002".into(), "Nested epic".into());
+        nested.task_type = TaskType::Epic;
+        nested.origin_project = Some("release-fixture".into());
+        store.add(&nested).unwrap();
+        // Fixture train predates project attribution; bind it explicitly.
+        let mut train = train;
+        train.origin_project = Some("release-fixture".into());
+        store.update(&train).unwrap();
+        store
+            .add_dependency(&Dependency::new(
+                nested.id.clone(),
+                train.id.clone(),
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let mut code = Task::new("cas-b001".into(), "Delivery".into());
+        code.origin_project = Some("release-fixture".into());
+        code.status = TaskStatus::AwaitingMerge;
+        code.branch = None; // real gabber incident: SQL branch is empty
+        code.deliverables.factory_branch_anchor = Some(anchor.clone());
+        code.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: WorkTarget {
+                repo_selector: "project:release-fixture".into(),
+                target_branch: "main".into(),
+            },
+            branch: "factory/inventory".into(),
+            assignee: "worker".into(),
+            base_sha: base.clone(),
+        });
+        for (id, scenario) in [
+            ("cas-b001", "nested"),
+            ("cas-b002", "backlog"),
+            ("cas-b003", "missing_base"),
+            ("cas-b004", "retired"),
+            ("cas-b005", "missing_anchor"),
+            ("cas-b006", "foreign"),
+            ("cas-b007", "no_code"),
+            ("cas-b008", "no_code_missing"),
+            ("cas-b009", "cancelled"),
+            ("cas-b00a", "missing_mapping"),
+        ] {
+            let mut t = code.clone();
+            t.id = id.into();
+            match scenario {
+                "nested" => {
+                    t.status = TaskStatus::Closed;
+                }
+                "missing_base" => {
+                    t.deliverables.factory_branch_start = None;
+                    t.deliverables.factory_branch_anchor = Some(final_sha.clone());
+                }
+                "retired" => {
+                    t.deliverables.historical_factory_branch_anchors = t
+                        .deliverables
+                        .factory_branch_anchor
+                        .take()
+                        .into_iter()
+                        .collect();
+                }
+                "missing_anchor" => {
+                    t.deliverables.factory_branch_anchor = Some("f".repeat(40));
+                }
+                "foreign" => {
+                    t.origin_project = Some("other-project".into());
+                }
+                "no_code" | "no_code_missing" => {
+                    t.execution_note = Some("no-code".into());
+                    t.deliverables = Default::default();
+                }
+                "cancelled" => {
+                    t.status = TaskStatus::Cancelled;
+                }
+                "missing_mapping" => {
+                    git(repo, &["checkout", "-b", "unshipped", &base]).unwrap();
+                    fs::write(repo.join("absent.txt"), "absent\n").unwrap();
+                    git(repo, &["add", "absent.txt"]).unwrap();
+                    git(repo, &["commit", "-m", "unshipped"]).unwrap();
+                    t.deliverables.factory_branch_anchor =
+                        Some(git(repo, &["rev-parse", "HEAD"]).unwrap());
+                }
+                _ => {}
+            }
+            store.add(&t).unwrap();
+            if scenario != "backlog" {
+                store
+                    .add_dependency(&Dependency::new(
+                        id.into(),
+                        nested.id.clone(),
+                        DependencyType::ParentChild,
+                    ))
+                    .unwrap();
+            }
+        }
+        for (schema, id) in [
+            (cas_store::QA_BATCH_RECEIPT_SCHEMA, "qa"),
+            (cas_store::RELEASE_VERDICT_SCHEMA, "review"),
+            (cas_store::RELEASE_TAG_VERDICT_SCHEMA, "tag"),
+        ] {
+            let is_tag = schema == cas_store::RELEASE_TAG_VERDICT_SCHEMA;
+            cas_store::record_qa_batch_receipt(
+                &root,
+                &cas_store::QaBatchReceipt {
+                    schema_version: schema,
+                    id: id.into(),
+                    project_id: "release-fixture".into(),
+                    ledger_artifact_id: if is_tag {
+                        String::new()
+                    } else {
+                        format!("art-{id}")
+                    },
+                    ledger_path: String::new(),
+                    ledger_sha256: if is_tag {
+                        String::new()
+                    } else {
+                        "a".repeat(64)
+                    },
+                    ledger_size_bytes: if is_tag { 0 } else { 10 },
+                    staging_sha: anchor.clone(),
+                    task_heads: [(code.id.clone(), anchor.clone())].into(),
+                    recorder_agent_id: "reviewer".into(),
+                    recorded_at: chrono::Utc::now().to_rfc3339(),
+                    release_tag: is_tag.then(|| "v9.99.2".into()),
+                    ledger_author_id: None,
+                    ledger_author_role: None,
+                    author_overrides: Default::default(),
+                    imported: false,
+                },
+            )
+            .unwrap();
+        }
+        let scope = crate::qa_batch::ReleaseScope {
+            project_id: "release-fixture".into(),
+            repository: "Example/Repo".into(),
+            release_id: "v9.99.2".into(),
+            reviewed_sha: anchor.clone(),
+            final_release_sha: final_sha.clone(),
+            promotion_pr: Some(4396),
+            release_tag: Some("v9.99.2".into()),
+            constituent_epic_ids: vec![train.id],
+            included_task_ids: Vec::new(),
+            proof_refs: Vec::new(),
+            no_code_members: [(
+                "cas-b007".into(),
+                vec![crate::qa_batch::ReleaseProofRef {
+                    kind: ReleaseProofKind::Report,
+                    artifact_id: "art-report".into(),
+                    sha256: "a".repeat(64),
+                    size_bytes: 10,
+                    reviewed_sha: anchor.clone(),
+                    receipt_id: None,
+                }],
+            )]
+            .into(),
+        };
+        let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        let ids: Vec<_> = inventory
+            .deliveries
+            .iter()
+            .map(|d| d.task_id.as_str())
+            .collect();
+        assert_eq!(ids, ["cas-b001", "cas-b002", "cas-b003", "cas-b007"]);
+        let shipped = &inventory.deliveries[0];
+        assert_eq!(shipped.anchor.as_deref(), Some(anchor.as_str()));
+        assert_eq!(shipped.base_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(shipped.shipped_commit.as_deref(), Some(mapped.as_str()));
+        assert_eq!(shipped.membership, Membership::SquashTree);
+        assert_eq!(
+            shipped.generation,
+            store.get(&code.id).unwrap().updated_at.to_rfc3339()
+        );
+        assert_eq!(shipped.proof_refs.len(), 2);
+        assert!(
+            shipped
+                .proof_refs
+                .iter()
+                .any(|p| p.kind == ReleaseProofKind::Qa && p.artifact_id == "art-qa")
+        );
+        assert!(
+            shipped
+                .proof_refs
+                .iter()
+                .any(|p| p.kind == ReleaseProofKind::Review && p.artifact_id == "art-review")
+        );
+        assert_eq!(inventory.deliveries[2].membership, Membership::Ancestry);
+        assert_eq!(
+            inventory.deliveries[3].membership,
+            Membership::ExplicitNoCode
+        );
+        let errors: Vec<_> = inventory
+            .exceptions
+            .iter()
+            .map(|e| (e.task_id.as_str(), e.code.clone()))
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                ("cas-b003", Code::MissingBase),
+                ("cas-b004", Code::RetiredAnchor),
+                ("cas-b005", Code::MissingAnchor),
+                ("cas-b006", Code::ForeignScope),
+                ("cas-b008", Code::MissingNoCodeProof),
+                ("cas-b009", Code::Cancelled),
+                ("cas-b00a", Code::MissingMapping)
+            ]
+        );
+        assert_eq!(
+            git(repo, &["rev-parse", "HEAD"]).unwrap(),
+            store
+                .get("cas-b00a")
+                .unwrap()
+                .deliverables
+                .factory_branch_anchor
+                .unwrap()
+        );
+        let mut wrong = scope.clone();
+        wrong.project_id = "other".into();
+        assert!(crate::qa_batch::resolve_release_inventory(&root, repo, &wrong).is_err());
+        wrong = scope;
+        wrong.final_release_sha = mapped;
+        assert!(crate::qa_batch::resolve_release_inventory(&root, repo, &wrong).is_err());
     }
 
     #[test]

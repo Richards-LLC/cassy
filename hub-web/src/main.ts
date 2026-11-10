@@ -25,7 +25,7 @@ import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
-import { HistoryPageState, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { HistoryPageState, ConversationHistory, supervisorWorking, waitingQuestion } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
@@ -2325,11 +2325,6 @@ function refreshCardStatuses(machineId: string, items: readonly HubSession[]): v
     cardStatusAt.set(key, now);
     void loadStatus(machineId, item.name);
   }
-}
-/** The question a waiting conversation asks, as its ask summarises it. */
-function waitingQuestion(history: ConversationHistory | undefined): string | undefined {
-  const ask = history?.waiting()[0];
-  return ask ? (ask.summary?.trim() || ask.message?.trim() || undefined) : undefined;
 }
 
 async function loadStatus(machineId: string, session: string): Promise<void> {

@@ -464,6 +464,10 @@ bug_families:
     title: Expired dead-owner Slack claims recover only after matching reply settlement; uncertain outcomes and live owners stay held without reposting
     tasks: [cas-f039]
     journeys: [FACTORY-SPAWN]
+  violet-transport-request-recovery:
+    title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
+    tasks: [cas-a0c5]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

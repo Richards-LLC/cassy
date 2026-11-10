@@ -31,6 +31,10 @@ enum LedgerCommand {
         /// Delivery IDs covered by the batch receipt (defaults to --task)
         #[arg(long, value_delimiter = ',', value_parser = crate::qa_ledger::covered_task_id)]
         covers: Vec<String>,
+        /// Release review: ReleaseScope JSON whose transformation and epic
+        /// blocks this RELEASE_VERDICT ledger publishes
+        #[arg(long)]
+        release_scope: Option<PathBuf>,
     },
 }
 
@@ -93,7 +97,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 });
             }
         }
-        LedgerCommand::Init { task: id, covers } => {
+        LedgerCommand::Init { task: id, covers, release_scope } => {
             let cas_root = cas_root.context("ledger init requires a Cassy project")?;
             let store = crate::store::open_task_store(cas_root)?;
             let task = store.get(id)?;
@@ -145,7 +149,11 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
             let mut covers = if covers.is_empty() { vec![id.clone()] } else { covers.clone() };
             covers.sort_unstable();
             covers.dedup();
-            let body = crate::qa_ledger::scaffold_with_coverage(&task, &journeys, revision.trim(), &covers);
+            let mut body = crate::qa_ledger::scaffold_with_coverage(&task, &journeys, revision.trim(), &covers);
+            if let Some(scope) = release_scope {
+                body.push_str("\n## Release review blocks\n\nRemove any epic whose acceptance this review did not verify.\n\n");
+                body.push_str(&super::release_adapters::review_blocks_for_scope(cas_root, scope)?);
+            }
             let paths = crate::config::resolved_factory_artifact_paths(
                 cas_root,
                 config.factory().artifacts_root.as_deref(),

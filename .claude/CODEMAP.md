@@ -124,11 +124,12 @@
 ## QA, Commander and services
 
 - `hub-web/src/main.ts`, `hub-web/src/styles.css` - Tasks & progress worker-card composition and shared desktop rail/phone sheet presentation. `hub-web/e2e/journeys/fleet-ops.journey.ts` checks named worker headers.
+- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, explicit parent acceptance, ordinary parent closure and SQLite operation records.
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - journey selection, registry validation, ledger parsing and declared coverage.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.
-- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - release verdicts, authorship rules and owner-scoped receipt notices.
+- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/release_close.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership, release-bound close and reviewed transformation proofs, release verdicts, authorship rules and owner-scoped receipt notices.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.
@@ -150,7 +151,8 @@
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
-- `cas-cli/src/cli/release_automation.rs` - train context, bounded Git probes, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation; installed notices accept older publications after an upgrade.
+- `cas-cli/src/cli/release_adapters.rs` - publish and promotion adapters: one release reconciliation per (project, release, final SHA), installed/backfill recovery on the same operation, the supervisor promotion-merge observer, the single closeout notice and the release review ledger's transformation/epic blocks.
+- `cas-cli/src/cli/release_automation.rs` - read-only release inventory, train context, bounded Git probes, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation; installed notices accept older publications after an upgrade.
 - `scripts/install-on-publish.sh`, `scripts/test-install-on-publish.sh` - native release polling, bounded notice delivery and per-version pending retries after installing the latest release.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py` (attempt-aware shard fan-in and durable missing-receipt red state), `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
@@ -162,3 +164,5 @@
 - **CLI/library:** `cas-cli/src/main.rs` (`cas`), `cas-cli/src/lib.rs`; MCP daemon `cas-cli/src/mcp/daemon.rs` (`cas serve`).
 - **Factory:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`; Commander `hub-web/src/main.ts`.
 - **In-place daemon updates:** `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs`, `cas-cli/src/cli/factory/reexec.rs`; real-hub journey HUB-J11.
+
+- `cas-cli/src/issue_reconcile.rs` - bounded GitHub reconciliation and typed release issue outcomes after delivery closes.

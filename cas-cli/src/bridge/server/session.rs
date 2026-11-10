@@ -170,6 +170,7 @@ pub(crate) fn build_status_json(
 
     let mut status = StatusJson {
         schema_version: 1,
+        release_scope: None,
         supervisor_phase: crate::ui::factory::daemon::runtime::work_events::supervisor_phase_for_session(
             cas_root,
             std::path::Path::new(session.metadata.project_dir.as_deref().unwrap_or(".")),
@@ -1367,6 +1368,7 @@ mod focused_epic_tests {
         let status_json =
             || serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap();
         let status = status_json();
+        assert!(status.get("release_scope").is_none());
         assert_eq!(status["agents"].as_array().unwrap().iter()
             .find(|agent| agent["name"] == "supervisor").unwrap()["current_task"], "cas-owned");
         let epics = status["epics"].as_array().unwrap();

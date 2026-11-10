@@ -80,7 +80,8 @@ function epicRow(document: Document, epic: ProjectEpic, index: number, options: 
   toggle.type = "button"; toggle.title = epic.epic.title ?? epic.title;
   toggle.dataset.fleetFocus = `epic:${epic.key}`;
   toggle.setAttribute("aria-expanded", String(open)); toggle.setAttribute("aria-controls", panelId);
-  const title = element(document, "span", "live-epic-title", epic.title);
+  item.dataset.freshness = epic.stale ? "last-known" : "live";
+  const title = element(document, "span", "live-epic-title", epic.stale ? `${epic.title} · last known` : epic.title);
   const ratio = element(document, "span", "live-epic-ratio");
   toggle.append(title, ratio);
   if (epic.counts) {

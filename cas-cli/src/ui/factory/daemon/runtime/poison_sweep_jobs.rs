@@ -344,6 +344,7 @@ pub(crate) fn page_operator_for_stalled_message(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     }) {
         Ok(payload) => payload,
         Err(error) => {

@@ -118,6 +118,7 @@ pub(super) fn record_operator_page(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     }) {
         Ok(payload) => payload,
         Err(error) => {

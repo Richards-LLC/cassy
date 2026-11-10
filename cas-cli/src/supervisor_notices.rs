@@ -153,6 +153,7 @@ pub(crate) fn operator_prompt(
             options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         },
     )?)
 }

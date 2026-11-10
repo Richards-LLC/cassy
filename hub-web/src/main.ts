@@ -10,7 +10,7 @@ import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
 import { releaseHeader } from "./progress-view";
-import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
+import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, operatorActions, releaseSnapshots, type ReconciledReleaseScope, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
@@ -4984,15 +4984,14 @@ function renderConversationList(): void {
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
     const summary = sessionSummaries.get(key);
-    const merge = attention.find((item) => item.machineId === machine.id && item.session === session.name && !item.acknowledgedAt && item.kind === "awaiting_merge");
-    const needsYou = waiting > 0 || Boolean(merge);
+    const needsYou = waiting > 0;
     // A kept catalog can still carry yesterday's positive online bit.
     const machineState = connectionStates.get(machine.id);
     const machineOnline = machineState?.phase === "live" && session.machine_online !== false;
     const machineOutage = !machineOnline && !machineState?.authFailure && machineState?.fatal !== true && !machineState?.networkAccessHelp;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, reloadReceipt: (supervisorCommands.get(key)?.visibleReceipts ?? []).filter(receipt => receipt.command === "mcp").at(-1), reloadPending: pendingReload?.machineId === machine.id && pendingReload.session === session.name, reloadUnavailable: !machine.scopes.includes("pane-input") ? "This browser was paired without command control. Pair again with pane:input." : undefined, mcp_version: !session.dormant && session.liveness === "live" ? session.mcp_version : undefined, installed_version: session.installed_version, ended: session.ended, dismissed: session.dismissed, harness: session.harness, account_email: session.account_email, project: session.project, projectName: session.project_name, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: waiting > 0 ? "Waiting for your answer" : undefined, operatorQuestion: waiting > 0 ? waitingQuestion(history) : undefined, statusLine: projectStatusLine(statuses.get(key), [session.supervisor, ...((statuses.get(key)?.agents as FleetAgent[] | undefined) ?? []).filter(agent => agent.name === session.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name))),  supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: machineOutage ? "Last known" : pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: !machineOutage && session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -5628,11 +5627,14 @@ function syncTeamView(status?: Record<string, unknown>, stale?: string): void {
     roster: session?.workers, supervisor: session?.supervisor, agents, tasks,
     epics: (status?.epics as ReleaseEpic[]) ?? [], focused: typeof status?.focused_epic === "string" ? status.focused_epic : null,
     supervisors: [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name)),
-    asks: key ? waitingOnOperator(conversationHistories.get(key)) : 0,
-    askLabel: key ? conversationHistories.get(key)?.waiting()[0]?.summary : undefined,
+    actions: operatorActions(key ? conversationHistories.get(key) : undefined),
     stale: statusFailures.has(key!) ? "Staffing update failed. Showing the last state received." : stale,
     unavailable: session?.ended ? "This session has ended." : !status ? statusFailures.has(key!) ? "Couldn’t load staffing." : "Waiting for project status…" : undefined,
-  }, () => select(false), openProgressSheet);
+  }, requestId => {
+    select(false);
+    const history = key ? conversationHistories.get(key) : undefined;
+    for (const thread of document.querySelectorAll(".conversation-reading.thread")) thread.dispatchEvent(new CustomEvent("conversation-reveal-turn", { detail: { history, notificationId: requestId } }));
+  });
   if (statusFailures.has(key!)) {
     const retry = document.createElement("button"); retry.type = "button"; retry.textContent = "Retry staffing";
     retry.onclick = () => { if (selectedMachineId && selectedSession) void loadStatus(selectedMachineId, selectedSession); };
@@ -5665,10 +5667,14 @@ function liveEpicsModel(train: string | undefined) {
       machine: machineId, machineLabel: machine.label, session: session.name, supervisor: session.supervisor,
       roster: session.workers, agents: (status.agents as FleetAgent[]) ?? [],
       tasks: [...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])],
+      authoritative: machineId === selectedMachineId && session.name === selectedSession,
+      release_scope: status.release_scope as ReconciledReleaseScope | undefined,
       epics: (status.epics as ReleaseEpic[]) ?? [], received: statusReceivedAt.get(key) ?? 0, stale,
     });
   }
-  const { live, quiet } = project ? projectEpics(sources, project, train) : { live: [], quiet: 0 };
+  const reconciled = releaseSnapshots(sources);
+  for (const source of reconciled) if (source.stale && source.machine !== selectedMachineId) failed.set(source.machineLabel, statusReceivedWall.get(sessionKey(source.machine, source.session)));
+  const { live, quiet } = project ? projectEpics(reconciled, project, train) : { live: [], quiet: 0 };
   return { project: project ?? "", live, quiet, multiMachine: labels.size > 1, pending: [...pending], failed: [...failed].map(([label, at]) => ({ label, at })) };
 }
 

@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  operator-mirror-expiry-notice:
+    title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
+    tasks: [cas-1a73]
+    journeys: [HUB-J5]
   released-delivery-metadata-supersession:
     title: Released fragments and generated codemaps do not block close; missing source and unpromoted entries still refuse
     tasks: [cas-2fe8]

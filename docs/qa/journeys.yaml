@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  nested-shell-worker-commit-scope:
+    title: Nested shell and eval history writes obey the worker worktree and branch guards
+    tasks: [cas-4923e]
+    journeys: [FACTORY-SUPERVISE]
   regenerated-merge-candidate-bundle:
     title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
     tasks: [cas-e4b9]

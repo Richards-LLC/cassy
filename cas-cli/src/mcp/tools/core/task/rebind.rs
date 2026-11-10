@@ -124,14 +124,16 @@ impl BranchRebindAudit {
 /// Missing or unreadable refs cannot prove safe succession. Leave the recorded
 /// start intact so task start reports the existing supervisor recovery action.
 pub(super) fn reassigned_branch_start(
+    cas_root: &Path,
     checkout: &Path,
     task: &cas_types::Task,
     worker: &cas_types::Agent,
     branch: &str,
+    queued_start: bool,
 ) -> Option<(FactoryBranchStart, BranchRebindAudit)> {
     let previous = task.deliverables.factory_branch_start.as_ref()?;
     let target = task.deliverables.work_target.as_ref()?;
-    if previous.work_target != *target {
+    if previous.work_target.repo_selector != target.repo_selector {
         return None;
     }
     let git = Git {
@@ -155,22 +157,36 @@ pub(super) fn reassigned_branch_start(
         }
     }
     let previous_tip = previous_tips.first()?.clone();
-    for old_tip in previous_tips {
-        if !git
-            .output(&["merge-base", "--is-ancestor", &old_tip, &tip])
-            .ok()?
-            .status
-            .success()
-        {
-            return None;
-        }
-    }
     let target_ref = close_ops::preferred_diff_target_ref_for_delivery(
         checkout,
         &target.target_branch,
         task.delivery_mode,
     );
     let target_tip = git.tip(&target_ref).ok()?;
+    // GH #1760: a queued task may have waited through a retarget without
+    // delivering anything. Its old lane can contain an unrelated inherited
+    // base; preserve that ref and bind the untouched successor at the target.
+    // Missing refs or delivery evidence never establish an empty old lane.
+    let empty_successor = queued_start
+        && branch == crate::factory_isolation::worker_task_branch(&worker.name, &task.id)
+        && tip == target_tip
+        && task.deliverables.parked_branch.is_none()
+        && task.deliverables.factory_branch_anchor.is_none()
+        && task.deliverables.historical_factory_branch_anchors.is_empty()
+        && cas_store::get_latest_worker_delivery(cas_root, &task.id)
+            .is_ok_and(|delivery| delivery.is_none())
+        && git.text(&["status", "--porcelain"]).ok()?.is_empty();
+    for old_tip in &previous_tips {
+        if !(empty_successor && *old_tip == previous.base_sha)
+            && !git.output(&["merge-base", "--is-ancestor", old_tip, &tip])
+                .ok()?.status.success()
+        {
+            return None;
+        }
+    }
+    if previous.work_target != *target && !empty_successor {
+        return None;
+    }
     let base_sha = git.text(&["merge-base", "--all", &tip, &target_tip]).ok()?;
     if base_sha.lines().count() != 1 {
         return None;
@@ -184,7 +200,11 @@ pub(super) fn reassigned_branch_start(
         },
         BranchRebindAudit {
             actor: worker.id.clone(),
-            reason: "Automatic reassignment: every previous branch tip is inherited".into(),
+            reason: if empty_successor {
+                "Automatic queued reassignment before first delivery: prior tips are untouched or inherited".into()
+            } else {
+                "Automatic reassignment: every previous branch tip is inherited".into()
+            },
             previous_tip: Some(previous_tip),
             tip,
             target_tip,

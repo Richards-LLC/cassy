@@ -2649,7 +2649,7 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
 #[tokio::test]
 async fn queued_blocked_successor_records_fresh_start_cas_57df() {
     let mut env = TestEnvGuard::temp_home();
-    for case in ["same-target", "retarget", "old-commit", "anchor", "history", "dirty", "prepared", "missing-old"] {
+    for case in ["same-target", "retarget", "old-commit", "remote-commit", "anchor", "history", "receipt", "dirty", "prepared", "missing-old", "foreign-repo"] {
         let f = queue_control_fixture(&mut env);
         let repo = f.dir.path();
         let checkout = f.cas_dir().join("worktrees").join(WORKER);
@@ -2658,7 +2658,7 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
         let new_branch = format!("{LANE}-{id}");
         let dirty_path = checkout.join(".gitignore");
         let dirty_contents = b".cas/\ndurable-artifacts/\n*.local\n";
-        let target_tip = git(repo, &["rev-parse", "origin/main"]);
+        let mut target_tip = git(repo, &["rev-parse", "origin/main"]);
         git(repo, &["branch", old_branch, &f.foreign_tip]);
         let mut task = f.task(id);
         task.status = TaskStatus::Blocked;
@@ -2666,16 +2666,28 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
         let mut old_target = task.deliverables.work_target.clone().unwrap();
         if case == "retarget" {
             old_target.target_branch = "epic/obsolete".into();
-            git(repo, &["branch", "epic/obsolete", &target_tip]);
+            git(repo, &["branch", "epic/obsolete", &f.foreign_tip]);
+            // Match the live migrated task: the former worker's later tip
+            // has landed, but the recorded WorkTarget still names an old train.
+            git(repo, &["merge", "-q", "--no-ff", "-m", "integrate former lane", old_branch]);
+            git(repo, &["push", "-q", "origin", "main"]);
+            git(&checkout, &["fetch", "-q", "origin"]);
+            target_tip = git(repo, &["rev-parse", "origin/main"]);
+        } else if case == "foreign-repo" {
+            old_target.repo_selector = "project:unrelated".into();
         }
         task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
             work_target: old_target, assignee: "former-worker".into(),
             branch: old_branch.into(), base_sha: f.foreign_tip.clone(),
         });
-        if case == "old-commit" {
+        if matches!(case, "old-commit" | "remote-commit") {
             git(repo, &["checkout", "-q", old_branch]);
             git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-8488-one): pending delivery"]);
             git(repo, &["checkout", "-q", "main"]);
+            if case == "remote-commit" {
+                git(repo, &["push", "-q", "origin", old_branch]);
+                git(repo, &["branch", "-f", old_branch, &f.foreign_tip]);
+            }
         } else if case == "anchor" {
             task.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
         } else if case == "history" {
@@ -2688,6 +2700,20 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
             git(repo, &["branch", "-D", old_branch]);
         }
         f.put(&task);
+        if case == "receipt" {
+            let receipt = cas_store::build_worker_completion_receipt(
+                &cas_types::WorkerCompletionReceiptInput {
+                    task_id: id.into(), worker_agent_id: "former-worker-session".into(),
+                    repo_selector: format!("project:{PROJECT}"), source_branch: old_branch.into(),
+                    commit_sha: f.foreign_tip.clone(), merge_base_sha: target_tip.clone(),
+                    target_branch: "main".into(), target_sha: target_tip.clone(),
+                    proof_reference: PROOF.into(), scope_summary: "pending prior delivery".into(),
+                    artifact_path: None,
+                }, "former-worker", chrono::Utc::now(),
+            );
+            cas_store::create_worker_delivery(&f.cas_dir(), &receipt,
+                cas_types::WorkerDeliveryState::AwaitingMerge, "former-worker-session").unwrap();
+        }
         let previous = task.deliverables.factory_branch_start.clone();
         let old_tip = if case == "missing-old" { None } else {
             Some(git(repo, &["rev-parse", old_branch]))

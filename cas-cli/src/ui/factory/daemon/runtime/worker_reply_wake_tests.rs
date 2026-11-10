@@ -180,14 +180,31 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         assert_eq!(wake_attempt(&mut daemon, thread_reference).await, cas_store::WakeAttempt::NotAttempted,
             "citing the worker's own {kind:?} message grants no answer authority");
 
-        let ask = serde_json::from_value(serde_json::json!({
-            "action": "message", "target": WORKER, "kind": "ask",
-            "summary": "Evidence needed", "message": "Which artifact contains the updated evidence?",
+        let instruction = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": WORKER,
+            "summary": "Continue work", "message": "Continue the assigned implementation.",
         })).unwrap();
-        service("local-sup").coordination(Parameters(ask)).await.unwrap();
-        let asked = last_row("Which artifact contains the updated evidence?");
+        service("local-sup").coordination(Parameters(instruction)).await.unwrap();
+        let instructed = last_row("Continue the assigned implementation.");
+        for attempt in 0..2 {
+            let mut status: cas_mcp::types::CoordinationRequest = request(Some(instructed));
+            let body = format!("{evidence} Instruction update {attempt}.");
+            status.message = Some(body.clone());
+            worker.coordination(Parameters(status)).await.unwrap();
+            let update = last_row(&body);
+            age(&daemon, update, 21);
+            assert_eq!(wake_attempt(&mut daemon, update).await, cas_store::WakeAttempt::NotAttempted,
+                "repeated {kind:?} replies to non-ask instructions stay capped");
+        }
+        let ask_request = |body: &str| serde_json::from_value(serde_json::json!({
+            "action": "message", "target": WORKER, "kind": "ask",
+            "summary": "Evidence needed", "message": body,
+        })).unwrap();
         // Answer authority must not override an explicit delivery opt-out.
         for receipt in [false, true] {
+            let body = format!("Which evidence for quiet reply {receipt}?");
+            service("local-sup").coordination(Parameters(ask_request(&body))).await.unwrap();
+            let asked = last_row(&body);
             let mut quiet: cas_mcp::types::CoordinationRequest = request(Some(asked));
             if receipt {
                 quiet.kind = Some("receipt".into());
@@ -199,9 +216,28 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
             assert_eq!(wake_attempt(&mut daemon, quiet_answer).await, cas_store::WakeAttempt::NotAttempted,
                 "linked {kind:?} reply stays quiet with receipt={receipt}");
         }
+        let body = "Which artifact contains the updated evidence?";
+        service("local-sup").coordination(Parameters(ask_request(body))).await.unwrap();
+        let asked = last_row(body);
         worker.coordination(Parameters(request(Some(asked)))).await.unwrap();
         let answer = last_row(evidence);
         assert_eq!(wake_attempt(&mut daemon, answer).await, cas_store::WakeAttempt::Fired,
             "linked {kind:?} answer must bypass the cap and burst debounce");
+        for attempt in 0..2 {
+            let mut repeated: cas_mcp::types::CoordinationRequest = request(Some(asked));
+            let body = format!("{evidence} Repeated answer {attempt}.");
+            repeated.message = Some(body.clone());
+            worker.coordination(Parameters(repeated)).await.unwrap();
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let id = last_row(&body);
+            let mut rows = vec![queue.queued_prompt(id).unwrap().unwrap()];
+            let mut facts = std::collections::HashMap::from([(id, super::queue_and_events::RowFacts::default())]);
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap();
+            crate::supervisor_message_wakes::schedule(
+                &cas_dir, &daemon.session_name, daemon.app.supervisor_name(), &agents,
+                &mut rows, &mut facts, chrono::Utc::now() + chrono::Duration::seconds(21),
+            ).unwrap();
+            assert!(rows.is_empty(), "only the first {kind:?} answer to an ask gets a cap exemption");
+        }
     }
 }

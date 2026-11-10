@@ -187,13 +187,21 @@ describe("Commander live connection lifecycle", () => {
     socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
     const requests = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.ConversationHistoryRequest).map(frame => frame.ConversationHistoryRequest);
     const newest = requests()[0]!;
+    await vi.advanceTimersByTimeAsync(1_000);
     connection.requestConversationHistory("session-a", 42);
-    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(cursor.failure).toBeDefined();
+    expect(cursor.failure?.before).toBeUndefined();
+    expect(cursor.loading).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
     const failure = view.element.querySelector<HTMLElement>('[role="alert"]')!;
     expect(failure.hidden).toBe(false);
     expect(cursor.failure?.before).toBe(42);
     // Only A arrives. Its hydration must not claim B's older rows arrived.
-    socket.receive({ ConversationHistory: { request_id: newest.request_id, messages: [], replies: [], has_earlier: true, next_before: 42 } });
+    socket.receive({ ConversationHistory: { request_id: newest.request_id, messages: [], replies: [
+      { notification_id: 50, reply_to: null, message: "Late newest answer", summary: "", device_id: "device", kind: "answer" },
+    ], has_earlier: true, next_before: 42 } });
+    expect(view.element.querySelectorAll('[data-key="reply:50"]')).toHaveLength(1);
     expect(failure.hidden).toBe(false);
     expect(cursor.failure?.before).toBe(42);
     const retry = failure.querySelector<HTMLButtonElement>("button")!;

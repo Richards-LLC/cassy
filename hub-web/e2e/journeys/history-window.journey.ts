@@ -91,10 +91,19 @@ test("HUB-J23 recover unanswered history without hiding missing answers (cas-359
   });
   await journey.stage("An unanswered older page can retry its original cursor", async () => {
     hub.pausedHistory.add(PELICAN);
-    await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+    // Reconnect A requests the newest page while the cached thread stays readable.
+    hub.drop(PELICAN);
     await expect.poll(() => hub.historyRequests.length).toBe(3);
+    const newest = hub.historyRequests.at(-1)!;
+    expect(newest.before).toBeUndefined();
+    await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+    await expect.poll(() => hub.historyRequests.length).toBe(4);
     await page.clock.fastForward(15_000);
     await expect(failure).toBeInViewport();
+    // A's late page hydrates, but B still owes the older answer (cas-bf2f).
+    hub.send(PELICAN, { ConversationHistory: { request_id: newest.request_id, messages: [], replies: [reply(100)], has_earlier: true, next_before: 51 } });
+    await expect(failure).toBeVisible();
+    await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toHaveCount(0);
     hub.pausedHistory.delete(PELICAN);
     await failure.getByRole("button").click();
     await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toBeVisible();

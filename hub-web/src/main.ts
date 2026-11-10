@@ -1235,8 +1235,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       // Only "Load earlier" sets loading; the first page is not a look back.
-      if (cursor.loading) countUsage("history.older");
-      cursor.receive(page);
+      if (cursor.receive(page)) countUsage("history.older");
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {
         const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));

@@ -934,23 +934,43 @@ export class HistoryPageState implements HistoryCursor {
   loaded = false;
   requested = false;
   unavailable = false;
-  failure?: { detail: string; before?: number };
+  private readonly requests = new Map<string, { before?: number; detail?: string }>();
 
-  request(_requestId: string, before?: number): void {
-    this.failure = undefined;
-    this.loading = before !== undefined;
-    this.requested = true;
+  get failure(): { detail: string; before?: number } | undefined {
+    let failure: { detail: string; before?: number } | undefined;
+    for (const request of this.requests.values()) {
+      if (request.detail !== undefined) failure = { detail: request.detail, before: request.before };
+    }
+    return failure;
   }
 
-  fail(_requestId: string, detail: string, before?: number): void {
-    this.loading = false;
-    this.requested = false;
-    this.failure = { detail, before };
+  request(requestId: string, before?: number): void {
+    // Only an equivalent read replaces a deadline/error. A newest-page read
+    // and Load earlier can be in flight independently on the same session.
+    for (const [id, request] of this.requests) {
+      if (request.before === before) this.requests.delete(id);
+    }
+    this.requests.set(requestId, { before });
+    this.syncRequests();
   }
 
-  receive(page: { request_id: string; has_earlier: boolean; next_before?: number }): void {
-    this.failure = undefined;
+  fail(requestId: string, detail: string, before?: number): void {
+    this.requests.set(requestId, { before, detail });
+    this.syncRequests();
+  }
+
+  receive(page: { request_id: string; has_earlier: boolean; next_before?: number }): boolean {
+    const older = this.requests.get(page.request_id)?.before !== undefined;
+    this.requests.delete(page.request_id);
     applyHistoryCursor(this, page);
+    this.syncRequests();
+    return older;
+  }
+
+  private syncRequests(): void {
+    const pending = [...this.requests.values()].filter(request => request.detail === undefined);
+    this.loading = pending.some(request => request.before !== undefined);
+    this.requested = pending.length > 0;
   }
 }
 

@@ -914,7 +914,7 @@ invariants:
       (cas-ab04)'
   HUB-J23-HISTORY-FAILURE:
     statement: A history request without a daemon answer exposes an error and retry, including an older page, without claiming the visible history is complete.
-    check: Run the cas-3590 HUB-J23 recovery case; suppress replies, advance the browser clock, retry and verify both the reopened answer and the older cursor's answer render once.
+    check: Run the cas-3590/cas-bf2f HUB-J23 recovery case; suppress replies, advance the browser clock, deliver a late reconnect page while an older read has failed, and verify its error and retry cursor survive. Retry and verify both the reopened answer and the older cursor's answer render once.
   HUB-J23-GOAL:
     statement: I reach the latest exchange immediately and scroll back through older turns without losing my place
     check: Walk HUB-J23 on the production bundle and read cursor requests back from the protocol double; measure the frozen real thread separately.

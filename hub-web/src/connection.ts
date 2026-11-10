@@ -2067,10 +2067,10 @@ export class HubConnectionSupervisor {
       this.callbacks.onConversationHistoryFailed?.(session, "Conversation history could not be requested. Retry when the session is live.", before, request_id);
       return false;
     }
-    // A reconnect supersedes the previous request's deadline. Late pages can
-    // still hydrate turns, but an abandoned request cannot fail the new read.
+    // Supersede only an equivalent read: different cursors retain their own
+    // deadlines, even when another page arrives late on the same session.
     for (const [id, request] of this.historyRequests) {
-      if (request.session === session) this.settleHistoryRequest(session, id);
+      if (request.session === session && request.before === before) this.settleHistoryRequest(session, id);
     }
     const timer = window.setTimeout(() => {
       this.failHistoryRequest(session, request_id, "Conversation history did not arrive. Some answers may be missing.");

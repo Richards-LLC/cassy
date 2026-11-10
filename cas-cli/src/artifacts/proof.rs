@@ -393,9 +393,13 @@ pub fn fetch_task(
                 reason: "The local task or proof is missing and the authenticated Cloud scope lookup is unavailable or incomplete.",
             };
             let client = cloud.as_ref().ok_or_else(unavailable)?;
-            let scoped_tasks = client
-                .visible_task_notes(task_id)
-                .map_err(|_| unavailable())?;
+            let deadline = std::time::Instant::now() + super::cloud::PROOF_LOOKUP_DEADLINE;
+            let scoped_tasks = match client.configured_task_notes(task_id, deadline)
+                .map_err(|_| unavailable())?
+            {
+                Some(scoped) if from_notes(&scoped.notes, id, task_id)?.is_some() => vec![scoped],
+                _ => client.visible_task_notes(task_id, deadline).map_err(|_| unavailable())?,
+            };
             let mut selected = None;
             for scoped in scoped_tasks {
                 if let Some(proof) = from_notes(&scoped.notes, id, task_id)? {

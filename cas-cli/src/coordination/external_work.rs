@@ -468,6 +468,16 @@ impl SqliteRequestJournal {
         now_ms: i64,
         lease_for: Duration,
     ) -> Result<Vec<JournalOperation>, JournalError> {
+        self.lease_due_for_claimant(limit, now_ms, lease_for, None)
+    }
+
+    fn lease_due_for_claimant(
+        &self,
+        limit: usize,
+        now_ms: i64,
+        lease_for: Duration,
+        registration_id: Option<&str>,
+    ) -> Result<Vec<JournalOperation>, JournalError> {
         let limit = limit.clamp(1, RECONCILE_BATCH_LIMIT);
         let token = Uuid::new_v4().to_string();
         let mut conn = self
@@ -483,13 +493,15 @@ impl SqliteRequestJournal {
                     "SELECT request_id FROM external_work_operations
                  WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation','claim_recovery')
                    AND stage IN ('prepared','retry_wait','dispatching')
+                       AND (?3 IS NULL OR kind != 'claim'
+                            OR json_extract(input_json, '$.actor.registration_id') = ?3)
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
                      ORDER BY COALESCE(next_retry_ms, 0), created_at LIMIT ?2",
                 )
                 .map_err(|error| JournalError::Storage(error.to_string()))?;
             statement
-                .query_map(params![now_ms, limit as i64], |row| row.get::<_, String>(0))
+                .query_map(params![now_ms, limit as i64, registration_id], |row| row.get::<_, String>(0))
                 .map_err(|error| JournalError::Storage(error.to_string()))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|error| JournalError::Storage(error.to_string()))?
@@ -1346,6 +1358,8 @@ impl ExternalWorkService {
             || generation.is_none()
             || intent["claim_generation"].as_u64() != generation
             || receipt["request_id"] != row.request_id
+            || wire["actor"]["registration_id"] != self.context.registration_id
+            || wire["project_id"] != self.context.project_id
             || receipt["resource"]["kind"] != "slack_thread"
             || receipt["resource"]["state"] != "claimed"
             || receipt["resource"]["project_id"] != wire["project_id"]
@@ -1574,7 +1588,7 @@ impl ExternalWorkService {
     pub fn reconcile_due(&self, now_ms: i64) -> Result<Vec<Value>, ExternalWorkError> {
         let rows = self
             .journal
-            .lease_due(RECONCILE_BATCH_LIMIT, now_ms, RECONCILE_LEASE)
+            .lease_due_for_claimant(RECONCILE_BATCH_LIMIT, now_ms, RECONCILE_LEASE, Some(&self.context.registration_id))
             .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2401,6 +2415,15 @@ mod tests {
             "claim_timeout",
         ] {
             let journal = journal();
+            let foreign_id = "000000f0-2222-4222-8222-0000000000f0";
+            if outcome == "unknown" {
+                // An older operation from a departed registration cannot
+                // starve this caller's readback retry or acquire its authority.
+                journal.prepare(foreign_id, "claim", &json!({
+                    "external_ref":"https://workspace.slack.com/archives/C08COORD01/p1760616000123456",
+                    "actor":{"registration_id":"reg-departed-supervisor"}
+                })).unwrap();
+            }
             let settled = Arc::new(Mutex::new(false));
             let mut held = if outcome == "live" {
                 payload("held", Some("owner_holds_claim"))
@@ -2524,6 +2547,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(results.len(), 1);
                 assert_eq!(results[0]["code"], "acquired");
+                assert_eq!(journal.get(foreign_id).unwrap().unwrap().stage, "prepared");
                 assert_eq!(cloud.posts.lock().unwrap().len(), 2);
                 assert_eq!(violet.reads.lock().unwrap().len(), 2);
                 journal

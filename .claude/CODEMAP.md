@@ -58,6 +58,7 @@
 ## Factory runtime and terminals
 
 - `cas-cli/src/ui/factory/app/`, `cas-cli/src/ui/factory/director/` - TUI state, worker dispatch/readiness, provisioning and delivery evidence.
+- `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - scoped worker messages and typed context respawn admission; `cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs` builds the saved-handoff resume brief.
 - `cas-cli/src/ui/factory/daemon/runtime/` - daemon lifecycle, event/probe jobs and queued work; `lifecycle.rs` handles expiry and shutdown; `director_refresh_tests.rs` covers blocker episodes.
 - `cas-cli/src/ui/factory/daemon/runtime/delivery.rs`, `cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs` - attributed envelopes, delivery-tip context, recipient receipts and durable escalation before an undelivered lifecycle relay retires.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs`, `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - Slack intake, managed claim outcomes and ordered session wakes; `violet_reader_tests.rs` covers explicit-unmanaged fallback fencing.
@@ -141,7 +142,8 @@
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
-- `cas-cli/src/cli/release_automation.rs` - train context, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation.
+- `cas-cli/src/cli/release_automation.rs` - train context, bounded Git probes, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation; installed notices accept older publications after an upgrade.
+- `scripts/install-on-publish.sh`, `scripts/test-install-on-publish.sh` - native release polling, bounded notice delivery and per-version pending retries after installing the latest release.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.

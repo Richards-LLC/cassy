@@ -123,6 +123,8 @@ struct VerdictRelease {
 }
 
 /// What Cassy's own post-merge close did.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CassyMergeClose {
     /// The task does not carry a published merge Cassy may close for.
     NotEligible,

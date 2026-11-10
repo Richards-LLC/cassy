@@ -130,6 +130,7 @@ pub mod qa_author_override;
 pub(crate) mod phase_outcome;
 pub(crate) mod model_eval;
 pub(crate) mod qa_batch;
+pub(crate) mod release_reconcile;
 pub(crate) mod review_body;
 pub mod retrieval_eval;
 pub mod retrieval_parity;

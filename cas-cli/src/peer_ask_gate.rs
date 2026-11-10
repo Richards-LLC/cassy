@@ -176,10 +176,8 @@ fn announce_override(
     reason: &str,
 ) {
     let id = ask_id(ask);
-    let line = format!(
-        "⚠️ {supervisor_name} overrode an unanswered ask to {} on {task_id} (ask {id}) to merge: {reason}",
-        ask.recipient
-    );
+    let summary = format!("{supervisor_name} is merging without an answer from {}.", ask.recipient);
+    let line = format!("{summary}\nTask: {task_id}\nReason: {reason}");
     crate::quality_ledger::intervention(
         cas_root,
         cas_store::InterventionKind::OverrideMerge,
@@ -188,12 +186,13 @@ fn announce_override(
         Some(supervisor_name),
         Some(reason),
     );
-    let _ = crate::supervisor_notices::enqueue(
+    let _ = crate::supervisor_notices::enqueue_with_summary(
         cas_root,
         &crate::supervisor_notices::Recipient::operator(operator_session.unwrap_or("supervisor-recovery")),
         "peer_ask_override",
         &line,
         id,
+        &summary,
     );
 }
 

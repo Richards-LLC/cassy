@@ -437,6 +437,11 @@ bug_families:
     title: Configured artifact symlinks and canonical cwd writes share containment while refusals identify both roots
     tasks: [cas-a767]
     journeys: [FACTORY-CLOSE, FACTORY-SUPERVISE]
+  peer-override-readable-reason:
+    title: Peer override notices keep machine identity separate from operator reasons and retained code summaries fall back to the message
+    tasks: [cas-ef6e]
+    journeys: [HUB-J5]
+    invariants: [HUB-J5-OPERATOR-REASON]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -773,6 +778,10 @@ invariants:
     statement: A supervisor direct answer or decision note retires the current task's blocker notices before status catches up; unrelated tasks and worker decisions cannot clear it, and a changed question gets one initial notice and one deadline escalation.
     check: 'Run answered_blocker_episode_retires_legacy_reply_or_decision_cas_9e1e through coordination, task notes, real stores and injected reconciliation time. In batch QA answer a blocked worker by direct message and by a decision note, then leave it blocked past the deadline; require no repeated wake, and verify a fresh question re-arms normal escalation.'
     bug: {task: cas-9e1e}
+  HUB-J5-OPERATOR-REASON:
+    statement: Peer override blockers carry a human summary independently of their routing kind and ask identity; Needs-you reasons fall back to the first message sentence for retained machine-code summaries.
+    check: Run a_merge_waits_on_the_supervisors_unanswered_peer_ask_cas_bddf9 through merge override and operator adoption, and project-navigation.test.ts through history and the Needs-you DOM. In batch QA inspect the same override row on desktop and phone, including a retained code-only summary.
+    bug: {task: cas-ef6e}
   HUB-J5-NO-ACTION-WAKES:
     statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
@@ -1618,6 +1627,8 @@ journeys:
   - commander_runtime
   - commander_dependencies
   owners:
+  - cas-cli/src/peer_ask_gate.rs
+  - cas-cli/src/supervisor_notices.rs
   - cas-cli/src/hooks/handlers/handlers_events/message_display.rs
   - cas-cli/src/mcp/tools/core/task/block_hold.rs
   - cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs
@@ -1674,6 +1685,7 @@ journeys:
   - FACTORY-RECORDED-BLOCKER-WAIT
   - FACTORY-ANSWERED-BLOCKER-EPISODE
   - HUB-J5-GOAL
+  - HUB-J5-OPERATOR-REASON
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-RECONNECT-ANSWER

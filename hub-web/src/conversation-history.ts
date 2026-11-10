@@ -1009,5 +1009,10 @@ export function applyHistoryCursor(cursor: HistoryCursor, page: { has_earlier: b
 /** The question a waiting conversation asks, as its ask summarises it. */
 export function waitingQuestion(history: ConversationHistory | undefined): string | undefined {
   const ask = history?.waiting()[0];
-  return ask ? (ask.summary?.trim() || ask.message?.trim() || undefined) : undefined;
+  if (!ask) return undefined;
+  const summary = ask.summary?.trim();
+  const machineCode = /^[a-z0-9_]+$/;
+  if (summary && !machineCode.test(summary)) return summary;
+  const first = ask.message?.trim().split(/(?<=[.!?])\s+|\n/, 1)[0]?.trim();
+  return first && !machineCode.test(first) ? first : undefined;
 }

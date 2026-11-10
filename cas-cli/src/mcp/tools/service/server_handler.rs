@@ -691,7 +691,7 @@ impl CasService {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                     message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if registration && commit.is_none() || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if (registration && commit.is_none()) || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
                         "continuation_id": continuation_id,
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
@@ -837,21 +837,7 @@ impl CasService {
         Ok(output)
     }
 
-    /// A response-layer timeout cancels the handler, but a synchronous store
-    /// write may have committed just before that cancellation. Never leave a
-    /// caller guessing whether retrying a mutating request would duplicate it.
-    /// cas-3b81 (GH #1142): a close answered IN_PROGRESS at the response
-    /// deadline keeps running; when it finishes, append its outcome and the
-    /// task's resulting status to the task, so the caller can determine what
-    /// happened with `task action=show` instead of guessing from "UNKNOWN".
-    /// Appending is an atomic SQL append, so it cannot clobber the close's
-    /// own row write.
-    /// cas-3937 review: a non-task call that answered COMMITTED (a merge,
-    /// after its push) keeps running. When it finishes, its result is
-    /// appended to the task named by its `task_id` argument, so a close that
-    /// a gate refused, or that failed, after the early answer is visible.
-    /// Batch receipts record the continuation on every listed task; individual
-    /// close results are also persisted as BATCH_CLOSE_OUTCOME notes.
+    /// Keep a non-cancellable registration and its final caller notice alive.
     fn record_registration_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
@@ -907,6 +893,21 @@ impl CasService {
         });
     }
 
+    /// A response-layer timeout cancels the handler, but a synchronous store
+    /// write may have committed just before that cancellation. Never leave a
+    /// caller guessing whether retrying a mutating request would duplicate it.
+    /// cas-3b81 (GH #1142): a close answered IN_PROGRESS at the response
+    /// deadline keeps running; when it finishes, append its outcome and the
+    /// task's resulting status to the task, so the caller can determine what
+    /// happened with `task action=show` instead of guessing from "UNKNOWN".
+    /// Appending is an atomic SQL append, so it cannot clobber the close's
+    /// own row write.
+    /// cas-3937 review: a non-task call that answered COMMITTED (a merge,
+    /// after its push) keeps running. When it finishes, its result is
+    /// appended to the task named by its `task_id` argument, so a close that
+    /// a gate refused, or that failed, after the early answer is visible.
+    /// Batch receipts record the continuation on every listed task; individual
+    /// close results are also persisted as BATCH_CLOSE_OUTCOME notes.
     fn record_post_commit_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,

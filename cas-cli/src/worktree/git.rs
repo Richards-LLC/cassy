@@ -163,13 +163,15 @@ pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
 pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
 /// cas-7aa5: the `.gitattributes` value for CHANGELOG.md's [Unreleased] union driver.
 pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
+/// Registry driver: independent bug families merge; competing edits conflict.
+pub const JOURNEYS_MERGE_ATTRIBUTE: &str = "merge=cas-journeys";
 /// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
 /// `merge-tree`) runs the same driver whatever the checkout carries.
 const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.py");
 
 /// cas-0c988, cas-7aa5: register Cassy's merge drivers for every merge in
-/// the repository at `dir` when the checkout or the `incoming` revision opts
-/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`).
+/// the repository at `dir` when the checkout or the incoming revisions opt
+/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`, `merge=cas-journeys`).
 ///
 /// The embedded `cas-merge-drivers.py` is written to the git common dir and
 /// its `install` registers `merge.cas-*` in git config and the attributes in
@@ -178,13 +180,15 @@ const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.
 /// checked-out tree has not received the `.gitattributes` line yet: the
 /// 2026-10-11 sweep met the opt-in on the second epic it merged. Best effort:
 /// without python3 the generated-output driver is still configured, and
-/// CHANGELOG conflicts stay ordinary conflicts.
-pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: Option<&str>) {
+/// CHANGELOG and registry conflicts stay ordinary conflicts.
+pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: &[&str]) {
     let marks = |text: &str| {
-        text.contains(GENERATED_MERGE_ATTRIBUTE) || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
+        text.contains(GENERATED_MERGE_ATTRIBUTE)
+            || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
+            || text.contains(JOURNEYS_MERGE_ATTRIBUTE)
     };
     let opted = std::fs::read_to_string(dir.join(".gitattributes")).is_ok_and(|text| marks(&text))
-        || incoming.is_some_and(|revision| {
+        || incoming.iter().any(|revision| {
             Command::new("git")
                 .args(["show", &format!("{revision}:.gitattributes")])
                 .current_dir(dir)
@@ -1233,6 +1237,9 @@ impl GitOperations {
     /// refuse to run the real merge when this returns any paths, so the
     /// failing case never enters the working tree at all.
     pub fn preflight_merge_conflicts(&self, target: &str, source: &str) -> Result<Vec<String>> {
+        // The preflight must use the same drivers as the eventual merge,
+        // including when only either endpoint carries the opt-in attribute.
+        ensure_merge_drivers(&self.repo_root, &[target, source]);
         let _phase = crate::mcp::tools::service::mutation_receipt::phase("merge-tree");
         let output = Command::new("git")
             .args(["merge-tree", "--write-tree", target, source])
@@ -1331,7 +1338,7 @@ impl GitOperations {
         // cas-0c988: committed build output (hub-web/dist) is regenerated
         // after the merge, never hand-merged. Register the driver its
         // `.gitattributes` names before git needs it.
-        ensure_merge_drivers(dir, Some(branch));
+        ensure_merge_drivers(dir, &[branch]);
         let pre_merge_head = Command::new("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(dir)

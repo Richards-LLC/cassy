@@ -21,3 +21,7 @@ cas-cli/src/builtins/reference-history.json merge=cas-generated
 # GitHub's mergeability check and merge queue ignore custom drivers, so
 # deliveries write changelog.d/<task-id>.md fragments instead (cas-f2be).
 CHANGELOG.md merge=cas-changelog
+
+# Parallel workers add independent QA cases at the top of the registry.
+# Keep both families and the newest updated date; same-family edits conflict.
+docs/qa/journeys.yaml merge=cas-journeys

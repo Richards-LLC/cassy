@@ -2270,7 +2270,7 @@ fn worktree_merge_parallel_journey_families_cas_ded57() {
     let (_temp, repo) = create_test_repo();
     let config = WorktreeConfig {
         auto_merge: true,
-        base_path: "worker-fixtures".into(),
+        base_path: repo.join(".cas/worker-fixtures").display().to_string(),
         ..Default::default()
     };
     let mut manager = WorktreeManager::new(&repo, config).unwrap();

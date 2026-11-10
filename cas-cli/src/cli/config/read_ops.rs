@@ -1169,7 +1169,7 @@ mod tests {
         let error = execute_set(&ConfigSetArgs {
             key: "project.canonical_id".into(), value: "other-project".into(), store: Default::default(),
         }, &cli, &root).unwrap_err();
-        assert!(error.to_string().contains("cas cloud project set"), "{error:#}");
+        assert!(error.to_string().contains("PROJECT_CANONICAL_ID_REDIRECT"), "{error:#}");
         assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
     }
 

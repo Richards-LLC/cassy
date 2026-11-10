@@ -1466,7 +1466,8 @@ mod tests {
     /// Temporary read-only probe of a copied real ledger (cas-3dd7 review ask).
     #[test]
     fn quality_reports_real_ledger_probe() {
-        let Ok(root) = std::env::var("CAS_QUALITY_PROBE_ROOT") else { return };
+        let root = "/mnt/rewind/cas/scratch/gt55/qroot";
+        if !Path::new(root).join(".cas/cas.db").exists() { return }
         let quality = quality_reports(Path::new(&root).join(".cas").as_path(), 5).unwrap();
         let labels: Vec<String> = quality["releases"].as_array().unwrap().iter()
             .map(|r| format!("{} deliveries={} changes={}", r["release"], r["deliveries"], r["changes"])).collect();

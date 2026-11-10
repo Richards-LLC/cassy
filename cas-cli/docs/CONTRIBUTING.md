@@ -265,8 +265,11 @@ individual stale-task revalidation. Busy panes, tool calls and drafts defer.
 `kind=receipt`, pure acknowledgements such as “thanks, received”, broadcasts and
 `wake=false` do not start turns; their bodies remain readable at the next turn.
 A rolling sender/recipient cap (`factory.supervisor_message_wakes_per_hour`,
-default 6) holds further wake attempts and places a readable wake-cap notice in
-the inbox. Other senders retain their own budget. Restarting the daemon retains
+default 6) holds further status wakes and places a readable notice in the inbox.
+Held senders receive one deduplicated notice with the earliest cap retry time;
+peer feedback is persisted to the existing outbox for automatic delivery.
+Substantive linked replies, asks, answers and blockers bypass the cap and debounce.
+Explicit quiet and receipt intent remains quiet. Other senders retain their own budget. Restarting the daemon retains
 the ledger and cap. Use `coordination action=message_status notification_id=<id>`
 for wakes in the last hour, measured turns, median input+output tokens per woken
 turn and maximum observed start latency. Claude/Codex usage is matched to the

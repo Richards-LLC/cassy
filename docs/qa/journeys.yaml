@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  peer-cap-sender-feedback:
+    title: Capped peer messages notify the sender with a retry time while substantive linked replies bypass the cap
+    tasks: [cas-0e49]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-PEER-CAP-FEEDBACK]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]
@@ -472,6 +477,10 @@ invariants:
     statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
     check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
     bug: {task: cas-ef5e8}
+  FACTORY-PEER-CAP-FEEDBACK:
+    statement: A peer status held by the hourly wake cap produces one sender-facing hold and retry-time reply; substantive linked answers remain eligible without consuming an extra debounce wait.
+    check: Run peer_cap_reports_eta_and_releases_linked_answer_cas_0e49 through the real scheduler and durable outbox for project and user scopes. Spend six wakes, hold a release-go status, inspect one correctly addressed feedback payload and retry time across reselection, then admit its linked status answer. Verify no network runs on the scheduler lane and quiet intent remains quiet.
+    bug: {task: cas-0e49}
   FACTORY-SPAWN-ACCOUNT-PREFERENCE:
     statement: Codex workers use factory.codex_home when config_dir is omitted; explicit account overrides win and spawn receipts identify the configured source.
     check: Run configured_worker_account_overrides_recommendation_cas_8c58 for local config persistence, direct and lane spawns, inherited and explicit accounts, other harnesses and cleared preferences; run recommended_spawn_accounts_preserve_explicit_and_override_inherited for unconfigured recommendation behavior. Walk actual worker startup on the batch candidate.
@@ -1073,8 +1082,8 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE

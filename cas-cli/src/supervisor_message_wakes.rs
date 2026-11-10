@@ -4,7 +4,7 @@ use crate::ui::factory::daemon::runtime::{
 };
 use cas_store::{PromptQueueStore, QueueOrigin, QueuedPrompt};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -145,7 +145,8 @@ fn waking_kind(prompt: &str) -> bool {
         || prompt.contains(&format!("{WAKING_KIND_TAG}ask\"/>"))
         || prompt.contains(&format!("{WAKING_KIND_TAG}answer\"/>"))
         || crate::cloud::peer_mailbox::parse_envelope(prompt)
-            .is_some_and(|peer| matches!(peer.kind, Some(Ask | Answer | Blocker)))
+            .is_some_and(|peer| peer.in_reply_to.is_some()
+                || matches!(peer.kind, Some(Ask | Answer | Blocker)))
 }
 
 fn wants_wake_text(prompt: &str) -> bool {
@@ -209,6 +210,49 @@ pub(crate) fn record(
     Ok(())
 }
 
+fn notify_held_sender(
+    cas: &Path, queue: &dyn PromptQueueStore, row: &QueuedPrompt,
+    supervisor: &str, session: &str, agents: &[cas_types::Agent],
+    cap: u64, retry_at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let body = format!(
+        "Message {} to {supervisor} is held by the {cap}/hour wake cap. Earliest cap retry: {}. It may arrive sooner with another turn.",
+        crate::cloud::peer_mailbox::parse_envelope(&row.prompt)
+            .map(|peer| peer.id).unwrap_or_else(|| row.id.to_string()),
+        retry_at.to_rfc3339(),
+    );
+    if row.origin == Some(QueueOrigin::Daemon) {
+        use crate::cloud::peer_mailbox::{self, PeerScope, PeerSend};
+        let peer = peer_mailbox::parse_envelope(&row.prompt)
+            .ok_or_else(|| anyhow::anyhow!("held peer message has no envelope"))?;
+        let author = agents.iter().find(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && (agent.name.eq_ignore_ascii_case(supervisor) || agent.id == supervisor)
+                && agent.factory_session.as_deref() == Some(session)
+        }).ok_or_else(|| anyhow::anyhow!("held peer message has no registered receiving supervisor"))?;
+        peer_mailbox::enqueue_feedback(cas, PeerSend {
+            project_id: crate::cloud::resolve_canonical_id(cas)
+                .ok_or_else(|| anyhow::anyhow!("held peer message has no project identity"))?,
+            sender_agent_id: author.id.clone(), recipient_agent_id: peer.sender_agent_id,
+            body: peer_mailbox::attach_message_intent(&body, Some("answer"), false)
+                .map_err(anyhow::Error::msg)?,
+            summary: Some("Peer message held by wake cap".into()),
+            in_reply_to: Some(peer.id.clone()), dedupe_key: format!("wake-cap-held:{}", peer.id),
+            scope: peer.scope,
+            recipient_project_id: (peer.scope == PeerScope::User).then_some(peer.repo),
+        }, &peer.sender_name).map_err(|error| anyhow::anyhow!(error))?;
+    } else if let Some(QueueOrigin::RegisteredAgent { agent_id }) = &row.origin
+        && let Some(sender) = agents.iter().find(|agent| agent.id == *agent_id)
+    {
+        queue.enqueue_idempotent(
+            "supervisor-wake-cap", &sender.name, &attach_waking_kind(&body, "answer"),
+            sender.factory_session.as_deref(), Some("Message held by wake cap"), None,
+            &format!("wake-cap-held:{}", row.id), Some(&QueueOrigin::Daemon),
+        )?;
+    }
+    Ok(())
+}
+
 /// QueueSelect runs on the store job lane. Only ordinary directed messages are
 /// batched here; envelopes requiring per-task revalidation retain their own row.
 /// Such action events still use the existing wake slot and pane safety gate.
@@ -239,14 +283,18 @@ pub(crate) fn schedule(
         .lock()
         .map_err(|_| anyhow::anyhow!("wake ledger lock poisoned"))?;
     let mut capped = HashMap::new();
-    let mut pair_capped = |sender: &str| -> anyhow::Result<bool> {
+    let mut pair_capped = |sender: &str| -> anyhow::Result<Option<DateTime<Utc>>> {
         if let Some(capped) = capped.get(sender) {
             return Ok(*capped);
         }
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
-            WHERE p.sender=?1 AND p.recipient=?2 AND w.injected_at>?3",
-            params![sender, supervisor, (now-chrono::Duration::hours(1)).to_rfc3339()], |row| row.get(0))?;
-        let held = count >= cap.min(i64::MAX as u64) as i64;
+        // The cap-th newest wake must expire before another wake is allowed,
+        // including when exempt conversations have exceeded the cap.
+        let injected: Option<String> = conn.query_row("SELECT w.injected_at FROM supervisor_message_wake_pairs p JOIN supervisor_message_wakes w USING(lead_id)
+            WHERE p.sender=?1 AND p.recipient=?2 AND w.injected_at>?3
+            ORDER BY w.injected_at DESC LIMIT 1 OFFSET ?4",
+            params![sender, supervisor, (now-chrono::Duration::hours(1)).to_rfc3339(), cap.min(i64::MAX as u64) as i64 - 1], |row| row.get(0)).optional()?;
+        let held = injected.map(|at| DateTime::parse_from_rfc3339(&at)
+            .map(|at| at.with_timezone(&Utc) + chrono::Duration::hours(1))).transpose()?;
         capped.insert(sender.to_string(), held);
         Ok(held)
     };
@@ -285,13 +333,13 @@ pub(crate) fn schedule(
         let Ok(deadline) = DateTime::parse_from_rfc3339(&row.deadline) else { continue };
         let deadline = deadline.with_timezone(&Utc);
         let Some(sender) = sender_fields(&row.prompt, &row.target, row.urgent, row.origin.as_ref(), supervisor, agents) else { continue };
-        if wants_wake_text(&row.prompt) && (waking_kind(&row.prompt) || !pair_capped(&sender)?) {
+        if wants_wake_text(&row.prompt) && (waking_kind(&row.prompt) || pair_capped(&sender)?.is_none()) {
             inherited_deadline = Some(inherited_deadline.map_or(deadline, |prior| prior.min(deadline)));
         }
     }
     drop(conn);
     let held = |row: &QueuedPrompt, sender: &String| {
-        capped[sender] && wants_wake(row) && !waking_kind(&row.prompt)
+        capped[sender].is_some() && wants_wake(row) && !waking_kind(&row.prompt)
     };
     for (row, sender) in &candidates {
         if held(row, sender) {
@@ -330,6 +378,10 @@ pub(crate) fn schedule(
     if !due {
         for (row, sender) in &candidates {
             let (detail, recheck) = if held(row, sender) {
+                // If feedback cannot be persisted, the existing batching-error
+                // fallback delivers normally rather than silently holding it.
+                notify_held_sender(cas, queue.as_ref(), row, supervisor, session, agents,
+                    cap, capped[sender].expect("held sender has a cap expiry"))?;
                 (
                     "directed supervisor message held by sender-pair wake cap",
                     now + chrono::Duration::minutes(1),
@@ -839,70 +891,79 @@ mod tests {
     fn peer_cap_reports_eta_and_releases_linked_answer_cas_0e49() {
         use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, PeerSend, render_envelope};
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-        let (_root, cas, _) = setup();
-        let mut supervisor = cas_types::Agent::new_with_role(
-            "local-sup".into(), "wake-sup".into(), cas_types::AgentRole::Supervisor,
-        );
-        supervisor.factory_session = Some("wake-session".into());
-        crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
-        crate::cloud::CloudConfig {
-            endpoint: "http://127.0.0.1:1".into(), token: Some("fixture-token".into()),
-            ..Default::default()
-        }.save_to_cas_dir(&cas).unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-11-08T20:00:00Z").unwrap().with_timezone(&Utc);
-        let spent = now - chrono::Duration::minutes(10);
-        let eta = spent + chrono::Duration::hours(1);
-        let pair = "cloud:github.com/acme/project:remote-sup".to_string();
-        for lead in 1..=6 {
-            record(&cas, -lead, "wake-sup", std::slice::from_ref(&pair), spent, spent).unwrap();
-        }
-        let mut envelope = PeerEnvelope {
-            id: "pm-release-go".into(), sender_name: "peer".into(),
-            sender_agent_id: "remote-sup".into(), machine: "other-box".into(),
-            session: Some("peer-session".into()), repo: "github.com/acme/project".into(),
-            in_reply_to: None, kind: Some(PeerMessageKind::Status), scope: PeerScope::Project,
-        };
-        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
-        let enqueue_peer = |envelope: &PeerEnvelope| {
-            let id = queue.enqueue_urgent_with_outcome(
-                "peer:peer@other-box", "wake-sup",
-                &format!("{}\nWindow open, start the run.", render_envelope(envelope)),
-                Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
-            ).unwrap().id();
-            let mut row = queue.queued_prompt(id).unwrap().unwrap();
-            row.created_at = now - chrono::Duration::minutes(1);
-            row
-        };
-        let held = enqueue_peer(&envelope);
-        let mut rows = vec![held.clone()];
-        let mut facts = HashMap::from([(held.id, RowFacts::default())]);
-        let agents = crate::store::open_agent_store(&cas).unwrap().list(None).unwrap();
-        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
-        assert!(rows.is_empty());
-        let conn = Connection::open(cas.join("cas.db")).unwrap();
-        let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
-        assert_eq!(notices, 1, "a held peer send needs feedback to its sender");
-        let payload: String = conn.query_row("SELECT payload FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
-        let notice: PeerSend = serde_json::from_str(&payload).unwrap();
-        assert_eq!(notice.recipient_agent_id, envelope.sender_agent_id);
-        assert_eq!(notice.in_reply_to.as_deref(), Some(envelope.id.as_str()));
-        assert!(notice.body.contains(&eta.to_rfc3339()));
-        let retry: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [held.id], |r| r.get(0)).unwrap();
-        assert_eq!(DateTime::parse_from_rfc3339(&retry).unwrap().with_timezone(&Utc), eta);
-        rows = vec![held];
-        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
-        let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
-        assert_eq!(notices, 1, "a scheduler retry must not repeat the notice");
+        for scope in [PeerScope::Project, PeerScope::User] {
+            let (_root, cas, _) = setup();
+            crate::cloud::set_canonical_id_in_config_toml(&cas, "github.com/acme/project").unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "local-sup".into(), "wake-sup".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("wake-session".into());
+            crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+            crate::cloud::CloudConfig {
+                endpoint: "http://127.0.0.1:1".into(), token: Some("fixture-token".into()),
+                ..Default::default()
+            }.save_to_cas_dir(&cas).unwrap();
+            let now = DateTime::parse_from_rfc3339("2026-11-08T20:00:00Z").unwrap().with_timezone(&Utc);
+            let spent = now - chrono::Duration::minutes(10);
+            let eta = spent + chrono::Duration::hours(1);
+            let repo = if scope == PeerScope::Project { "github.com/acme/project" } else { "github.com/acme/other-project" };
+            let pair = format!("cloud:{repo}:remote-sup");
+            for lead in 1..=6 {
+                record(&cas, -lead, "wake-sup", std::slice::from_ref(&pair), spent, spent).unwrap();
+            }
+            let mut envelope = PeerEnvelope {
+                id: "pm-release-go".into(), sender_name: "peer".into(),
+                sender_agent_id: "remote-sup".into(), machine: "other-box".into(),
+                session: Some("peer-session".into()), repo: repo.into(),
+                in_reply_to: None, kind: Some(PeerMessageKind::Status), scope,
+            };
+            let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+            let enqueue_peer = |envelope: &PeerEnvelope| {
+                let id = queue.enqueue_urgent_with_outcome(
+                    "peer:peer@other-box", "wake-sup",
+                    &format!("{}\nWindow open, start the run.", render_envelope(envelope)),
+                    Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
+                ).unwrap().id();
+                let mut row = queue.queued_prompt(id).unwrap().unwrap();
+                row.created_at = now - chrono::Duration::minutes(1);
+                row
+            };
+            let held = enqueue_peer(&envelope);
+            let mut rows = vec![held.clone()];
+            let mut facts = HashMap::from([(held.id, RowFacts::default())]);
+            let agents = crate::store::open_agent_store(&cas).unwrap().list(None).unwrap();
+            schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+            assert!(rows.is_empty());
+            let conn = Connection::open(cas.join("cas.db")).unwrap();
+            let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+            assert_eq!(notices, 1, "a held peer send needs feedback to its sender");
+            let payload: String = conn.query_row("SELECT payload FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+            let notice: PeerSend = serde_json::from_str(&payload).unwrap();
+            assert_eq!(notice.recipient_agent_id, envelope.sender_agent_id);
+            assert_eq!(notice.project_id, "github.com/acme/project");
+            assert_eq!(notice.scope, scope);
+            assert_eq!(notice.recipient_project_id.as_deref(), (scope == PeerScope::User).then_some(repo));
+            let attempts: i64 = conn.query_row("SELECT attempts FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+            assert_eq!(attempts, 0, "scheduler feedback must not perform network I/O");
+            assert_eq!(notice.in_reply_to.as_deref(), Some(envelope.id.as_str()));
+            assert!(notice.body.contains(&eta.to_rfc3339()));
+            let retry: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [held.id], |r| r.get(0)).unwrap();
+            assert_eq!(DateTime::parse_from_rfc3339(&retry).unwrap().with_timezone(&Utc), now + chrono::Duration::minutes(1));
+            rows = vec![held];
+            schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+            let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+            assert_eq!(notices, 1, "a scheduler retry must not repeat the notice");
 
-        // A peer may use kind=status to answer an open release ask. The reply
-        // link still makes this conversation rather than capped status traffic.
-        envelope.id = "pm-release-answer".into();
-        envelope.in_reply_to = Some("pm-open-release-ask".into());
-        let reply = enqueue_peer(&envelope);
-        rows = vec![reply.clone()];
-        facts.insert(reply.id, RowFacts::default());
-        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
-        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![reply.id]);
+            // A peer may use kind=status to answer an open release ask. The reply
+            // link still makes this conversation rather than capped status traffic.
+            envelope.id = "pm-release-answer".into();
+            envelope.in_reply_to = Some("pm-open-release-ask".into());
+            let reply = enqueue_peer(&envelope);
+            rows = vec![reply.clone()];
+            facts.insert(reply.id, RowFacts::default());
+            schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+            assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![reply.id]);
+        }
     }
 
     #[test]

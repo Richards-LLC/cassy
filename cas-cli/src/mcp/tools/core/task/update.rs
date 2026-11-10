@@ -2955,19 +2955,44 @@ mod status_transition_tests {
         core.set_agent_id_for_testing(sup.id);
 
         let mut task = Task::new("cas-finding-p".into(), "finding".into());
-        // Without a repro, reach normalizes to theoretical: broken × theoretical is P4.
-        task.priority = Priority(4);
+        task.priority = Priority(2);
+        task.notes = "Repro: task update priority=1 keeps P2 while saving design".into();
         task.labels = vec!["from-finding".into(), "severity:broken".into(), "reach:secondary".into()];
         tasks.add(&task).unwrap();
 
-        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
-            "id": task.id, "priority": 0, "labels": "incident",
-        })).unwrap();
-        let text = format!("{:?}", core.cas_task_update(Parameters(request)).await.unwrap());
+        // GH #1781: mismatched priority rejects the whole mixed-field update.
+        for requested in [1, 0] {
+            let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": requested, "labels": "incident", "design": "x",
+            })).unwrap();
+            let error = core.cas_task_update(Parameters(request)).await.expect_err("derived priority must refuse an override");
+            assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+            let data = error.data.unwrap();
+            assert_eq!(data["rule_id"], "finding_priority_derived");
+            assert_eq!(data["requested_priority"], requested);
+            assert_eq!(data["derived_priority"], 2);
+            assert_eq!(data["applied_fields"], serde_json::json!([]));
+            for axis in ["severity:broken", "reach:secondary"] {
+                assert!(data["labels"].as_array().unwrap().contains(&serde_json::json!(axis)));
+            }
+            let stored = tasks.get(&task.id).unwrap();
+            assert_eq!(stored.priority, task.priority);
+            assert_eq!(stored.labels, task.labels);
+            assert_eq!(stored.design, task.design);
+            assert_eq!(stored.updated_at, task.updated_at);
+        }
+        // Retry without the conflicting field, then accept an agreeing value.
+        for priority in [None, Some(2)] {
+            let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": priority, "labels": "incident", "design": "x",
+            })).unwrap();
+            let result = core.cas_task_update(Parameters(request)).await.unwrap();
+            assert_eq!(result.structured_content.unwrap()["priority"], 2);
+        }
         let stored = tasks.get(&task.id).unwrap();
-        assert_eq!(stored.priority, Priority(4), "severity × reach decides finding priority");
+        assert_eq!(stored.priority, Priority(2));
         assert!(stored.labels.iter().any(|l| l == "incident"));
-        assert!(text.contains("severity:broken") && text.contains("reach:theoretical"), "reply names the axes: {text}");
+        assert_eq!(stored.design.as_deref(), Some("x"));
     }
 
     #[tokio::test]

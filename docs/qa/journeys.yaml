@@ -120,8 +120,8 @@ bug_families:
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
     journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
-    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication, exact delivery and dedicated review gates
-    tasks: [cas-abb0, cas-e06c, cas-3806]
+    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication; immutable release finalization retains full delivery effects, reviewed transformations and dedicated review gates
+    tasks: [cas-abb0, cas-e06c, cas-3806, cas-9c84f]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26, FACTORY-CLOSE]
   unread-supervisor-mail-succession:

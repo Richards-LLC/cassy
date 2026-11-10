@@ -1,4 +1,5 @@
 //! Validation shared by batch recording and close. No process or polling work.
+pub(crate) mod release_close;
 use crate::mcp::tools::core::task::lifecycle::close_ops::{
     TaskCommitReceiptWindow, squash_receipt_qa_anchor,
 };
@@ -522,7 +523,8 @@ pub(crate) fn task_context(root: &Path, task: &Task) -> Result<(PathBuf, String)
     let parent = store.get_parent_epic(&task.id).map_err(|e| e.to_string())?;
     if let Some(target) = close_ops::effective_close_work_target(task, parent.as_ref()) {
         let context = repo_context::resolve_repo_context(root, &target)?;
-        return Ok((context.repo_root, context.target_branch));
+        let target = release_close::target(root, &task.id).unwrap_or(context.target_branch);
+        return Ok((context.repo_root, target));
     }
     let repo = root
         .parent()
@@ -549,6 +551,7 @@ pub(crate) fn task_context(root: &Path, task: &Task) -> Result<(PathBuf, String)
         }),
         &repo,
     )?;
+    let target = release_close::target(root, &task.id).unwrap_or(target);
     Ok((repo, target))
 }
 
@@ -1067,7 +1070,10 @@ fn covering_receipt(
         .filter_map(|head| commit(repo, head))
         .collect();
     let receipts = receipts_for_task(root, &project, &task.id).map_err(|e| e.to_string())?;
+    let fixed_target = release_close::target(root, &task.id);
+    let target = fixed_target.as_deref().unwrap_or(target);
     for receipt in receipts {
+        if !release_close::receipt_allowed(root, task, &receipt) { continue; }
         let Some(reviewed) = receipt.task_heads.get(&task.id) else { continue };
         let known = *reviewed == anchor || retired.contains(reviewed);
         if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {

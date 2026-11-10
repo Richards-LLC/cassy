@@ -70,3 +70,47 @@ uses the existing by-ID inspection path to preserve their shipped facts and
 adds a `quarantined` exception; membership never lifts that independent hold.
 Recorded anchors and bases must resolve to their own full SHA, never a symbolic
 branch alias.
+
+## Close at the shipped commit
+
+Trusted release adapters call `CasCore::close_release_inventory_outcomes` with
+this inventory. The consumer re-resolves membership, compares each delivery
+snapshot before acting, checks referenced receipts and runs ordinary close with
+`final_release_sha` as its evidence target. Stale or held members remain explicit
+exceptions while other deliveries continue. The ordinary optimistic write guard
+still rejects concurrent changes. Dedicated review, CI overrides and independent
+task holds remain gates. Explicit no-code deliveries retain their own close
+path; this code-delivery entry reports that limitation.
+
+The full recorded start-to-anchor effect is measured, including earlier commits
+and deletions. Changelog fragments use the existing promotion validator: their
+entries must survive in a released section of `CHANGELOG.md`. A maintained view
+has no unconditional filename exemption.
+
+A release review may attach transformation evidence once, in its published
+Markdown/plain-text ledger, as one fenced `cassy-release-transformations` JSON
+block. Its object contains `project_id`, `release_id`, `reviewed_sha`,
+`final_release_sha` and `paths`. Each path object contains:
+
+| Field | Required evidence |
+| --- | --- |
+| `path` | `.claude/CODEMAP.md`, `docs/qa/journeys.yaml` or `docs/PRODUCT_OVERVIEW.md`. |
+| `input_blobs` | Exact Git blob IDs of the delivered view versions replaced. |
+| `output_blob` | Exact view blob at the final release; deletion is not a view transformation. |
+| `producing_commit` | Full reachable commit changing this path and establishing its final blob and mode. A supersession chain names its final producer. |
+| `producer` | The corresponding skill: `codemap`, `cas-qa-craft` or `project-overview`. |
+| `producer_blob` | Exact skill revision in `cas-cli/src/builtins/skills/<producer>/SKILL.md` or `.claude/skills/<producer>/SKILL.md` at the release. |
+
+The scope's `review` proof reference binds artifact, digest, size, reviewed
+commit and recorded release-verdict receipt. Published bytes are checked locally
+and the author must be independent of the covered deliveries. The receipt must
+cover the original anchor. This represents a reviewed skill-authored view, not
+a claimed deterministic generator run. Ordinary source files cannot use this
+rule. Built-output regeneration retains its existing generator checks.
+
+QA walk receipts, independent review receipts and published-tag shipping
+verdicts keep their distinct kinds. A shipping verdict never creates a QA PASS.
+Missing bytes, bad bindings, changed task versions, unknown producers or lost
+source leave the delivery held. Existing receipt callbacks also pin ordinary
+close to their reviewed SHA; full inventory adapters additionally supply the
+validated release transformation manifest.

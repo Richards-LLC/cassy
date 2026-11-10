@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn release_operation_recovers_checkpoint_and_serializes_same_identity() {
         let root = tempfile::tempdir().unwrap();
-        let key = ReleaseOperationKey { project_id: "project-a".into(), release_id: "v4.13.0".into(), final_release_sha: "a".repeat(40) };
+        let key = ReleaseOperationKey { project_id: "project-a".into(), release_id: "v9.99.0".into(), final_release_sha: "a".repeat(40) };
         let receipt = serde_json::json!({"key": key, "members": {"cas-a": {"action":"closed"}}, "notice_sent":true});
         {
             let operation = ReleaseOperation::open(root.path(), key.clone()).unwrap();
@@ -77,7 +77,7 @@ mod tests {
         assert_eq!(resumed.load().unwrap(), Some(receipt));
         for different in [
             ReleaseOperationKey { project_id: "project-b".into(), ..key.clone() },
-            ReleaseOperationKey { release_id: "v4.13.1".into(), ..key.clone() },
+            ReleaseOperationKey { release_id: "v9.99.1".into(), ..key.clone() },
             ReleaseOperationKey { final_release_sha: "b".repeat(40), ..key.clone() },
         ] {
             let other = ReleaseOperation::open(root.path(), different).unwrap();

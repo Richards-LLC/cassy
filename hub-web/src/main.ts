@@ -5469,7 +5469,10 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   if (!machine || !selectedSession) return undefined;
   const rerender = (focus?: string) => { fleetFocusNext = focus; renderStatus(status); };
-  const epics = ((status.epics as any[]) ?? []).map((epic) => String(epic?.id ?? epic)).filter(Boolean);
+  const epics = (status.epics as ReleaseEpic[] | undefined) ?? [];
+  const session = sessions.get(machine.id)?.find(session => session.name === selectedSession);
+  const agents = (status.agents as FleetAgent[] | undefined) ?? [];
+  const supervisors = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
   const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[];
   return {
@@ -5481,6 +5484,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     agents: ((status.agents as any[]) ?? []) as FleetAgent[],
     tasks,
     epics,
+    supervisors,
     currentEpic,
     asked: fleetAskedFor(selectedMachineId, selectedSession),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },

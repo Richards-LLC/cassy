@@ -46,6 +46,8 @@ export function workerProgress(roster: readonly string[] | undefined, agents: re
 export interface ReleaseEpic {
   readonly id: string;
   readonly title?: string;
+  readonly priority?: number;
+  readonly branch?: string | null;
   readonly focused?: boolean;
   readonly status?: string;
   readonly assignee?: string | null;
@@ -73,13 +75,27 @@ export function epicCounts(epic: ReleaseEpic | undefined): (EpicCounts & { total
 }
 export type ProgressTask = FleetTask & { readonly epic_id?: string | null; readonly delivery_state?: string | null };
 
+/** Shared status/ownership rules for progress and the focus picker. */
+export function isLiveEpic(epic: ReleaseEpic): boolean {
+  return LIVE_EPIC.includes(statusLabel(epic.status));
+}
+export function ownsEpic(epic: ReleaseEpic, supervisors: readonly string[]): boolean {
+  return (epic.assignee != null && supervisors.includes(epic.assignee))
+    || (epic.epic_verification_owner != null && supervisors.includes(epic.epic_verification_owner));
+}
+
+/** The project/session's available focus targets, with the release lane first. */
+export function focusEpicChoices(epics: readonly ReleaseEpic[], supervisors: readonly string[], current: string | null): ReleaseEpic[] {
+  const train = (epic: ReleaseEpic) => epic.auto_cut_paused != null || epic.freeze != null || epic.branch?.includes("release-train") === true;
+  return epics.filter(epic => epic.id !== current && isLiveEpic(epic) && ownsEpic(epic, supervisors) && epicTitle(epic))
+    .sort((a, b) => Number(train(b)) - Number(train(a)) || (a.priority ?? 2) - (b.priority ?? 2) || epicTitle(a).localeCompare(epicTitle(b)) || a.id.localeCompare(b.id));
+}
+
 /** Status epics are a project catalog, never a session ownership list. */
 function supervisorEpics(epics: readonly ReleaseEpic[], focused: string | null, supervisors: readonly string[]): ReleaseEpic[] {
-  const open = epics.filter(epic => ["Open", "Ready", "In progress", "Blocked", "Awaiting merge"].includes(statusLabel(epic.status)));
+  const open = epics.filter(isLiveEpic);
   const pinned = open.find(epic => epic.id === focused) ?? open.find(epic => epic.focused);
-  return pinned ? [pinned] : open.filter(epic =>
-    (epic.assignee != null && supervisors.includes(epic.assignee))
-    || (epic.epic_verification_owner != null && supervisors.includes(epic.epic_verification_owner)));
+  return pinned ? [pinned] : open.filter(epic => ownsEpic(epic, supervisors));
 }
 
 export function releaseProgress(epics: readonly ReleaseEpic[], focused: string | null, tasks: readonly ProgressTask[], supervisors: readonly string[] = []): ReleaseEpic | undefined {
@@ -194,7 +210,7 @@ function epicTaskState(task: ProgressTask, worker: WorkerProgress | undefined): 
   return state === "Executing" ? "Building" : state;
 }
 
-const LIVE_EPIC = ["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification"];
+const LIVE_EPIC = ["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification", "Paused", "Planned"];
 
 /** The selected session's project only, joined across machines by epic id.
  * The release train has its own header; open epics without in-flight work or
@@ -207,7 +223,7 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
     const workers = workerProgress(source.roster, source.agents, source.tasks, source.supervisor);
     for (const epic of source.epics) {
       if (!latest.has(epic.id)) latest.set(epic.id, epic);
-      if (epic.id === train || !epicTitle(latest.get(epic.id)) || !LIVE_EPIC.includes(statusLabel(latest.get(epic.id)?.status))) continue;
+      if (epic.id === train || !epicTitle(latest.get(epic.id)) || !isLiveEpic(latest.get(epic.id)!)) continue;
       let entry = epics.get(epic.id);
       if (!entry) epics.set(epic.id, entry = { epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true });
       else if (!epicCounts(entry.epic) && epicCounts(epic)) entry.epic = { ...entry.epic, counts: epic.counts };

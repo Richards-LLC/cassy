@@ -6889,9 +6889,9 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut foreign = request.clone();
         foreign.target = Some(sibling.name.clone());
         assert!(service.message_send(foreign).await.is_err());
-        core.set_agent_id_for_testing(owner.id.clone());
-        assert!(service.message_send(request.clone()).await.is_err());
-        core.set_agent_id_for_testing(worker.id.clone());
+        let owner_core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        owner_core.set_agent_id_for_testing(owner.id.clone());
+        assert!(gh_1171_service(&owner_core).message_send(request.clone()).await.is_err());
         let response = service.message_send(request.clone()).await.expect("typed respawn accepted");
         assert_eq!(response.structured_content.unwrap()["respawn_queued"], true);
         let spawns = crate::store::open_spawn_queue_store(&root).unwrap();

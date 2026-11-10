@@ -563,8 +563,7 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     let tasks = open_task_store(&cas_dir).unwrap();
     git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
     git(repo, &["switch", "-qc", "epic/approved", "main"]);
-    std::fs::write(repo.join("child.txt"), "integrated sibling
-").unwrap();
+    std::fs::write(repo.join("child.txt"), "integrated sibling\n").unwrap();
     git(repo, &["add", "child.txt"]);
     git(repo, &["commit", "-qm", "fix(cas-beef): sibling delivery"]);
     let child = git(repo, &["rev-parse", "HEAD"]);

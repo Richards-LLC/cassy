@@ -117,7 +117,8 @@ pub(super) fn validated_started_delivery(
     }
     // cas-985f: a worker told to merge the released trunk into its lane brings
     // in other tasks' already-released commits. They are upstream, not foreign.
-    let upstream = upstream_refs(repo, &target, task);
+    let upstream = released_trunk_ref(repo, &target).map(|reference| format!("^{reference}"));
+    let identity = task_commit_identity(task, None);
     let range = format!("{}..{tip}", start.base_sha);
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
@@ -138,39 +139,40 @@ pub(super) fn validated_started_delivery(
         .collect::<Vec<_>>(),
     )
     .ok_or_else(|| refuse("the lane history cannot be read"))?;
-    // Inspect side-parent work too, excluding integrated target history so a
-    // large target sync does not consume this task's attribution budget.
-    let side_history = git_text(
-        repo,
-        &[
-            "log",
-            "-n",
-            "201",
-            "--format=%H %P%x1f%B%x1e",
-            &tip,
-            &format!("^{}", start.base_sha),
-            &format!("^{target}"),
-        ]
-        .into_iter()
-        .chain(upstream.iter().map(String::as_str))
-        .chain(["--"])
-        .collect::<Vec<_>>(),
-    )
-    .ok_or_else(|| refuse("the off-target history cannot be read"))?;
-    let mut records = Vec::new();
-    for (on_lane, history) in [(true, &lane_history), (false, &side_history)] {
-        let range: Vec<_> = history
-            .split('\u{1e}')
-            .map(str::trim)
-            .filter(|record| !record.is_empty())
-            .collect();
-        if range.len() > 200 {
-            return Err(refuse("the start-to-delivery range exceeds 200 commits"));
-        }
-        records.extend(range.into_iter().map(|record| (on_lane, record)));
+    let lane: Vec<_> = lane_history.split('\u{1e}').map(str::trim)
+        .filter(|record| !record.is_empty()).collect();
+    if lane.len() > 200 {
+        return Err(refuse("the start-to-delivery range exceeds 200 commits"));
     }
+    // Walk each unapproved side from its own tip. Excluding an approved
+    // SHA globally would hide the same foreign work on a different parent.
+    let mut sides = Vec::new();
+    for record in &lane {
+        let (metadata, _) = record.split_once('\u{1f}')
+            .ok_or_else(|| refuse("the commit metadata cannot be read"))?;
+        sides.extend(metadata.split_whitespace().skip(2)
+            .filter(|parent| !identity.approved_merge_parents.iter().any(|sha| sha == *parent)));
+    }
+    sides.sort_unstable();
+    sides.dedup();
+    let side_history = if sides.is_empty() {
+        String::new()
+    } else {
+        git_text(
+            repo,
+            &["log", "-n", "201", "--format=%H %P%x1f%B%x1e"]
+                .into_iter()
+                .chain(sides)
+                .chain([format!("^{}", start.base_sha).as_str(), format!("^{target}").as_str()])
+                .chain(upstream.iter().map(String::as_str))
+                .chain(["--"])
+                .collect::<Vec<_>>(),
+        ).ok_or_else(|| refuse("the off-target history cannot be read"))?
+    };
+    let side = side_history.split('\u{1e}').map(str::trim).filter(|record| !record.is_empty());
+    let records = lane.into_iter().map(|record| (true, record))
+        .chain(side.map(|record| (false, record)));
     let mut seen = HashSet::new();
-    let identity = task_commit_identity(task, None);
     let mut commits = Vec::new();
     for (on_lane, record) in records {
         let (metadata, message) = record
@@ -183,9 +185,13 @@ pub(super) fn validated_started_delivery(
         if !seen.insert(sha) {
             continue;
         }
+        if seen.len() > 200 {
+            return Err(refuse("the start-to-delivery range exceeds 200 commits"));
+        }
         let parents: Vec<String> = metadata.map(str::to_owned).collect();
         let merged = parents.get(1..).unwrap_or_default();
-        if !merged.is_empty() && merged.iter().all(|parent| {
+        let approved_import = merged.iter().any(|parent| identity.approved_merge_parents.contains(parent));
+        if !approved_import && !merged.is_empty() && merged.iter().all(|parent| {
             git_commit_is_ancestor(repo, parent, &target)
                 || upstream.iter().any(|reference|
                     git_commit_is_ancestor(repo, parent, &reference[1..]))
@@ -465,6 +471,9 @@ fn merge_brings_foreign_work(
     identity: &TaskCommitIdentity,
 ) -> bool {
     for parent in merged_parents {
+        if identity.approved_merge_parents.contains(parent) {
+            continue;
+        }
         let exclude_first = format!("^{first_parent}");
         let exclude_target = format!("^{target}");
         let Some(brought) = git_text(
@@ -515,13 +524,17 @@ pub(super) fn upstream_refs(repo: &Path, target: &str, task: &Task) -> Vec<Strin
         .map(|reference| format!("^{reference}"))
         .into_iter()
         .collect();
-    refs.extend(task.deliverables.authorized_merge_sources.iter().filter(|source| {
+    refs.extend(authorized_merge_parents(task).into_iter().map(|sha| format!("^{sha}")));
+    refs
+}
+
+pub(super) fn authorized_merge_parents(task: &Task) -> Vec<String> {
+    task.deliverables.authorized_merge_sources.iter().filter(|source| {
         Some(&source.work_target) == task.deliverables.work_target.as_ref()
             && !source.supervisor_id.trim().is_empty()
             && matches!(source.commit.len(), 40 | 64)
             && source.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-    }).map(|source| format!("^{}", source.commit)));
-    refs
+    }).map(|source| source.commit.to_ascii_lowercase()).collect()
 }
 
 /// The ref whose history counts as released upstream for a lane bound to
@@ -720,9 +733,11 @@ fn task_delivery_selection(
             // cas-f2eb: likewise a merge that brings another task's work
             // (an epic tip the target does not hold yet, or main) imports
             // that work; only the task's own commits around it are delivery.
+            let approved_import = c.merged_parents.iter()
+                .any(|parent| window.identity.approved_merge_parents.contains(parent));
             if candidate
                 && c.merge
-                && (is_target_sync_merge(repo, &c.merged_parents, &target)
+                && ((!approved_import && is_target_sync_merge(repo, &c.merged_parents, &target))
                     || merge_brings_foreign_work(
                         repo,
                         &c.parent,
@@ -2235,6 +2250,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-taskb".into()),
                 known_commits: vec![],
@@ -3466,6 +3482,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-taskb".into()),
             known_commits: vec![tip.clone()],

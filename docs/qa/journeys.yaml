@@ -49,6 +49,10 @@ bug_families:
     tasks: [cas-f499]
     invariants: [FACTORY-CLOSE-PAIR-SCHEMA]
     journeys: [FACTORY-CLOSE]
+  approved-epic-integration-parent:
+    title: An active integration parks with its exact supervisor-approved merge parent and pushed-tip proof while other side history stays subject to attribution
+    tasks: [cas-8a0f]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
   refused-close-owned-correction:
     title: Refused validation leaves no parked candidate and corrected owned lineage survives supervisor change requests
     tasks: [cas-56f1]

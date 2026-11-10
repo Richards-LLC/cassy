@@ -44,7 +44,7 @@ it("scopes server-shaped project epics to the supervisor and keeps the full boar
   const supervisors = ["supervisor", "supervisor-id"];
   expect(releaseProgress(epics, "release", tasks, supervisors)).toMatchObject({ title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5 } });
   expect(taskGroups(tasks, epics, [], false, supervisors, "release").map(group => group.tasks.map(task => task.id))).toEqual([
-    ["merge", "blocked"], ["work"], ["ready"],
+    [], ["merge", "blocked", "work"], ["ready"],
   ]);
   expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("other");
   expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("unknown");

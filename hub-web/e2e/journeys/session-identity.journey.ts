@@ -49,7 +49,8 @@ for (const identity of ["resume", "replacement", "unknown"] as const) {
   });
 }
 
-test("HUB-J14 a stopped catalog before journal restoration still exposes the saved message", journeyPart, async ({ page, journey }) => {
+for (const order of ["catalog-first", "journal-first"] as const) {
+test(`HUB-J14 a stopped catalog ${order === "catalog-first" ? "before" : "after"} journal restoration still exposes the saved message`, journeyPart, async ({ page, journey }) => {
   const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "restore-test", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };
   const hub = await journey.hub({ machines: [machine], paired: [machine.id], multiplex: true });
   await journey.open(); await showConversationList(page); await page.locator(".conversation-row").click();
@@ -60,7 +61,18 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   await page.getByRole("button", { name: /^Send to the .+ supervisor$/ }).click();
   await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
   machine.sessions[0]!.liveness = "stale_metadata";
-  await page.addInitScript(() => {
+  await page.addInitScript((order) => {
+    // A cold catalog makes the initial empty list observable before the reply.
+    if (order === "catalog-first") localStorage.removeItem("cas-commander-conversation:catalog:v1");
+    const fetch = window.fetch;
+    let releaseCatalog!: () => void;
+    const catalogReady = new Promise<void>(resolve => { releaseCatalog = resolve; });
+    (window as unknown as { releaseCatalog: () => void }).releaseCatalog = releaseCatalog;
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const url = new URL(args[0] instanceof Request ? args[0].url : String(args[0]), location.href);
+      if (url.pathname === "/v1/sessions") await catalogReady;
+      return fetch(...args);
+    };
     const original = IDBFactory.prototype.open;
     const pending: (() => void)[] = [];
     let released = false;
@@ -75,13 +87,24 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
       }
       return request;
     };
-  });
+  }, order);
   await hub.up(machine.id); await page.reload();
+  if (order === "journal-first") {
+    await page.evaluate(() => (window as unknown as { releaseDelivery: () => void }).releaseDelivery());
+    // The cached conversation proves restoration finished before the catalog.
+    await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
+    await showConversationList(page);
+  }
+  const stoppedCatalog = page.waitForResponse(response => response.url() === "https://atlas.test/v1/sessions" && response.ok());
+  await page.evaluate(() => (window as unknown as { releaseCatalog: () => void }).releaseCatalog());
+  await stoppedCatalog;
+  // Zero rows alone also matches the initial render before a catalog arrives.
+  await expect(page.locator("#conversation-empty")).toHaveAttribute("data-state", "text");
   await expect(page.locator(".conversation-row")).toHaveCount(0);
   // Later polls fail: the first positive stopped response must be enough.
   await page.route("https://atlas.test/v1/sessions", route => route.abort("failed"));
-  await page.evaluate(() => (window as unknown as { releaseDelivery: () => void }).releaseDelivery());
-  await journey.stage("Journal restoration applies the already confirmed stop", async () => {
+  if (order === "catalog-first") await page.evaluate(() => (window as unknown as { releaseDelivery: () => void }).releaseDelivery());
+  await journey.stage("Saved words survive both catalog and journal arrival orders", async () => {
     const saved = page.getByRole("region", { name: "Saved messages" });
     await expect(saved).toBeVisible();
     await saved.locator("summary").click();
@@ -89,6 +112,7 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
     expect(hub.sends).toHaveLength(0);
   });
 });
+}
 
 test("HUB-J14 a live explicit send does not depend on a catalog read", journeyPart, async ({ page, journey }) => {
   const machine: Machine = { id: "atlas", label: "Atlas", sessions: [{ name: "live-send", project_dir: "/projects/cas-src", supervisor: "supervisor", workers: [], liveness: "live", started_at: journeyStamp(-60000) }] };

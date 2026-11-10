@@ -5067,10 +5067,12 @@ fn harness_session_scratchpad_pattern(session_id: &str) -> [&str; 5] {
 pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
     use std::path::Component;
 
-    let path = path.strip_prefix("/private").unwrap_or(path);
-    let mut components = path.components();
+    let mut components = path.components().peekable();
     if components.next() != Some(Component::RootDir) {
         return false;
+    }
+    if components.peek() == Some(&Component::Normal(std::ffi::OsStr::new("private"))) {
+        components.next();
     }
     for (index, expected) in harness_session_scratchpad_pattern(session_id).iter().enumerate() {
         let Some(Component::Normal(actual)) = components.next() else {

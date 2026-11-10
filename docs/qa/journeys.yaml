@@ -372,6 +372,18 @@ bug_families:
     title: A refused restart bind preserves the running hub's PID and serving health before either service or detached lifecycle mutation
     tasks: [cas-aa18]
     journeys: [HUB-J11]
+  release-report-message-permalink:
+    title: Report receipts preserve distinct provider-returned upload-message and file permalinks, including thread context
+    tasks: [cas-bbf4]
+    journeys: [CLI-RELEASE]
+  worker-respawn-handoff-isolation:
+    title: Recycling keeps task handoffs in artifacts and parking refuses new or retained repo-root handoffs from the delivered commit
+    tasks: [cas-c55fa]
+    journeys: [FACTORY-CLOSE, FACTORY-SPAWN, HUB-J26]
+  advancing-owned-child-work:
+    title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
+    tasks: [cas-8a87]
+    journeys: [HUB-J26, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1110,7 +1122,7 @@ journeys:
   kind: cli
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Read the release publication receipt]
-  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/finding_triage.rs]
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

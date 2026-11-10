@@ -4401,6 +4401,39 @@ impl CasService {
         // WorkerSpec consumers ignore this compatible metadata field.
         spec_payload["dead_worker_recovery"] = serde_json::Value::Bool(recovering_dead_worker);
         let spec_json = spec_payload.to_string();
+        // Keep a fallback checkpoint outside the checkout before replacing a
+        // harness. An authored handoff wins; never truncate or overwrite it.
+        let handoffs = (|| -> anyhow::Result<()> {
+            use std::io::Write;
+            let config = crate::config::Config::load(&self.inner.cas_root)?;
+            let artifacts = crate::config::resolved_factory_artifact_paths(
+                &self.inner.cas_root, config.factory().artifacts_root.as_deref(),
+            );
+            for task in tasks.iter().filter(|task| {
+                task.assignee.as_deref().is_some_and(|name| name == worker.name || name == worker.id)
+                    && matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked)
+            }) {
+                let dir = artifacts.project_root.join(&task.id);
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join("HANDOFF.md");
+                if path.try_exists()? {
+                    continue;
+                }
+                let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+                write!(file, "# Worker handoff: {}\n\n{}\n\n## Task\n{}\n\n{}\n\n## Notes\n{}\n",
+                    task.id, snapshot.render_state(), task.title, task.description, task.notes)?;
+                match file.persist_noclobber(&path) {
+                    Ok(_) => {},
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+            Ok(())
+        })();
+        handoffs.map_err(|error| Self::error(
+            ErrorCode::INTERNAL_ERROR,
+            format!("recycle_worker refused: could not save task-artifact handoff: {error}. Nothing was queued."),
+        ))?;
         let request_id = queue
             .enqueue_recycle(worker_name, Some(&spec_json), factory_session.as_deref())
             .map_err(|error| {
@@ -12514,7 +12547,13 @@ pub(crate) fn worker_liveness_for_agent(
         .resolution,
         cli,
     );
-    let process = super::worker_liveness::process_evidence(agent);
+    let mut process = super::worker_liveness::process_evidence(agent);
+    if super::worker_liveness::child_progress(agent, now)
+        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
+    {
+        process.cpu_busy = Some(true);
+        process.detail.push_str("; owned child CPU/output advanced within the stall window");
+    }
     if cli == cas_mux::SupervisorCli::OpenCode {
         if let Some(mapped) = super::opencode_liveness::observe(
             cas_root,

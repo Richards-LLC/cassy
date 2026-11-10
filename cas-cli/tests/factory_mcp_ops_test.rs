@@ -15164,8 +15164,16 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
         let env = FactoryTestEnv::new();
         let path = init_pushed_worker_repo(&env, "checkpoint-worker");
         let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);
-        let handoff = env.cas_root.join("HANDOFF.md");
-        std::fs::write(&handoff, "Continue from this durable checkpoint.\n").unwrap();
+        let config = cas::config::Config::load(&env.cas_root).unwrap();
+        let artifacts_base = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let handoff = cas::config::factory_task_artifact_dirs(
+            &env.cas_root, &artifacts_base, "cas-3111",
+        )[0].join("HANDOFF.md");
+        let authored_checkpoint = "Keep this authored next command and open question.\n";
+        if action == "clear_context" {
+            std::fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+            std::fs::write(&handoff, authored_checkpoint).unwrap();
+        }
         let mut before = Vec::new();
         for (id, status) in [
             ("cas-3111", TaskStatus::InProgress),
@@ -15175,7 +15183,7 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
             let mut task = Task::new(id.into(), format!("checkpoint {id}"));
             task.status = status;
             task.assignee = Some("checkpoint-worker".into());
-            task.notes = format!("HANDOFF: {}", handoff.display());
+            task.notes = "Checkpoint: finish the remaining regression and park the pushed tip.".into();
             env.task_store().add(&task).unwrap();
             before.push((
                 id,
@@ -15228,7 +15236,13 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
             agent
         );
         assert_eq!(std::fs::read(path.join("README")).unwrap(), checkout);
-        assert!(handoff.is_file(), "the durable handoff survives");
+        let checkpoint = std::fs::read_to_string(&handoff).expect("recycle writes a durable task handoff");
+        if action == "clear_context" {
+            assert_eq!(checkpoint, authored_checkpoint);
+        } else {
+            assert!(checkpoint.contains(&env.task_store().get("cas-3111").unwrap().notes));
+        }
+        assert!(!path.join("HANDOFF.md").exists(), "recycle never writes scratch notes in the checkout");
         assert!(
             env.prompt_queue().peek_all(10).unwrap().is_empty(),
             "Codex reset uses recycle, not an unsupported /clear"

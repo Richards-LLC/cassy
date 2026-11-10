@@ -18511,7 +18511,19 @@ pub(crate) fn resolve_close_gate_repo_root(
 ) -> Result<std::path::PathBuf, String> {
     use std::process::Command;
 
-    for ancestor in cas_root.ancestors() {
+    // Like Git's own discovery, never move up into a GIT_CEILING_DIRECTORIES
+    // entry: a fixture beneath an unrelated checkout must not bind to it.
+    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let ceilings: Vec<std::path::PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map(|value| std::env::split_paths(&value)
+            .filter(|path| path.is_absolute())
+            .map(|path| canonical(&path))
+            .collect())
+        .unwrap_or_default();
+    for (index, ancestor) in cas_root.ancestors().enumerate() {
+        if index > 0 && ceilings.contains(&canonical(ancestor)) {
+            break;
+        }
         if !ancestor.join(".git").exists() {
             continue;
         }
@@ -19015,6 +19027,11 @@ mod parent_branch_resolver_tests {
 
         let resolved = resolve_close_gate_repo_root(&cas_root).expect("ancestor repo must resolve");
         assert_eq!(resolved, dir.path().canonicalize().unwrap());
+
+        // cas-e1db: a ceiling between the root and the checkout stops the walk.
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("GIT_CEILING_DIRECTORIES", dir.path().join("state"));
+        resolve_close_gate_repo_root(&cas_root).expect_err("the walk must not cross a ceiling");
     }
 
     #[test]

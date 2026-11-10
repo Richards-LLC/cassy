@@ -182,6 +182,13 @@ reconciliation cannot replace a same-name supervisor on another machine.
 Legacy handoffs without a machine stamp remain readable through memory tools
 but cannot inject approvals into startup.
 
+Memory updates discard caller-supplied `handoff-machine:` and `handoff-owner:`
+values and retain existing stamps when replacing ordinary tags. Removing and
+restoring the `handoff` tag cannot change that lineage. When an ordinary entry
+without existing stamps becomes a handoff, its authenticated writer supplies
+the machine, owner and default role; editing an unstamped legacy handoff does
+not mint new provenance.
+
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
 parked refs/PRs, pending messages and asks at startup, with a full JSON receipt in

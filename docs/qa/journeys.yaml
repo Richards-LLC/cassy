@@ -589,6 +589,10 @@ invariants:
     statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.
     check: Verify committed dist/app.js reads the card's stateLabel and omits the legacy Activity button. Run work-picture.test.ts for active, executing, blocked, parked and offline data and both HUB-J25 worker timeline parts. Inspect J03 for the flat name opener and restored focus, including the phone overflow route. In batch QA compare card, timeline and Team state words and inspect long-title wrapping.
     bug: {task: cas-0d5e}
+  FACTORY-SOURCE-REACTIONS:
+    statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, observed takeover revokes the former owner's status-only authority even after claim expiry, confirmed terminal sources quiesce until task changes or explicit retry, and a shared five-second pass budget cannot delay mention admission.
+    check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences plus source_reaction_deadline_defers_remaining_calls against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
+    bug: {task: cas-c610}
   FACTORY-MANAGED-MENTION-CLAIMS:
     statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker that wakes that owner without claiming proactively.
     check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay, exact owner destination and Blocker classification of the actual queued prompt through daemon wake admission; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
@@ -1318,6 +1322,16 @@ invariants:
     bug: {task: cas-4cdd}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
+- id: FACTORY-SOURCE-REACTIONS
+  name: Keep source Slack status consistent with acknowledged work and staging delivery
+  status: live
+  kind: factory
+  entry: {url: 'cli:cas violet reactions', trigger: Audit the running factory's source status}
+  steps: [Accept source work, Start the task, Confirm its recorded delivery on staging, Audit reaction status and pending retries]
+  owners: [cas-cli/src/coordination/source_reactions.rs, cas-cli/src/coordination/source_reactions/tests.rs, cas-cli/src/ui/factory/daemon/runtime/violet_reactions.rs, cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs, cas-cli/src/cli/violet_cmd/mod.rs]
+  invariants: [FACTORY-SOURCE-REACTIONS]
+  spec: cas-cli/src/coordination/source_reactions/tests.rs
+  traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SUPERVISE
   name: Keep a factory supervisor running and accepting work
   status: live

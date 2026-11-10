@@ -157,6 +157,30 @@ fn run_cli_at(
     (String::from_utf8(out).unwrap(), result)
 }
 
+#[test]
+fn source_reaction_audit_cli_is_local() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let temp = TempDir::new().unwrap();
+    let root = crate::store::init_cas_dir(temp.path()).unwrap();
+    let mut task = cas_types::Task::new("cas-audit".into(), "Source work".into());
+    task.external_ref = Some("https://example.slack.com/archives/C123/p1710000000000001".into());
+    crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+    let hub = ScriptedHub::default();
+    for argv in [vec!["reactions"], vec!["reactions", "--retry"]] {
+        let (output, result) = run_cli_at(&argv, &hub, true, &|_| None, None, Some(&root));
+        result.unwrap();
+        let receipt: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(receipt["sources"][0]["tasks"], json!(["cas-audit"]));
+        assert_eq!(receipt["sources"][0]["desired"], "eyes");
+        assert_eq!(receipt["sources"][0]["observed_at"], Value::Null);
+        assert_eq!(receipt["sources"][0]["pending"], true);
+    }
+    let (output, error) = run_cli(&["reactions"], &hub, true, &|_| None);
+    assert_eq!(error.unwrap_err().code, "project_required");
+    assert_eq!(serde_json::from_str::<Value>(&output).unwrap()["error"]["code"], "project_required");
+    assert_eq!(hub.0.borrow().connects, 0);
+}
+
 fn no_gate(_: &Value) -> Option<String> {
     None
 }

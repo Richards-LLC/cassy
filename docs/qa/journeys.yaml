@@ -460,6 +460,10 @@ bug_families:
     title: Memory edits retain writer-assigned machine and owner stamps and authenticated writers stamp new handoff conversions
     tasks: [cas-6733]
     journeys: [HUB-J26, FACTORY-SUPERVISE]
+  accounts-default-and-stale-reset:
+    title: The default account card shows its badge without Set default, and a reset already past is never shown as a time
+    tasks: [cas-eae3]
+    journeys: [HUB-J13]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

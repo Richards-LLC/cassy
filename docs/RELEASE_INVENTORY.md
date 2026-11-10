@@ -62,8 +62,8 @@ SHA; their anchor and shipped commit are null.
 `cancelled`, `missing_anchor`, `retired_anchor`, `missing_base`, `invalid_base`,
 `missing_mapping`, `missing_no_code_proof`, `quarantined`. A delivery may also have a base
 exception: callers must inspect both arrays. The inventory does not grant QA,
-review, content-preservation or close admission, and does not alter existing
-publication scripts or the current installed/backfill closer.
+review, content-preservation or close admission. The resolver itself performs
+no publication or lifecycle writes; adapter integration is described below.
 
 Quarantined rows remain suppressed on the ordinary task board. The resolver
 uses the existing by-ID inspection path to preserve their shipped facts and
@@ -114,9 +114,46 @@ after release preparation; an unreviewed product/configuration change requires
 new affected proof rather than an ancestry-only transfer.
 
 QA walk receipts, independent review receipts and published-tag shipping
-verdicts keep their distinct kinds. The inventory close entry requires independent review; shipping alone never
-creates a review or a QA PASS.
+verdicts keep their distinct kinds. The inventory close entry requires
+independent review; shipping alone never creates a review or a QA PASS.
 Missing bytes, bad bindings, changed task versions, unknown producers or lost
 source leave the delivery held. Existing receipt callbacks also pin ordinary
 close to their reviewed SHA; full inventory adapters additionally supply the
 validated release transformation manifest.
+
+## GitHub issue outcomes after task reconciliation
+
+This stage consumes the same immutable inventory and the delivery outcome map
+returned by `CasCore::close_release_inventory_outcomes`. It runs after local
+close decisions; issue-side failures remain separate from those decisions.
+
+`issue_reconcile::reconcile_release_issues(root: &Path, repo: &Path,
+ inventory: &ReleaseInventory, close_results: &BTreeMap<String, CassyMergeClose>)
+ -> Vec<IssueOutcome>` runs after the delivery close calls. `CassyMergeClose`
+comes from `mcp::tools::core::task::lifecycle::merge_close`. Each serializable
+`IssueOutcome` has `issue`, `action` (`closed`, `partial`, `failed`, `skipped`),
+`comment_or_error`, and sorted `task_ids`. The next release receipt should embed
+this vector directly; issue failures do not undo successful local task closes.
+
+The incoming inventory selects candidate issues through `task_issue_refs`.
+The function reloads every referencing task, including quarantined rows and
+terminal deliveries outside the original scope, and expands that scope through
+the same inventory resolver. As with `shipped_open_issues`, cancelled attempts
+do not keep an otherwise complete issue open. Every remaining reference must
+be closed and have proven shipped membership; a held close or quarantine keeps
+the issue partial. Missing/invalid start bases do not erase proven ancestry of
+an already closed task. Explicit no-code membership still needs the scope's
+portable proof. Referencing task versions are checked again after GitHub reads;
+changes require a fresh run.
+
+GitHub reads and writes share the existing six-second deadline and repository
+bound. A successful close uses reason `completed` and a comment naming the
+release identity, immutable final SHA and every referencing task. Already closed
+issues are skipped on replay. Partials and every read/write failure remain named
+outcomes; offline does not mean closed. Dry runs never contact GitHub.
+
+The current installed/backfill adapter invokes this function after closes and
+atomically saves `.cas/releases/<tag>-issues.json` with `scope` and `issues`, then
+includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
+exists for historical releases that have no tracked cut receipt. Publication
+verification precedes this stage; the issue helper never publishes a release.

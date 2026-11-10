@@ -341,6 +341,10 @@ bug_families:
     title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
     tasks: [cas-3623]
     journeys: [FACTORY-CLOSE]
+  release-issue-completion:
+    title: Published releases close complete issues, retain shared or hidden unfinished fixes, and name transport failures without duplicate success comments
+    tasks: [cas-a992]
+    journeys: [CLI-RELEASE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

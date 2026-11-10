@@ -1,3 +1,3 @@
-title: Superseded transcript mirrors expire without a supervisor wake while undelivered operator actions retain watchdog alerts
+title: Old transcript mirrors stay quiet while recent actionable mirrors batch once and explicit operator actions retain watchdog alerts
 tasks: [cas-31c9]
 journeys: [FACTORY-SUPERVISE, HUB-J5]

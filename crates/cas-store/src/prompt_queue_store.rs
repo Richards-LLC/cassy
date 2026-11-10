@@ -66,6 +66,59 @@ const OPERATOR_LANE_EXCLUSION: &str =
 // Expiring their queue replay never removes the independent delivery snapshot.
 const TRANSCRIPT_MIRROR: &str =
     "lower(target) = 'operator' AND source = 'supervisor' AND dedupe_key LIKE 'commander-mirror:%'";
+const MIRROR_ALERT_GRACE_SECS: i64 = 5 * 60;
+const MIRROR_ALERT_WINDOW_SECS: i64 = 60 * 60;
+const MIRROR_ALERT_BATCH_LIMIT: usize = 50;
+
+// Bound the poll by the mirror's own indexed age, never session registration.
+// Only verified operator input (or locally recorded terminal input) binds an answer.
+const RECENT_MIRROR_ACTIONS_SQL: &str = r#"
+SELECT q.id FROM prompt_queue q INDEXED BY idx_prompt_queue_pending_mirror_age
+WHERE q.factory_session = ?1 AND q.created_at > ?2 AND q.created_at < ?3
+  AND q.processed_at IS NULL AND q.transport_delivered_at IS NULL
+  AND q.acked_at IS NULL AND q.delivery_stalled_notified_at IS NULL
+  AND q.source = 'supervisor' AND lower(q.target) = 'operator'
+  AND q.dedupe_key LIKE 'commander-mirror:%'
+  AND q.kind IN ('ask', 'blocker', 'answer')
+  AND (q.kind IN ('ask', 'blocker') OR (q.kind = 'answer' AND
+       CASE WHEN json_valid(q.prompt) THEN
+         json_type(q.prompt, '$.reply_to') = 'integer' AND EXISTS (
+           SELECT 1 FROM prompt_queue a
+           WHERE a.id = json_extract(q.prompt, '$.reply_to') AND a.id < q.id
+             AND a.factory_session = q.factory_session AND a.created_at <= q.created_at
+             AND ((a.source LIKE 'commander:%' AND a.origin_kind = 'paired_device'
+                   AND a.operator_verified = 1 AND a.target IN ('supervisor', ?4))
+                  OR (a.source = 'terminal' AND a.target = 'terminal-history'))
+         ) ELSE 0 END))
+ORDER BY q.created_at, q.id LIMIT ?5
+"#;
+
+struct PendingMirrorAlert {
+    sender: String,
+    session: String,
+    ids: Vec<i64>,
+}
+
+fn pending_mirror_alert(conn: &Connection, now: DateTime<Utc>) -> Result<Option<PendingMirrorAlert>> {
+    if !agents_table_exists(conn)? {
+        return Ok(None);
+    }
+    let supervisor = conn.query_row(
+        "SELECT name, factory_session FROM agents
+         WHERE role = 'supervisor' AND status IN ('active', 'idle') AND factory_session IS NOT NULL
+         ORDER BY last_heartbeat DESC, id LIMIT 1",
+        [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    ).optional()?;
+    let Some((sender, session)) = supervisor else { return Ok(None); };
+    let ids = conn.prepare_cached(RECENT_MIRROR_ACTIONS_SQL)?.query_map(
+        params![session, (now - chrono::Duration::seconds(MIRROR_ALERT_WINDOW_SECS)).to_rfc3339(),
+            (now - chrono::Duration::seconds(MIRROR_ALERT_GRACE_SECS)).to_rfc3339(),
+            sender, MIRROR_ALERT_BATCH_LIMIT as i64],
+        |row| row.get::<_, i64>(0),
+    )?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok((!ids.is_empty()).then_some(PendingMirrorAlert { sender, session, ids }))
+}
+
 const PROMPT_RETRY_BASE_DELAY_MS: i64 = 250;
 const PROMPT_RETRY_MAX_DELAY_MS: i64 = 5_000;
 /// Exact-content worker reports are collapsed only while a recent,
@@ -853,6 +906,12 @@ const PROMPT_QUEUE_SESSION_HISTORY_INDEX: &str = r#"
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_session_history
     ON prompt_queue(factory_session, id)
     WHERE factory_session IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_prompt_queue_pending_mirror_age
+    ON prompt_queue(factory_session, created_at, id)
+    WHERE lower(target) = 'operator' AND source = 'supervisor'
+      AND kind IN ('ask', 'blocker', 'answer')
+      AND processed_at IS NULL AND transport_delivered_at IS NULL
+      AND acked_at IS NULL AND delivery_stalled_notified_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_attention
     ON prompt_queue(factory_session,
         COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END), id)
@@ -10182,7 +10241,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let cutoff = (Utc::now() - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            let sweep_at = Utc::now();
+            let cutoff = (sweep_at - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
             // cas-1bc7: every inbox poll runs this sweep. Look for a candidate
             // without the write lock first, so a sweep with nothing to expire
             // never queues behind another writer. A row that turns stale after
@@ -10197,11 +10257,33 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 params![cutoff],
                 |row| row.get(0),
             )?;
-            if !any_candidate {
+            if !any_candidate && pending_mirror_alert(&conn, sweep_at)?.is_none() {
                 return Ok(Vec::new());
             }
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let now = Utc::now().to_rfc3339();
+            let now = sweep_at.to_rfc3339();
+
+            // Re-select under the write lock: a device receipt since the probe
+            // cancels its alarm. The notice and each row's dedupe marker commit
+            // together, so subsequent polls cannot replay this batch.
+            if let Some(alert) = pending_mirror_alert(&tx, sweep_at)? {
+                let ids = alert.ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                tx.execute(
+                    "INSERT OR IGNORE INTO prompt_queue
+                        (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, kind, dedupe_key)
+                     VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', 'blocker', ?6)",
+                    params![alert.sender,
+                        format!("Messages {ids} to operator have no device receipt after five minutes. These recent asks, blockers or answers to operator input need delivery review; the durable outbox still retries. Review the original messages with message_status.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
+                        now, alert.session, "Recent operator decisions awaiting delivery",
+                        format!("operator-mirror-undelivered:{}", alert.ids[0])],
+                )?;
+                for id in alert.ids {
+                    tx.execute(
+                        "UPDATE prompt_queue SET delivery_stalled_notified_at = ?1 WHERE id = ?2",
+                        params![now, id],
+                    )?;
+                }
+            }
 
             // Retire aged transcript duplicates without fabricating a device
             // receipt or altering their durable operator outbox retry. Every
@@ -16433,6 +16515,16 @@ mod tests {
         ).unwrap().id();
         backdate(&store, operator_ask, 12 * 60);
         store.mark_processed(operator_ask).unwrap();
+        let terminal_ask = store.record_terminal_operator_turn("factory-a", "May we proceed from the terminal?").unwrap();
+        backdate(&store, terminal_ask, 12 * 60);
+        let unverified = store.enqueue_operator_message(
+            "commander:Unknown@phone", "current-supervisor", "Unverified input", Some("factory-a"),
+            None, None, false, None,
+            &OperatorStamp { operator: "Unknown".into(), device_id: "phone".into(),
+                device_label: "phone".into(), scopes: vec![], verified: false },
+        ).unwrap().id();
+        backdate(&store, unverified, 12 * 60);
+        store.mark_processed(unverified).unwrap();
         let unrelated = store.enqueue_with_session("worker", "current-supervisor", "worker report", "factory-a").unwrap();
         backdate(&store, unrelated, 12 * 60);
         store.mark_processed(unrelated).unwrap();
@@ -16452,6 +16544,7 @@ mod tests {
             mirror("recent-receipt", "receipt", 6 * 60, None),
             mirror("unlinked-answer", "answer", 6 * 60, None),
             mirror("answer-to-worker", "answer", 6 * 60, Some(unrelated)),
+            mirror("answer-to-unverified", "answer", 6 * 60, Some(unverified)),
             mirror("still-delivering", "ask", 60, None),
             mirror("outside-replay-window", "ask", 61 * 60, None),
         ];
@@ -16461,7 +16554,17 @@ mod tests {
             mirror("recent-ask", "ask", 6 * 60, None),
             mirror("recent-blocker", "blocker", 6 * 60, None),
             mirror("answer-to-operator", "answer", 6 * 60, Some(operator_ask)),
+            mirror("answer-to-terminal", "answer", 6 * 60, Some(terminal_ask)),
         ];
+        {
+            let conn = store.conn.lock().unwrap();
+            let plan = conn.prepare(&format!("EXPLAIN QUERY PLAN {RECENT_MIRROR_ACTIONS_SQL}")).unwrap()
+                .query_map(params!["factory-a", (Utc::now() - chrono::Duration::minutes(60)).to_rfc3339(),
+                    (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339(), "current-supervisor", MIRROR_ALERT_BATCH_LIMIT as i64],
+                    |row| row.get::<_, String>(3)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            // pin: SQLite's machine query-plan identifier proves the created_at range index is used.
+            assert!(plan.iter().any(|step| step.contains("idx_prompt_queue_pending_mirror_age")));
+        }
         store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
         let notices = store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 20).unwrap();
         assert_eq!(notices.len(), 1);
@@ -16482,6 +16585,16 @@ mod tests {
         store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
         assert_eq!(store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 20).unwrap()
             .iter().map(|row| row.id).collect::<Vec<_>>(), vec![notices[0].id]);
+        // A later sweep with no stale rows still detects new recent actions.
+        let next = mirror("next-sweep-ask", "ask", 6 * 60, None);
+        store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        let after = store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 20).unwrap();
+        assert_eq!(after.len(), 2);
+        assert!(store.conn.lock().unwrap().query_row(
+            "SELECT delivery_stalled_notified_at IS NOT NULL FROM prompt_queue WHERE id = ?1", [next],
+            |row| row.get::<_, bool>(0),
+        ).unwrap());
+
     }
 
     #[test]

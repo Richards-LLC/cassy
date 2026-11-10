@@ -1,3 +1,3 @@
 ### Fixed — Factory
 
-- **Retire expired transcript copies quietly** — An aged Commander transcript replay no longer creates a supervisor blocker, including copies from the current session. Durable outbox retries and alerts for undelivered operator asks or decisions continue.
+- **Bound transcript delivery alarms to recent decisions** — Ask/blocker mirrors and answers linked to operator input get one batched alert only after five minutes without a device receipt and before an hour has passed. Old replay copies and informational turns stay quiet, with durable deduplication and outbox retries preserved.

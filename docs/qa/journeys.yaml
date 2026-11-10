@@ -424,6 +424,10 @@ bug_families:
     title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
     tasks: [cas-919d]
     journeys: [FACTORY-SPAWN, HUB-J26]
+  long-sandbox-daemon-socket:
+    title: Long canonical store paths use a private bounded daemon socket so native caller discovery, reminders and handoffs work without manual registration
+    tasks: [cas-d9bd]
+    journeys: [FACTORY-SPAWN]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

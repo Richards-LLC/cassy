@@ -2,7 +2,7 @@
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
 import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
-const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
+const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function() { this.removeAttribute("open"); this.dispatchEvent(new Event("close")); };
@@ -135,7 +135,9 @@ it("formats reset and observation times locally in 12-hour form and clears expir
   const now = new Date("2026-10-28T16:00:00Z").getTime();
   const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
   expect(fresh).toContain("weekly"); expect(fresh).toContain("62%"); expect(fresh).toContain(accountTime("2026-10-28T13:00:00Z")); expect(fresh).toMatch(/AM|PM/);
-  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, resetPast: true });
+  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, reset: null });
+  // cas-eae3: a reset already past is a stale fact, not a time to show.
+  expect(accountCapacity([{ name: "weekly", used_percent: null, resets_at: "2026-10-27T16:00:00Z" }], null, now)).toEqual(["weekly usage unknown"]);
   const zone = process.env.TZ;
   try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
   finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }

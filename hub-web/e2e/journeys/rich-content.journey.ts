@@ -379,6 +379,8 @@ for (const variant of variants) {
         hub.supervisorSays(PELICAN, `Epic progress, ready for review.\n\n![Epic progress at desktop width](${shown})\n\n![Outside the artifacts directory](/etc/shadow.png)\n\n![Remote](https://example.com/x.png)`);
         const image = log.getByRole("img", { name: "Epic progress at desktop width" });
         await expect(image).toBeVisible();
+        // cas-a16f: visible passes on the placeholder; the opener turns ready on the image's load event.
+        await expect(log.getByRole("button", { name: "Epic progress at desktop width. Enlarge image" })).toHaveAttribute("data-state", "ready");
         expect(await image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
         await expect(log).toContainText("![Outside the artifacts directory](/etc/shadow.png)");
         await expect(log).toContainText("![Remote](https://example.com/x.png)");

@@ -603,6 +603,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await palette.getByRole("button", { name: /Paired machines/ }).click();
     await expect(paired).toBeVisible();
     await expect(palette).toBeHidden();
+    // cas-5e8b: the chips clear the description, Close is a 40px circle and
+    // the installations control has an action pill's edge.
+    const hint = (await paired.locator(".machine-register-hint").boundingBox())!;
+    const chips = (await paired.locator("#paired-machine-filters").boundingBox())!;
+    expect(chips.y - (hint.y + hint.height)).toBeGreaterThanOrEqual(12);
+    expect(await paired.locator("#paired-machines-close").evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return [box.width, box.height, parseFloat(getComputedStyle(node).borderTopLeftRadius) >= box.height / 2];
+    })).toEqual([40, 40, true]);
+    expect(await paired.getByRole("button", { name: /^Browser installations on / }).first().evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
     await page.locator("#paired-machines-close").click();
     await expect(paired).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();

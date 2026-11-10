@@ -506,6 +506,11 @@ bug_families:
     title: A failed browser installations list names the machine and list in a capitalised sentence and offers Retry, which reloads it
     tasks: [cas-0dcf]
     journeys: [HUB-J2]
+  missing-release-evidence:
+    title: Missing release trains and unavailable merge counts render as quiet evidence rather than headline or bold count text
+    tasks: [cas-504e9]
+    journeys: [HUB-J17, HUB-J26]
+    invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -544,6 +549,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-RELEASE-UNKNOWN-EVIDENCE:
+    statement: Without a reported release train, the shared rail and Team release renderer emits one evidence paragraph with no heading or emphasized count; known releases retain their titles while unavailable counts stay evidence.
+    check: Run fleet-ops.test.ts through releaseHeader with absent and partial release data. In batch QA inspect the empty rail and Team at phone and desktop widths in light and dark, using the regular ink-mid meta style.
+    bug: {task: cas-504e9}
   HUB-TASK-TITLE-FIRST:
     statement: Worker card task text, Show work task chips, worker timeline subjects and write-access options lead with the reported task title; task IDs remain secondary metadata and option values retain exact routing IDs.
     check: Run work-picture.test.ts and write-grant.test.ts through the real DOM renderers. In batch QA inspect the four surfaces on desktop and phone with long titles and unavailable titles; preserve state badges, escaped text, event detail and write-access routing.
@@ -2741,6 +2750,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-RELEASE-UNKNOWN-EVIDENCE
   - HUB-TASK-TITLE-FIRST
   - HUB-J17-WORKER-NAME
   - HUB-J17-FOCUS-CHOICES
@@ -3236,7 +3246,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
+  invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

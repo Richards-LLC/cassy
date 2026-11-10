@@ -37,6 +37,12 @@ cat >"$tmp/bin/cas" <<'EOF'
 if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10-15)"; exit 0; fi
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
 if [[ "$1 $2" == "release installed" ]]; then
+    notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
+    printf 'notice=%s\n' "$notice_tag" >>"$FAKE_LOG"
+    if [[ "${FAKE_NOTICE_HANGS:-}" == "$notice_tag" ]]; then
+        exec perl -e '$SIG{TERM} = "IGNORE"; open my $f, ">", $ENV{FAKE_NOTICE_PID} or die $!; print $f "$$\n"; close $f; select undef, undef, undef, 60; exit 1;'
+    fi
+    [[ "${FAKE_NOTICE_FAIL_TAG:-}" == "$notice_tag" ]] && exit 1
     [[ "${FAKE_NOTICE_FAILS:-}" == 1 ]] && exit 1
     exit 0
 fi
@@ -114,6 +120,65 @@ FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 2 ]] && ! grep -q "cas update" "$FAKE_LOG"' 'cas-61e0: a pending notice retries once successfully without reinstalling'
+
+# cas-a00be: a pending older notice survives a newer installation, and is
+# attempted only after the update. All calls use the fixture binary.
+(
+    export XDG_STATE_HOME="$tmp/ordering-state"
+    mkdir -p "$XDG_STATE_HOME/cassy"
+    printf '{"tag_name":"v9.99.2","published_at":"2026-11-05T23:00:00Z","draft":false}\n' >"$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+    python3 - "$FAKE_LOG" "$FAKE_INSTALLED" "$XDG_STATE_HOME/cassy" <<'PY_ORDER'
+import json
+import pathlib
+import sys
+log = pathlib.Path(sys.argv[1]).read_text().splitlines()
+state = pathlib.Path(sys.argv[3])
+assert pathlib.Path(sys.argv[2]).read_text().strip() == "9.99.3"
+assert log.index("cas update --yes --version 9.99.3") < log.index("notice=v9.99.2")
+assert json.loads((state / "install-on-publish.pending.d/v9.99.2.json").read_text())["tag_name"] == "v9.99.2"
+PY_ORDER
+    [[ $? == 0 ]] || exit 1
+) && ok 'a newer install precedes retries and retains the older pending notice' || bad 'a newer install precedes retries and retains the older pending notice'
+
+# Exercise an actual hung, TERM-ignoring notice. A separate test deadline
+# bounds the red run too; kill only the process group this fixture started.
+(
+    export XDG_STATE_HOME="$tmp/timeout-state" FAKE_NOTICE_PID="$tmp/notice.pid"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.4 FAKE_NOTICE_HANGS=v9.99.4 RELEASE_NOTICE_TIMEOUT_SECONDS=1 python3 - "$installer" <<'PY_TIMEOUT'
+import os
+import pathlib
+import signal
+import subprocess
+import sys
+process = subprocess.Popen([sys.argv[1], "--once"], start_new_session=True, stdout=subprocess.DEVNULL)
+try:
+    assert process.wait(timeout=6) == 0
+except BaseException:
+    os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
+    raise
+pid = int(pathlib.Path(os.environ["FAKE_NOTICE_PID"]).read_text())
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
+    pass
+else:
+    raise AssertionError("timed-out notice survived")
+state = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy"
+assert (state / "install-on-publish.pending.d/v9.99.4.json").exists()
+assert not (state / "install-on-publish.notified.d/v9.99.4").exists()
+PY_TIMEOUT
+    [[ $? == 0 ]] || exit 1
+    FAKE_LATEST=v9.99.4 "$installer" --once >/dev/null
+    FAKE_LATEST=v9.99.4 "$installer" --once >/dev/null
+    [[ "$(grep -c '^notice=v9.99.4$' "$FAKE_LOG")" == 2 ]]
+    [[ "$(grep -c '^cas update ' "$FAKE_LOG")" == 1 ]]
+    [[ ! -e "$XDG_STATE_HOME/cassy/install-on-publish.pending.d/v9.99.4.json" ]]
+) && ok 'a hung notice releases the lock, stays pending and retries once successfully' || bad 'a hung notice releases the lock, stays pending and retries once successfully'
+echo 9.99.2 >"$FAKE_INSTALLED"
 
 # 3. A second host leaves the completed timer alone.
 echo 9.99.1 >"$FAKE_INSTALLED"

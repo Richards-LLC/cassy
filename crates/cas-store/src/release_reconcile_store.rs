@@ -1,6 +1,6 @@
 //! One durable closeout record per immutable project/release/commit identity.
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use rusqlite::{params, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ impl ReleaseOperationKey {
 pub struct ReleaseOperation {
     key: ReleaseOperationKey,
     path: PathBuf,
+    root: PathBuf,
     _lock: File,
 }
 
@@ -42,30 +43,51 @@ impl ReleaseOperation {
         let lock = OpenOptions::new().create(true).truncate(false).read(true).write(true)
             .open(dir.join(format!("{id}.lock")))?;
         crate::wait_budget::lock_file_exclusive_within_budget(&lock, "release-reconcile")?;
-        Ok(Self { key, path: dir.join(format!("{id}.json")), _lock: lock })
+        Ok(Self { key, path: dir.join(format!("{id}.lock")), root: root.into(), _lock: lock })
     }
 
     pub fn path(&self) -> &Path { &self.path }
 
+    fn connection(&self) -> Result<std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>> {
+        let conn = crate::shared_db::shared_connection(&self.root.join("cas.db"))?;
+        crate::shared_db::lock_connection(&conn)?.execute(
+            "CREATE TABLE IF NOT EXISTS release_reconcile_operations (
+                project_id TEXT NOT NULL, release_id TEXT NOT NULL, final_release_sha TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                PRIMARY KEY (project_id, release_id, final_release_sha))", [],
+        )?;
+        Ok(conn)
+    }
+
     pub fn load(&self) -> Result<Option<serde_json::Value>> {
-        let bytes = match std::fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let receipt: serde_json::Value = serde_json::from_slice(&bytes)?;
-        self.validate_receipt(&receipt)?;
-        Ok(Some(receipt))
+        let conn = self.connection()?;
+        let guard = crate::shared_db::lock_connection(&conn)?;
+        let json: Option<String> = guard.query_row(
+            "SELECT receipt_json FROM release_reconcile_operations
+             WHERE project_id=?1 AND release_id=?2 AND final_release_sha=?3",
+            params![self.key.project_id, self.key.release_id, self.key.final_release_sha],
+            |row| row.get(0),
+        ).optional()?;
+        json.map(|json| {
+            let receipt = serde_json::from_str(&json)?;
+            self.validate_receipt(&receipt)?;
+            Ok(receipt)
+        }).transpose()
     }
 
     pub fn save(&self, receipt: &serde_json::Value) -> Result<()> {
         self.validate_receipt(receipt)?;
-        let dir = self.path.parent().expect("operation path has a parent");
-        let mut pending = tempfile::NamedTempFile::new_in(dir)?;
-        pending.write_all(&serde_json::to_vec_pretty(receipt)?)?;
-        pending.as_file().sync_all()?;
-        pending.persist(&self.path).map_err(|error| StoreError::Io(error.error))?;
-        File::open(dir)?.sync_all()?;
+        let json = serde_json::to_string(receipt)?;
+        let conn = self.connection()?;
+        let mut guard = crate::shared_db::lock_connection(&conn)?;
+        let tx = guard.transaction()?;
+        tx.execute(
+            "INSERT INTO release_reconcile_operations (project_id,release_id,final_release_sha,receipt_json)
+             VALUES (?1,?2,?3,?4) ON CONFLICT(project_id,release_id,final_release_sha)
+             DO UPDATE SET receipt_json=excluded.receipt_json",
+            params![self.key.project_id, self.key.release_id, self.key.final_release_sha, json],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 

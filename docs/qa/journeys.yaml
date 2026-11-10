@@ -350,6 +350,11 @@ bug_families:
     title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
     tasks: [cas-3623]
     journeys: [FACTORY-CLOSE]
+  omitted-session-replacement-clock:
+    title: Catalog omission preserves live attaches, explicit stops fence sends, and running replacements resume after their controlled rate slot
+    tasks: [cas-f640]
+    invariants: [HUB-J14-RUNNING-ONLY]
+    journeys: [HUB-J11, HUB-J14]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

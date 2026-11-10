@@ -115,6 +115,8 @@
 
 ## QA, Commander and services
 
+- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, explicit parent acceptance, ordinary parent closure and SQLite operation records.
+
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - journey selection, registry validation, ledger parsing and declared coverage.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.

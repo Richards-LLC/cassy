@@ -694,7 +694,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     }
 
     let refreshed = store.get_subtasks(train_id)?;
-    let mut train_closed = false;
+    let train_closed = false;
     let train_will_close = refreshed.iter().all(|child| {
         child.is_terminal()
             || (!receipt_failed.contains(&child.id)
@@ -702,18 +702,8 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
                 && (shipped_tags.contains_key(&child.id)
                     || unmerged_factory_commit_count(&repo, child, &tag_sha) == 0))
     });
-    if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) {
-        let mut closed = store.get(train_id)?;
-        if !closed.is_terminal() {
-            let now = chrono::Utc::now();
-            closed.status = TaskStatus::Closed;
-            closed.terminal_outcome = Some(TaskTerminalOutcome::Delivered);
-            closed.closed_at = Some(now);
-            closed.updated_at = now;
-            closed.close_reason = Some(format!("Release tag {tag} shipped train lane {lane}."));
-            store.update(&closed)?;
-            train_closed = true;
-        }
+    if !dry_run && refreshed.iter().all(cas_types::Task::is_terminal) && !store.get(train_id)?.is_terminal() {
+        report.push(format!("{train_id}: HOLD; gate RELEASE_PARENT_RECONCILIATION_REQUIRED; replay the shared release operation to evaluate parent acceptance and lifecycle gates"));
     }
     if dry_run {
         let mut preview = format!("{train_id} ({tag}) dry-run: no writes");

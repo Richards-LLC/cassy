@@ -123,6 +123,8 @@ struct VerdictRelease {
 }
 
 /// What Cassy's own post-merge close did.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum CassyMergeClose {
     /// The task does not carry a published merge Cassy may close for.
     NotEligible,
@@ -571,7 +573,9 @@ impl CasCore {
         let unrecorded = release.as_ref()
             .map(|release| self.record_verdict_release(store, &closed, release))
             .unwrap_or_default();
-        let mut notice = match super::supervisor_push::queue_cassy_merge_close_notice(
+        let mut notice = if crate::release_reconcile::active() {
+            "completion included in release receipt".to_string()
+        } else { match super::supervisor_push::queue_cassy_merge_close_notice(
             &self.cas_root,
             &closed,
             merge_commit,
@@ -579,7 +583,7 @@ impl CasCore {
             Ok(Some(prompt_id)) => format!("worker notified (prompt {prompt_id})"),
             Ok(None) => "no live assigned worker to notify".to_string(),
             Err(error) => format!("worker notice failed: {error}"),
-        };
+        } };
         // cas-43d2: the supervisor reads this receipt; a record that failed
         // after the close committed belongs in it, not only in a warn log.
         for failure in unrecorded {
@@ -639,61 +643,70 @@ impl CasCore {
     pub(crate) async fn close_release_inventory_outcomes(
         &self, inventory: &crate::qa_batch::ReleaseInventory,
     ) -> std::collections::BTreeMap<String, CassyMergeClose> {
+        self.close_release_inventory_with_checkpoint(inventory, &mut |_, _| Ok(())).await
+            .unwrap_or_else(|error| inventory.deliveries.iter().map(|d|
+                (d.task_id.clone(), CassyMergeClose::Held(error.clone()))).collect())
+    }
+
+    /// The durable release controller commits each result before this loop
+    /// proceeds. A failed checkpoint stops effects; the ordinary close remains
+    /// replayable if it committed just before the process died.
+    pub(crate) async fn close_release_inventory_with_checkpoint(
+        &self,
+        inventory: &crate::qa_batch::ReleaseInventory,
+        checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<(), String>,
+    ) -> Result<std::collections::BTreeMap<String, CassyMergeClose>, String> {
         use crate::qa_batch::{self, release_close::ReleaseClose};
-        let initial_outcomes = || {
-            let mut outcomes: std::collections::BTreeMap<_, _> = inventory.exceptions.iter().map(|e|
-                (e.task_id.clone(), CassyMergeClose::Held(format!("RELEASE_MEMBER_HELD: {:?}", e.code)))).collect();
-            for id in inventory.scope.included_task_ids.iter().chain(inventory.scope.no_code_members.keys()) {
-                if !inventory.deliveries.iter().any(|d| &d.task_id == id) {
-                    outcomes.entry(id.clone()).or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
-                }
+        let mut outcomes: std::collections::BTreeMap<_, _> = inventory.exceptions.iter().map(|e|
+            (e.task_id.clone(), CassyMergeClose::Held(format!("RELEASE_MEMBER_HELD: {:?}", e.code)))).collect();
+        for id in inventory.scope.included_task_ids.iter().chain(inventory.scope.no_code_members.keys()) {
+            if !inventory.deliveries.iter().any(|d| &d.task_id == id) {
+                outcomes.entry(id.clone()).or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
             }
-            outcomes
-        };
+        }
+        for (id, outcome) in &outcomes { checkpoint(id, outcome.clone())?; }
         let repo = self.cas_root.parent().unwrap_or(&self.cas_root);
         let context = match ReleaseClose::prepare(&self.cas_root, repo, inventory) {
             Ok(context) => context,
             Err(error) => {
-                let mut outcomes = initial_outcomes();
-                outcomes.extend(inventory.deliveries.iter().map(|d|
-                    (d.task_id.clone(), CassyMergeClose::Held(error.clone()))));
-                return outcomes;
+                for delivery in &inventory.deliveries {
+                    let outcome = CassyMergeClose::Held(error.clone());
+                    checkpoint(&delivery.task_id, outcome.clone())?;
+                    outcomes.insert(delivery.task_id.clone(), outcome);
+                }
+                return Ok(outcomes);
             }
         };
         context.clone().scope(async {
-            let mut outcomes = initial_outcomes();
-            let store = match self.open_task_store() {
-                Ok(store) => store,
-                Err(error) => return inventory.deliveries.iter().map(|d|
-                    (d.task_id.clone(), CassyMergeClose::Held(error.to_string()))).collect(),
-            };
+            let store = self.open_task_store().map_err(|e| e.to_string())?;
             for delivery in &inventory.deliveries {
                 let id = &delivery.task_id;
-                if store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed) {
-                    outcomes.insert(id.clone(), CassyMergeClose::AlreadyClosed);
-                    continue;
-                }
-                if let Some(error) = context.member_error(id) {
-                    outcomes.insert(id.clone(), CassyMergeClose::Held(error.into()));
-                    continue;
-                }
-                let result = (|| {
-                    let task = store.get(id).map_err(|e| e.to_string())?;
-                    qa_batch::release_close::validate_task(&self.cas_root, &task)?;
-                    let (repo, target) = qa_batch::task_context(&self.cas_root, &task)?;
-                    let anchor = delivery.anchor.as_deref().ok_or("RELEASE_NO_CODE_REQUIRES_OWN_CLOSE")?;
-                    qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, anchor)?
-                        .ok_or_else(|| "RELEASE_REVIEW_MISSING: no bound independent release review".into())
-                })();
-                match result {
-                    Ok(mut receipt) => {
-                        receipt.task_heads.retain(|task, _| task == id);
-                        outcomes.extend(self.close_release_covered_delivery_outcomes(&receipt).await);
+                let outcome = if store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed) {
+                    CassyMergeClose::AlreadyClosed
+                } else if let Some(error) = context.member_error(id) {
+                    CassyMergeClose::Held(error.into())
+                } else {
+                    let result = (|| {
+                        let task = store.get(id).map_err(|e| e.to_string())?;
+                        qa_batch::release_close::validate_task(&self.cas_root, &task)?;
+                        let (repo, target) = qa_batch::task_context(&self.cas_root, &task)?;
+                        let anchor = delivery.anchor.as_deref().ok_or("RELEASE_NO_CODE_REQUIRES_OWN_CLOSE")?;
+                        qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, anchor)?
+                            .ok_or_else(|| "RELEASE_REVIEW_MISSING: no bound independent release review".to_string())
+                    })();
+                    match result {
+                        Ok(mut receipt) => {
+                            receipt.task_heads.retain(|task, _| task == id);
+                            self.close_release_covered_delivery_outcomes(&receipt).await.remove(id)
+                                .unwrap_or(CassyMergeClose::NotEligible)
+                        }
+                        Err(error) => CassyMergeClose::Held(error),
                     }
-                    Err(error) => { outcomes.insert(id.clone(), CassyMergeClose::Held(error)); }
-                }
+                };
+                checkpoint(id, outcome.clone())?;
+                outcomes.insert(id.clone(), outcome);
             }
-            outcomes
+            Ok(outcomes)
         }).await
     }
 
@@ -736,6 +749,7 @@ impl CasCore {
                 // recorder (or its live successor/operator) directly, using
                 // the existing idempotent supervisor outbox and wake class.
                 let notice = (|| -> Result<(), String> {
+                    if crate::release_reconcile::active() { return Ok(()); }
                     let agents = crate::store::open_agent_store(&self.cas_root)
                         .map_err(|error| error.to_string())?.list(None).map_err(|error| error.to_string())?;
                     let recipient = crate::supervisor_notices::resolve(

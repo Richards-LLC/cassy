@@ -62,8 +62,8 @@ SHA; their anchor and shipped commit are null.
 `cancelled`, `missing_anchor`, `retired_anchor`, `missing_base`, `invalid_base`,
 `missing_mapping`, `missing_no_code_proof`, `quarantined`. A delivery may also have a base
 exception: callers must inspect both arrays. The inventory does not grant QA,
-review, content-preservation or close admission, and does not alter existing
-publication scripts or the current installed/backfill closer.
+review, content-preservation or close admission. The resolver itself performs
+no publication or lifecycle writes; adapter integration is described below.
 
 Quarantined rows remain suppressed on the ordinary task board. The resolver
 uses the existing by-ID inspection path to preserve their shipped facts and
@@ -71,7 +71,61 @@ adds a `quarantined` exception; membership never lifts that independent hold.
 Recorded anchors and bases must resolve to their own full SHA, never a symbolic
 branch alias.
 
+## Close at the shipped commit
+
+Trusted release adapters call `CasCore::close_release_inventory_outcomes` with
+this inventory. The consumer re-resolves membership, compares each delivery
+snapshot before acting, checks referenced receipts and runs ordinary close with
+`final_release_sha` as its evidence target. Stale or held members remain explicit
+exceptions while other deliveries continue. The ordinary optimistic write guard
+still rejects concurrent changes. Dedicated review, CI overrides and independent
+task holds remain gates. Explicit no-code deliveries retain their own close
+path; this code-delivery entry reports that limitation.
+
+The full recorded start-to-anchor effect is measured, including earlier commits
+and deletions. Changelog fragments use the existing promotion validator: their
+entries must survive in a released section of `CHANGELOG.md`. A maintained view
+has no unconditional filename exemption.
+
+A release review may attach transformation evidence once, in its published
+Markdown/plain-text ledger, as one fenced `cassy-release-transformations` JSON
+block. Its object contains `project_id`, `release_id`, `reviewed_sha`,
+`final_release_sha` and `paths`. Each path object contains:
+
+| Field | Required evidence |
+| --- | --- |
+| `path` | `.claude/CODEMAP.md`, `docs/qa/journeys.yaml` or `docs/PRODUCT_OVERVIEW.md`. |
+| `input_blobs` | Exact Git blob IDs of the delivered view versions replaced. |
+| `output_blob` | Exact view blob at the final release; deletion is not a view transformation. |
+| `producing_commit` | Full reachable commit changing this path and establishing its final blob and mode. A supersession chain names its final producer. |
+| `producer` | The corresponding skill: `codemap`, `cas-qa-craft` or `project-overview`. |
+| `producer_blob` | Exact skill revision in `cas-cli/src/builtins/skills/<producer>/SKILL.md` or `.claude/skills/<producer>/SKILL.md` at the release. |
+
+The scope's `review` proof reference binds artifact, digest, size, reviewed
+commit and recorded release-verdict receipt. Published bytes are checked locally
+and the author must be independent of the covered deliveries. The receipt must
+cover the original anchor. This represents a reviewed skill-authored view, not
+a claimed deterministic generator run. Ordinary source files cannot use this
+rule. Built-output regeneration retains its existing generator checks.
+
+The reviewed candidate and final release must have identical trees apart from
+explicitly reviewed maintained-view transformations. Adapters bind their review
+after release preparation; an unreviewed product/configuration change requires
+new affected proof rather than an ancestry-only transfer.
+
+QA walk receipts, independent review receipts and published-tag shipping
+verdicts keep their distinct kinds. The inventory close entry requires
+independent review; shipping alone never creates a review or a QA PASS.
+Missing bytes, bad bindings, changed task versions, unknown producers or lost
+source leave the delivery held. Existing receipt callbacks also pin ordinary
+close to their reviewed SHA; full inventory adapters additionally supply the
+validated release transformation manifest.
+
 ## GitHub issue outcomes after task reconciliation
+
+This stage consumes the same immutable inventory and the delivery outcome map
+returned by `CasCore::close_release_inventory_outcomes`. It runs after local
+close decisions; issue-side failures remain separate from those decisions.
 
 `issue_reconcile::reconcile_release_issues(root: &Path, repo: &Path,
  inventory: &ReleaseInventory, close_results: &BTreeMap<String, CassyMergeClose>)

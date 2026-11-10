@@ -12,10 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  release-issue-completion:
-    title: Published releases close complete issues, retain shared or hidden unfinished fixes, and name transport failures without duplicate success comments
-    tasks: [cas-a992]
-    journeys: [CLI-RELEASE]
   parallel-journey-registry-merge:
     title: Parallel inline QA families and updated dates merge while competing family and policy edits remain conflicts
     tasks: [cas-ded57]
@@ -124,8 +120,8 @@ bug_families:
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
     journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
-    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication, exact delivery and dedicated review gates
-    tasks: [cas-abb0, cas-e06c, cas-3806]
+    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication; immutable release finalization retains full delivery effects, reviewed transformations and dedicated review gates
+    tasks: [cas-abb0, cas-e06c, cas-3806, cas-9c84f]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26, FACTORY-CLOSE]
   unread-supervisor-mail-succession:
@@ -345,6 +341,10 @@ bug_families:
     title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
     tasks: [cas-3623]
     journeys: [FACTORY-CLOSE]
+  release-issue-completion:
+    title: Published releases close complete issues, retain shared or hidden unfinished fixes, and name transport failures without duplicate success comments
+    tasks: [cas-a992]
+    journeys: [CLI-RELEASE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

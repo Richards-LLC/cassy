@@ -8,7 +8,9 @@ use super::release_automation::{
     ReleaseContext, git, published_tag_sha, published_version, receipt_path, release_roots,
     tracked_context,
 };
-use crate::qa_batch::release_close::{ReleasePathTransformation, ReleaseTransformations};
+use crate::qa_batch::release_close::{
+    EpicAcceptance, EpicManifest, EpicPass, ReleasePathTransformation, ReleaseTransformations,
+};
 use crate::issue_reconcile::IssueAction;
 use crate::release_reconcile::{self, ParentOutcome, ReconcileTrigger, ReleaseReconcileReceipt};
 use cas_store::release_reconcile_store::ReleaseOperationKey;
@@ -17,7 +19,6 @@ use crate::qa_batch::{
 };
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -317,21 +318,39 @@ pub struct PromotedArgs {
 }
 
 pub fn promoted(args: &PromotedArgs, root: &Path) -> Result<()> {
+    println!("{}", promoted_with(root, args.pr, &LocalReconciler)?);
+    Ok(())
+}
+
+fn gh() -> std::ffi::OsString {
+    std::env::var_os(crate::qa_pass::github_gate::GH_BIN_ENV)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "gh".into())
+}
+
+fn gh_pr_view(repo: &Path, slug: &str, pr: u64) -> Result<serde_json::Value> {
+    let output = Command::new(gh())
+        .args(["pr", "view", &pr.to_string(), "--repo", slug, "--json", "state,mergeCommit,baseRefName,headRefOid"])
+        .current_dir(repo)
+        .output()?;
+    ensure!(output.status.success(), "gh pr view {pr}: {}", String::from_utf8_lossy(&output.stderr));
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn promoted_with(root: &Path, pr: u64, reconciler: &dyn Reconciler) -> Result<String> {
     use crate::mcp::tools::core::task::repo_context::{integration_branch, resolve_default_branch};
     let (repo, _) = integration_branch(root).context("project checkout unavailable")?;
     let slug = crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3))
         .map_err(anyhow::Error::msg)?
         .context("promotion needs a GitHub origin")?;
-    let output = Command::new("gh")
-        .args(["pr", "view", &args.pr.to_string(), "--repo", &slug, "--json", "state,mergeCommit,baseRefName,headRefOid"])
-        .output()?;
-    ensure!(output.status.success(), "gh pr view {}: {}", args.pr, String::from_utf8_lossy(&output.stderr));
-    let pr: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-    ensure!(pr["state"] == "MERGED", "PR #{} is not merged", args.pr);
-    let merge_sha = pr["mergeCommit"]["oid"].as_str().context("merged PR has no merge commit")?.to_string();
-    let head_sha = pr["headRefOid"].as_str().context("PR has no head commit")?;
+    let view = gh_pr_view(&repo, &slug, pr)?;
+    ensure!(view["state"] == "MERGED", "PR #{pr} is not merged yet; run `cas release promoted --pr {pr}` after it lands");
     let base = resolve_default_branch(&repo).map_err(anyhow::Error::msg)?;
-    ensure!(pr["baseRefName"] == base.as_str(), "PR #{} did not merge into {base}", args.pr);
+    if view["baseRefName"] != base.as_str() {
+        return Ok(format!("PR #{pr} did not merge into {base}: not a promotion, nothing to reconcile"));
+    }
+    let merge_sha = view["mergeCommit"]["oid"].as_str().context("merged PR has no merge commit")?.to_string();
+    let head_sha = view["headRefOid"].as_str().context("PR has no head commit")?;
     git(&repo, &["fetch", "--quiet", "origin", &base])?;
     ensure!(
         crate::qa_batch::ancestor(&repo, &merge_sha, &format!("origin/{base}")) == Some(true),
@@ -345,46 +364,84 @@ pub fn promoted(args: &PromotedArgs, root: &Path) -> Result<()> {
     let scope = ReleaseScope {
         project_id,
         repository: slug,
-        release_id: format!("pr-{}", args.pr),
+        release_id: format!("pr-{pr}"),
         reviewed_sha,
         final_release_sha: merge_sha.clone(),
-        promotion_pr: Some(args.pr),
+        promotion_pr: Some(pr),
         release_tag: None,
         constituent_epic_ids: Vec::new(),
         included_task_ids: Vec::new(),
         no_code_members: BTreeMap::new(),
         proof_refs,
     };
-    let trigger = ReconcileTrigger::Promotion { pr: args.pr, merge_sha };
-    println!("{}", reconcile_once(root, &repo, &scope, trigger, &LocalReconciler)?);
+    reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)
+}
+
+/// The integration branch a project promotes to its default branch by PR, if
+/// it releases that way. Release trains publish tags instead.
+fn promotion_base(root: &Path, repo: &Path) -> Option<String> {
+    let factory = crate::config::Config::load(root).ok()?.factory();
+    let staging = factory.epic_base_branch.filter(|_| !factory.release_train)?;
+    let default = crate::mcp::tools::core::task::repo_context::resolve_default_branch(repo).ok()?;
+    (staging != default).then_some(default)
+}
+
+/// PostToolUse: a supervisor's successful `gh pr merge` of a staging→main
+/// promotion starts the release's one reconciliation in the background. Any
+/// other command or role returns at the first check, before any I/O.
+pub(crate) fn observe_promotion_merge(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
+    observe_promotion_merge_with(cas_root, cwd, command, &|pr| spawn_promoted(cas_root, cwd, pr))
+}
+
+fn observe_promotion_merge_with(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    launch: &dyn Fn(u64) -> Result<()>,
+) -> Option<String> {
+    if !command.contains("pr merge") || std::env::var("CAS_AGENT_ROLE").as_deref() != Ok("supervisor") {
+        return None;
+    }
+    let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(cas_root)?;
+    let default = promotion_base(cas_root, &repo)?;
+    let slug = crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3)).ok()??;
+    let mut lines = Vec::new();
+    for merge in crate::qa_pass::github_gate::github_merges_in(command) {
+        let Ok(pr) = crate::qa_pass::github_gate::merge_pr_number(cwd, &merge) else { continue };
+        let Ok(view) = gh_pr_view(&repo, merge.repo.as_deref().unwrap_or(&slug), pr) else { continue };
+        if view["baseRefName"] != default.as_str() {
+            continue;
+        }
+        if view["state"] != "MERGED" {
+            lines.push(format!(
+                "PR #{pr} is queued, not merged: after it lands, run `cas release promoted --pr {pr}` (backfill stays the recovery path)."
+            ));
+        } else if let Err(error) = launch(pr) {
+            lines.push(format!("Promotion closeout for PR #{pr} did not start ({error:#}); run `cas release promoted --pr {pr}`."));
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+/// Detached `cas release promoted`; its output goes to the release-reconcile log.
+fn spawn_promoted(cas_root: &Path, cwd: &Path, pr: u64) -> Result<()> {
+    let dir = cas_root.join("release-reconcile");
+    fs::create_dir_all(&dir)?;
+    let log = fs::OpenOptions::new().create(true).append(true).open(dir.join("promotion.log"))?;
+    let mut command = Command::new(std::env::current_exe()?);
+    command
+        .args(["release", "promoted", "--pr", &pr.to_string()])
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn()?;
     Ok(())
 }
 
 // ---- Release review blocks: what the reviewer's published ledger carries. ----
-
-#[derive(Debug, Args)]
-pub struct ReviewBlocksArgs {
-    /// ReleaseScope JSON naming the reviewed candidate and final release commit
-    #[arg(long)]
-    scope: PathBuf,
-}
-
-#[derive(Debug, Serialize)]
-struct ReleaseEpics {
-    project_id: String,
-    release_id: String,
-    reviewed_sha: String,
-    final_release_sha: String,
-    epics: Vec<ReleaseEpicAcceptance>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReleaseEpicAcceptance {
-    task_id: String,
-    generation: String,
-    child_ids: Vec<String>,
-    acceptance: &'static str,
-}
 
 const MAINTAINED_VIEWS: [(&str, &str); 3] = [
     (".claude/CODEMAP.md", "codemap"),
@@ -392,13 +449,16 @@ const MAINTAINED_VIEWS: [(&str, &str); 3] = [
     ("docs/qa/journeys.yaml", "cas-qa-craft"),
 ];
 
-pub fn review_blocks(args: &ReviewBlocksArgs, root: &Path) -> Result<()> {
-    let scope: ReleaseScope = serde_json::from_slice(&fs::read(&args.scope)?)?;
-    let repo = root.parent().context("project checkout unavailable")?;
-    let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &scope)
+/// Both blocks for the ReleaseScope JSON at `scope_path`, bound to that scope.
+/// `cas qa ledger init --release-scope` writes them into the review ledger,
+/// so the published RELEASE_VERDICT bytes carry them.
+pub(crate) fn review_blocks_for_scope(root: &Path, scope_path: &Path) -> Result<String> {
+    let scope: ReleaseScope = serde_json::from_slice(&fs::read(scope_path)?)?;
+    let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
+        .context("project checkout unavailable")?;
+    let inventory = crate::qa_batch::resolve_release_inventory(root, &repo, &scope)
         .map_err(anyhow::Error::msg)?;
-    print!("{}", render_review_blocks(root, repo, &inventory)?);
-    Ok(())
+    render_review_blocks(root, &repo, &inventory)
 }
 
 /// Both fenced blocks for the release review ledger. Epics are those every
@@ -467,14 +527,14 @@ fn render_review_blocks(root: &Path, repo: &Path, inventory: &ReleaseInventory) 
         child_ids.sort();
         finishing.insert(epic.id.clone());
         pending.push(epic.id.clone());
-        epics.insert(epic.id.clone(), ReleaseEpicAcceptance {
+        epics.insert(epic.id.clone(), EpicAcceptance {
             task_id: epic.id.clone(),
             generation: epic.updated_at.to_rfc3339(),
             child_ids,
-            acceptance: "pass",
+            acceptance: EpicPass::Pass,
         });
     }
-    let epics = ReleaseEpics {
+    let epics = EpicManifest {
         project_id: scope.project_id.clone(),
         release_id: scope.release_id.clone(),
         reviewed_sha: scope.reviewed_sha.clone(),
@@ -582,66 +642,62 @@ mod tests {
             && row.prompt.contains("record the batch QA receipt")));
     }
 
+    /// The review ledger scaffold publishes both blocks for its scope, and #2's
+    /// and #3's parsers read them back; epic child_ids are the full subtree.
     #[test]
-    fn review_epics_block_lists_each_finished_epics_full_subtree() {
-        use crate::qa_batch::{ReleaseDelivery, ReleaseMembership};
-        use cas_types::{Dependency, DependencyType, Task, TaskType};
+    fn release_ledger_blocks_round_trip_with_recursive_epic_subtrees() {
+        use cas_types::{Dependency, DependencyType, FactoryBranchStart, Task, TaskStatus, TaskType, WorkTarget};
         let (temp, root, _, _, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();
-        let sha = git(repo, &["rev-parse", "HEAD"]).unwrap();
         let store = crate::store::open_task_store(&root).unwrap();
-        let link = |child: &str, parent: &str| {
-            store.add_dependency(&Dependency {
-                from_id: child.into(),
-                to_id: parent.into(),
-                dep_type: DependencyType::ParentChild,
-                created_at: chrono::Utc::now(),
-                created_by: None,
-            }).unwrap();
-        };
+        let mut base = git(repo, &["rev-parse", "HEAD"]).unwrap();
         for (id, epic) in [("cas-e000", true), ("cas-e001", true), ("cas-d001", false), ("cas-d002", false)] {
             let mut task = Task::new(id.into(), id.into());
+            task.origin_project = Some("release-fixture".into());
             if epic {
                 task.task_type = TaskType::Epic;
+            } else {
+                fs::write(repo.join(format!("{id}.txt")), id).unwrap();
+                git(repo, &["add", "."]).unwrap();
+                git(repo, &["commit", "-m", id]).unwrap();
+                let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+                task.status = TaskStatus::AwaitingMerge;
+                task.deliverables.factory_branch_anchor = Some(anchor.clone());
+                task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+                    work_target: WorkTarget { repo_selector: "project:release-fixture".into(), target_branch: "main".into() },
+                    branch: format!("factory/{id}"),
+                    assignee: "worker".into(),
+                    base_sha: std::mem::replace(&mut base, anchor),
+                });
             }
             store.add(&task).unwrap();
         }
-        link("cas-e001", "cas-e000");
-        link("cas-d001", "cas-e001");
-        link("cas-d002", "cas-e000");
-        let delivery = |id: &str| ReleaseDelivery {
-            task_id: id.into(),
-            generation: String::new(),
-            anchor: None,
-            base_sha: None,
-            shipped_commit: None,
-            membership: ReleaseMembership::Ancestry,
+        for (child, parent) in [("cas-e001", "cas-e000"), ("cas-d001", "cas-e001"), ("cas-d002", "cas-e000")] {
+            store.add_dependency(&Dependency::new(child.into(), parent.into(), DependencyType::ParentChild)).unwrap();
+        }
+        let scope = ReleaseScope {
+            project_id: "release-fixture".into(),
+            repository: "Example/Repo".into(),
+            release_id: "v9.99.2".into(),
+            reviewed_sha: base.clone(),
+            final_release_sha: base.clone(),
+            promotion_pr: None,
+            release_tag: Some("v9.99.2".into()),
+            constituent_epic_ids: vec!["cas-e000".into()],
+            included_task_ids: Vec::new(),
+            no_code_members: BTreeMap::new(),
             proof_refs: Vec::new(),
         };
-        let inventory = ReleaseInventory {
-            scope: ReleaseScope {
-                project_id: "release-fixture".into(),
-                repository: "Example/Repo".into(),
-                release_id: "v9.99.2".into(),
-                reviewed_sha: sha.clone(),
-                final_release_sha: sha.clone(),
-                promotion_pr: None,
-                release_tag: Some("v9.99.2".into()),
-                constituent_epic_ids: Vec::new(),
-                included_task_ids: Vec::new(),
-                no_code_members: BTreeMap::new(),
-                proof_refs: Vec::new(),
-            },
-            deliveries: vec![delivery("cas-d001"), delivery("cas-d002")],
-            exceptions: Vec::new(),
-        };
-        let blocks = render_review_blocks(&root, repo, &inventory).unwrap();
-        let json = blocks.split("```cassy-release-epics\n").nth(1).unwrap().split("\n```").next().unwrap();
-        let epics: serde_json::Value = serde_json::from_str(json).unwrap();
-        let subtrees: BTreeMap<String, Vec<String>> = epics["epics"].as_array().unwrap().iter()
-            .map(|e| (e["task_id"].as_str().unwrap().to_string(),
-                e["child_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect()))
-            .collect();
+        let scope_path = root.join("scope.json");
+        fs::write(&scope_path, serde_json::to_vec(&scope).unwrap()).unwrap();
+
+        let ledger = review_blocks_for_scope(&root, &scope_path).unwrap();
+        let transformations = crate::qa_batch::release_close::parse_manifest(&ledger).unwrap().unwrap();
+        assert_eq!((transformations.release_id.as_str(), transformations.final_release_sha.as_str()), ("v9.99.2", base.as_str()));
+        let json = ledger.split("```cassy-release-epics\n").nth(1).unwrap().split("\n```").next().unwrap();
+        let epics: EpicManifest = serde_json::from_str(json).unwrap();
+        assert_eq!((epics.release_id.as_str(), epics.final_release_sha.as_str()), ("v9.99.2", base.as_str()));
+        let subtrees: BTreeMap<_, _> = epics.epics.into_iter().map(|e| (e.task_id, e.child_ids)).collect();
         assert_eq!(subtrees, BTreeMap::from([
             ("cas-e000".to_string(), vec!["cas-d001".to_string(), "cas-d002".into(), "cas-e001".into()]),
             ("cas-e001".to_string(), vec!["cas-d001".to_string()]),
@@ -701,5 +757,42 @@ mod tests {
             .into_iter().filter(|row| row.prompt.contains("kind=\"release_closeout\"")).collect();
         assert_eq!(notices.len(), 1);
         assert!(notices[0].prompt.contains("cas-b001"));
+    }
+
+    /// A supervisor's `gh pr merge` of a staging→main promotion reaches the
+    /// release reconciliation through the PostToolUse observer, once.
+    #[test]
+    fn supervisor_promotion_merge_reaches_the_reconciliation_once() {
+        let (temp, root, _, owner, _) = super::super::release_automation::tests::release_fixture();
+        let repo = temp.path();
+        fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'release-fixture'\n[factory]\nepic_base_branch = 'staging'\n").unwrap();
+        git(repo, &["branch", "staging"]).unwrap();
+        let merge_sha = git(repo, &["rev-parse", "main"]).unwrap();
+        let bare = temp.path().join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/Example/Repo.git"]).unwrap();
+        git(repo, &["push", "origin", "main"]).unwrap();
+        let gh = temp.path().join("gh");
+        fs::write(&gh, format!(
+            "#!/bin/sh\nprintf '%s' '{{\"state\":\"MERGED\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"{merge_sha}\"}},\"headRefOid\":\"{merge_sha}\"}}'\n"
+        )).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
+        let _cwd = env.enter_dir(repo);
+        let reconciler = Recording { recipient: owner.id.clone(), calls: Default::default(), done: Default::default() };
+        let launch = |pr: u64| promoted_with(&root, pr, &reconciler).map(drop);
+        let command = ["gh", "pr", "merge", "4396", "--merge"].join(" ");
+        env.set("CAS_AGENT_ROLE", "worker");
+        assert!(observe_promotion_merge_with(&root, repo, &command, &launch).is_none());
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        for _ in 0..2 {
+            assert!(observe_promotion_merge_with(&root, repo, &command, &launch).is_none());
+        }
+        assert_eq!(*reconciler.calls.borrow(), vec![ReconcileTrigger::Promotion { pr: 4396, merge_sha }]);
     }
 }

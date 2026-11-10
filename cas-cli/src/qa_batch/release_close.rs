@@ -247,7 +247,7 @@ impl ReleaseClose {
     }
 }
 
-fn parse_manifest(body: &str) -> Result<Option<ReleaseTransformations>, String> {
+pub(crate) fn parse_manifest(body: &str) -> Result<Option<ReleaseTransformations>, String> {
     let marker = "```cassy-release-transformations\n";
     let mut blocks = body.split(marker);
     blocks.next();
@@ -498,28 +498,30 @@ fn transformation_matches(
 }
 
 
-#[derive(Debug, Clone, serde::Deserialize)]
+/// The release review's `cassy-release-epics` block; the publishing ledger
+/// scaffold and this validator share one type.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EpicManifest {
-    project_id: String,
-    release_id: String,
-    reviewed_sha: String,
-    final_release_sha: String,
-    epics: Vec<EpicAcceptance>,
+pub(crate) struct EpicManifest {
+    pub project_id: String,
+    pub release_id: String,
+    pub reviewed_sha: String,
+    pub final_release_sha: String,
+    pub epics: Vec<EpicAcceptance>,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EpicAcceptance {
-    task_id: String,
-    generation: String,
-    child_ids: Vec<String>,
-    acceptance: EpicPass,
+pub(crate) struct EpicAcceptance {
+    pub task_id: String,
+    pub generation: String,
+    pub child_ids: Vec<String>,
+    pub acceptance: EpicPass,
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum EpicPass { Pass }
+pub(crate) enum EpicPass { Pass }
 
 #[derive(Clone)]
 struct ParentReleaseEvidence {

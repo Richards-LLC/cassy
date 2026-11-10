@@ -1924,6 +1924,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
         commit_file(repo, ".gitignore", ".cas/\n", "fixture state");
         let config = WorktreeConfig {
             auto_merge: true,
@@ -1955,6 +1957,9 @@ mod tests {
         git(repo, &["merge-tree", "--write-tree", &lanes[0].branch, &lanes[1].branch])
             .expect("candidate preparation installs the registry driver too");
         for lane in &mut lanes[..2] {
+            // Independently prove manager preflight reinstalls the driver,
+            // rather than inheriting the candidate preparation's config.
+            run(repo, &["config", "--remove-section", "merge.cas-journeys"]);
             manager.merge_and_cleanup(lane, false, false).expect("disjoint families merge");
         }
         // Load through the actual registry loader, rather than just looking for text.

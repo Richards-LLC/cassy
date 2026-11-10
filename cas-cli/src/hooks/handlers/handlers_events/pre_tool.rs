@@ -2903,9 +2903,27 @@ fn collect_git_write_targets(
             for (position, arg) in args.iter().enumerate() {
                 let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
                 if flags_c || arg == "--command" {
-                    // Shell options can follow -c before its command operand.
-                    let payload = args[position + 1..].iter()
-                        .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'));
+                    // Classify options instead of mistaking an option's value
+                    // for the command string. Unknown forms fail closed.
+                    let mut remaining = args[position + 1..].iter();
+                    let payload = loop {
+                        let Some(arg) = remaining.next() else { break None; };
+                        match arg.as_str() {
+                            "--" => break remaining.next(),
+                            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file" => {
+                                if remaining.next().is_none() { break None; }
+                            }
+                            _ if arg.starts_with('-') || arg.starts_with('+') => {
+                                let flags = &arg[1..];
+                                if flags.is_empty() || !flags.bytes().all(|flag| {
+                                    b"abcefhiklmnprstuvxBCDEHPT".contains(&flag)
+                                }) {
+                                    break None;
+                                }
+                            }
+                            _ => break Some(arg),
+                        }
+                    };
                     if let Some(payload) = payload {
                         // A child inherits cwd but cannot change its parent's cwd.
                         collect_git_write_targets(

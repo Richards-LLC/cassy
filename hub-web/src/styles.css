@@ -3379,7 +3379,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-targets { margin: 0; padding-inline-start: var(--space-4); font: var(--fs-xs)/1.45 var(--font-mono); }
 .work-path { margin: 0; font: var(--fs-xs)/1.45 var(--font-mono); }
 .work-detail-limit { margin: var(--space-2) 0 0; color: var(--ink-mid); font-size: var(--fs-xs); }
-.status-timeline { margin-left: auto; min-height: 28px; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--color-action); font: var(--weight-medium) var(--fs-xs)/1 var(--font-ui); cursor: pointer; }
+.status-timeline { min-height: var(--rail-item-min); padding: 0; border: 0; border-radius: 0; background: var(--color-transparent); color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.status-timeline:is(:hover, :focus-visible) { text-decoration: underline; }
 .worker-timeline-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: auto; padding: var(--space-3) var(--space-3) var(--space-4); gap: var(--space-2); }
 .worker-timeline .raw-output-subject { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .worker-timeline-rows { padding-left: 0; }
@@ -3423,8 +3424,8 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .fleet-permissions a { display: inline-block; padding-block: var(--space-2); color: var(--color-action); }
 .progress-filter { margin: var(--space-4) 0 0; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); color: var(--ink); background: var(--bg-panel); font: inherit; }
 .conversation-context .status-task { padding-inline: 0; background: var(--color-transparent); border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; }
-.conversation-context .status-agent .status-line { align-items: start; flex-wrap: wrap; }
-.conversation-context .status-agent .status-timeline { margin-left: 0; }
+.conversation-context .status-agent .status-line { align-items: center; flex-wrap: wrap; }
+.conversation-context .status-agent .status-line > .status-timeline { display: inline-flex; align-items: center; }
 .conversation-reading, .conversation-context { scrollbar-width: thin; scrollbar-color: var(--ink-mid) var(--color-transparent); }
 .conversation-reading::-webkit-scrollbar, .conversation-context::-webkit-scrollbar { width: var(--space-2); height: var(--space-2); }
 .conversation-reading::-webkit-scrollbar-thumb, .conversation-context::-webkit-scrollbar-thumb { background: var(--ink-mid); border: 2px solid var(--panel); border-radius: var(--radius-pill); }

@@ -30,7 +30,7 @@ import {
 } from "./fleet-ops";
 import { epicTitle, focusEpicChoices, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
-import { writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
+import { labelled, writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
 import type { Scope } from "./types";
 
 export interface FleetOpsViewContext {
@@ -434,17 +434,21 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
     disclosure.append(summary, explanation, link); wrap.append(disclosure);
   }
   if (panel === "add" && addGate.allowed) {
+    // cas-5d53: titled and labelled like Write access; the heading names the group and its phone sheet.
     const form = document.createElement("div");
-    form.className = "fleet-ops-panel";
+    form.className = "fleet-ops-panel fleet-ops-add-panel";
     form.setAttribute("role", "group");
-    form.setAttribute("aria-label", "Add worker");
-    const count = document.createElement("select"); count.className = "fleet-ops-count"; count.setAttribute("aria-label", "How many workers");
+    form.setAttribute("aria-labelledby", "fleet-ops-add-title");
+    form.dataset.closeLabel = "Close add workers";
+    const title = document.createElement("h3"); title.id = "fleet-ops-add-title"; title.className = "write-grant-title"; title.textContent = "Add workers";
+    const count = document.createElement("select"); count.className = "fleet-ops-count";
     for (let n = 1; n <= 4; n += 1) count.append(new Option(String(n), String(n)));
-    const start = document.createElement("select"); start.className = "fleet-ops-start-on"; start.setAttribute("aria-label", "Start on");
+    const start = document.createElement("select"); start.className = "fleet-ops-start-on";
     start.append(new Option("No task yet", ""));
     for (const task of context.tasks.filter(readyTask)) start.append(new Option(`${task.id}${task.title ? ` · ${task.title}` : ""}`, task.id));
     const go = button(document, "Add", "fleet-ops-add-go primary", "header:add-go", () => context.on.choose("header", spawnAction(Number(count.value), start.value || undefined)));
-    form.append(count, start, go);
+    const actions = document.createElement("div"); actions.className = "write-grant-actions"; actions.append(go);
+    form.append(title, labelled(document, "How many", count), labelled(document, "Start on", start), actions);
     wrap.append(form);
   }
   if (panel === "focus" && focusGate.allowed) {

@@ -33,8 +33,14 @@ export interface TrainActivity { readonly building: number; readonly parked: num
 /** The release header reads producer counts verbatim, never infers merges from closure. */
 export function releaseHeader(document: Document, epic: ReleaseEpic | undefined, activity?: TrainActivity): HTMLElement {
   const header = document.createElement("header"); header.className = "release-progress";
+  if (!epic) {
+    const evidence = document.createElement("p"); evidence.className = "release-meta";
+    evidence.textContent = "No release train for this supervisor";
+    header.append(evidence);
+    return header;
+  }
   const eyebrow = document.createElement("p"); eyebrow.className = "release-eyebrow"; eyebrow.textContent = "Release progress";
-  const title = document.createElement("h3"); title.textContent = epic ? epicTitle(epic) || "Untitled release" : "No release reported";
+  const title = document.createElement("h3"); title.textContent = epicTitle(epic) || "Untitled release";
   if (epic?.title) title.title = epic.title;
   header.append(eyebrow, title);
   if (epic?.freeze?.summary) {
@@ -45,7 +51,7 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined,
   const progress = epic?.progress;
   const valid = progress && Number.isSafeInteger(progress.total) && Number.isSafeInteger(progress.merged) && progress.total >= progress.merged && progress.merged >= 0;
   const count = document.createElement("p"); count.className = "release-count";
-  if (!counts && !valid) { count.textContent = "Merge progress not reported"; header.append(count); return header; }
+  if (!counts && !valid) { count.className = "release-meta"; count.textContent = "Merge progress not reported"; header.append(count); return header; }
   const [merged, total] = counts ? [counts.merged, counts.total] : [progress!.merged, progress!.total];
   count.textContent = `${merged} of ${total} merged`;
   header.append(count);
@@ -74,4 +80,12 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined,
     header.append(line);
   }
   return header;
+}
+
+/** The worker card's reported task, with identity kept available. */
+export function workerTaskLine(document: Document, worker: { readonly work: string; readonly currentTask?: string }): HTMLElement {
+  const work = document.createElement("p"); work.className = "status-activity";
+  work.textContent = worker.work;
+  if (worker.currentTask) work.title = worker.currentTask;
+  return work;
 }

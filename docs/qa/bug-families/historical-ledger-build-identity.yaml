@@ -1,0 +1,4 @@
+title: Historical ledger init uses immutable delivery identity after local source cleanup without changing bindings or evidence
+tasks: [cas-0371]
+invariants: [FACTORY-LEDGER-HISTORICAL-BUILD]
+journeys: [FACTORY-QA-RECEIPT]

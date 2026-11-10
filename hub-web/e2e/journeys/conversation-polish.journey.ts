@@ -1,4 +1,4 @@
-import { test, expect, journeyPart, type Journey } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
 import type { Page } from "@playwright/test";
 import { ATLAS, PELICAN } from "./world";
 import { writeFileSync } from "node:fs";
@@ -43,7 +43,7 @@ test("HUB-J7 question and progress across light, dark, desktop and phone", journ
       await page.emulateMedia({ colorScheme: scheme });
       for (const width of [1280, 1600, 390]) {
         await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await page.screenshot({ path: testInfo.outputPath(`${scheme}-${width}.png`) });
         // Preserve the actual rendered build DOM and exact build CSS for
         // offline strict mechanical QA; no reconstructed fixture markup.

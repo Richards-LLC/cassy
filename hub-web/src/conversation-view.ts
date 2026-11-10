@@ -4,6 +4,7 @@ import { nativeCommandReceipt, sentAttachments, sentMessageLabel } from "./sent-
 import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
+import { providerAvatarMarkup } from "./provider-mark";
 import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { hydrateReplyImages } from "./reply-images";
 import type { ArtifactViewResult } from "./artifact-open";
@@ -121,6 +122,8 @@ export interface ConversationViewOptions {
   /** Machine label and project name for the mono line beneath the name. */
   machine?: string;
   project?: string;
+  /** The session's reported harness: the empty card wears its mark, as the header does (cas-36cb). */
+  harness?: () => string | undefined;
   /**
    * Machine accent class (machineAccentClass from machine-accent.ts). The shell
    * root already carries it (conversation-shell.ts) so the thread inherits the
@@ -1321,12 +1324,14 @@ export class ConversationView {
     const echo = this.options.echo?.()?.trim() || "";
     const activity = this.options.activity?.();
     const activityText = activity ? emptyCardActivityText(activity, Date.now()) : "";
-    const signature = JSON.stringify([supervisor, machine, project, echo, activityText, copy.said]);
+    const harness = this.options.harness?.();
+    const signature = JSON.stringify([supervisor, machine, project, harness, echo, activityText, copy.said]);
     if (this.empty.dataset.signature === signature) return;
     this.empty.dataset.signature = signature;
     const document = this.element.ownerDocument;
-    const mono = document.createElement("span"); mono.className = "mono"; mono.setAttribute("aria-hidden", "true");
-    mono.textContent = machineMonogram(machine || supervisor);
+    const avatar = document.createElement("template");
+    avatar.innerHTML = providerAvatarMarkup({ harness, fallback: machineMonogram(machine || supervisor), className: "mono" });
+    const mono = avatar.content.firstElementChild as HTMLElement; mono.setAttribute("aria-hidden", "true");
     // The project titles the card, as it titles the header and every list row
     // (journey F7); machine and codename sit beneath it. Without a project the
     // codename is the only name there is, and it keeps the title.

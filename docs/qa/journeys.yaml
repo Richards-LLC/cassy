@@ -334,8 +334,8 @@ bug_families:
     invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
     journeys: [HUB-J5]
   operator-mirror-expiry-notice:
-    title: Expired current-session mirrors and decision asks notify the supervisor; completed mirrors from previous or ended sessions stay quiet while durable delivery retries
-    tasks: [cas-1a73, cas-c568]
+    title: Expired prior supervisor-session mirrors stay quiet; current-session status replies and explicit undelivered operator asks retain delivery alerts
+    tasks: [cas-1a73, cas-0afdd, cas-c568]
     journeys: [HUB-J5]
 ignore:
 - hub-web/dist/**

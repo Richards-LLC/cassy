@@ -11292,6 +11292,45 @@ EOF
         );
     }
 
+    /// GH #1603: an inline relative Python write from the real artifact cwd
+    /// must receive the same decision as its configured symlink spelling.
+    #[cfg(unix)]
+    #[test]
+    fn configured_artifact_symlink_and_realpath_writes_agree_cas_a767() {
+        use std::os::unix::fs::symlink;
+        let _env = TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let worktree = root.join("worktree");
+        let real_artifacts = root.join("real-artifacts");
+        let logical_artifacts = root.join("configured-artifacts");
+        let outside = root.join("outside");
+        let task = std::path::Path::new("project/cas-a767");
+        for dir in [&worktree, &real_artifacts.join(task), &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        symlink(&real_artifacts, &logical_artifacts).unwrap();
+        symlink(&outside, real_artifacts.join(task).join("escape")).unwrap();
+        std::fs::write(real_artifacts.join(task).join("existing.json"), "{}").unwrap();
+        let configured = Some(logical_artifacts.display().to_string());
+        for cwd in [logical_artifacts.join(task), real_artifacts.join(task)] {
+            for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
+                let command = format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\"");
+                assert_eq!(factory_write_violation(&bash_input(&command, &cwd), &configured,
+                    None, false, Some(&worktree)), None, "cwd={} target={path}", cwd.display());
+            }
+            let input = bash_input("python3 -c \"from pathlib import Path; Path('escape/helper-audit.json').write_text('{}')\"", &cwd);
+            let violation = factory_write_violation(&input, &configured, None, false, Some(&worktree)).unwrap();
+            assert_eq!(violation.resolved_path, outside.join("helper-audit.json"));
+            let denial = factory_workspace_contract_denial_with_roots(&input, &violation,
+                configured.as_deref(), None, Some(&worktree), &super::super::write_roots::WritePolicy::default(),
+                &std::collections::HashSet::new());
+            // Paths are diagnostic data, not pinned human-facing wording.
+            assert!(denial.contains(&logical_artifacts.display().to_string()), "{denial}");
+            assert!(denial.contains(&real_artifacts.display().to_string()), "{denial}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_worktree_subtree_that_escapes_is_denied() {

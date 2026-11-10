@@ -928,7 +928,10 @@ impl CasService {
         Some(tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
-            let summary = late_close_summary(&joined);
+            // A checked disposition belongs to this request, unlike the row's
+            // current status or the legacy error-shaped MERGE REQUIRED reply.
+            let summary = receipt.outcome.get().cloned()
+                .unwrap_or_else(|| late_close_summary(&joined));
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
                 let status = store

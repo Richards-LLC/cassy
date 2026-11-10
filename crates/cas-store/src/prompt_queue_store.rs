@@ -10241,7 +10241,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                         (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, dedupe_key)
                      VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', ?6)",
                     params![sender,
-                        format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision."),
+                        format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
                         now, session, "Operator messages not delivered before transcript expiry",
                         format!("operator-mirror-undelivered:{first_id}")],
                 )?;
@@ -16499,6 +16499,9 @@ mod tests {
         ).unwrap();
         assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", None));
         assert!(notice.2.contains(PendingReason::SupersededStale.as_str()));
+        // FactoryDaemon::supervisor_wake_class consumes this protocol suffix
+        // on daemon-origin notices; plain watchdog prose cannot wake an idle sender.
+        assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));
         let notice_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM prompt_queue WHERE dedupe_key LIKE 'operator-mirror-undelivered:%'",
             [], |row| row.get(0),

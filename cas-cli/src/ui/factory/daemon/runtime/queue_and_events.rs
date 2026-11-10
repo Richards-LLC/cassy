@@ -22162,9 +22162,10 @@ mod gh_1153_idle_pty_delivery_tests {
             for receipt in ["ack", "poll", "hook"] {
                 let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
                 let mut probe = daemon.normal_delivery_probes[&row].clone();
+                let source = if target == WORKER { "supervisor" } else { "worker-b" };
                 if target != WORKER {
                     rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
-                        .execute("UPDATE prompt_queue SET target=? WHERE id=?", rusqlite::params![target, row]).unwrap();
+                        .execute("UPDATE prompt_queue SET source=?, target=? WHERE id=?", rusqlite::params![source, target, row]).unwrap();
                     probe.target = target.into();
                     daemon.normal_delivery_probes.insert(row, probe.clone());
                 }
@@ -22184,13 +22185,13 @@ mod gh_1153_idle_pty_delivery_tests {
                 }
                 // A new notification, even with the same body and pane, owns
                 // its own undelivered wake; retiring the old one cannot mute it.
-                let next = queue.enqueue_with_session("supervisor", target, &probe.prompt, "provision-test").unwrap();
+                let next = queue.enqueue_with_session(source, target, &probe.prompt, "provision-test").unwrap();
                 queue.mark_transport_delivered(next).unwrap();
                 probe.delivered_at_utc = chrono::Utc::now();
                 probe.next_check_at = Some(Instant::now());
                 daemon.normal_delivery_probes.insert(next, probe);
                 daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
-                assert_eq!(daemon.normal_delivery_probes[&next].nudges, 1);
+                assert_eq!(daemon.normal_delivery_probes.get(&next).unwrap_or_else(|| panic!("{target} {receipt}: fresh directed mail lost its probe")).nudges, 1);
                 assert_eq!(queue.message_delivery_report(next).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
             }
         }

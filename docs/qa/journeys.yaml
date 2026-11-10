@@ -12,11 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  queued-blocked-successor-source:
-    title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
-    tasks: [cas-57df]
-    journeys: [FACTORY-CLOSE]
-    invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]
@@ -447,6 +442,11 @@ bug_families:
     tasks: [cas-e466c]
     invariants: [HUB-J17-WORKER-NAME]
     journeys: [HUB-J17]
+  worker-timeline-header-polish:
+    title: Worker names open timelines without an action pill and cards share their state vocabulary with the timeline
+    tasks: [cas-0d5e]
+    journeys: [HUB-J17, HUB-J25, HUB-J26]
+    invariants: [HUB-WORKER-TIMELINE-HEADER]
   launch-sheet-phone-touch-targets:
     title: New session's project tabs and its Cancel and Start actions are 44px touch targets on a phone
     tasks: [cas-59e5]
@@ -473,14 +473,6 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
-  nested-shell-worker-commit-scope:
-    title: Nested shell and eval history writes obey the worker worktree and branch guards
-    tasks: [cas-4923e]
-    journeys: [FACTORY-SUPERVISE]
-  regenerated-merge-candidate-bundle:
-    title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
-    tasks: [cas-e4b9]
-    journeys: [FACTORY-MERGE]
   dialog-action-bar-sheet-at-rest:
     title: New session and Operator inbox action bars frost only while fields scroll beneath them and are otherwise the sheet with its hairline
     tasks: [cas-6c0d]
@@ -528,6 +520,19 @@ bug_families:
     title: An empty conversation's card wears the same provider mark as its header and list row when the session reports a harness
     tasks: [cas-36cb]
     journeys: [HUB-J3]
+  queued-blocked-successor-source:
+    title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
+    tasks: [cas-57df]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
+  nested-shell-worker-commit-scope:
+    title: Nested shell and eval history writes obey the worker worktree and branch guards
+    tasks: [cas-4923e]
+    journeys: [FACTORY-SUPERVISE]
+  regenerated-merge-candidate-bundle:
+    title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
+    tasks: [cas-e4b9]
+    journeys: [FACTORY-MERGE]
   conversation-header-single-row:
     title: Conversation identity and actions share one row with a state pill and reachable compact phone controls
     tasks: [cas-bcf0]
@@ -580,6 +585,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-WORKER-TIMELINE-HEADER:
+    statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.
+    check: Verify committed dist/app.js reads the card's stateLabel and omits the legacy Activity button. Run work-picture.test.ts for active, executing, blocked, parked and offline data and both HUB-J25 worker timeline parts. Inspect J03 for the flat name opener and restored focus, including the phone overflow route. In batch QA compare card, timeline and Team state words and inspect long-title wrapping.
+    bug: {task: cas-0d5e}
   FACTORY-SOURCE-REACTIONS:
     statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, observed takeover revokes the former owner's status-only authority even after claim expiry, confirmed terminal sources quiesce until task changes or explicit retry, and a shared five-second pass budget cannot delay mention admission.
     check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences plus source_reaction_deadline_defers_remaining_calls against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
@@ -2829,6 +2838,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-WORKER-TIMELINE-HEADER
   - HUB-CONVERSATION-HEADER-ROW
   - HUB-RELEASE-UNKNOWN-EVIDENCE
   - HUB-TASK-TITLE-FIRST
@@ -3249,6 +3259,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-WORKER-TIMELINE-HEADER
   - HUB-CONVERSATION-HEADER-ROW
   - HUB-TASK-TITLE-FIRST
   - HUB-J25-PHONE-TIMELINE-TEXT
@@ -3327,7 +3338,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
+  invariants: [HUB-WORKER-TIMELINE-HEADER, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE, HUB-RELEASE-UNKNOWN-EVIDENCE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

@@ -7750,7 +7750,7 @@ impl CasCore {
                 }
             }
             if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
-                return Ok(Self::tool_error(reason));
+                return Ok(close_refusal::gate("post_release_gate", "complete_post_release_check", reason));
             }
             // An override use appends an audit note; do not overwrite it later.
             task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;

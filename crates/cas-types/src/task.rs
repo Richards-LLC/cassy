@@ -941,7 +941,8 @@ pub struct TaskAnsweredBlocker {
     pub decision_event_id: Option<i64>,
 }
 
-/// Latest explicitly identified close gate, bound to the task inputs it refused.
+/// Latest close gate, with a specific identity or the close_gate fallback,
+/// bound to the task inputs it refused.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskCloseRefusal {

@@ -64,8 +64,9 @@ pub(crate) fn gate(code: &str, next_action: &str, message: impl Into<String>) ->
 }
 
 /// Called after every close path, including early gates and background closes.
-/// Only explicit structured gate identities can hold the watchdog. A later
-/// successful close, untyped failure or park clears the previous gate fact.
+/// A refused tool answer is a gate even before it gains specific metadata.
+/// Protocol errors (including INVALID_PARAMS/INVALID_REQUEST), successful
+/// closes and park handoffs clear the previous gate fact.
 pub(crate) fn record(
     root: &Path,
     id: &str,
@@ -80,9 +81,8 @@ pub(crate) fn record(
                 rmcp::model::RawContent::Text(text) if text.text.lines().any(is_merge_handoff))
                 }) =>
         {
-            answer.structured_content.as_ref()
+            Some(answer.structured_content.clone().unwrap_or(Value::Null))
         }
-        Err(error) if !error.message.lines().any(is_merge_handoff) => error.data.as_ref(),
         _ => None,
     };
     let store = crate::store::open_task_store_local(root)?;
@@ -95,7 +95,8 @@ pub(crate) fn record(
             .get("rule_id")
             .or_else(|| metadata.get("code"))
             .and_then(Value::as_str)
-            .filter(|code| !code.trim().is_empty())?;
+            .filter(|code| !code.trim().is_empty())
+            .unwrap_or("close_gate");
         Some(Refusal {
             code: code.to_string(),
             next_action: metadata

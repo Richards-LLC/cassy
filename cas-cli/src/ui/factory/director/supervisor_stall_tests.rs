@@ -257,6 +257,8 @@ fn historical_backlog_is_not_authorized_idle_work_cas_c243() {
         task_ids: vec!["cas-focused".into()], idle_workers: vec!["gold-fox".into()],
     }));
     assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None), None);
+    let held = HashSet::from(["gold-fox".to_string()]);
+    assert_eq!(supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &held, now, 600, |_| None), None);
 }
 
 #[test]

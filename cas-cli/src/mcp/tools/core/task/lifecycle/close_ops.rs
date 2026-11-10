@@ -7689,6 +7689,9 @@ impl CasCore {
                 inline_external_ref, inline_execution_note)
         })
         .await;
+        if let Err(error) = crate::mcp::tools::core::task::close_refusal::record(&self.cas_root, &id, &result) {
+            tracing::warn!(task_id = %id, %error, "could not record latest close outcome for progress watchdog");
+        }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;

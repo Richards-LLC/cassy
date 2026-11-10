@@ -5,6 +5,8 @@
 //! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
 //! lift, not on anyone here: it is reported once per freeze, never chased.
+//! A current gate-refused close is reported with its code and remedy instead
+//! of starting an operator-page clock, unless the gate explicitly needs the operator.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -25,11 +27,12 @@ static HELD_REPORTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Parked deliveries held by a train freeze, by train: when the freeze
 /// started and since when it holds, then the held task ids.
 type FreezeHeld = BTreeMap<String, (i64, String, Vec<String>)>;
+type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::Refusal>;
 
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -45,6 +48,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     }
     tasks.retain(|task| task.assignee.as_ref()
         .is_some_and(|who| agents.iter().any(|agent| &agent.name == who || &agent.id == who)));
+    let mut refusals = CloseHeld::new();
+    for task in &tasks {
+        // An unreadable receipt is uncertainty, never proof of a stall.
+        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(cas_dir, task).ok()? {
+            refusals.insert(task.id.clone(), refusal);
+        }
+    }
     // cas-c1fb: historical local assignees do not make a peer's release
     // train actionable here. Only structured ownership and Git proof count.
     let peer_tasks: HashSet<_> = crate::cloud::epic_split::current_epic_splits(cas_dir).ok()?
@@ -54,7 +64,16 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
     let mut all_tasks = None;
     let mut freeze_held = FreezeHeld::new();
+    let mut close_held = CloseHeld::new();
     tasks.retain(|task| {
+        // Applies to every close path and status, including finished epics.
+        // Only explicit machine metadata can make a gate an operator action.
+        if let Some(refusal) = refusals.get(&task.id)
+            && !refusal.operator_action_required
+        {
+            close_held.insert(task.id.clone(), refusal.clone());
+            return false;
+        }
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
         if task.status == TaskStatus::Blocked {
@@ -107,7 +126,11 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .map(|task| format!("{} {} {}", task.id, task.status, task.updated_at.to_rfc3339())).collect();
     let waiting = tasks.iter().map(|task| {
         let title: String = task.title.chars().take(70).collect();
-        format!("- {} {} ({}): {title}", task.id, task.status, task.assignee.as_deref().unwrap_or_default())
+        let gate = refusals.get(&task.id).map(|refusal| format!(
+            "\n  operator action required; code={}; next_action={}\n{}",
+            refusal.code, refusal.next_action, refusal.message,
+        )).unwrap_or_default();
+        format!("- {} {} ({}): {title}{gate}", task.id, task.status, task.assignee.as_deref().unwrap_or_default())
     }).collect();
     let latest = crate::store::open_prompt_queue_store(cas_dir).ok()?.latest_agent_message_id(&names, session).ok()?;
     fingerprint.push(format!("message {}", latest.unwrap_or(0)));
@@ -133,7 +156,20 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held))
+    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held))
+}
+
+fn report_close_held(cas_dir: &Path, held: CloseHeld) {
+    for (id, refusal) in held {
+        let key = format!("close-gate-held:{id}:{}", refusal.key());
+        super::lifecycle::enqueue_worker_attention_relay_detail_with_key(
+            cas_dir, "progress_close_refused", "supervisor", Some(&id), None,
+            |prefix| format!(
+                "Close is held by a Cassy gate: {id}; code={}; next_action={}.\n{}\nResolve the recorded refusal, then retry `{prefix}task action=close id={id}`. The watchdog will not page the operator for this held close.",
+                refusal.code, refusal.next_action, refusal.message,
+            ), &key, Some(&key),
+        );
+    }
 }
 
 /// Tell the supervisor once per freeze which deliveries it holds and who
@@ -186,8 +222,9 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor, freeze_held)) = observe(cas_dir, session, now) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now) else { return };
     report_freeze_held(cas_dir, freeze_held);
+    report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let episodes = episodes.get_or_insert_with(HashMap::new);
     // A project hold is the operator's own stop, not a stall.

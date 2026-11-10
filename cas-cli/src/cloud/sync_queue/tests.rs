@@ -551,6 +551,14 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
         )
         .unwrap();
 
+    // Replayed after a restart: the same discarded state is one snapshot.
+    let reopened = SyncQueue::open(_temp.path()).unwrap();
+    reopened.record_conflict(
+        "task", "cas-conflict",
+        r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#,
+        "remote", "timestamp_lww", None, None,
+    ).unwrap();
+
     let conflicts = queue.list_conflicts(10).unwrap();
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].entity_type, "task");

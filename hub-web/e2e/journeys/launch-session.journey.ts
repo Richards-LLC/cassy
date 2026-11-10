@@ -577,9 +577,9 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
   await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"] });
   const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
   const turns = (wakes: number, noOp: number, input: number) => ({ wakes, no_op_wakes: noOp, input_tokens: input, output_tokens: 0, minutes: 0, missing_tokens: 0, missing_minutes: 0 });
-  const release = (name: string, from: string, to: string | null, deliveries: number, input: number, features: string[]) => ({
+  const release = (name: string, from: string, to: string | null, deliveries: number, input: number, changes: string[]) => ({
     release: name, published: to !== null, from, to, deliveries, turns: turns(100, 40, input), interventions_total: deliveries, interventions: { override_close: deliveries },
-    checks: { verifier: { pass: deliveries, fail: 1 }, lane: { pass: 20, fail: 2 } }, escapes: [], features: Object.fromEntries(features.map(key => [key, {}])),
+    checks: { verifier: { pass: deliveries, fail: 1 }, lane: { pass: 20, fail: 2 } }, escapes: [], changes, merged: [{ task: `cas-${name.length}`, title: "Readable merged delivery", merged_at: "2026-11-10T13:00:00Z" }],
     friction: [{ reference: "cas-89fa", severity: "p1", title: "Audit aggregation double-counts verifier passes", state: "open" }],
     turns_by_actor: { "f056bf8a-0427-4d4f": { daemon: turns(80, 40, input * 0.8), operator: turns(20, 0, input * 0.2) } },
   });
@@ -588,9 +588,9 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
     if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
     reads++;
     return route.fulfill({ headers, json: { supervisors: { "f056bf8a-0427-4d4f": "cosmic-pelican-12" }, releases: [
-      release("v4.11.0", "2026-11-10T00:30:00Z", "2026-11-10T04:00:00Z", 30, 175e6, ["verification_dispatch"]),
-      release("v4.12.0", "2026-11-10T04:00:00Z", "2026-11-10T12:40:00Z", 20, 100e6, ["verification_dispatch"]),
-      release("unreleased", "2026-11-10T12:40:00Z", null, 150, 2200e6, ["verification_dispatch", "delivery_watchdog"]),
+      release("v4.11.0", "2026-11-10T00:30:00Z", "2026-11-10T04:00:00Z", 30, 175e6, []),
+      release("v4.12.0", "2026-11-10T04:00:00Z", "2026-11-10T12:40:00Z", 20, 100e6, []),
+      release("unreleased", "2026-11-10T12:40:00Z", null, 150, 2200e6, ["close gate", "skill cas-worker"]),
     ] } });
   });
   await journey.open();

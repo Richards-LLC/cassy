@@ -3,22 +3,22 @@ import { qualityView, type LedgerRelease } from "./quality-model";
 
 const turns = (wakes: number, noOp: number, input: number) => ({ wakes, no_op_wakes: noOp, input_tokens: input, output_tokens: 0 });
 function release(name: string, from: string, to: string | null, fields: Partial<LedgerRelease>): LedgerRelease {
-  return { release: name, published: to !== null, from, to, turns: turns(0, 0, 0), interventions_total: 0, interventions: {}, checks: {}, escapes: [], friction: [], features: {}, ...fields };
+  return { release: name, published: to !== null, from, to, turns: turns(0, 0, 0), interventions_total: 0, interventions: {}, checks: {}, escapes: [], friction: [], ...fields };
 }
 
 // Shaped like the 4.12 → 4.13 ledger: 4.13 ran three times as long with ten times the deliveries.
 const report = {
   supervisors: { "f056bf8a-0427": "cosmic-pelican-12" },
   releases: [
-    release("v4.11.0", "2026-11-10T00:00:00Z", "2026-11-10T04:00:00Z", { features: { batch_receipt_offer: 1 } }),
+    release("v4.11.0", "2026-11-10T00:00:00Z", "2026-11-10T04:00:00Z", { deliveries: { unknown: "the merge record starts inside this window" }, changes: [] }),
     release("v4.12.0", "2026-11-10T04:00:00Z", "2026-11-10T12:00:00Z", {
       deliveries: 10, interventions_total: 20, turns: turns(100, 80, 100e6), checks: { verifier: { pass: 18, fail: 2 } },
-      turns_by_actor: { "f056bf8a-0427": { daemon: turns(90, 80, 90e6) } }, features: { batch_receipt_offer: 1 },
+      turns_by_actor: { "f056bf8a-0427": { daemon: turns(90, 80, 90e6) } }, changes: [],
     }),
     release("unreleased", "2026-11-10T12:00:00Z", null, {
       deliveries: 100, interventions_total: 50, turns: turns(400, 100, 2000e6), checks: { verifier: { pass: 90, fail: 10 } },
       turns_by_actor: { "f056bf8a-0427": { daemon: turns(300, 100, 1200e6), operator: turns(100, 0, 800e6) }, "7ec6ea4c-b248": { worker: turns(1, 0, 5e6) } },
-      features: { batch_receipt_offer: 1, delivery_watchdog: 1 },
+      changes: ["close gate", "skill cas-worker"],
     }),
   ],
 };
@@ -38,7 +38,7 @@ it("normalises rates per merged delivery, keeps per hour for the drill-down and 
   expect(row("Claim honesty").points).toBeUndefined();
   const workers = view.rubrics.filter(item => item.actor === "workers");
   expect(workers.findIndex(item => !item.points)).toBe(workers.filter(item => item.points).length);
-  // Only a release that brought a feature the ledger had not seen carries a change marker.
+  // Only a release whose git range touched a skill or gate carries a change marker.
   expect(row("Context burn").points!.map(point => Boolean(point.change))).toEqual([false, false, true]);
 });
 

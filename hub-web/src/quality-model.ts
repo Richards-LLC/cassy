@@ -6,7 +6,11 @@
  */
 export interface TurnTotals { wakes: number; no_op_wakes: number; input_tokens: number; output_tokens: number }
 export interface CheckRow { pass: number; fail: number }
-export interface FrictionRow { reference: string; severity?: string | null; title?: string | null; state: string }
+export interface FrictionRow { reference: string; severity?: string | null; title?: string | null; project?: string | null; link?: string | null; state: string; status?: string }
+export interface MergedRow { task: string; title?: string | null; merged_at: string }
+/** A ledger measure: the value, or why it is unknown. */
+export type Measure<T> = T | { unknown: string };
+const known = <T>(measure: Measure<T> | undefined): T | undefined => measure === undefined || (typeof measure === "object" && measure !== null && "unknown" in measure) ? undefined : measure as T;
 export interface LedgerRelease {
   release: string;
   published: boolean;
@@ -14,13 +18,14 @@ export interface LedgerRelease {
   to?: string | null;
   turns: TurnTotals;
   turns_by_actor?: Record<string, Record<string, TurnTotals>>;
-  deliveries?: number;
+  deliveries?: Measure<number>;
+  merged?: MergedRow[];
+  changes?: Measure<string[]>;
   interventions_total: number;
   interventions: Record<string, number>;
   checks: Record<string, CheckRow>;
   escapes: unknown[];
   friction: FrictionRow[];
-  features: Record<string, unknown>;
 }
 export interface QualityReport { releases: LedgerRelease[]; supervisors?: Record<string, string> }
 
@@ -66,7 +71,9 @@ export const RUBRICS: readonly Rubric[] = [
 ];
 export const ACTORS: readonly [Actor, string][] = [["workers", "Workers"], ["supervisors", "Supervisors"]];
 
-export interface Point { label: string; value: number | undefined; perHour?: number; hours: number; change?: string }
+export interface Point { label: string; release: number; value: number | undefined; perHour?: number; hours: number; change?: string }
+/** What stands behind one release's numbers: the merges counted and the friction filed. */
+export interface ReleaseRecords { label: string; deliveries?: number; coverage?: string; merged: MergedRow[]; friction: FrictionRow[] }
 export interface Trend { change: string; word: "worse" | "better" | "no change" | "new"; ratio?: number }
 export interface RubricRow { actor: Actor; name: string; unit: string; points?: Point[]; trend?: Trend; format?: (value: number) => string; pending?: Pending }
 export interface WakeSourceRow { supervisor: string; source: string; wakes: number; noOp: number; average: number; total: number; was?: number }
@@ -77,6 +84,7 @@ export interface QualityView {
   interventions: [string, number][];
   serious: FrictionRow[];
   wakeSources: WakeSourceRow[];
+  records: ReleaseRecords[];
 }
 
 /** "v4.13.0" → "4.13"; work in progress takes the next minor after the newest release. */
@@ -106,28 +114,24 @@ export function trendOf(now?: number, was?: number): Trend | undefined {
   return { change: `${factor} ${word}`, word, ratio };
 }
 
-const humanize = (key: string) => key.replace(/[_-]+/g, " ");
-
 export function qualityView(report: QualityReport, now = new Date()): QualityView | undefined {
   const releases = report.releases;
   if (!releases.length) return undefined;
   const labels = releases.map((_, index) => releaseLabel(releases, index));
   const hours = releases.map(release => windowHours(release, now));
-  // A release that shipped features the ledger had not seen before changed a gate or skill.
-  const seen = new Set<string>();
-  const changes = releases.map((release, index) => {
-    const fresh = Object.keys(release.features ?? {}).filter(key => !seen.has(key));
-    for (const key of fresh) seen.add(key);
-    return index > 0 && fresh.length ? fresh.map(humanize).join(", ") : undefined;
+  // The skills, guards and gates git shows each release changed.
+  const changes = releases.map(release => {
+    const names = known(release.changes) ?? [];
+    return names.length ? names.slice(0, 4).join(", ") + (names.length > 4 ? ` and ${names.length - 4} more` : "") : undefined;
   });
   const rubrics: RubricRow[] = RUBRICS.map(rubric => {
     if ("pending" in rubric) return { ...rubric };
     const points = releases.map((release, index): Point => {
       const raw = rubric.read(release);
-      const deliveries = release.deliveries ?? 0;
+      const deliveries = known(release.deliveries) ?? 0;
       const value = raw === undefined ? undefined : rubric.rate ? (deliveries > 0 ? raw / deliveries : undefined) : raw;
       const perHour = rubric.rate && raw !== undefined && hours[index] > 0 ? raw / hours[index] : undefined;
-      return { label: labels[index], value, perHour, hours: hours[index], change: changes[index] };
+      return { label: labels[index], release: index, value, perHour, hours: hours[index], change: changes[index] };
     });
     const trend = trendOf(points.at(-1)?.value, points.at(-2)?.value);
     return { actor: rubric.actor, name: rubric.name, unit: rubric.unit, points, trend, format: rubric.format };
@@ -155,6 +159,13 @@ export function qualityView(report: QualityReport, now = new Date()): QualityVie
     serious: current.friction.filter(row => row.severity === "p0" || row.severity === "p1")
       .sort((a, b) => (a.severity ?? "").localeCompare(b.severity ?? "") || Number(a.state !== "open") - Number(b.state !== "open")).slice(0, 8),
     wakeSources,
+    records: releases.map((release, index) => {
+      const deliveries = release.deliveries;
+      return {
+        label: labels[index], deliveries: known(deliveries), merged: release.merged ?? [], friction: release.friction,
+        coverage: deliveries !== undefined && typeof deliveries === "object" ? deliveries.unknown : deliveries === undefined ? "this machine's Cassy reports no merge record" : undefined,
+      };
+    }),
   };
 }
 

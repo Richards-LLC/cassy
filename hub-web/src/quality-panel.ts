@@ -1,6 +1,6 @@
 import "./quality-panel.css";
 import { escapeHtml } from "./cloud-brand";
-import { ACTORS, qualityView, tokens, type Point, type QualityReport, type QualityView, type RubricRow } from "./quality-model";
+import { ACTORS, qualityView, tokens, type Point, type QualityReport, type QualityView, type ReleaseRecords, type RubricRow } from "./quality-model";
 
 export interface QualityHost {
   load(signal: AbortSignal): Promise<QualityReport>;
@@ -38,11 +38,26 @@ function chart(row: RubricRow & { points: Point[] }, hero: boolean): string {
   return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(row.name)} by release, ${escapeHtml(row.points[0].label)} to ${escapeHtml(row.points.at(-1)!.label)}" preserveAspectRatio="none" class="quality-chart${hero ? "" : " quality-spark"}">${parts.join("")}</svg>`;
 }
 
+/** A release opens the records behind its numbers. */
+const releaseButton = (point: Point) => `<button type="button" class="quality-release" data-quality-release="${point.release}" aria-label="Records behind ${escapeHtml(point.label)}">${escapeHtml(point.label)}</button>`;
+const eastern = (iso: string) => `${new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} ET`;
+/** A link the ledger recorded opens where it points; otherwise the reference stays quiet text. */
+const reference = (link: string | null | undefined, text: string) => link && /^https:\/\//.test(link) ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>` : escapeHtml(text);
+
+/** The merges counted in a release's per-delivery denominator and the friction filed in it. */
+export function recordsMarkup(records: ReleaseRecords): string {
+  const merged = records.coverage !== undefined
+    ? `<p class="quality-quiet">Per-delivery rates are unknown for ${escapeHtml(records.label)}: ${escapeHtml(records.coverage)}.</p>`
+    : records.merged.length ? `<ul class="quality-list">${records.merged.map(row => `<li data-task="${escapeHtml(row.task)}"><span>${escapeHtml(row.title || row.task)}</span><code>${escapeHtml(row.task)}</code><time datetime="${escapeHtml(row.merged_at)}">${escapeHtml(eastern(row.merged_at))}</time></li>`).join("")}</ul>` : '<p class="quality-quiet">No deliveries merged.</p>';
+  const friction = records.friction.length ? `<ul class="quality-list">${records.friction.map(row => `<li data-reference="${escapeHtml(row.reference)}"><span>${escapeHtml(row.title || row.reference)}</span><code>${reference(row.link, row.reference)}</code><span class="quality-state">${escapeHtml(row.status ?? row.state)}</span></li>`).join("")}</ul>` : '<p class="quality-quiet">No friction filed.</p>';
+  return `<h3 id="quality-records-title" tabindex="-1">Behind ${escapeHtml(records.label)}</h3><div class="quality-split"><section aria-label="Merged deliveries"><p class="quality-eyebrow">Merged deliveries${records.deliveries === undefined ? "" : ` · ${records.deliveries}`}</p>${merged}</section><section aria-label="Friction filed"><p class="quality-eyebrow">Friction filed · ${records.friction.length}</p>${friction}</section></div>`;
+}
+
 /** The drill-down: every release's value, per hour for rates, and its window. */
 function dataTable(row: RubricRow & { points: Point[] }): string {
   const perHour = row.points.some(point => point.perHour !== undefined);
   const head = `<tr><th scope="col">Release</th><th scope="col">${escapeHtml(row.unit)}</th>${perHour ? '<th scope="col">Per hour</th>' : ""}<th scope="col">Window</th></tr>`;
-  const body = row.points.map(point => `<tr><th scope="row">${escapeHtml(point.label)}</th><td>${escapeHtml(fmt(row, point.value))}</td>${perHour ? `<td>${escapeHtml(fmt(row, point.perHour))}</td>` : ""}<td>${point.hours.toFixed(1)} h</td></tr>`).join("");
+  const body = row.points.map(point => `<tr><th scope="row">${releaseButton(point)}</th><td>${escapeHtml(fmt(row, point.value))}</td>${perHour ? `<td>${escapeHtml(fmt(row, point.perHour))}</td>` : ""}<td>${point.hours.toFixed(1)} h</td></tr>`).join("");
   const changes = row.points.filter(point => point.change).map(point => `${escapeHtml(point.label)}: ${escapeHtml(point.change!)}`);
   return `<table class="quality-data"><thead>${head}</thead><tbody>${body}</tbody></table>${changes.length ? `<p>▾ changed a gate or skill. ${changes.join("; ")}.</p>` : ""}`;
 }
@@ -62,14 +77,15 @@ export function qualityMarkup(view: QualityView): string {
   }).join("");
   const wake = view.wakeSources.length ? `<table class="quality-data quality-wakes"><caption class="quality-eyebrow">Supervisor tokens by wake source, ${escapeHtml(view.current)}</caption><thead><tr><th scope="col">Supervisor</th><th scope="col">Woken by</th><th scope="col">Wakes</th><th scope="col">No-op</th><th scope="col">Avg input</th><th scope="col">Was</th><th scope="col">Total</th></tr></thead><tbody>${view.wakeSources.map(row => `<tr><th scope="row">${escapeHtml(row.supervisor)}</th><td>${escapeHtml(row.source)}</td><td>${row.wakes}</td><td>${row.noOp}</td><td>${tokens(row.average)}</td><td>${row.was === undefined ? "–" : tokens(row.was)}</td><td>${tokens(row.total)}</td></tr>`).join("")}</tbody></table>` : "";
   const mix = view.interventions.length ? `<ul class="quality-mix">${view.interventions.map(([kind, count]) => `<li><b>${count}</b><span>${escapeHtml(kind.replace(/_/g, " "))}</span></li>`).join("")}</ul>` : '<p class="quality-quiet">No gate overrides.</p>';
-  const serious = view.serious.length ? `<table class="quality-drill"><caption class="quality-eyebrow">Serious friction filed this release</caption><tbody>${view.serious.map(row => `<tr><td class="quality-sev" data-severity="${escapeHtml(row.severity ?? "")}">${escapeHtml((row.severity ?? "").toUpperCase())}</td><td>${escapeHtml((row.title ?? "").split(" (GH")[0])}</td><td class="quality-state">${escapeHtml(row.state)}</td><td class="quality-ref">${escapeHtml(row.reference)}</td></tr>`).join("")}</tbody></table>` : '<p class="quality-quiet">No P0 or P1 friction filed this release.</p>';
-  return `${heroMarkup}<section class="quality-card" aria-labelledby="quality-rubrics-title"><h3 id="quality-rubrics-title">Every rubric, by who it scores</h3><div class="quality-groups">${groups}</div></section><section class="quality-card" aria-labelledby="quality-behind-title"><h3 id="quality-behind-title">Behind the numbers</h3><div class="quality-split"><div><p class="quality-eyebrow">Gate overrides, by kind</p>${mix}</div>${serious}</div>${wake}<p class="quality-folio">Source: the friction ledger, ${escapeHtml(view.rubrics.find(row => row.points)?.points?.[0]?.label ?? view.current)} to ${escapeHtml(view.current)}${view.inProgress ? " in progress" : ""}. Rates are per merged delivery, a task whose close the verifier accepted; each row's data shows per hour.</p></section>`;
+  const serious = view.serious.length ? `<table class="quality-drill"><caption class="quality-eyebrow">Serious friction filed this release</caption><tbody>${view.serious.map(row => `<tr><td class="quality-sev" data-severity="${escapeHtml(row.severity ?? "")}">${escapeHtml((row.severity ?? "").toUpperCase())}</td><td>${escapeHtml((row.title ?? "").split(" (GH")[0])}</td><td class="quality-state">${escapeHtml(row.state)}</td><td class="quality-ref">${reference(row.link, row.reference)}</td></tr>`).join("")}</tbody></table>` : '<p class="quality-quiet">No P0 or P1 friction filed this release.</p>';
+  return `${heroMarkup}<section class="quality-card" aria-labelledby="quality-rubrics-title"><h3 id="quality-rubrics-title">Every rubric, by who it scores</h3><div class="quality-groups">${groups}</div></section><section class="quality-card" aria-labelledby="quality-behind-title"><h3 id="quality-behind-title">Behind the numbers</h3><div class="quality-split"><div><p class="quality-eyebrow">Gate overrides, by kind</p>${mix}</div>${serious}</div>${wake}<p class="quality-folio">Source: the friction ledger, ${escapeHtml(view.rubrics.find(row => row.points)?.points?.[0]?.label ?? view.current)} to ${escapeHtml(view.current)}${view.inProgress ? " in progress" : ""}. Rates are per merged delivery from the merge record; each row's data shows per hour, and a release there opens its records.</p></section><section class="quality-card quality-records" aria-labelledby="quality-records-title" hidden></section>`;
 }
 
 /** Body-mounted modal, as Accounts: shell redraws leave it alone. */
 export class QualitySheet {
   private dialog?: HTMLDialogElement;
   private loads = new AbortController();
+  private view?: QualityView;
   constructor(private readonly host: QualityHost, private readonly doc: Document = document) {}
 
   open(project: string): void {
@@ -83,7 +99,7 @@ export class QualitySheet {
     dialog.querySelector<HTMLButtonElement>("[data-quality-close]")!.focus();
     void this.host.load(signal).then(report => {
       if (signal.aborted) return;
-      const view = qualityView(report);
+      const view = this.view = qualityView(report);
       dialog.querySelector(".quality-window")!.textContent = view ? `${view.current}${view.inProgress ? " in progress" : ""} · ${view.hours.toFixed(0)} h${view.inProgress ? " so far" : ""}${view.previous ? ` · vs ${view.previous}` : ""}` : "";
       body.innerHTML = view ? qualityMarkup(view) : '<p class="quality-quiet">No releases in this project\'s friction ledger yet.</p>';
     }, () => {
@@ -103,6 +119,12 @@ export class QualitySheet {
       const button = (event.target as Element).closest<HTMLButtonElement>("button");
       if (button?.hasAttribute("data-quality-close")) dialog.close();
       if (button?.hasAttribute("data-quality-retry")) this.open(dialog.querySelector(".quality-project")!.textContent ?? "");
+      const records = button?.dataset.qualityRelease !== undefined ? this.view?.records[Number(button.dataset.qualityRelease)] : undefined;
+      const region = dialog.querySelector<HTMLElement>(".quality-records");
+      if (records && region) {
+        region.innerHTML = recordsMarkup(records); region.hidden = false;
+        region.querySelector<HTMLElement>("#quality-records-title")!.focus();
+      }
     });
     return dialog;
   }

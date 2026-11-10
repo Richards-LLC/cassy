@@ -38,7 +38,7 @@ impl CasCore {
             return held(gate, owner);
         }
         let result = async {
-            let queue = crate::cloud::SyncQueue::open_read_only(&self.cas_root).map_err(|e| e.to_string())?;
+            let queue = crate::cloud::SyncQueue::open(&self.cas_root).map_err(|e| e.to_string())?;
             if queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).map_err(|e| e.to_string())?.iter().any(|q| q == id) {
                 return Err("RELEASE_PARENT_QUARANTINED".into());
             }

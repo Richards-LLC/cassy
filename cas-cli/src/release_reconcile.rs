@@ -340,6 +340,9 @@ pub(crate) async fn reconcile_release(
     }
     let repo =
         crate::mcp::tools::core::task::lifecycle::close_ops::resolve_close_gate_repo_root(root)?;
+    // Reconciliation writes task/sync outcomes; initialize optional queue tables
+    // before issue, quarantine, or sync-state reads on a fresh project store.
+    let _queue = crate::cloud::SyncQueue::open(root).map_err(|e| e.to_string())?;
     let mut effects = CoreEffects {
         root,
         repo,

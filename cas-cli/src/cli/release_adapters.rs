@@ -5,7 +5,8 @@
 //! notice. Installed and backfill are recovery triggers, no-ops once complete.
 //! GitHub is read as evidence only: no CI job, poller or test rerun is added.
 use super::release_automation::{
-    ReleaseContext, git, published_tag_sha, published_version, release_roots, tracked_context,
+    ReleaseContext, git, published_tag_sha, published_version, receipt_path, release_roots,
+    tracked_context,
 };
 use crate::qa_batch::release_close::{ReleasePathTransformation, ReleaseTransformations};
 use crate::issue_reconcile::{IssueAction, IssueOutcome};
@@ -284,8 +285,17 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str) -> 
     Ok((reviewed, proofs))
 }
 
-fn publish_scope(root: &Path, repo: &Path, context: &ReleaseContext, tag: &str, tag_sha: &str) -> Result<ReleaseScope> {
-    if let Some(scope) = &context.release_scope {
+/// A published tag's scope: the tracked cut receipt's when present, else the
+/// train, its tracked inputs and the reviewed candidate the tag contains.
+fn tag_scope(
+    root: &Path,
+    repo: &Path,
+    context: Option<&ReleaseContext>,
+    train_id: &str,
+    tag: &str,
+    tag_sha: &str,
+) -> Result<ReleaseScope> {
+    if let Some(scope) = context.and_then(|c| c.release_scope.as_ref()) {
         ensure!(
             scope.final_release_sha == tag_sha && scope.release_id == tag,
             "tracked release scope names {} at {}, not {tag} at {tag_sha}",
@@ -295,26 +305,68 @@ fn publish_scope(root: &Path, repo: &Path, context: &ReleaseContext, tag: &str, 
         return Ok(scope.clone());
     }
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
+    let repository = match context {
+        Some(context) => context.repository.clone(),
+        None => crate::github_repo::origin_slug(repo, std::time::Duration::from_secs(3))
+            .map_err(anyhow::Error::msg)?
+            .context("release has no GitHub origin")?,
+    };
     let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha)?;
     let included_task_ids = context
-        .release_inputs
-        .as_ref()
+        .and_then(|c| c.release_inputs.as_ref())
         .and_then(|inputs| inputs["included_task_ids"].as_array())
         .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     Ok(ReleaseScope {
         project_id,
-        repository: context.repository.clone(),
+        repository,
         release_id: tag.to_string(),
         reviewed_sha,
         final_release_sha: tag_sha.to_string(),
         promotion_pr: None,
         release_tag: Some(tag.to_string()),
-        constituent_epic_ids: vec![context.train_id.clone()],
+        constituent_epic_ids: vec![train_id.to_string()],
         included_task_ids,
         no_code_members: BTreeMap::new(),
         proof_refs,
     })
+}
+
+/// The legacy closer's train hold. #3 removed its direct train write; the
+/// recovery trigger resolves this hold through the one reconciliation.
+pub(crate) const PARENT_HOLD: &str = "RELEASE_PARENT_RECONCILIATION_REQUIRED";
+
+/// Installed/backfill recovery after the legacy delivery closer has run.
+pub(crate) fn resolve_parent_hold(
+    root: &Path,
+    train_id: &str,
+    tag: &str,
+    report: String,
+    trigger: ReconcileTrigger,
+) -> Result<String> {
+    resolve_parent_hold_with(root, train_id, tag, report, trigger, &LocalReconciler)
+}
+
+fn resolve_parent_hold_with(
+    root: &Path,
+    train_id: &str,
+    tag: &str,
+    report: String,
+    trigger: ReconcileTrigger,
+    reconciler: &dyn Reconciler,
+) -> Result<String> {
+    if !report.contains(PARENT_HOLD) {
+        return Ok(report);
+    }
+    let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
+        .context("project checkout unavailable")?;
+    let tag_sha = git(&repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
+    let context: Option<ReleaseContext> = match receipt_path(root, tag.trim_start_matches('v')) {
+        Ok(path) if path.exists() => Some(serde_json::from_slice(&fs::read(path)?)?),
+        _ => None,
+    };
+    let scope = tag_scope(root, &repo, context.as_ref(), train_id, tag, &tag_sha)?;
+    Ok(format!("{report}\n{}", reconcile_once(root, &repo, &scope, trigger, reconciler)?))
 }
 
 // ---- Publish adapter: the host's existing install-on-publish read. ----
@@ -342,7 +394,7 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
             // The tag may be newer than this checkout; fetching it is idempotent.
             let _ = git(&repo, &["fetch", "--quiet", "origin", "tag", &tag]);
             let tag_sha = published_tag_sha(&repo, &tag)?;
-            let scope = publish_scope(&root, &repo, &context, &tag, &tag_sha)?;
+            let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha)?;
             let trigger = ReconcileTrigger::Publish { tag: tag.clone() };
             reconcile_once(&root, &repo, &scope, trigger, &LocalReconciler)
         })();
@@ -609,16 +661,27 @@ mod tests {
             reconcile_once(&root, repo, &scope("pr-4396"), promotion.clone(), &reconciler).unwrap();
         }
         reconcile_once(&root, repo, &scope("v9.99.2"), ReconcileTrigger::Installed, &reconciler).unwrap();
-        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion]);
+        assert_eq!(*reconciler.calls.borrow(), vec![publish.clone(), promotion.clone()]);
 
         // The installed host's recovery closer sees Publish's completed record.
         git(repo, &["tag", "v9.99.2", &sha]).unwrap();
         assert!(recorded_closeout_with(&root, "v9.99.2", &reconciler).is_some());
         assert!(recorded_closeout_with(&root, "v9.99.3", &reconciler).is_none());
 
+        // A recovery trigger resolves the legacy closer's train hold through one
+        // reconciliation; a report without that hold reconciles nothing.
+        git(repo, &["tag", "v9.99.4", &sha]).unwrap();
+        for report in ["closed 1 delivery(ies)".to_string(), format!("{}: {PARENT_HOLD}", train.id)] {
+            for _ in 0..2 {
+                resolve_parent_hold_with(&root, &train.id, "v9.99.4", report.clone(), ReconcileTrigger::Installed, &reconciler).unwrap();
+            }
+        }
+        assert_eq!(reconciler.calls.borrow().len(), 3);
+        assert_eq!(reconciler.calls.borrow()[2], ReconcileTrigger::Installed);
+
         // One notice per release, naming each residual with owner and next action.
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.target == owner.name
             && crate::supervisor_notices::is_action_envelope(&row.prompt)
             && row.prompt.contains("cas-0002")

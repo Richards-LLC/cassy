@@ -428,7 +428,14 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
             "v{version} published and installed: post-release steps due (notes checksums, Slack, factory restart, release receipt)"
         ),
     )?;
-    let reconciled = close_shipped_train(root, &context.train_id, &format!("v{version}"))?;
+    let tag = format!("v{version}");
+    let reconciled = super::release_adapters::resolve_parent_hold(
+        root,
+        &context.train_id,
+        &tag,
+        close_shipped_train(root, &context.train_id, &tag)?,
+        super::release_adapters::release_reconcile::ReconcileTrigger::Installed,
+    )?;
     println!("{reconciled}");
     Ok(true)
 }
@@ -830,7 +837,15 @@ pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
         let result = if args.dry_run {
             preview_shipped_train(root, train, tag)
         } else {
-            close_shipped_train(root, train, tag)
+            close_shipped_train(root, train, tag).and_then(|report| {
+                super::release_adapters::resolve_parent_hold(
+                    root,
+                    train,
+                    tag,
+                    report,
+                    super::release_adapters::release_reconcile::ReconcileTrigger::Backfill,
+                )
+            })
         };
         match result {
             Ok(report) => println!("{report}"),

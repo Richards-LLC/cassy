@@ -44,7 +44,7 @@
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery and receipt cleanup.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs` - health, update receipts and GitHub request budgets.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
-- `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/`, `cas-cli/src/hooks/handoff_updates.rs` - lifecycle policy, inherited process-signal guards and Violet handoff reads.
+- `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/`, `cas-cli/src/hooks/handoff_updates.rs` - lifecycle policy, canonical artifact-root diagnostics, inherited process-signal guards and Violet handoff reads.
 - `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs`, `cas-cli/src/cli/codemap_cmd.rs` - checkout-bound documentation freshness and structural-change reports.
 - `cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs` - worker Git target/branch guards, literal path bindings and unresolved-directory refusals; shared shell lexer and command policy.
 - `cas-cli/src/cloud/`, `cas-cli/src/coordination/` - sync, presence, scoped artifacts and worker peer coordination; `cas-cli/src/cloud/peer_mailbox/transcript.rs` serves bounded redacted peer transcripts.
@@ -146,7 +146,7 @@
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
 - `cas-cli/src/cli/release_automation.rs` - train context, bounded Git probes, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation; installed notices accept older publications after an upgrade.
 - `scripts/install-on-publish.sh`, `scripts/test-install-on-publish.sh` - native release polling, bounded notice delivery and per-version pending retries after installing the latest release.
-- **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
+- **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py` (attempt-aware shard fan-in and durable missing-receipt red state), `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.

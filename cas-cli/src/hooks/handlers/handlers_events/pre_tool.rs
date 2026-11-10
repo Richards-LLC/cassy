@@ -7563,6 +7563,11 @@ fn factory_workspace_contract_denial_with_roots(
         configured_scratch_root,
         worktree_root,
     );
+    let artifacts = crate::config::resolved_factory_artifacts_root(configured_artifacts_root);
+    let canonical_artifacts = canonicalize_for_containment(&artifacts)
+        .map(|path| format!("`{}`", path.display()))
+        .unwrap_or_else(|| "unresolved".to_string());
+    let measured = format!(" Artifact root: configured `{}`; canonical {canonical_artifacts}.", artifacts.display());
     let roots = policy.describe(task_ids);
     let roots = if roots.is_empty() {
         String::new()
@@ -7570,7 +7575,7 @@ fn factory_workspace_contract_denial_with_roots(
         format!(" Operator write roots in effect: {}.", roots.join("; "))
     };
     format!(
-        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
+        "{denial}{measured}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
     )
 }
 
@@ -11407,6 +11412,63 @@ EOF
             None,
             "symlinked registered roots must compare by their canonical target"
         );
+    }
+
+    /// GH #1603: an inline relative Python write from the real artifact cwd
+    /// must receive the same decision as its configured symlink spelling.
+    #[cfg(unix)]
+    #[test]
+    fn configured_artifact_symlink_and_realpath_writes_agree_cas_a767() {
+        use std::os::unix::fs::symlink;
+        let mut env = TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let cas_root = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let worktree = root.join("worktree");
+        let real_base = root.join("real-artifacts");
+        let logical_base = root.join("configured-artifacts");
+        let outside = root.join("outside");
+        for dir in [&worktree, &real_base, &outside] { std::fs::create_dir_all(dir).unwrap(); }
+        symlink(&real_base, &logical_base).unwrap();
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", logical_base.display().to_string())).unwrap();
+        let logical_root = crate::config::resolved_factory_artifact_paths(&cas_root,
+            Some(logical_base.to_str().unwrap())).project_root;
+        let real_root = real_base.join(logical_root.strip_prefix(&logical_base).unwrap());
+        std::fs::create_dir_all(real_root.join("cas-a767")).unwrap();
+        symlink(&outside, real_root.join("cas-a767/escape")).unwrap();
+        std::fs::write(real_root.join("cas-a767/existing.json"), "{}").unwrap();
+        for (key, value) in [("CAS_AGENT_ROLE", "worker"), ("CAS_FACTORY_MODE", "1"),
+            ("CAS_HOOK_HARNESS", "codex"), ("CAS_AGENT_NAME", "worker-a767"),
+            ("CAS_FACTORY_SESSION", "artifact-root-a767")] { env.set(key, value); }
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_ROOT", &cas_root);
+        let run = |cwd: &Path, path: &str| {
+            // Codex projects exec_command as Bash/command plus workdir, while
+            // the hook's turn cwd remains the worker's assigned checkout.
+            let input = tool_input("Bash", serde_json::json!({
+                "command": format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\""),
+                "workdir": cwd,
+            }), &worktree);
+            serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap()
+        };
+        let mut denials = Vec::new();
+        for cwd in [logical_root.join("cas-a767"), real_root.join("cas-a767")] {
+            for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
+                let output = run(&cwd, path);
+                assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
+            }
+            let output = run(&cwd, "escape/helper-audit.json");
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
+            let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
+            assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
+            denials.push(denial);
+        }
+        // Paths are diagnostic data, not pinned human-facing wording. Check
+        // these only after both spellings and their escape controls have run.
+        for denial in denials {
+            assert!(denial.contains(&logical_root.display().to_string()), "{denial}");
+            assert!(denial.contains(&real_root.display().to_string()), "{denial}");
+        }
     }
 
     #[cfg(unix)]

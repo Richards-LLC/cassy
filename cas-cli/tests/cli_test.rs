@@ -3282,9 +3282,17 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let primary_head = git(&["rev-parse", "HEAD"]);
     assert!(String::from_utf8_lossy(&original).contains(&format!("build: {primary_head}")));
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
-    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    // GH #1758: rerunning init resumes a valid ledger, byte for byte.
+    let resumed = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--covers", "cas-delivery-a,cas-delivery-b", "--json"]).output().unwrap();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!((resumed["resumed"].clone(), resumed["path"].clone()), (serde_json::json!(true), init["path"].clone()));
     assert_eq!(std::fs::read(path).unwrap(), original);
-    std::fs::write(path, String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" )).unwrap();
+    let invalid = String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" );
+    std::fs::write(path, &invalid).unwrap();
+    // An existing ledger that does not validate is refused and left untouched.
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
     let bad = cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"]).output().unwrap();
     assert!(!bad.status.success());
     let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");

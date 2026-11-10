@@ -197,6 +197,20 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     Some(bounded_tail_text(trimmed))
 }
 
+/// Keep the diagnostic before a secret assignment while dropping the rest
+/// of that line, including quoted or incomplete values. The shared pass
+/// handles other credential shapes and PEM blocks before this is persisted.
+fn boot_output_tail(text: Option<&str>) -> Option<String> {
+    static ASSIGNMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?im)\b(?:api[_-]?key|token|secret|password)\b[ \t]*[:=][^\r\n]*").unwrap()
+    });
+    let text = text?.trim();
+    if text.is_empty() { return None; }
+    let text = ASSIGNMENT.replace_all(text, "[REDACTED SECRET]");
+    let (text, _) = crate::hooks::handlers::handlers_events::message_display::redact_secrets(text.into_owned());
+    Some(bounded_tail_text(&crate::ai_enrichment::redact_string(&text)))
+}
+
 /// A PTY exit in plain words: the signal wins, then the code; a missing status
 /// stays explicitly unavailable rather than becoming a guessed code.
 fn pane_exit_status(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
@@ -6585,7 +6599,7 @@ impl FactoryDaemon {
                     crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
                 );
                 if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
-                    let tail = worker_exit_cause(None, None, pane_tail.as_deref()).output_tail;
+                    let tail = boot_output_tail(pane_tail.as_deref());
                     return Some((
                         worker.clone(),
                         VerificationAction::Failed(format!("{}\n\nObserved worker boot output:\n{}",

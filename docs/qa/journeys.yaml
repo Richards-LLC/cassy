@@ -572,8 +572,8 @@ owner_groups:
     - hub-web/src/usage.ts
 invariants:
   FACTORY-MANAGED-MENTION-CLAIMS:
-    statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker for that owner without claiming proactively.
-    check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay and exact owner destination; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
+    statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker that wakes that owner without claiming proactively.
+    check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay, exact owner destination and Blocker classification of the actual queued prompt through daemon wake admission; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
     bug: {task: cas-0288}
   HUB-CONVERSATION-HEADER-ROW:
     statement: Conversation identity and actions share one row, even with the context rail open. The observed state is a pill beside the project title; phone headers keep direct Raw output and Interrupt controls while secondary actions remain reachable through one native overflow menu with return focus and attention count.

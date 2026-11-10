@@ -1915,11 +1915,12 @@ mod tests {
     /// including its merge-tree preflight, before the real merge installs a driver.
     #[test]
     fn worktree_merge_parallel_journey_families_cas_ded57() {
-        use crate::worktree::manager::{WorktreeConfig, WorktreeError, WorktreeManager};
+        use crate::worktree::{WorktreeConfig, WorktreeError, WorktreeManager};
         use crate::worktree::git::GitError;
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path();
         run(repo, &["init", "-q", "-b", "main"]);
+        commit_file(repo, ".gitignore", ".cas/\n", "fixture state");
         let config = WorktreeConfig {
             auto_merge: true,
             base_path: repo.join(".cas/worker-fixtures").display().to_string(),

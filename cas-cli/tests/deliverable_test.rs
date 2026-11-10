@@ -38,6 +38,15 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+fn assert_no_capture_checkouts(cas_root: &Path) {
+    assert!(!fs::read_dir(cas_root.join("tmp")).unwrap().any(|entry| {
+        let entry = entry.unwrap();
+        entry.file_type().unwrap().is_dir()
+            && entry.file_name().to_string_lossy().starts_with("capture-")
+            && entry.file_name() != "capture-ports"
+    }));
+}
+
 /// Pair selection verifies the bytes and never promotes a missing side into
 /// report evidence, even when an input incorrectly puts it in pairs[].
 #[test]
@@ -235,12 +244,7 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
         fs::read_to_string(root.join("source.txt")).unwrap(),
         "delivered source"
     );
-    assert!(!fs::read_dir(cas_root.join("tmp")).unwrap().any(|e| {
-        let e = e.unwrap();
-        e.file_type().unwrap().is_dir()
-            && e.file_name().to_string_lossy().starts_with("capture-")
-            && e.file_name() != "capture-ports"
-    }));
+    assert_no_capture_checkouts(&cas_root);
     // The lease directory remains as reusable lock files, without held locks.
     for pid in fs::read_to_string(pid_file).unwrap().split_whitespace() {
         let proc = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
@@ -317,6 +321,7 @@ fn deliverable_capture_budget_spent_before_serving_still_reports_a_timeout_recei
             "slow {program}: {receipt}"
         );
         assert!(receipt["elapsed_ms"].as_u64().unwrap() < 8000, "slow {program}: {receipt}");
+        assert_no_capture_checkouts(&root.join(".cas"));
     }
 }
 

@@ -242,7 +242,12 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
     project(&root, &scope.team_id);
     // Scratch lives under the checkout; runtime discovery needs this project's
     // Git boundary instead of inheriting the outer repository.
-    git2::Repository::init(root.parent().unwrap()).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root.parent().unwrap())
+        .status()
+        .unwrap()
+        .success());
     let gui = runtime(&root, true);
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", server.server_addr());

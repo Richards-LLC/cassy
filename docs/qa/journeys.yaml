@@ -394,6 +394,10 @@ bug_families:
     tasks: [cas-53ed]
     invariants: [FACTORY-WORKER-RESPAWN]
     journeys: [FACTORY-SUPERVISE]
+  returning-batch-qa-owner:
+    title: Superseded batch QA offers return once per ownership episode when the same supervisor session regains the outstanding set
+    tasks: [cas-b26e]
+    journeys: [FACTORY-QA-RECEIPT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

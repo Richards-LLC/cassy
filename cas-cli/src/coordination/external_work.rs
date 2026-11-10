@@ -206,7 +206,7 @@ impl SqliteRequestJournal {
         Ok(())
     }
 
-    pub fn begin_attempt(&self, request_id: &str) -> Result<(), JournalError> {
+    pub fn begin_attempt(&self, request_id: &str) -> Result<bool, JournalError> {
         let conn = self
             .conn
             .lock()
@@ -214,13 +214,107 @@ impl SqliteRequestJournal {
         let changed = conn
             .execute(
                 "UPDATE external_work_operations SET stage='dispatching', attempts=attempts+1,
-                 updated_at=?2 WHERE request_id=?1 AND wire_json IS NOT NULL",
+                 updated_at=?2 WHERE request_id=?1 AND wire_json IS NOT NULL
+                 AND (kind != 'claim_recovery' OR stage = 'awaiting_readback')",
                 params![request_id, Utc::now().to_rfc3339()],
             )
             .map_err(|error| JournalError::Storage(error.to_string()))?;
-        if changed == 0 {
+        if changed == 0 && load_operation(&conn, request_id)?.is_none() {
             return Err(JournalError::Missing(request_id.to_string()));
         }
+        Ok(changed == 1)
+    }
+
+    /// Reserve one recovery claim under the original caller's immutable request.
+    /// The child cannot dispatch until Violet has settled the named reply.
+    fn reserve_reply_recovery(
+        &self,
+        request_id: &str,
+        held: &Value,
+    ) -> Result<JournalOperation, JournalError> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+        let parent = load_operation(&tx, request_id)?
+            .ok_or_else(|| JournalError::Missing(request_id.into()))?;
+        let saved: Value = parent
+            .response_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| JournalError::Storage(e.to_string()))?
+            .unwrap_or(Value::Null);
+        let child_id = if let Some(id) = saved
+            .pointer("/_reply_recovery/request_id")
+            .and_then(Value::as_str)
+        {
+            id.to_string()
+        } else {
+            let id = Uuid::new_v4().to_string();
+            let mut wire: Value =
+                serde_json::from_str(parent.wire_json.as_deref().ok_or_else(|| {
+                    JournalError::Storage("recovery requires a frozen claim".into())
+                })?)
+                .map_err(|e| JournalError::Storage(e.to_string()))?;
+            wire["request_id"] = json!(id);
+            let now = Utc::now().to_rfc3339();
+            tx.execute(
+                "INSERT INTO external_work_operations
+                (request_id,kind,input_digest,input_json,wire_json,stage,created_at,updated_at)
+                VALUES (?1,'claim_recovery',?2,?3,?4,'awaiting_readback',?5,?5)",
+                params![
+                    id,
+                    parent.input_digest,
+                    parent.input_json,
+                    canonical_json(&wire)?,
+                    now
+                ],
+            )
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+            let mut response = held.clone();
+            response["_reply_recovery"] = json!({"request_id":id,"held":held});
+            tx.execute(
+                "UPDATE external_work_operations SET response_json=?2,stage='retry_wait',
+                next_retry_ms=NULL,updated_at=?3 WHERE request_id=?1",
+                params![request_id, canonical_json(&response)?, now],
+            )
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+            id
+        };
+        let child =
+            load_operation(&tx, &child_id)?.ok_or_else(|| JournalError::Missing(child_id))?;
+        tx.commit()
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
+        Ok(child)
+    }
+
+    /// Keep the recovery pointer private and durable even when the child returns
+    /// an uncertain result. Held readbacks are retryable without reposting.
+    fn record_reply_recovery(
+        &self,
+        request_id: &str,
+        response: &Value,
+        retry: Option<Duration>,
+    ) -> Result<(), JournalError> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
+        let next_retry = retry.map(|delay| {
+            Utc::now()
+                .timestamp_millis()
+                .saturating_add(i64::try_from(delay.as_millis()).unwrap_or(i64::MAX))
+        });
+        conn.execute("UPDATE external_work_operations SET response_json=json_set(?2,'$._reply_recovery',
+                json_extract(response_json,'$._reply_recovery')),stage=?3,next_retry_ms=?4,
+                lease_token=NULL,lease_until_ms=NULL,updated_at=?5 WHERE request_id=?1 AND stage != 'terminal'",
+            params![request_id, canonical_json(response)?, if retry.is_some() { "retry_wait" } else { "terminal" },
+                next_retry, Utc::now().to_rfc3339()])
+            .map_err(|e| JournalError::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -252,7 +346,8 @@ impl SqliteRequestJournal {
             .execute(
                 "UPDATE external_work_operations SET stage=?2, response_json=?3,
                  next_retry_ms=?4, lease_token=NULL, lease_until_ms=NULL, updated_at=?5
-                 WHERE request_id=?1",
+                 WHERE request_id=?1
+                   AND json_extract(COALESCE(response_json, '{}'), '$._reply_recovery') IS NULL",
                 params![
                     request_id,
                     stage,
@@ -262,7 +357,7 @@ impl SqliteRequestJournal {
                 ],
             )
             .map_err(|error| JournalError::Storage(error.to_string()))?;
-        if changed == 0 {
+        if changed == 0 && load_operation(&conn, request_id)?.is_none() {
             return Err(JournalError::Missing(request_id.to_string()));
         }
         Ok(())
@@ -355,7 +450,7 @@ impl SqliteRequestJournal {
         conn.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM external_work_operations
-                WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation','claim_recovery')
                   AND stage IN ('prepared','retry_wait','dispatching')
                   AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                   AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
@@ -386,7 +481,7 @@ impl SqliteRequestJournal {
             let mut statement = transaction
                 .prepare(
                     "SELECT request_id FROM external_work_operations
-                 WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation')
+                 WHERE kind NOT IN ('stakeholder_contact','stakeholder_reservation','claim_recovery')
                    AND stage IN ('prepared','retry_wait','dispatching')
                        AND (next_retry_ms IS NULL OR next_retry_ms <= ?1)
                        AND (lease_until_ms IS NULL OR lease_until_ms <= ?1)
@@ -663,8 +758,15 @@ pub trait VioletThreadResolver: Send + Sync {
 pub(crate) fn violet_proxy_outcome(
     outcome: Result<anyhow::Result<Value>, tokio::time::error::Elapsed>,
 ) -> Result<Value, RemoteError> {
+    violet_proxy_payload(outcome).and_then(decode_violet_result)
+}
+
+#[cfg(feature = "mcp-proxy")]
+pub(crate) fn violet_proxy_payload(
+    outcome: Result<anyhow::Result<Value>, tokio::time::error::Elapsed>,
+) -> Result<Value, RemoteError> {
     match outcome {
-        Ok(Ok(value)) => decode_violet_result(value),
+        Ok(Ok(value)) => violet_payload(value),
         Ok(Err(error)) => {
             let message = format!(
                 "Violet could not resolve the Slack permalink: {}",
@@ -680,11 +782,9 @@ pub(crate) fn violet_proxy_outcome(
     }
 }
 
-/// Decode the MCP envelope around Violet's deployed `violet_read` response and
-/// normalize the identity-only v1 contract for the external-work service.
-/// Violet intentionally returns no message body or identity-proof field.
-pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
-    let payload = value
+/// Extract either deployed MCP envelope without interpreting the tool's payload.
+fn violet_payload(value: Value) -> Result<Value, RemoteError> {
+    value
         .get("structuredContent")
         .or_else(|| value.get("structured_content"))
         .cloned()
@@ -700,9 +800,13 @@ pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
                     })
                 })
         })
-        .or_else(|| value.get("ok").map(|_| value.clone()))
-        .ok_or_else(|| RemoteError::unavailable("Violet returned no structured thread identity"))?;
+        .or_else(|| (value.get("ok").is_some() || value.get("code").is_some()).then(|| value.clone()))
+        .ok_or_else(|| RemoteError::unavailable("Violet returned no structured response"))
+}
 
+/// Normalize Violet's identity-only `violet_read` response for the claim service.
+pub(crate) fn decode_violet_result(value: Value) -> Result<Value, RemoteError> {
+    let payload = violet_payload(value)?;
     if payload.get("ok").is_some() {
         if payload.get("ok").and_then(Value::as_bool) == Some(false) {
             let refusal = payload.get("error").cloned().unwrap_or(Value::Null);
@@ -1018,7 +1122,7 @@ impl ExternalWorkService {
         };
         if !created {
             if row.stage == "terminal" {
-                return row_response(&row);
+                return self.recover_reply(&row, row_response(&row)?, Instant::now() + self.total_budget);
             }
             if row.stage == "dispatching" || row.stage == "retry_wait" && row.wire_json.is_some() {
                 return self.reconcile(&row);
@@ -1137,9 +1241,9 @@ impl ExternalWorkService {
             )
         })?;
         let timeout = call_timeout(deadline)?;
-        self.journal
-            .begin_attempt(&row.request_id)
-            .map_err(journal_error)?;
+        if !self.journal.begin_attempt(&row.request_id).map_err(journal_error)? {
+            return self.reconcile_with_deadline(row, deadline);
+        }
         let result = match self.cloud.post(&path, &payload, timeout) {
             Ok(mut response) => {
                 if response.get("code").and_then(Value::as_str).is_none() {
@@ -1178,6 +1282,157 @@ impl ExternalWorkService {
                 retry.then_some(Duration::from_secs(2)),
             )
             .map_err(journal_error)?;
+        self.recover_reply(row, result, deadline)
+    }
+
+    /// Cloud alone identifies an expired, departed owner. Violet only reads
+    /// and settles its reply; the new claim still goes through Cloud authority.
+    fn recover_reply(
+        &self,
+        row: &JournalOperation,
+        result: Value,
+        deadline: Instant,
+    ) -> Result<Value, ExternalWorkError> {
+        if row.kind != "claim" {
+            return Ok(result);
+        }
+        let saved: Value = row
+            .response_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| error("journal_error", e.to_string()))?
+            .unwrap_or(Value::Null);
+        let recovery = saved.get("_reply_recovery");
+        if recovery.is_some()
+            && (row.stage == "terminal"
+                || result["code"] == "held"
+                    && row
+                        .next_retry_ms
+                        .is_some_and(|at| at > Utc::now().timestamp_millis()))
+        {
+            return Ok(result);
+        }
+        let held = recovery
+            .map(|metadata| &metadata["held"])
+            .unwrap_or(&result);
+        let wire: Value = row
+            .wire_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| error("journal_error", e.to_string()))?
+            .unwrap_or(Value::Null);
+        let receipt = &held["receipt"];
+        let intent = &receipt["reply_intent"];
+        let intent_id = intent["id"].as_str().unwrap_or_default();
+        let generation = receipt["generation"]
+            .as_u64()
+            .filter(|generation| *generation > 0);
+        let date = |value: &Value| {
+            value
+                .as_str()
+                .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        };
+        let expired = date(&receipt["expires_at"])
+            .zip(date(&receipt["observed_at"]))
+            .is_some_and(|(expires, observed)| expires <= observed);
+        if held["schema"] != CONTRACT_SCHEMA
+            || held["code"] != "held"
+            || held["reason"] != "reply_unresolved"
+            || receipt["next_action"] != "reconcile"
+            || intent["status"] != "outcome_unknown"
+            || valid_uuid(intent_id).is_err()
+            || generation.is_none()
+            || intent["claim_generation"].as_u64() != generation
+            || receipt["request_id"] != row.request_id
+            || receipt["resource"]["kind"] != "slack_thread"
+            || receipt["resource"]["state"] != "claimed"
+            || receipt["resource"]["project_id"] != wire["project_id"]
+            || receipt["resource"]["external_ref"] != wire["external_ref"]
+            || receipt["resource"]["id"]
+                .as_str()
+                .is_none_or(|id| valid_uuid(id).is_err())
+            || receipt["visible_owner"]["is_caller"] != false
+            || receipt["visible_owner"]["registration_id"]
+                .as_str()
+                .is_none_or(|owner| owner.trim().is_empty() || owner == self.context.registration_id)
+            || !expired
+        {
+            return Ok(result);
+        }
+        let child = self
+            .journal
+            .reserve_reply_recovery(&row.request_id, held)
+            .map_err(journal_error)?;
+        let result = if child.stage == "awaiting_readback" {
+            let readback = call_timeout(deadline)
+                .ok()
+                .and_then(|timeout| self.violet.reconcile_reply(intent_id, timeout).ok());
+            let settled = readback.as_ref().is_some_and(|reply| {
+                let terminal = matches!(reply["state"].as_str(), Some("posted" | "rejected"));
+                let acknowledged = reply["ok"] == true
+                    && (reply["state"] != "posted"
+                        || reply["message_ts"]
+                            .as_str()
+                            .is_some_and(|ts| !ts.is_empty()));
+                let already_settled =
+                    reply["ok"] == false && reply["reason"] == "intent_not_unresolved";
+                terminal
+                    && (acknowledged || already_settled)
+                    && reply["coordination_operation_id"] == intent_id
+                    && reply
+                        .get("channel_id")
+                        .is_none_or(|id| id == &wire["external_ref"]["channel_id"])
+                    && reply
+                        .get("thread_ts")
+                        .is_none_or(|ts| ts == &wire["external_ref"]["root_ts"])
+            });
+            if !settled {
+                let delay = readback
+                    .as_ref()
+                    .and_then(|reply| reply["retry_after"].as_u64())
+                    .unwrap_or(2)
+                    .max(2);
+                self.journal
+                    .record_reply_recovery(&row.request_id, held, Some(Duration::from_secs(delay)))
+                    .map_err(journal_error)?;
+                return Ok(held.clone());
+            }
+            let input: Value = serde_json::from_str(&row.input_json)
+                .map_err(|e| error("journal_error", e.to_string()))?;
+            let command = ExternalWorkCommand::Claim {
+                external_ref: input["external_ref"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+                request_id: Some(child.request_id.clone()),
+            };
+            // Failure to start before the shared deadline leaves the reserved
+            // child undispatched; the next attempt can safely read back again.
+            if call_timeout(deadline).is_err() {
+                self.journal
+                    .record_reply_recovery(&row.request_id, held, Some(Duration::from_secs(2)))
+                    .map_err(journal_error)?;
+                return Ok(held.clone());
+            }
+            self.dispatch(&child, &command, deadline)?
+        } else if child.stage == "terminal" {
+            row_response(&child)?
+        } else {
+            self.reconcile_with_deadline(&child, deadline)?
+        };
+        let retry = matches!(
+            result["code"].as_str(),
+            Some("pending" | "outcome_unknown" | "authority_unavailable")
+        );
+        self.journal
+            .record_reply_recovery(
+                &row.request_id,
+                &result,
+                retry.then_some(Duration::from_secs(2)),
+            )
+            .map_err(journal_error)?;
         Ok(result)
     }
 
@@ -1206,7 +1461,7 @@ impl ExternalWorkService {
             ));
         }
         if row.stage == "terminal" {
-            return row_response(&row);
+            return self.recover_reply(&row, row_response(&row)?, Instant::now() + self.total_budget);
         }
         if row.kind == "claim" && row.wire_json.is_none() {
             let ref_link = input
@@ -1266,7 +1521,15 @@ impl ExternalWorkService {
     }
 
     fn reconcile(&self, row: &JournalOperation) -> Result<Value, ExternalWorkError> {
-        let deadline = Instant::now() + self.total_budget;
+        self.reconcile_with_deadline(row, Instant::now() + self.total_budget)
+    }
+
+    fn reconcile_with_deadline(&self, row: &JournalOperation, deadline: Instant) -> Result<Value, ExternalWorkError> {
+        if row.kind == "claim" && row.response_json.as_deref()
+            .and_then(|saved| serde_json::from_str::<Value>(saved).ok())
+            .is_some_and(|saved| saved.get("_reply_recovery").is_some()) {
+            return self.recover_reply(row, row_response(row)?, deadline);
+        }
         self.journal
             .begin_attempt(&row.request_id)
             .map_err(journal_error)?;
@@ -1303,7 +1566,7 @@ impl ExternalWorkService {
                 retry.then_some(Duration::from_secs(2)),
             )
             .map_err(journal_error)?;
-        Ok(result)
+        self.recover_reply(row, result, deadline)
     }
 
     /// One bounded background batch. Callers submit this on an external job
@@ -1315,7 +1578,7 @@ impl ExternalWorkService {
             .map_err(journal_error)?;
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
-            let result = if row.kind == "claim" && row.wire_json.is_none() {
+            let result = if row.kind == "claim" {
                 self.claim_status(&row.request_id)?
             } else {
                 self.reconcile(&row)?
@@ -1708,7 +1971,7 @@ fn row_response(row: &JournalOperation) -> Result<Value, ExternalWorkError> {
         .transpose()
         .map_err(|e| error("journal_error", format!("saved response is invalid: {e}")))
         .map(|result| {
-            result.unwrap_or_else(|| {
+            let mut response = result.unwrap_or_else(|| {
                 failure_response(
                     &row.request_id,
                     "pending",
@@ -1716,7 +1979,9 @@ fn row_response(row: &JournalOperation) -> Result<Value, ExternalWorkError> {
                     "The request is journaled and waiting for dispatch.",
                     "reconcile",
                 )
-            })
+            });
+            if let Some(object) = response.as_object_mut() { object.remove("_reply_recovery"); }
+            response
         })
 }
 
@@ -2021,7 +2286,9 @@ mod tests {
             settled: Arc<Mutex<bool>>,
             held: Value,
             acquired: Value,
+            timeout: bool,
             posts: Mutex<Vec<Value>>,
+            lookups: Mutex<Vec<String>>,
         }
         impl CloudCoordinationPort for RecoveryCloud {
             fn post(&self, path: &str, payload: &Value, _: Duration) -> Result<Value, RemoteError> {
@@ -2029,12 +2296,25 @@ mod tests {
                 let id = payload["request_id"].as_str().unwrap();
                 assert!(self.journal.get(id).unwrap().unwrap().wire_json.is_some());
                 self.posts.lock().unwrap().push(payload.clone());
-                let mut result = if *self.settled.lock().unwrap() { self.acquired.clone() } else { self.held.clone() };
+                if self.timeout && *self.settled.lock().unwrap() {
+                    return Err(RemoteError::timeout("committed, response lost"));
+                }
+                let mut result = if *self.settled.lock().unwrap() {
+                    self.acquired.clone()
+                } else {
+                    self.held.clone()
+                };
                 result["receipt"]["request_id"] = payload["request_id"].clone();
                 Ok(result)
             }
-            fn lookup(&self, _: &str, _: &str, _: Duration) -> Result<Value, RemoteError> {
-                panic!("a settled replay must use its journal, never look up a different operation");
+            fn lookup(&self, id: &str, _: &str, _: Duration) -> Result<Value, RemoteError> {
+                assert!(self.timeout);
+                assert_ne!(id, REQUEST_ID);
+                assert_eq!(self.posts.lock().unwrap()[1]["request_id"], id);
+                self.lookups.lock().unwrap().push(id.to_string());
+                let mut result = self.acquired.clone();
+                result["receipt"]["request_id"] = json!(id);
+                Ok(result)
             }
         }
         struct RecoveryViolet {
@@ -2047,46 +2327,215 @@ mod tests {
                 FakeViolet::ok().resolve(link, budget)
             }
             fn reconcile_reply(&self, intent_id: &str, _: Duration) -> Result<Value, RemoteError> {
-                self.reads.lock().unwrap().push(intent_id.to_string());
-                let settled = self.outcome != "unknown";
+                let mut reads = self.reads.lock().unwrap();
+                reads.push(intent_id.to_string());
+                if self.outcome == "readback_timeout" {
+                    return Err(RemoteError::timeout("read failed"));
+                }
+                let settled = self.outcome != "unknown" || reads.len() > 1;
                 *self.settled.lock().unwrap() = settled;
-                Ok(json!({"ok": self.outcome != "settled_posted" && settled,
-                    "state": if self.outcome == "settled_posted" { "posted" } else if settled { self.outcome } else { "outcome_unknown" },
-                    "coordination_operation_id": intent_id,
-                    "message_ts": if self.outcome == "posted" { json!("1760616010.000001") } else { Value::Null },
-                    "reason": if self.outcome == "settled_posted" { "intent_not_unresolved" } else { "retry_later" },
-                    "retry_after": 120}))
+                let already_settled = self.outcome.starts_with("settled_");
+                let state = if !settled {
+                    "outcome_unknown"
+                } else if self.outcome.ends_with("rejected") {
+                    "rejected"
+                } else {
+                    "posted"
+                };
+                let mut reply = json!({"ok": !already_settled && settled,
+                    "state": state, "coordination_operation_id": intent_id,
+                    "message_ts": if state == "posted" && !already_settled { json!("1760616010.000001") } else { Value::Null },
+                    "reason": if already_settled { "intent_not_unresolved" } else { "retry_later" },
+                    "retry_after": 120});
+                match self.outcome {
+                    "wrong_intent" => reply["coordination_operation_id"] = json!(REQUEST_ID),
+                    "wrong_thread" => reply["thread_ts"] = json!("1760616011.000001"),
+                    "wrong_channel" => reply["channel_id"] = json!("COTHER"),
+                    "missing_ts" => reply["message_ts"] = Value::Null,
+                    _ => {}
+                }
+                // Both MCP envelope forms use the production readback decoder.
+                violet_payload(if already_settled {
+                    json!({"content":[{"type":"text","text":reply.to_string()}]})
+                } else {
+                    json!({"structuredContent":reply})
+                })
             }
         }
         let cases = fixture("claim")["cases"].as_array().unwrap().clone();
-        let payload = |code: &str, reason: Option<&str>| cases.iter().map(|case| &case["response"]["payload"])
-            .find(|value| value["code"] == code && reason.is_none_or(|reason| value["reason"] == reason)).unwrap().clone();
+        let payload = |code: &str, reason: Option<&str>| {
+            cases
+                .iter()
+                .map(|case| &case["response"]["payload"])
+                .find(|value| {
+                    value["code"] == code && reason.is_none_or(|reason| value["reason"] == reason)
+                })
+                .unwrap()
+                .clone()
+        };
         let unresolved = payload("held", Some("reply_unresolved"));
-        let intent = unresolved["receipt"]["reply_intent"]["id"].as_str().unwrap();
-        let acquired = cases.iter().map(|case| &case["response"]["payload"])
-            .find(|value| value["code"] == "acquired" && value["receipt"]["generation"] == 2).unwrap().clone();
-        for outcome in ["posted", "rejected", "settled_posted", "unknown", "live"] {
+        let intent = unresolved["receipt"]["reply_intent"]["id"]
+            .as_str()
+            .unwrap();
+        let acquired = cases
+            .iter()
+            .map(|case| &case["response"]["payload"])
+            .find(|value| value["code"] == "acquired" && value["receipt"]["generation"] == 2)
+            .unwrap()
+            .clone();
+        for outcome in [
+            "posted",
+            "rejected",
+            "settled_posted",
+            "settled_rejected",
+            "unknown",
+            "live",
+            "wrong_intent",
+            "wrong_thread",
+            "wrong_channel",
+            "missing_ts",
+            "wrong_generation",
+            "unexpired",
+            "wrong_scope",
+            "readback_timeout",
+            "claim_timeout",
+        ] {
             let journal = journal();
             let settled = Arc::new(Mutex::new(false));
-            let cloud = Arc::new(RecoveryCloud { journal: journal.clone(), settled: settled.clone(),
-                held: if outcome == "live" { payload("held", Some("owner_holds_claim")) } else { unresolved.clone() },
-                acquired: acquired.clone(), posts: Mutex::new(Vec::new()) });
-            let violet = Arc::new(RecoveryViolet { settled, outcome, reads: Mutex::new(Vec::new()) });
-            let service = ExternalWorkService::new(journal, cloud.clone(), violet.clone(), OperationContext {
-                project_id: "github.com/richards-llc/cassy".into(), registration_id: "reg-supervisor-beta-07".into() });
-            let command = claim(REQUEST_ID, "https://workspace.slack.com/archives/C08COORD01/p1760616000123456");
-            let result = service.execute(command.clone()).unwrap();
-            let terminal = !matches!(outcome, "unknown" | "live");
-            assert_eq!(result["code"], if terminal { "acquired" } else { "held" }, "{outcome}: {result}");
-            assert_eq!(service.execute(command).unwrap(), result, "{outcome}: replay changes its outcome");
-            let posts = cloud.posts.lock().unwrap();
-            assert_eq!(posts.len(), if terminal { 2 } else { 1 }, "{outcome}");
-            if terminal {
-                assert_ne!(posts[0]["request_id"], posts[1]["request_id"]);
-                assert_eq!(result["receipt"]["generation"], 2);
-                assert_eq!(*violet.reads.lock().unwrap(), vec![intent.to_string()]);
-            } else if outcome == "live" {
-                assert!(violet.reads.lock().unwrap().is_empty());
+            let mut held = if outcome == "live" {
+                payload("held", Some("owner_holds_claim"))
+            } else {
+                unresolved.clone()
+            };
+            match outcome {
+                "wrong_generation" => {
+                    held["receipt"]["reply_intent"]["claim_generation"] = json!(2)
+                }
+                "unexpired" => held["receipt"]["expires_at"] = json!("2026-10-17T14:00:00.000Z"),
+                "wrong_scope" => {
+                    held["receipt"]["resource"]["external_ref"]["channel_id"] = json!("COTHER")
+                }
+                _ => {}
+            }
+            let cloud = Arc::new(RecoveryCloud {
+                journal: journal.clone(),
+                settled: settled.clone(),
+                held,
+                acquired: acquired.clone(),
+                timeout: outcome == "claim_timeout",
+                posts: Mutex::new(Vec::new()),
+                lookups: Mutex::new(Vec::new()),
+            });
+            let violet = Arc::new(RecoveryViolet {
+                settled,
+                outcome,
+                reads: Mutex::new(Vec::new()),
+            });
+            let service = ExternalWorkService::new(
+                journal.clone(),
+                cloud.clone(),
+                violet.clone(),
+                OperationContext {
+                    project_id: "github.com/richards-llc/cassy".into(),
+                    registration_id: "reg-supervisor-beta-07".into(),
+                },
+            );
+            let command = claim(
+                REQUEST_ID,
+                "https://workspace.slack.com/archives/C08COORD01/p1760616000123456",
+            );
+            let started_ms = Utc::now().timestamp_millis();
+            let first = service.execute(command.clone()).unwrap();
+            let terminal = matches!(
+                outcome,
+                "posted" | "rejected" | "settled_posted" | "settled_rejected" | "claim_timeout"
+            );
+            assert_eq!(
+                first["code"],
+                if outcome == "claim_timeout" {
+                    "outcome_unknown"
+                } else if terminal {
+                    "acquired"
+                } else {
+                    "held"
+                },
+                "{outcome}: {first}"
+            );
+            // Reconstruct the service against the same durable journal: no new
+            // request or duplicate mutation may appear after a process restart.
+            let restarted = ExternalWorkService::new(
+                journal.clone(),
+                cloud.clone(),
+                violet.clone(),
+                service.context.clone(),
+            );
+            let result = if outcome == "claim_timeout" {
+                restarted.claim_status(REQUEST_ID).unwrap()
+            } else {
+                first.clone()
+            };
+            assert_eq!(
+                restarted.execute(command).unwrap(),
+                result,
+                "{outcome}: replay changes its outcome"
+            );
+            {
+                let posts = cloud.posts.lock().unwrap();
+                assert_eq!(posts.len(), if terminal { 2 } else { 1 }, "{outcome}");
+                if terminal {
+                    assert_ne!(posts[0]["request_id"], posts[1]["request_id"]);
+                    assert_eq!(posts[0]["external_ref"], posts[1]["external_ref"]);
+                    assert_eq!(posts[0]["actor"], posts[1]["actor"]);
+                    assert_eq!(result["receipt"]["generation"], 2);
+                    assert_eq!(*violet.reads.lock().unwrap(), vec![intent.to_string()]);
+                } else if matches!(
+                    outcome,
+                    "live" | "wrong_generation" | "unexpired" | "wrong_scope"
+                ) {
+                    assert!(violet.reads.lock().unwrap().is_empty());
+                } else {
+                    assert_eq!(violet.reads.lock().unwrap().len(), 1);
+                }
+            }
+            assert_eq!(
+                cloud.lookups.lock().unwrap().len(),
+                usize::from(outcome == "claim_timeout")
+            );
+            if outcome == "unknown" {
+                let waiting = journal.get(REQUEST_ID).unwrap().unwrap();
+                assert_eq!(waiting.stage, "retry_wait");
+                assert!(waiting.next_retry_ms.unwrap() >= started_ms + 120_000);
+                journal
+                    .record_result(REQUEST_ID, &unresolved, None)
+                    .unwrap();
+                assert_eq!(journal.get(REQUEST_ID).unwrap().unwrap(), waiting);
+                // Inject a due schedule; no sleep or wall-clock race.
+                journal
+                    .conn
+                    .lock()
+                    .unwrap()
+                    .execute(
+                        "UPDATE external_work_operations SET next_retry_ms=0 WHERE request_id=?1",
+                        [REQUEST_ID],
+                    )
+                    .unwrap();
+                let results = restarted
+                    .reconcile_due(Utc::now().timestamp_millis())
+                    .unwrap();
+                assert_eq!(results.len(), 1);
+                assert_eq!(results[0]["code"], "acquired");
+                assert_eq!(cloud.posts.lock().unwrap().len(), 2);
+                assert_eq!(violet.reads.lock().unwrap().len(), 2);
+                journal
+                    .record_result(REQUEST_ID, &unresolved, None)
+                    .unwrap();
+                journal
+                    .record_reply_recovery(REQUEST_ID, &unresolved, Some(Duration::from_secs(2)))
+                    .unwrap();
+                assert_eq!(
+                    restarted.claim_status(REQUEST_ID).unwrap()["code"],
+                    "acquired"
+                );
             }
         }
     }

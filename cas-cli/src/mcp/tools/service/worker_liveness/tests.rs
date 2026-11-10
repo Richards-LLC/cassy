@@ -612,6 +612,7 @@ struct CpuTree {
     harness: std::process::Child,
     output: std::io::BufReader<std::process::ChildStdout>,
     agent: cas_types::Agent,
+    log_dir: tempfile::TempDir,
 }
 
 #[cfg(target_os = "linux")]
@@ -623,7 +624,7 @@ import subprocess, sys, time
 script, depth = sys.argv[1], int(sys.argv[2])
 child = None
 if depth:
-    child = subprocess.Popen(['python3', '-u', '-c', script, script, str(depth - 1)],
+    child = subprocess.Popen(['python3', '-u', '-c', script, script, str(depth - 1), sys.argv[3]],
                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     assert child.stdout.readline().strip() == 'ready'
 print('ready', flush=True)
@@ -633,8 +634,11 @@ for line in sys.stdin:
         end = time.process_time() + 0.15
         while time.process_time() < end:
             pass
+    elif command == 'write' and child is None:
+        with open(sys.argv[3], 'a') as log:
+            log.write('passing test\n')
     elif child:
-        child.stdin.write('work\n' if command == 'work' else 'idle\n')
+        child.stdin.write(command + '\n')
         child.stdin.flush()
         assert child.stdout.readline().strip() == 'done'
     print('done', flush=True)
@@ -642,9 +646,11 @@ if child:
     child.stdin.close()
     assert child.wait(timeout=5) == 0
 "#;
+        let log_dir = tempfile::tempdir().unwrap();
         let mut harness = std::process::Command::new("python3")
             .arg0("claude")
             .args(["-u", "-c", script, script, &depth.to_string()])
+            .arg(log_dir.path().join("tests.log"))
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -658,6 +664,7 @@ if child:
             harness,
             output,
             agent,
+            log_dir,
         };
         tree.read_ack("ready");
         tree
@@ -730,4 +737,79 @@ fn process_evidence_silent_background_child_ignores_harness_cpu() {
     tree.work("harness");
     let got = tree.observe();
     assert_eq!(got.state, Liveness::Stalled, "{}", got.detail());
+}
+
+
+// GH #1606: a live child writes passing tests without updating its owner's
+// transcript. Exercise status, director health and the progress watchdog on
+// the same owned tree; then leave it alive but silent until recovery is due.
+#[cfg(target_os = "linux")]
+#[test]
+fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
+    use crate::ui::factory::{daemon::runtime::progress_watchdog, director::events::{run_worker_health_probe, WorkerHealthRequest}};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    const SESSION: &str = "child-progress-cas-8a87";
+    env.set("CAS_FACTORY_SESSION", SESSION);
+    let repo = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(repo.path()).unwrap();
+    let mut tree = CpuTree::new(2);
+    tree.agent.factory_session = Some(SESSION.into());
+    tree.agent.metadata.insert("worker_cli".into(), "codex".into());
+    tree.agent.metadata.insert("clone_path".into(), repo.path().display().to_string());
+    tree.agent.metadata.insert("worker_account_dir".into(), env.home().display().to_string());
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    agents.register(&tree.agent).unwrap();
+    let mut supervisor = Agent::new_with_role("supervisor-8a87".into(), "supervisor".into(), AgentRole::Supervisor);
+    supervisor.factory_session = Some(SESSION.into());
+    agents.register(&supervisor).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = Task::new("cas-8a87-fixture".into(), "Long non-Rust gate".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(tree.agent.id.clone());
+    tasks.add(&task).unwrap();
+    let rollout = env.home().join("sessions/2026/11/10/rollout-child-progress.jsonl");
+    std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+    let now = Utc::now();
+    let cold = now - chrono::Duration::hours(3);
+    let meta = serde_json::json!({"type":"session_meta","payload":{"session_id":tree.agent.id,"cwd":repo.path(),"originator":"codex_cli_rs","source":"cli"}});
+    let start = serde_json::json!({"timestamp":cold.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started"}});
+    std::fs::write(&rollout, format!("{meta}\n{start}\n")).unwrap();
+    std::fs::File::open(&rollout).unwrap().set_modified(cold.into()).unwrap();
+    let owner = tree.agent.clone();
+    let status = |at| super::super::factory_ops::worker_liveness_for_agent(&root, &owner, at, 300);
+    assert_eq!(status(now).state, Liveness::Stalled); // Cold sample never proves progress.
+    progress_watchdog::sweep(&root, SESSION, now);
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    for minutes in [44, 88, 132] {
+        tree.work("write");
+        assert!(std::fs::metadata(tree.log_dir.path().join("tests.log")).unwrap().len() > 0);
+        let at = now + chrono::Duration::minutes(minutes);
+        let got = status(at);
+        assert_eq!(got.state, Liveness::Executing, "{}", got.detail());
+        // A second consumer must not steal the first consumer's progress delta.
+        assert_eq!(status(at).state, Liveness::Executing);
+        let request = WorkerHealthRequest { worker: tree.agent.name.clone(), task: task.id.clone(), threshold_secs: 300, delay_secs: 5, requested_at: at };
+        assert!(!run_worker_health_probe(Some(&root), &request).confirmed);
+        progress_watchdog::sweep(&root, SESSION, at);
+    }
+    assert!(queue.peek_all(50).unwrap().is_empty());
+    let silent = now + chrono::Duration::minutes(138);
+    assert_eq!(status(silent).state, Liveness::Stalled);
+    let request = WorkerHealthRequest { worker: tree.agent.name.clone(), task: task.id.clone(), threshold_secs: 300, delay_secs: 5, requested_at: silent };
+    assert!(run_worker_health_probe(Some(&root), &request).confirmed, "a sleeping descendant cannot suppress recovery forever");
+    // Neither a new session nor a reused root PID may borrow cached progress.
+    tree.work("write");
+    assert_eq!(status(silent).state, Liveness::Executing);
+    let mut foreign = tree.agent.clone();
+    foreign.factory_session = Some("another-session".into());
+    assert_eq!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, silent, 300).state, Liveness::Stalled);
+    foreign.pid_starttime = Some(0);
+    assert_ne!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, silent, 300).state, Liveness::Executing);
+    for minutes in [184, 229] {
+        progress_watchdog::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+    }
+    let rows = queue.peek_all(50).unwrap();
+    assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1);
+    assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1);
 }

@@ -1352,6 +1352,9 @@ impl CasCore {
         let store = self.open_store()?;
 
         let mut entry = Self::resolve_memory_entry(store.as_ref(), &req.id)?;
+        let was_handoff = handoff::is_handoff(&entry);
+        let reserved = |tag: &str| tag.starts_with("handoff-machine:") || tag.starts_with("handoff-owner:");
+        let lineage: Vec<_> = entry.tags.iter().filter(|tag| reserved(tag)).cloned().collect();
 
         let mut changes = Vec::new();
 
@@ -1369,8 +1372,11 @@ impl CasCore {
             entry.tags = tags
                 .split(',')
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .filter(|s| !s.is_empty() && !reserved(s))
                 .collect();
+            // Lineage is persisted provenance, not caller-editable tags. Keep
+            // it even if the handoff tag is temporarily removed and restored.
+            entry.tags.extend(lineage.iter().cloned());
             changes.push("tags");
         }
 
@@ -1395,6 +1401,17 @@ impl CasCore {
 
         if changes.is_empty() {
             return Ok(Self::success("No changes specified"));
+        }
+
+        if !was_handoff && handoff::is_handoff(&entry) && lineage.is_empty() {
+            let author_id = self.get_agent_id()?;
+            let author = self.open_agent_store()?.get(&author_id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(error.to_string()),
+                data: None,
+            })?;
+            handoff::tag_new_handoff(&mut entry.tags, Some(&author.role.to_string()));
+            handoff::HandoffLineage::for_agent(&author).stamp(&mut entry);
         }
 
         entry.expire_if_superseded(Utc::now());

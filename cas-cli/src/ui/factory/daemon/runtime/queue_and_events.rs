@@ -15,6 +15,8 @@ pub(crate) const SUPERVISOR_STARTUP_SOURCE: &str = "cas-startup";
 /// cas-d511: the delivery watchdog's pane nudge has no queue row of its own;
 /// the turn ledger matches this exact text to attribute the turn to the daemon.
 pub(crate) const DELIVERY_WATCHDOG_NUDGE: &str =
+    "Cassy delivery watchdog: a message may be waiting.";
+pub(crate) const LEGACY_DELIVERY_WATCHDOG_NUDGE: &str =
     "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.";
 
 /// The daemon's own reminder to its owner is not an inter-agent relay.
@@ -3350,6 +3352,7 @@ const NORMAL_DELIVERY_BUSY_RECHECK: std::time::Duration = std::time::Duration::f
 /// A normal write that has not yet produced evidence of a harness turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NormalDeliveryProbe {
+    pub(crate) source: String,
     pub(crate) pane: String,
     pub(crate) target: String,
     pub(crate) bytes_at_delivery: u64,
@@ -5368,7 +5371,7 @@ impl FactoryDaemon {
                 NormalDeliveryProbeAction::RetryNormalNudge => {
                     let source = "lifecycle-wake:delivery-watchdog";
                     let nudge = format!("{DELIVERY_WATCHDOG_NUDGE}\n{}",
-                        super::delivery::pointer_wake_payload("supervisor", Some(row_id)));
+                        super::delivery::pointer_wake_payload(&probe.source, Some(row_id)));
                     let payload = super::delivery::prepare_pty_machine_delivery(
                         self.app.cas_dir(),
                         &pane,
@@ -8681,6 +8684,7 @@ impl FactoryDaemon {
                 self.normal_delivery_probes.insert(
                     queued.id,
                     NormalDeliveryProbe {
+                        source: queued.source.clone(),
                         pane: normal_delivery_pane,
                         target: queued.target.clone(),
                         bytes_at_delivery,
@@ -22089,6 +22093,10 @@ mod gh_1153_idle_pty_delivery_tests {
     /// open the watchdog probe exactly as the delivery arm does, aged so its
     /// first observe window has elapsed.
     async fn deliver_to_idle_worker() -> Fixture {
+        deliver_to_idle_worker_from("supervisor", None).await
+    }
+
+    async fn deliver_to_idle_worker_from(source: &str, origin: Option<&cas_store::QueueOrigin>) -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let cas_dir = tmp.path().join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -22109,9 +22117,11 @@ mod gh_1153_idle_pty_delivery_tests {
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let prompt = "You have been assigned a new task: cas-1153. Start it now.";
-        let row = queue
-            .enqueue_with_session("supervisor", WORKER, prompt, "provision-test")
-            .unwrap();
+        let row = match queue.enqueue_idempotent(source, WORKER, prompt, Some("provision-test"),
+            None, None, "watchdog-fixture", origin).unwrap() {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            _ => unreachable!(),
+        };
         let delivered_at_utc = chrono::Utc::now();
         let bytes_at_delivery = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
         let outcome = daemon.app.mux.inject(WORKER, prompt).await.unwrap();
@@ -22129,6 +22139,7 @@ mod gh_1153_idle_pty_delivery_tests {
         daemon.normal_delivery_probes.insert(
             row,
             NormalDeliveryProbe {
+                source: source.into(),
                 pane: WORKER.to_string(),
                 target: WORKER.to_string(),
                 bytes_at_delivery,
@@ -22149,6 +22160,39 @@ mod gh_1153_idle_pty_delivery_tests {
             queue,
             rollout,
             row,
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_47cb_completion_watchdog_keeps_sender_and_delivery_facts() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (source, origin) in [
+            ("worker-check", Some(cas_store::QueueOrigin::Daemon)),
+            ("worker-check", None),
+            ("peer-1782", None),
+        ] {
+            let Fixture { _tmp, mut daemon, queue, row, .. } =
+                deliver_to_idle_worker_from(source, origin.as_ref()).await;
+            let before = queue.message_delivery_report(row).unwrap().unwrap();
+            daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+            if origin == Some(cas_store::QueueOrigin::Daemon) {
+                assert!(!daemon.normal_delivery_probes.contains_key(&row));
+                let after = queue.message_delivery_report(row).unwrap().unwrap();
+                assert_eq!(after.wake_attempt, before.wake_attempt);
+                assert_eq!(after.delivered_at, before.delivered_at);
+                assert!(queue.queued_prompt(row).unwrap().unwrap().acked_at.is_none());
+            } else {
+                assert_eq!(daemon.normal_delivery_probes[&row].nudges, 1);
+                // Sender IDs are machine identities, not a pin on human wording.
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    let _ = daemon.app.mux.poll_batch();
+                    let screen = daemon.app.mux.get(WORKER).unwrap().dump_viewport().unwrap();
+                    if screen.contains(source) { break; }
+                    assert!(Instant::now() < deadline, "missing sender ID {source} in PTY delivery");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
         }
     }
 
@@ -22247,6 +22291,7 @@ mod gh_1153_idle_pty_delivery_tests {
                     rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
                         .execute("UPDATE prompt_queue SET source=?, target=? WHERE id=?", rusqlite::params![source, target, row]).unwrap();
                     probe.target = target.into();
+                    probe.source = source.into();
                     daemon.normal_delivery_probes.insert(row, probe.clone());
                 }
                 match receipt {

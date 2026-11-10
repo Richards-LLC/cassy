@@ -404,8 +404,8 @@ bug_families:
     tasks: [cas-b26e]
     journeys: [FACTORY-QA-RECEIPT]
   drained-inbox-delivery-watchdog:
-    title: Drained worker and supervisor inboxes retire delivery wakes while fresh unread notifications still wake
-    tasks: [cas-40ed]
+    title: Drained inboxes and transported worker-check completions retire delivery wakes while fresh unread notifications name their sender
+    tasks: [cas-40ed, cas-47cb]
     journeys: [FACTORY-SUPERVISE, HUB-J5]
   named-live-focus-choices:
     title: Focus choices preserve titles and include only live owned epics, with the release train first and current focus excluded

@@ -98,6 +98,7 @@ async fn scoped<R: SessionReadModel>(
         }
         let store = cas_store::SqliteArtifactStore::open(&root).ok()?;
         if let Some(record) = store.get(&artifact).ok()?
+            && record.revocation.is_none()
             && record.task_id == format!("commander-{session}")
         {
             let file = super::composer_upload::open_preview(&root, &session, &record).ok()?;
@@ -107,7 +108,7 @@ async fn scoped<R: SessionReadModel>(
             });
         }
         let record = store.get_for_session(&artifact, &session).ok()??;
-        if record.status != "committed"
+        if record.revocation.is_some() || record.status != "committed"
             || record
                 .cloud_artifact_id
                 .as_deref()

@@ -854,8 +854,11 @@ pub fn propose(
     let epic = tasks
         .get(epic_id)
         .map_err(|_| format!("epic {epic_id} not found"))?;
-    if epic.task_type != TaskType::Epic {
-        return Err(format!("{epic_id} is not an epic"));
+    let standalone = epic.task_type != TaskType::Epic;
+    if standalone && (!mine.is_empty() || theirs.len() != 1 || theirs[0] != epic_id
+        || tasks.get_parent_epic(epic_id).map_err(|error| error.to_string())?.is_some())
+    {
+        return Err(format!("For a standalone task, its owner offers factory action=epic_split id={epic_id} target=<peer> theirs={epic_id}. For a child, use its parent epic as id."));
     }
     for id in mine.iter().chain(theirs) {
         let task = tasks
@@ -864,11 +867,23 @@ pub fn propose(
         let child = tasks.get_dependencies(id).unwrap_or_default().iter().any(|dep| {
             dep.dep_type == DependencyType::ParentChild && dep.to_id == epic_id
         });
-        if !child {
+        if !child && !(standalone && id == epic_id) {
             return Err(format!("{id} is not a child of epic {epic_id}"));
         }
         if task.status == TaskStatus::Closed {
             return Err(format!("{id} is already closed"));
+        }
+        if let Some(source) = task.external_ref.as_deref()
+            .filter(|source| crate::mcp::tools::core::task::source_claim::is_slack_source(source))
+        {
+            let project = crate::cloud::resolve_canonical_id(cas_root)
+                .ok_or("Slack work delegation requires the project's canonical identity")?;
+            let receipt = crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
+                .map_err(|error| error.to_string())?
+                .task_source_receipt(source, &project).map_err(|error| error.to_string())?;
+            if !receipt.is_some_and(|receipt| receipt["visible_owner"]["registration_id"] == caller.id) {
+                return Err(format!("Only the current Slack claim owner can offer {id}. Ask the owner to offer this task via epic_split; its reply authority stays with that owner."));
+            }
         }
     }
     let all: Vec<String> = mine.iter().chain(theirs).cloned().collect();
@@ -1474,10 +1489,11 @@ pub fn release_moved_child(
     }
     let tasks = crate::store::open_task_store_local(cas_root)
         .map_err(|error| format!("could not open the task store: {error}"))?;
-    if tasks.get_parent_epic(task_id).map_err(|error| error.to_string())?
-        .is_some_and(|parent| parent.id == split.epic_id)
+    let parent = tasks.get_parent_epic(task_id).map_err(|error| error.to_string())?;
+    if parent.as_ref().is_some_and(|parent| parent.id == split.epic_id)
+        || parent.is_none() && task_id == split.epic_id
     {
-        return Err(format!("{task_id} is still a child of epic {}; move it before releasing this split claim", split.epic_id));
+        return Err(format!("{task_id} is still within split scope {}; reparent it before releasing this split claim", split.epic_id));
     }
     let claims = peer_claims(cas_root)?;
     let released = release_obsolete_split_claims(
@@ -1547,7 +1563,9 @@ fn release_obsolete_split_claims(
             }
             let parent = tasks.get_parent_epic(task_id)
                 .map_err(|error| format!("could not read split child parent for {task_id}: {error}"))?
-                .map(|epic| epic.id);
+                .map(|epic| epic.id)
+                // A lone task is its own scope until explicitly reparented.
+                .or_else(|| (task_id == &split.epic_id).then(|| task_id.clone()));
             // A missing parent in a background scan may mean partial sync. The
             // task-update path is explicit and may settle a removed parent.
             let moved = match parent.as_deref() {

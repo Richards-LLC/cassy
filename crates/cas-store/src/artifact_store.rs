@@ -60,6 +60,27 @@ pub const ARTIFACT_SCHEMA_STATEMENTS: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_artifacts_sha256 ON artifacts(sha256)",
 ];
 
+/// Revocation is independent of the immutable file metadata and upload phase.
+pub const ARTIFACT_REVOCATION_SCHEMA_STATEMENTS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS artifact_revocations (
+        artifact_id TEXT PRIMARY KEY REFERENCES artifacts(id),
+        actor_id TEXT NOT NULL CHECK (length(trim(actor_id)) > 0),
+        reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+        revoked_at TEXT NOT NULL,
+        cloud_revoked_at TEXT
+    )",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRevocation {
+    pub artifact_id: String,
+    pub actor_id: String,
+    pub reason: String,
+    pub revoked_at: String,
+    /// None means Cloud deletion has not been acknowledged, not that it succeeded.
+    pub cloud_revoked_at: Option<String>,
+}
+
 /// One published artifact, as stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublishedArtifact {
@@ -75,6 +96,14 @@ pub struct PublishedArtifact {
     pub cloud_url: Option<String>,
     pub slack_permalink: Option<String>,
     pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<ArtifactRevocation>,
+}
+
+impl PublishedArtifact {
+    pub fn access_status(&self) -> &str {
+        if self.revocation.is_some() { "revoked" } else { &self.status }
+    }
 }
 
 /// What a caller supplies to record a freshly hashed local file.
@@ -146,6 +175,9 @@ impl SqliteArtifactStore {
     pub fn init(&self) -> Result<()> {
         let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         conn.execute_batch(ARTIFACT_SCHEMA)?;
+        for statement in ARTIFACT_REVOCATION_SCHEMA_STATEMENTS {
+            conn.execute(statement, [])?;
+        }
         Ok(())
     }
 
@@ -209,6 +241,7 @@ impl SqliteArtifactStore {
             cloud_url: None,
             slack_permalink: None,
             created_at,
+            revocation: None,
         })
     }
 
@@ -223,7 +256,8 @@ impl SqliteArtifactStore {
         let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let changed = conn.execute(
             "UPDATE artifacts SET cloud_artifact_id = ?2, status = 'uploaded'
-             WHERE id = ?1 AND status = 'local'",
+             WHERE id = ?1 AND status = 'local'
+               AND NOT EXISTS (SELECT 1 FROM artifact_revocations WHERE artifact_id = ?1)",
             params![id, cloud_artifact_id],
         )?;
         if changed == 0 {
@@ -247,7 +281,8 @@ impl SqliteArtifactStore {
         let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
         let changed = conn.execute(
             "UPDATE artifacts SET status = 'committed', cloud_url = ?2
-             WHERE id = ?1 AND status IN ('local', 'uploaded')",
+             WHERE id = ?1 AND status IN ('local', 'uploaded')
+               AND NOT EXISTS (SELECT 1 FROM artifact_revocations WHERE artifact_id = ?1)",
             params![id, cloud_url],
         )?;
         if changed == 0 {
@@ -278,7 +313,10 @@ impl SqliteArtifactStore {
                     status, cloud_url, slack_permalink, created_at
              FROM artifacts WHERE id = ?1",
         )?;
-        let row = stmt.query_row([id], row_to_artifact).optional()?;
+        let mut row = stmt.query_row([id], row_to_artifact).optional()?;
+        if let Some(artifact) = &mut row {
+            artifact.revocation = revocation_with_conn(&conn, id)?;
+        }
         Ok(row)
     }
 
@@ -297,7 +335,10 @@ impl SqliteArtifactStore {
                      AND json_extract(ref.value, '$.artifact_id') = ?1
                )",
         )?;
-        let row = stmt.query_row(params![id, session], row_to_artifact).optional()?;
+        let mut row = stmt.query_row(params![id, session], row_to_artifact).optional()?;
+        if let Some(artifact) = &mut row {
+            artifact.revocation = revocation_with_conn(&conn, id)?;
+        }
         Ok(row)
     }
 
@@ -309,11 +350,55 @@ impl SqliteArtifactStore {
                     status, cloud_url, slack_permalink, created_at
              FROM artifacts WHERE task_id = ?1 ORDER BY created_at DESC, id DESC",
         )?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map([task_id], row_to_artifact)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        for artifact in &mut rows {
+            artifact.revocation = revocation_with_conn(&conn, &artifact.id)?;
+        }
         Ok(rows)
     }
+
+    /// First writer wins: retries never replace the original audit identity/reason/time.
+    pub fn revoke(&self, id: &str, actor_id: &str, reason: &str) -> Result<ArtifactRevocation> {
+        if actor_id.trim().is_empty() || reason.trim().is_empty() {
+            return Err(StoreError::Parse("revocation requires an actor and reason".into()));
+        }
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
+        conn.execute(
+            "INSERT INTO artifact_revocations (artifact_id, actor_id, reason, revoked_at)
+             SELECT id, ?2, ?3, ?4 FROM artifacts WHERE id = ?1
+             ON CONFLICT(artifact_id) DO NOTHING",
+            params![id, actor_id.trim(), reason.trim(), Utc::now().to_rfc3339()],
+        )?;
+        revocation_with_conn(&conn, id)?.ok_or_else(|| StoreError::NotFound(format!("no artifact {id}")))
+    }
+
+    pub fn confirm_cloud_revocation(&self, id: &str, revoked_at: &str) -> Result<()> {
+        chrono::DateTime::parse_from_rfc3339(revoked_at)
+            .map_err(|_| StoreError::Parse("Cloud revocation acknowledgement requires an RFC3339 timestamp".into()))?;
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
+        let changed = conn.execute(
+            "UPDATE artifact_revocations SET cloud_revoked_at = COALESCE(cloud_revoked_at, ?2)
+             WHERE artifact_id = ?1", params![id, revoked_at],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::NotFound(format!("no artifact tombstone {id}")));
+        }
+        Ok(())
+    }
+}
+
+fn revocation_with_conn(conn: &rusqlite::Connection, id: &str) -> Result<Option<ArtifactRevocation>> {
+    Ok(conn.query_row(
+        "SELECT artifact_id, actor_id, reason, revoked_at, cloud_revoked_at
+         FROM artifact_revocations WHERE artifact_id = ?1", [id], |row| {
+            Ok(ArtifactRevocation {
+                artifact_id: row.get(0)?, actor_id: row.get(1)?, reason: row.get(2)?,
+                revoked_at: row.get(3)?, cloud_revoked_at: row.get(4)?,
+            })
+        },
+    ).optional()?)
 }
 
 fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishedArtifact> {
@@ -329,6 +414,7 @@ fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<PublishedArtifac
         cloud_url: row.get(8)?,
         slack_permalink: row.get(9)?,
         created_at: row.get(10)?,
+        revocation: None,
     })
 }
 
@@ -352,6 +438,44 @@ mod tests {
             size_bytes: 4_096,
             sha256: "b".repeat(64),
         }
+    }
+
+    #[test]
+    fn artifact_revocation_preserves_audit_and_denies_resurrection_cas_6d35() {
+        let dir = TempDir::new().unwrap();
+        // Upgrade a database that predates tombstones through ordinary store bootstrap.
+        let conn = rusqlite::Connection::open(dir.path().join("cas.db")).unwrap();
+        conn.execute_batch(ARTIFACT_SCHEMA).unwrap();
+        drop(conn);
+        let store = SqliteArtifactStore::open(dir.path()).unwrap();
+        for phase in ["local", "uploaded", "committed"] {
+            let id = format!("art-{phase}");
+            store.record_local(&new_artifact(&id)).unwrap();
+            if phase != "local" { store.mark_uploaded(&id, "cloud-fixture").unwrap(); }
+            if phase == "committed" { store.mark_committed(&id, None).unwrap(); }
+            assert!(store.revoke(&id, "supervisor", " ").is_err());
+            assert!(store.get(&id).unwrap().unwrap().revocation.is_none());
+            let first = store.revoke(&id, "supervisor", "Harmless fixture cleanup").unwrap();
+            assert_eq!(store.revoke(&id, "another-supervisor", "Retry reason").unwrap(), first);
+            let record = store.get(&id).unwrap().unwrap();
+            assert_eq!(record.status, phase);
+            assert_eq!(record.revocation.as_ref(), Some(&first));
+            assert_eq!(record.access_status(), "revoked");
+            assert!(store.mark_uploaded(&id, "another-cloud-id").is_err());
+            assert!(store.mark_committed(&id, None).is_err());
+            assert!(store.list_for_task(&record.task_id).unwrap().iter()
+                .find(|row| row.id == id).unwrap().revocation.is_some());
+            let confirmed = "2026-11-09T21:00:00Z";
+            store.confirm_cloud_revocation(&id, confirmed).unwrap();
+            store.confirm_cloud_revocation(&id, "2026-11-10T21:00:00Z").unwrap();
+            let reopened = SqliteArtifactStore::open(dir.path()).unwrap();
+            let audit = reopened.get(&id).unwrap().unwrap().revocation.unwrap();
+            assert_eq!(audit.actor_id, first.actor_id);
+            assert_eq!(audit.reason, first.reason);
+            assert_eq!(audit.revoked_at, first.revoked_at);
+            assert_eq!(audit.cloud_revoked_at.as_deref(), Some(confirmed));
+        }
+        assert!(store.revoke("art-missing", "supervisor", "cleanup").is_err());
     }
 
     #[test]

@@ -1,0 +1,4 @@
+title: CLI parser argv payload equality is accepted without allowing generated prose pins
+tasks: [cas-5442]
+invariants: [FACTORY-CLI-PAYLOAD-SHAPE]
+journeys: [FACTORY-CLOSE]

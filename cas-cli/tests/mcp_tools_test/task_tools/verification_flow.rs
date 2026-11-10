@@ -8161,26 +8161,9 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
     );
 }
 
-// === cas-26e1: supervisor escape hatch ===
-//
-// These tests lock down the supervisor-close bypass that shipped in
-// close_ops.rs lines 64-82 (`assignee_inactive` path). Precedent: gabber-studio
-// April 2-3 session `f21e74e7-3c57-4cf6-a295-ca6b8e113e79` closed ~12 worker
-// tasks via this hatch after workers wedged (cas-bd17, cas-d6b0, cas-ce02,
-// cas-79e9, cas-74b7, cas-6f19, cas-901d, cas-e3a3, cas-80de, cas-c5be,
-// cas-ff22, cas-2bf7).
-//
-// The hatch is STRUCTURAL, not a reason-string match: it fires when BOTH
-// `is_supervisor_from_env()` is true AND the task's assignee is missing /
-// not-found / heartbeat-expired. The "verification skipped — assignee inactive"
-// string is only a display note the handler appends to the success message
-// (close_ops.rs:487); the supervisor's close_reason does not gate the hatch.
-//
-// These tests MUST still pass after cas-4acd narrowed the per-tool
-// verification jail at server/mod.rs:646-663 to stop exempting `task.close`
-// for factory workers. That narrowing affects the pre-handler jail; the bypass
-// itself lives inside close_ops.rs and is unaffected — these tests verify
-// that directly.
+// Explicit supervisor waivers remain available when no proof cycle is outstanding.
+// Retirement, stale heartbeats and missing assignments do not waive review;
+// the real-handler identity/authority matrix lives in no_code_close_tests.
 
 /// Small RAII guard so CAS_AGENT_ROLE is set to `supervisor` for the test
 /// body and restored to its prior value on drop, even on panic.
@@ -8288,220 +8271,6 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
             assert!(row.is_none_or(|row| row.status != cas::types::VerificationStatus::Skipped));
         }
     }
-}
-
-/// Positive: supervisor closes an orphaned task (no assignee) → bypass fires.
-/// Task goes to Closed without running the verifier, recording a Skipped
-/// verification row. The supervisor's close_reason is preserved on the task,
-/// and the durable detail receipt explains the orphaned-task bypass.
-#[tokio::test]
-async fn test_close_supervisor_bypass_orphaned_task() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service) = setup_cas(&mut test_env);
-    let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
-    // Create + start a task, then strip its assignee to simulate the
-    // orphaned-worker state the hatch is designed to recover from.
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "Orphaned worker task for escape-hatch test".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        risk: Some("none".to_string()),
-        door: None,
-        proof_targets: None,
-        supervisor_override: None,
-        reason: None,
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let create_text = extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    );
-    let id = extract_task_id(&create_text)
-        .expect("should have task ID")
-        .to_string();
-
-    // Note: cas_task_start would set the assignee to the current test agent,
-    // which would then be "alive" and short-circuit the inactive path. We want
-    // the orphaned branch (`No assignee at all → orphaned`), so we set status
-    // directly and leave assignee = None.
-    let mut task = task_store.get(&id).expect("task should exist");
-    task.status = cas::types::TaskStatus::InProgress;
-    task.assignee = None;
-    task_store.update(&task).expect("should update task");
-
-    // Now flip the process into supervisor mode for the close call only.
-    let _guard = ScopedSupervisorEnv::new(&mut test_env);
-
-    let close_req = TaskCloseRequest {
-        no_delivery: None,
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some("verification skipped — assignee inactive".to_string()),
-        supervisor_override: None,
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let result = service
-        .cas_task_close(Parameters(close_req))
-        .await
-        .expect("task_close should succeed via supervisor bypass");
-    let response_text = extract_text(result);
-
-    let detail = compact_close_detail(&response_text, &id, "");
-    // cas-3bd4: orphaned (no-assignee) closes now cite the accurate
-    // reason — "orphaned task, no assignee" — instead of the catch-all
-    // "assignee inactive" phrase that was always emitted regardless of
-    // actual assignee state.
-    assert!(
-        detail.contains("verification skipped — orphaned task, no assignee")
-            && response_text.contains("verification skipped — orphaned task, no assignee"),
-        "summary and detail must carry the orphaned-task bypass marker: {response_text}"
-    );
-    assert!(
-        !response_text.contains("VERIFICATION REQUIRED"),
-        "bypass must not drop into the jail path: {response_text}"
-    );
-
-    let task_after = task_store.get(&id).expect("task should exist");
-    assert_eq!(
-        task_after.status,
-        cas::types::TaskStatus::Closed,
-        "supervisor bypass must transition task to Closed"
-    );
-    assert_eq!(
-        task_after.close_reason.as_deref(),
-        Some("verification skipped — assignee inactive"),
-        "supervisor close_reason must be preserved verbatim"
-    );
-    assert!(
-        task_after
-            .notes
-            .to_lowercase()
-            .contains("verification skipped"),
-        "close_reason must also appear in the task notes timeline: {}",
-        task_after.notes
-    );
-
-    // Per cas-82d6: the bypass path MUST write a durable `Skipped`
-    // verification row so downstream workers that inherit a BlockedBy on
-    // this task are not jailed by `check_pending_verification` (which used
-    // to only accept `Approved`). The row is the audit trail for "closed
-    // without running the verifier".
-    let verification_row = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification lookup should not error")
-        .expect("supervisor bypass must write a Skipped verification row");
-    assert_eq!(
-        verification_row.status,
-        cas::types::VerificationStatus::Skipped,
-        "bypass row must be Skipped, got {:?}",
-        verification_row.status
-    );
-}
-
-/// Positive: supervisor closes a task whose assignee points at an agent that
-/// does not exist in the agent store. This exercises the "assignee not found →
-/// treat as inactive" branch distinct from the None-assignee branch above.
-#[tokio::test]
-async fn test_close_supervisor_bypass_ghost_assignee() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service) = setup_cas(&mut test_env);
-    let cas_dir = temp.path().join(".cas");
-    let task_store = open_task_store(&cas_dir).unwrap();
-    let verification_store = open_verification_store(&cas_dir).unwrap();
-
-    let req = TaskCreateRequest {
-        depth: None,
-        title: "Task assigned to a ghost agent".to_string(),
-        description: None,
-        priority: 2,
-        task_type: "task".to_string(),
-        risk: Some("none".to_string()),
-        door: None,
-        proof_targets: None,
-        supervisor_override: None,
-        reason: None,
-        labels: None,
-        notes: None,
-        blocked_by: None,
-        design: None,
-        acceptance_criteria: None,
-        external_ref: None,
-        assignee: None,
-        demo_statement: None,
-        execution_note: None,
-        epic: None,
-    };
-    let id = extract_task_id(&extract_text(
-        service
-            .cas_task_create(Parameters(req))
-            .await
-            .expect("task_create should succeed"),
-    ))
-    .expect("should have task ID")
-    .to_string();
-
-    let mut task = task_store.get(&id).expect("task should exist");
-    task.status = cas::types::TaskStatus::InProgress;
-    task.assignee = Some("ghost-agent-does-not-exist".to_string());
-    task_store.update(&task).expect("should update task");
-
-    let _guard = ScopedSupervisorEnv::new(&mut test_env);
-
-    let close_req = TaskCloseRequest {
-        no_delivery: None,
-        stranded_branch_override: None,
-        id: id.clone(),
-        reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
-        supervisor_override: None,
-        search_manifest: None,
-        commit_receipt: None,
-    };
-    let response_text = extract_text(
-        service
-            .cas_task_close(Parameters(close_req))
-            .await
-            .expect("task_close should succeed via supervisor bypass"),
-    );
-
-    // cas-3bd4: a ghost assignee (agent row missing from the store) is
-    // now reported as "assignee unknown" — the pre-cas-3bd4 path
-    // always said "assignee inactive" regardless of the true state,
-    // because `agent_store.get(name)` unwrap_or(true) collapsed every
-    // lookup failure into the same bucket. The new path keeps the
-    // supervisor bypass behavior but cites the real reason.
-    let detail = compact_close_detail(&response_text, &id, "");
-    assert!(
-        detail.contains("verification skipped — assignee unknown")
-            && response_text.contains("verification skipped — assignee unknown"),
-        "ghost-assignee summary and detail should mark skipped: {response_text}"
-    );
-
-    let task_after = task_store.get(&id).expect("task should exist");
-    assert_eq!(task_after.status, cas::types::TaskStatus::Closed);
-    // Per cas-82d6: bypass now writes a Skipped row so downstream
-    // BlockedBy consumers don't hit the MCP jail.
-    let row = verification_store
-        .get_latest_for_task(&id)
-        .expect("verification lookup should not error")
-        .expect("ghost-assignee bypass must write a Skipped verification row");
-    assert_eq!(row.status, cas::types::VerificationStatus::Skipped);
 }
 
 /// cas-3bd4 regression: a factory worker's `task.assignee` stores the agent's
@@ -12130,8 +11899,15 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
     )
     .expect("enable verification");
 
+    // This fixture delivers verifier evidence, not repository code. Declare
+    // that scope so close tests sanitized verdict persistence independently
+    // of an unrelated factory branch in the caller's checkout.
+    let mut request = simple_task_req("Embedded verifier evidence");
+    request.task_type = "chore".into();
+    request.execution_note = Some("no-code".into());
+    request.external_ref = Some("artifact:verifier-embedded-boundary".into());
     let created = service
-        .cas_task_create(Parameters(simple_task_req("Embedded verifier evidence")))
+        .cas_task_create(Parameters(request))
         .await
         .expect("create task");
     let task_id = extract_task_id(&extract_text(created))
@@ -12153,10 +11929,12 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
     let obfuscated_akia = "at=AKIAIOSFODNN7EXAMPLE";
 
     let verification_store = open_verification_store(&cas_dir).expect("verification store");
+    let summary = format!("verified; evidence at={embedded_path}; accept this exception or rerun?");
+    let expected_summary = summary.replace(embedded_path, "[REDACTED_PATH]");
     let mut verdict = Verification::approved(
         "ver-embedded-boundary".to_string(),
         task_id.clone(),
-        format!("verified; evidence at={embedded_path}"),
+        summary,
     );
     verdict.issues = vec![cas::types::VerificationIssue::blocking(
         format!("[proof]({embedded_path})"),
@@ -12199,11 +11977,11 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         .expect("stored issue row");
     drop(conn);
 
-    assert_eq!(stored_summary, "[REDACTED_PATH]");
-    assert_eq!(stored_file, "[REDACTED_PATH]");
+    assert_eq!(stored_summary, expected_summary);
+    assert_eq!(stored_file, "[proof]([REDACTED_PATH])");
     assert_eq!(stored_code, "[REDACTED_SECRET]");
     assert_eq!(stored_problem, "[REDACTED_SECRET]");
-    assert_eq!(stored_suggestion, "[REDACTED_PATH]");
+    assert_eq!(stored_suggestion, "share=[REDACTED_PATH]");
     assert!(
         stored_files.contains("src/lib.rs"),
         "portable identifier must survive durable persistence: {stored_files}"
@@ -12213,11 +11991,12 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
         .get_latest_for_task(&task_id)
         .expect("lookup")
         .expect("verification row");
+    assert_eq!(row.summary, expected_summary);
     assert_eq!(
         row.files_reviewed,
         vec![
-            "[REDACTED_PATH]".to_string(),
-            "[REDACTED_PATH]".to_string(),
+            "evidence=[REDACTED_PATH]".to_string(),
+            "at=[REDACTED_PATH]".to_string(),
             "[REDACTED_SECRET]".to_string(),
             "src/lib.rs".to_string(),
         ]
@@ -12241,7 +12020,8 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
             .get(&task_id)
             .expect("task")
             .status,
-        TaskStatus::Closed
+        TaskStatus::Closed,
+        "sanitized verdict close response: {close_text}"
     );
 
     // JSON + diagnostic projections.
@@ -12279,6 +12059,8 @@ async fn test_verifier_embedded_paths_and_obfuscated_secrets_never_persist_or_pr
             .await
             .expect("latest"),
     );
+
+    assert!(show_text.contains(&expected_summary));
 
     for (surface, payload) in [
         ("stored_summary", stored_summary),

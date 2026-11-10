@@ -228,6 +228,14 @@ pub struct CompleteResponse {
     pub url: Option<String>,
 }
 
+/// A positive acknowledgement includes deletion, not merely receipt of the request.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RevokeResponse {
+    pub artifact_id: String,
+    pub revoked: bool,
+    pub revoked_at: String,
+}
+
 /// What `GET /api/artifacts/{id}/url` answers: a short-lived signed URL on
 /// the blob store's own origin, for viewing a committed artifact.
 #[derive(Clone, Serialize, Deserialize)]
@@ -266,6 +274,8 @@ pub enum ViewFailure {
     NotLive { reason: String },
     /// 404 for the artifact: unknown, or in a team this account is not in.
     NotFound { interaction: String },
+    /// 409 with the stable artifact_revoked code; no URL may be issued.
+    Revoked,
     /// 409: the artifact exists but is not committed (pending or rejected).
     NotCommitted {
         status: Option<String>,
@@ -278,6 +288,7 @@ pub enum ViewFailure {
 impl fmt::Display for ViewFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ViewFailure::Revoked => write!(f, "artifact_revoked: Cloud has revoked this artifact"),
             ViewFailure::NotLive { reason } => write!(f, "{reason}"),
             ViewFailure::NotFound { interaction } => write!(
                 f,
@@ -329,6 +340,31 @@ impl fmt::Debug for ArtifactUploadClient {
 }
 
 impl ArtifactUploadClient {
+    /// Revoke without opening the object or exposing upstream bodies/credentials.
+    pub fn revoke(&self, artifact_id: &str, reason: &str, actor_id: &str) -> Result<RevokeResponse, String> {
+        if artifact_id.is_empty() || !artifact_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
+            return Err("invalid Cloud artifact id".into());
+        }
+        let url = format!("{}/api/artifacts/{artifact_id}/revoke", self.endpoint);
+        let response = ureq::post(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .timeout(self.timeout)
+            .send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(status, _)) => return Err(format!("Cloud revoke endpoint returned HTTP {status}")),
+            Err(_) => return Err("Cloud revoke request could not be confirmed".into()),
+        };
+        let receipt: RevokeResponse = serde_json::from_reader(response.into_reader().take(16 * 1024))
+            .map_err(|_| "Cloud returned an unsupported revocation receipt".to_string())?;
+        if receipt.artifact_id != artifact_id || !receipt.revoked
+            || chrono::DateTime::parse_from_rfc3339(&receipt.revoked_at).is_err()
+        {
+            return Err("Cloud did not acknowledge revocation of this artifact".into());
+        }
+        Ok(receipt)
+    }
+
     /// Read one named task in every visible project, with a fixed read budget.
     /// A failed scope makes the result incomplete; callers must not interpret
     /// it as proof that the artifact is absent.
@@ -685,9 +721,13 @@ impl ArtifactUploadClient {
             }
             404 => return Err(ViewFailure::NotFound { interaction }),
             409 => {
-                let status = serde_json::from_str::<serde_json::Value>(&body)
-                    .ok()
-                    .and_then(|value| {
+                let value = serde_json::from_str::<serde_json::Value>(&body).ok();
+                if value.as_ref().and_then(|value| value.get("error")).and_then(serde_json::Value::as_str)
+                    == Some("artifact_revoked")
+                {
+                    return Err(ViewFailure::Revoked);
+                }
+                let status = value.and_then(|value| {
                         value
                             .get("status")
                             .and_then(serde_json::Value::as_str)

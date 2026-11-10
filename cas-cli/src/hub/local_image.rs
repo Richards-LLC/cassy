@@ -89,6 +89,7 @@ pub(crate) fn open_local_image(cas_root: &Path, reference: &str) -> anyhow::Resu
             cloud_url: None,
             slack_permalink: None,
             created_at: String::new(),
+            revocation: None,
         },
         file,
     ))

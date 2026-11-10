@@ -272,6 +272,9 @@ fn open_target(
         return Err(io::Error::other("invalid target lease"));
     }
     if let Err(error) = file.try_lock_exclusive() {
+        // The contender opened this inode too, but does not own its lock.
+        // Close that descriptor before observing the actual inherited holders.
+        drop(file);
         return Err(if error.kind() == io::ErrorKind::WouldBlock {
             held_lease_error(&lock_path)
         } else {

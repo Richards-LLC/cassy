@@ -7,6 +7,75 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.10.0] - 2026-11-10
+
+### Fixed — Factory
+
+- **Explicit release freeze confirmation** — Supervisors must confirm `train_freeze` with `reason="release-freeze: <reason>"`. Tool guidance and refusals explain that only the operator in Commander or a published release ends the freeze, and direct temporary CI waits to the documented merge-hold follow-up.
+- **Frozen-train deliveries are not reported as a stall** — Was: the progress watchdog listed parked deliveries for a train frozen for release as owed by the supervisor, repeated the stall notice and threatened to page the operator, although only the operator can lift the freeze. Now: those deliveries leave the stall set; the supervisor hears once per freeze which tasks it holds, since when, and that the operator lifts it with Lift freeze in Commander. Release repairs still count as local work, and a lift makes the held deliveries local work again.
+- **Close deliveries after train publication** — Preserve the recorded reviewed landing when a released train moves onto the target’s second-parent history. Unpublished candidate commits no longer block an already landed delivery; unmerged corrections and dropped delivery content still refuse close.
+- **Recover integrated local deliveries without origin** — Retired workers' parked `local_merge` deliveries resolve local branches and target containment without fetching a remote, while preserving QA and verification gates and remote recovery requirements for `push_branch` deliveries.
+- **Report automatic merge landings** — Green-CI merge retries leave one quiet receipt for their owning supervisor with the task, exact landed commit and target branch. Replaying a completed retry preserves that receipt without duplicating it.
+- **Preserved independent QA evidence** — Corrected heads and new passes receive separate evidence directories even when rounds repeat. Generated paths include the full head and pass id; verdict recording rejects a supplied id for another pass while retaining historical evidence support.
+- **Preserved fleet isolation during source checks** — Tasks without a matching accepted delegation split leave the caller's identity unchanged. Artifact revocation is included in the MCP call-shape snapshot and the Violet post-error contract.
+- **Retired implementer recovery** — Closing a task keeps its required verification after the assignee retires, including no-code work. Named missing registrations are reported accurately, deliberate waivers remain auditable, and existing review errors cannot be replaced by a close override.
+- **Honor release batch QA ownership during review** — Premerge verifiers receive the configured QA mode and may approve with explicitly recorded journey deferrals owned solely by release batch QA. Per-task QA and other missing-evidence reasons still require a supervisor decision.
+- **Answered blockers stop waking the supervisor** — Direct supervisor replies and task decision notes now retire the current worker blocker episode while its status catches up. A new blocker question gets its own deadline, and answers for another task leave the original alert armed.
+- **Detached builds settle before worker recycle** — Recycling stops the worker's owned capped runs and checks their inherited target leases before tearing down its process scope, preventing surviving guards or Cargo children from locking out the replacement. Lease refusals no longer identify the retry as its own holder.
+- **Delegate task work while keeping thread replies** — A Slack claim owner can offer a standalone task through an accepted epic split. The builder can staff and start it with its source link intact; pending offers and unrelated shares grant no work, and replying still requires separate thread authority.
+- **Reproduce CI with an isolated test HOME** — Named capped worker tests now accept literal HOME, Cargo/Rustup home, CI and Git identity/config prefixes, including `env -u`. Values reach the test child through foreground and detached execution while runner identity, builder admission, private targets and receipts stay protected. Broad test commands and identity/build overrides remain refused.
+- **Keep verifier questions readable** — Local-path redaction now hides only path spans, preserving the surrounding supervisor question in review notices and verification show/latest.
+- **Undelivered blocked alerts** — A lifecycle relay whose task moves on before supervisor delivery now queues a supervisor action before retiring. Failed alert writes keep the relay pending, and retries reuse one alert.
+
+### Fixed — Managed Slack intake
+
+- **Uncertain routing holds legacy intake** — A refused managed activity claim now reports its error and keeps legacy claims and sweeps off. Only an explicit unmanaged response permits initial legacy fallback; Cloud still selects managed delivery owners and reply authority.
+
+### Fixed — Cloud sync
+
+- **Working task ownership** — A live owner's task restored to InProgress after a blocked yield stays protected from Open or reassignment snapshots even without a lease. Newer same-owner blocked and terminal updates still apply, and peers can recover tasks whose owner has exited.
+
+### Fixed — MCP
+
+- **Read-only search deadlines** — Task evidence searches now report a non-mutating timeout instead of an unknown write. Timeout diagnostics retain search stage timings to distinguish index opening, task loading, task reconciliation and lookup.
+
+### Fixed — Test evidence
+
+- **Accept exact CLI payload round trips** — The test-shape guard recognizes literal parser arguments returned through immutable command routing. Unrelated fields and generated prose pins still fail.
+
+### Fixed — QA evidence
+
+- **Declare batch ledger coverage before publishing** — Ledger init and check accept `--covers` for the intended receipt deliveries. Generated ledgers name those IDs, batch instructions include the preflight, and QA and release receipts reject tasks outside declared coverage while preserving legacy reports.
+- **Historical image-pair evidence** — Close reads schema 1 pairs with their original PNG seals without requiring new BEFORE captures or an evidence waiver. New schema 2 captures require both PNG and JPG seals; unsupported versions request a compatible reader or an explicit migration.
+
+### Added — Artifacts
+
+- **Audited artifact revocation** — Supervisors can revoke an artifact with a reason while retaining its audit record. Local fetch, previews and new shares stop immediately; Cloud deletion is confirmed separately, with an explicit pending warning when the server cannot complete it.
+
+### Fixed — Worker accounts
+
+- **Honor the configured Codex worker account** — `spawn_workers` uses the local project's `factory.codex_home` when no explicit batch or per-worker `config_dir` is set, including lane requests. The receipt names the configuration source. Existing paths, `~/` paths and account aliases use normal account validation; invalid preferences refuse queueing. Clear the value to restore recommendations.
+
+### Fixed — Developer tools
+
+- **Keep tool discovery within its size budget** — Shorten factory guidance while retaining release-freeze confirmation and authority rules; align configuration and verifier checks with current contracts.
+
+### Fixed — Verification
+
+- **Executable epic timeout recovery** — Verification timeout guidance now directs a registered supervisor to review the exact dispatch, record the matching task or epic verdict, and retry close. It no longer advertises a shipped-delivery override for epics lacking the required delivery evidence.
+
+### Fixed — Factory communication
+
+- **Supervisor follow-ups reach active workers** — Answers about an assigned task now reach its worker through both transport and inbox delivery without restarting or rebinding the task. Assignments owned by another worker and stale start instructions remain guarded.
+
+### Fixed — Delivery evidence
+
+- **Recognize canonical merge-queue CI receipts** — Close accepts successful queue runs from the full-validation wrapper as well as the legacy CI workflow. A trailing colon after a cited run ID is accepted; repository, event, tree receipt and landing checks remain required.
+
+### Fixed — Task delivery
+
+- **Park against remote-only train refs** — The test-shape gate resolves the delivery target before checking assertions, so workers with only an origin train ref can park. Missing targets report `TEST_ASSERTION_TARGET_UNRESOLVED` instead of a prose assertion violation.
+
 ## [4.9.0] - 2026-11-09
 
 ### Fixed — Factory

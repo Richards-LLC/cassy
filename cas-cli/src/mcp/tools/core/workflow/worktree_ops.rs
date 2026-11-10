@@ -5012,9 +5012,15 @@ impl CasCore {
         // merge-tree's exit 1 behind a verification refusal (cas-225b).
         if train_queue.is_some() || scoped_task.is_some() {
             let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
-                Ok(None)
-            } else { manager.git().fetch_merge_target(&worktree.parent_branch) }
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+                None
+            } else {
+                // This advisory conflict probe also serves offline/local-only
+                // deliveries. Publication still has its own freshness gates.
+                manager.git().fetch_merge_target(&worktree.parent_branch).unwrap_or_else(|error| {
+                    tracing::debug!(%error, "conflict precheck uses local target: origin unavailable");
+                    None
+                })
+            };
             let local = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "merge target missing"))?;
             let target_tip = match remote {

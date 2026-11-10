@@ -1842,14 +1842,14 @@ else:
         for (id, _) in trains {
             assert_eq!(store.get(id).unwrap().status, TaskStatus::Open, "dry-run mutated {id}");
         }
-        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
-        assert_eq!(store.get("cas-c4a0").unwrap().status, TaskStatus::Open);
-        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
-            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
-        }
-        assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
-        for (id, _) in trains.into_iter().filter(|(id, _)| *id != "cas-c4a0") {
-            assert_eq!(store.get(id).unwrap().status, TaskStatus::Closed, "{id}");
+        // Backfill never writes a train's status: each finished train is held
+        // for the shared release reconciliation (cas-c1db), which this
+        // non-GitHub fixture cannot resolve, so every train stays open.
+        for _ in 0..2 {
+            assert!(backfill(&BackfillArgs { dry_run: false }, &root).is_err());
+            for (id, _) in trains {
+                assert_eq!(store.get(id).unwrap().status, TaskStatus::Open, "{id}");
+            }
         }
     }
 }

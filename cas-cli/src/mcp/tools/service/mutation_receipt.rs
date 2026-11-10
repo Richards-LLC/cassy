@@ -107,6 +107,19 @@ pub(crate) fn message_committed(id: i64) {
     }
 }
 
+pub(crate) fn registration_committed(id: &str, session_id: &str) {
+    if let Some(receipt) = current()
+        && receipt.tool == "coordination"
+        && matches!(receipt.action(), "register" | "session_start")
+    {
+        let _ = receipt.commit.set(Commit {
+            description: format!("agent `{id}` registered; harness session `{session_id}`"),
+            notification_id: None,
+        });
+        let _ = receipt.terminal.set(std::time::Instant::now());
+    }
+}
+
 pub(crate) fn task_committed(id: &str) {
     if let Some(receipt) = current()
         && receipt.tool == "task"

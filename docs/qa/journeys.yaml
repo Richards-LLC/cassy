@@ -485,6 +485,10 @@ bug_families:
     title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
     tasks: [cas-a0c5]
     journeys: [FACTORY-SUPERVISE]
+  supervisor-registration-rebind-and-late-commit:
+    title: Same-pane live supervisors retain one identity on register and session_start; delayed registration writes report their final outcome to the caller
+    tasks: [cas-1550]
+    journeys: [FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-QA-RECEIPT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1226,7 +1230,7 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs, cas-cli/src/mcp/tools/core/memory.rs]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs, cas-cli/src/mcp/server/mod.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs, cas-cli/src/mcp/tools/core/memory.rs]
   invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

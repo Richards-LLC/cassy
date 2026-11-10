@@ -27,6 +27,12 @@ independent reviewer authority. `coordination whoami` shows the caller's type,
 role and parent. A shared-connection child registration fails before mutation
 with `rule_id=shared_mcp_child_identity`.
 
+For an already-registered live supervisor in the same pane, `coordination
+action=register` and `action=session_start` bind a new harness `session_id`
+to the existing agent's `cc_session_id`. The durable agent ID and factory
+ownership stay the same. A different name, process or role keeps its own
+registration semantics.
+
 Use the daemon-owned candidate verifier or a separately registered reviewer
 with a sealed handoff for the exact dispatch. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
@@ -2022,6 +2028,14 @@ Its `timings` field and tracing retain inclusive `search_index_open`,
 canonical tasks and reconcile the task index before lookup, with a full task
 rewrite on the first request in each server process. `include_source` applies
 to code search, not this context search action.
+
+Registration handlers run on the blocking pool because synchronous startup
+and store work cannot be cancelled by aborting an async task. When `register`
+or `session_start` outlives the response budget, the answer reports
+`IN_PROGRESS` (or `COMMITTED` when its write was observed), with a
+`continuation_id`. The handler continues and records a durable
+`registration_outcome` notice in the caller's inbox, carrying the same ID,
+requested session and final mutation outcome. Do not retry while it is running.
 
 Factory merge and task-close handlers run synchronous Git/store work on the
 blocking pool. Once publication or the checked Closed/AwaitingMerge disposition

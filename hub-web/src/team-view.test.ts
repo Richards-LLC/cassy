@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { expect, it, vi } from "vitest";
+import { renderTeam, updateTeamElapsed, type TeamSnapshot } from "./team-view";
+
 const request = { owner: "operator" as const, request_id: 21, task_id: "work", request: { notification_id: 21, device_id: "*", reply_to: null, kind: "blocker" as const, summary: "Choose release", message: "Choose release" } };
-import { renderTeam, teamFinding, updateTeamElapsed, type TeamSnapshot } from "./team-view";
 
 it("joins the selected session to real receipts, keeps focus on live updates and exposes no raw activity", () => {
   const root = document.createElement("section"); root.tabIndex = 0; document.body.append(root);

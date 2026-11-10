@@ -188,7 +188,7 @@ class TrainReceipts(unittest.TestCase):
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
-            'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': 1, 'head_sha': self.env['GITHUB_SHA'],
+            'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
             'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'push', 'status': status, 'conclusion': conclusion}]}))
 
     def observe(self, check=False, expected=0):
@@ -281,6 +281,13 @@ class TrainReceipts(unittest.TestCase):
         self.assertNotIn('schema', red)
         self.assertEqual(self.observe(), red)
         self.observe(check=True, expected=1)
+        self.env['GITHUB_RUN_ATTEMPT'] = '2'
+        self.evidence('recovered')
+        self.forge('recovered')
+        recovered = self.observe(check=True)
+        self.assertEqual(recovered['last_green'], self.env['GITHUB_SHA'])
+        self.assertNotIn('red_since', recovered)
+        self.assertNotIn('failure_kind', recovered)
 
     def test_full_receipt_refuses_partial_legacy_and_wrong_tree(self):
         self.evidence('full')

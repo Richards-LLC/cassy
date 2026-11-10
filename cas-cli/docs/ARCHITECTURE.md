@@ -13,6 +13,13 @@ as a file, or the legacy `.cas/entries/` directory. `~/.cas/` also holds factory
 IPC sockets; a socket-only directory is skipped during ancestor and worktree
 discovery. An explicit `CAS_ROOT` still selects any existing directory.
 
+Embedded daemon sockets retain `.cas/daemon.sock` for short canonical store
+paths. Longer roots use `/tmp/cas-mcp-<uid>/daemon-<canonical-store-hash>.sock`,
+with an owner-validated 0700 directory and a 0600 socket. Hooks, caller discovery
+and hub idle-sync resolve the same canonical identity; the election lock remains
+in the project store and cleanup removes only the pathname held by its lease.
+The runtime socket location does not change `serve --sandbox` store fencing.
+
 ### cas-cli (main crate) — `cas-cli/src/`
 
 | Module | Purpose |

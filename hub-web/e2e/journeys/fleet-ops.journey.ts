@@ -1,4 +1,4 @@
-import { test, expect, journeyPart, type Journey } from "./journey";
+import { openConversationActions, clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
 import type { Page, Route } from "@playwright/test";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -43,7 +43,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
   await journey.stage("Open the fleet", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+    if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
     await expect(row).toBeVisible();
   });
   return { row, panel, result };
@@ -124,7 +124,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const rail = page.locator("#status-view");
       const agent = rail.locator(".status-agent", { hasText: "swift-lark-3" });
       const notice = page.locator("#fleet-phone-undo");
-      const open = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+      const open = () => clickConversationHeaderAction(page, "#conversation-fleet");
       await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
@@ -160,7 +160,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src-refreshed");
         await expect(dismiss).toBeFocused(); await page.keyboard.press("Enter");
         await expect(notice).toHaveCount(0);
-        await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
+        await expect(page.locator("#conversation-more")).toBeFocused();
         await open(); await expect(agent.locator(".fleet-ops-note")).toBeVisible();
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         await expect(notice, "redrawing the same result does not undo Dismiss").toHaveCount(0);
@@ -176,10 +176,20 @@ for (const colorScheme of ["light", "dark"] as const) {
       world.epics = catalog;
       const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
       const sheet = page.locator("dialog.fleet-action-sheet");
-      await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
+      const namedWorkers = async () => {
+        const rail = page.locator("#status-view");
+        await expect(rail.locator(".status-agent")).toHaveCount(world.agents.length);
+        for (const agent of world.agents) {
+          await expect(rail.locator(".status-agent", { hasText: agent.name }).locator(".status-line").getByText(agent.name, { exact: true })).toBeVisible();
+        }
+      };
+      await journey.stage("cas-e466c: read every worker header on phone without opening Team", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        await clickConversationHeaderAction(page, "#conversation-fleet");
+        await namedWorkers();
+      });
+      await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
         await expect(sheet.getByRole("heading", { name: "Assign cas-2001 to", exact: true })).toBeVisible();
@@ -200,11 +210,14 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(items.nth(0)).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
         await expect(items.nth(1)).toContainText(world.epics[1]!.title!);
       });
-      await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
+      await journey.stage("cas-e466c: read every worker header on desktop without opening Team", async () => {
         await page.keyboard.press("Escape");
         await expect(page.locator("#status-view").getByRole("button", { name: "Focus epic…" })).toBeFocused();
         await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
         await page.setViewportSize({ width: 1280, height: 800 });
+        await namedWorkers();
+      });
+      await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
         const rail = page.locator("#status-view");
         await rail.getByRole("button", { name: "Focus epic…", exact: true }).click();
         const menu = rail.locator(".fleet-ops-epics");
@@ -278,8 +291,24 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(menu.getByRole("menuitem")).toHaveText([/quiet-owl-7/]);
     await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
     await expect(announcer).toContainText(new RegExp("(?=[\\s\\S]*cas\\-2001)(?=[\\s\\S]*quiet\\-owl\\-7)"));
-    await expect(row("quiet-owl-7")).toContainText("cas-2001");
+    // cas-943b: the card shows the task title and keeps the id in its title attribute.
+    await expect(row("quiet-owl-7").locator('.status-activity[title="cas-2001"]')).toBeVisible();
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "assign_task", task_id: "cas-2001", assignee: "quiet-owl-7" }, expected: { assignee: null, updated_at: "2026-10-03T11:20:00Z" } });
+  });
+
+  await journey.stage("Add worker… opens a titled panel whose labelled fields stay inside the rail", async () => {
+    // cas-5d53: the panel reads like Write access: a heading, labels, and nothing past the rail's edge.
+    const toggle = rail.getByRole("button", { name: "Add worker…" });
+    await toggle.click();
+    const panel = rail.getByRole("group", { name: "Add workers" });
+    await expect(panel.getByRole("heading", { name: "Add workers" })).toBeVisible();
+    const edge = (await rail.boundingBox())!;
+    for (const field of [panel.getByLabel("How many"), panel.getByLabel("Start on")]) {
+      const box = (await field.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(edge.x + edge.width);
+    }
+    await toggle.click();
+    await expect(panel).toHaveCount(0);
   });
 
   await journey.stage("Stop another worker after confirming", async () => {
@@ -401,7 +430,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   const task = (id: string) => rail.locator(".status-task", { hasText: id });
   const actions = () => page.locator("dialog.fleet-action-sheet");
   const result = page.locator("#fleet-ops-announcer");
-  const openFleet = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+  const openFleet = () => clickConversationHeaderAction(page, "#conversation-fleet");
   const target = async (control: ReturnType<typeof page.getByRole>) => {
     await expect(control).toBeVisible(); const box = await control.boundingBox();
     expect(box!.width).toBeGreaterThanOrEqual(44); expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -409,7 +438,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
+    await openConversationActions(page); await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
     // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
     await expect(page.locator(".context-sheet-where")).toBeVisible();
@@ -428,6 +457,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await journey.stage("Add a worker on the first machine", async () => {
         await rail.getByRole("button", { name: "Add worker…" }).click();
         await expect(actions()).toBeVisible();
+        await expect(actions().getByRole("heading", { name: "Add workers" })).toBeVisible();
+        await expect(actions().getByLabel("How many")).toBeVisible();
         const add = actions().getByRole("button", { name: "Add", exact: true });
         await target(add); await expect(add).toBeFocused(); await page.keyboard.press("Enter");
         await expect(agent("amber-heron-11")).toBeVisible();
@@ -439,6 +470,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click(); await openFleet();
         await expect(page.locator(".context-sheet-where")).toBeVisible();
         await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
+        // cas-5d53: the phone sheet names the worker it acts on.
+        await expect(actions().getByRole("heading", { name: "Actions for brisk-wren-9" })).toBeVisible();
         await actions().getByRole("menuitem", { name: "Stop…" }).click();
         await expect(actions().getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("Tab");
@@ -463,7 +496,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         // cas-2796a F02: the refusal is in view in the open sheet, landscape included.
         await expect(page.locator("#fleet-phone-undo")).toBeVisible();
         await expect(page.locator("#fleet-phone-undo")).toBeInViewport();
-        await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
+        await page.keyboard.press("Escape"); await expect(page.locator("#conversation-more")).toBeFocused();
       });
     });
     test(`HUB-J17 phone ${viewport.width}×${viewport.height}: Undo and searchable fleet pickers`, journeyPart, async ({ page, journey }) => {
@@ -527,7 +560,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
-          await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+          await clickConversationHeaderAction(page, "#conversation-fleet");
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
           await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Pause" }).click();
           await expect.poll(() => Boolean(request)).toBe(true);

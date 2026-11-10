@@ -5009,24 +5009,45 @@ impl CasCore {
         }
 
         // Return conflicting deliveries before candidate preparation can hide
-        // merge-tree's exit 1 behind a verification refusal (cas-225b).
-        if train_queue.is_some() || scoped_task.is_some() {
-            let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
-                Ok(None)
-            } else { manager.git().fetch_merge_target(&worktree.parent_branch) }
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
-            let local = manager.git().resolve_commit(&worktree.parent_branch)
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "merge target missing"))?;
-            let target_tip = match remote {
-                Some(remote) if manager.git().is_ancestor(&local, &remote) => remote,
-                Some(remote) if !manager.git().is_ancestor(&remote, &local) => {
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target diverged from origin; reconcile before retrying the merge"));
+        // merge-tree's exit 1 behind a verification refusal (cas-225b). A
+        // train reservation keeps its strict probe. A single task-scoped merge
+        // probes advisorily (cas-e1db): no extra fetch (the cached origin
+        // ref stands in), and a missing target, an unresolvable source or a
+        // diverged origin leave the ordinary merge path to report them.
+        let strict = train_queue.is_some();
+        if strict || scoped_task.is_some() {
+            let probe = (|| -> Result<Option<(String, Vec<String>)>, McpError> {
+                let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
+                    None
+                } else if strict {
+                    // This advisory conflict probe also serves offline/local-only
+                    // deliveries. Publication still has its own freshness gates.
+                    manager.git().fetch_merge_target(&worktree.parent_branch).unwrap_or_else(|error| {
+                        tracing::debug!(%error, "conflict precheck uses local target: origin unavailable");
+                        None
+                    })
+                } else {
+                    manager.git().resolve_commit(&format!("refs/remotes/origin/{}", worktree.parent_branch))
+                };
+                let Some(local) = manager.git().resolve_commit(&worktree.parent_branch) else {
+                    return if strict { Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target missing")) } else { Ok(None) };
+                };
+                let target_tip = match remote {
+                    Some(remote) if manager.git().is_ancestor(&local, &remote) => remote,
+                    Some(remote) if !manager.git().is_ancestor(&remote, &local) => {
+                        return if strict {
+                            Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target diverged from origin; reconcile before retrying the merge"))
+                        } else { Ok(None) };
+                    }
+                    _ => local,
+                };
+                match manager.git().preflight_merge_conflicts(&target_tip, &worktree.branch) {
+                    Ok(paths) => Ok(Some((target_tip, paths))),
+                    Err(error) if strict => Err(Self::error(ErrorCode::INVALID_PARAMS, error.to_string())),
+                    Err(_) => Ok(None),
                 }
-                _ => local,
-            };
-            let paths = manager.git().preflight_merge_conflicts(&target_tip, &worktree.branch)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
-            if !paths.is_empty() {
+            })()?;
+            if let Some((target_tip, paths)) = probe && !paths.is_empty() {
                 let error = crate::worktree::WorktreeError::Git(crate::worktree::GitError::MergeConflictPaths(paths));
                 let recovery = self.return_conflicted_parked_delivery(
                     scoped_task.as_deref(), &error, &worktree, Some(&target_tip),

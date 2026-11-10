@@ -333,29 +333,18 @@ fn import_receipt(
             "peer approval task is already complete",
         ));
     }
-    // A newer local cycle or an existing local verdict permanently owns this
-    // slot. Do not keep an old receipt leased while waiting on the network.
+    // Existing dispatch ownership is checked atomically after authenticating
+    // and validating this receipt. A stale admitted peer approval may be
+    // superseded by its source's fresh review, never by rebinding old proof.
     let existing = cas_store::get_latest_verification_dispatch(root, &task.id)
         .map_err(ReceiptFailure::retry)?;
-    if let Some(existing) = existing {
-        let same = existing.state == VerificationDispatchState::Resolved
-            && existing
-                .repository
-                .as_ref()
-                .and_then(|proof| proof.peer_premerge.as_ref())
-                .is_some_and(|attestation| {
-                    attestation.receipt == receipt
-                        && attestation.message_id == message.id
-                        && Some(&attestation.sender_machine_id)
-                            == message.sender_machine_id.as_ref()
-                        && Some(&attestation.sender_session) == message.sender_session.as_ref()
-                });
-        if !same {
-            return Err(ReceiptFailure::reject(
-                "an existing local verification cycle owns this task",
-            ));
-        }
-    } else if crate::store::open_verification_store(root)
+    if existing.as_ref().is_some_and(|dispatch| {
+        dispatch.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref()).is_none()
+            || !matches!(dispatch.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+    }) {
+        return Err(ReceiptFailure::reject("an existing local verification cycle owns this task"));
+    }
+    if existing.is_none() && crate::store::open_verification_store(root)
         .map_err(ReceiptFailure::retry)?
         .get_latest_for_task(&task.id)
         .map_err(ReceiptFailure::retry)?
@@ -425,8 +414,8 @@ fn import_receipt(
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
     cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
         |error| {
-            // Payload and existing-cycle refusals were checked before Git work.
-            // A store Parse here can be its updated_at compare losing a race;
+            // Ownership conflicts are permanent. A store Parse here can be
+            // its updated_at compare losing a race;
             // retry so the next pass can classify the now-current local cycle.
             let permanent = matches!(&error, cas_store::StoreError::VerificationDispatchConflict { .. })
                 || matches!(&error, cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(cause, _))
@@ -477,4 +466,139 @@ pub(super) fn verify_peer_promotion(
         return Err("peer approval repository binding changed".into());
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repaired_delivery_replaces_only_superseded_source_peer_approval_cas_d7f9() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const PROJECT: &str = "peer-repair-fixture";
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[{
+                "id":"source-supervisor", "name":"source", "agent_type":"primary", "status":"active",
+                "machine_id":"source-machine", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0,
+                "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"source-session"}
+            }, {
+                "id":"other-supervisor", "name":"other", "agent_type":"primary", "status":"active",
+                "machine_id":"other-machine", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0,
+                "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"other-session"}
+            }]}))).mount(&server).await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let _env = crate::test_support::TestEnvGuard::temp_home();
+            let home = _env.home();
+            let origin = home.join("origin.git");
+            let source = home.join("source");
+            let receiver = home.join("receiver");
+            git(home, &["init", "--bare", "-b", "main", origin.to_str().unwrap()]).unwrap();
+            git(home, &["init", "-b", "main", source.to_str().unwrap()]).unwrap();
+            git(&source, &["config", "user.name", "Review fixture"]).unwrap();
+            git(&source, &["config", "user.email", "review@example.test"]).unwrap();
+            git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]).unwrap();
+            std::fs::write(source.join(".gitignore"), ".cas/\n").unwrap();
+            git(&source, &["add", "."]).unwrap();
+            git(&source, &["commit", "-qm", "base"]).unwrap();
+            let base = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["switch", "-c", "factory/peer"]).unwrap();
+            std::fs::write(source.join("delivery"), "old\n").unwrap();
+            git(&source, &["add", "."]).unwrap();
+            git(&source, &["commit", "-qm", "delivery"]).unwrap();
+            let old_sha = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["push", "origin", "HEAD:main"]).unwrap();
+            git(home, &["clone", "--branch", "main", origin.to_str().unwrap(), receiver.to_str().unwrap()]).unwrap();
+            let root = crate::store::init_cas_dir(&receiver).unwrap();
+            crate::cloud::set_canonical_id_in_config_toml(&root, PROJECT).unwrap();
+            crate::cloud::CloudConfig { endpoint, token: Some("fixture-token".into()), ..Default::default() }
+                .save_to_cas_dir(&root).unwrap();
+            let recipient = Agent::new_with_role("receiver-supervisor".into(), "receiver".into(), AgentRole::Supervisor);
+            crate::store::open_agent_store(&root).unwrap().register(&recipient).unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            let mut task = Task::new("cas-d7f9-repair".into(), "Reviewed repair".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = Some("factory/peer".into());
+            task.deliverables.factory_branch_anchor = Some(old_sha.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: format!("project:{PROJECT}"), target_branch: "main".into(),
+            });
+            tasks.add(&task).unwrap();
+            let receipt = |task: &Task, sha: &str, target: &str, cycle: &str| PeerPremergeReceipt {
+                status: VerificationStatus::Approved, project_id: PROJECT.into(),
+                supervisor_id: "source-supervisor".into(), task_id: task.id.clone(),
+                source_branch: "factory/peer".into(), source_sha: sha.into(), target_branch: "main".into(),
+                target_sha: target.into(), candidate_tree: git(&source, &["rev-parse", &format!("{sha}^{{tree}}")]).unwrap(),
+                landed_sha: sha.into(), dispatch_id: format!("dispatch-{cycle}"), verdict_id: format!("ver-{cycle}"),
+                plan_digest: portable_plan_digest(&root, task).unwrap(),
+            };
+            let message = |receipt: &PeerPremergeReceipt, age: i64| ClaimedPeerMessage {
+                id: format!("message-{}", receipt.dispatch_id), project_id: PROJECT.into(),
+                recipient_agent_id: recipient.id.clone(), sender_agent_id: "source-supervisor".into(),
+                sender_name: "source".into(), sender_machine_id: Some("source-machine".into()),
+                sender_session: Some("source-session".into()), sender_label: None,
+                body: format!("{TAG}{}", serde_json::to_string(receipt).unwrap()), summary: None, in_reply_to: None,
+                created_at: (chrono::Utc::now() - chrono::Duration::minutes(age)).to_rfc3339(),
+                attempts: 1, scope: PeerScope::Project,
+            };
+            let old = receipt(&task, &old_sha, &base, "old");
+            let old_message = message(&old, 2);
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Imported));
+            let old_dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).unwrap());
+
+            std::fs::write(source.join("delivery"), "repaired\n").unwrap();
+            git(&source, &["commit", "-qam", "reviewed repair"]).unwrap();
+            let repaired = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["push", "origin", "HEAD:main"]).unwrap();
+            task.deliverables.factory_branch_anchor = Some(repaired.clone());
+            tasks.update(&task).unwrap();
+            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).is_err());
+            let fresh = receipt(&task, &repaired, &old_sha, "repair");
+            let fresh_message = message(&fresh, 1);
+            // A source approval is required; an authenticated rejected verdict
+            // and an envelope whose sender identity changed grant no recovery.
+            let mut rejected = fresh.clone();
+            rejected.status = VerificationStatus::Rejected;
+            let mut foreign = fresh_message.clone();
+            foreign.sender_machine_id = Some("foreign-machine".into());
+            let mut rebound = fresh.clone();
+            rebound.dispatch_id = old.dispatch_id.clone();
+            rebound.verdict_id = old.verdict_id.clone();
+            let mut other = fresh.clone();
+            other.supervisor_id = "other-supervisor".into();
+            let mut other_message = message(&other, 1);
+            other_message.sender_agent_id = other.supervisor_id.clone();
+            other_message.sender_machine_id = Some("other-machine".into());
+            other_message.sender_session = Some("other-session".into());
+            for invalid in [message(&rejected, 1), foreign, old_message.clone(), message(&rebound, 1), other_message] {
+                assert!(matches!(ingest_peer_receipt(&root, &recipient, &invalid).unwrap(), PeerReceiptIngested::Rejected(_)));
+                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, old.dispatch_id);
+            }
+            let admitted = ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap();
+            assert!(matches!(admitted, PeerReceiptIngested::Imported), "{admitted:?}");
+            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_eq!(current.id, fresh.dispatch_id);
+            assert!(verify_peer_promotion(&root, &task, &current, &fresh.verdict_id).unwrap());
+            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap().state, VerificationDispatchState::Invalidated);
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
+            let events = crate::store::open_event_store(&root).unwrap()
+                .list_for_entity(cas_types::EventEntityType::Task, &task.id, 100).unwrap();
+            let replacements: Vec<_> = events.iter().filter_map(|event| event.metadata.as_ref())
+                .filter(|metadata| metadata["code"] == "peer_premerge_approval_replaced").collect();
+            assert_eq!(replacements.len(), 1);
+            assert_eq!(replacements[0]["old_dispatch_id"], old.dispatch_id);
+            assert_eq!(replacements[0]["new_dispatch_id"], fresh.dispatch_id);
+            assert_eq!(cas_store::get_verification_for_dispatch(&root, &old.dispatch_id).unwrap().unwrap().id, old.verdict_id);
+            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap()
+                .repository.unwrap().peer_premerge.unwrap().receipt.source_sha, old_sha);
+            let local = cas_store::create_verification_dispatch(&root, &task.id, &recipient.id, &recipient.id,
+                chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Rejected(_)));
+            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, local.id);
+        }).await.unwrap();
+    }
 }

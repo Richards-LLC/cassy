@@ -125,10 +125,20 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .or(task.deliverables.parked_branch.as_deref());
             let revision = match source {
                 Some(branch) => {
+                    // A local source remains authoritative for ongoing work.
+                    // After branch cleanup, use the same immutable delivery
+                    // identity as batch receipts, never a movable tag or HEAD.
                     crate::qa_impact::io::resolve_ref(&repo, &format!("refs/heads/{branch}"))
+                        .or_else(|error| crate::qa_batch::delivery_anchor(&repo, &task).ok_or(error))
                         .with_context(|| {
                             format!("resolve recorded task source branch {branch:?} for {id}")
                         })?
+                }
+                None if task.deliverables.factory_branch_anchor.is_some()
+                    || !task.deliverables.historical_factory_branch_anchors.is_empty() =>
+                {
+                    crate::qa_batch::delivery_anchor(&repo, &task)
+                        .with_context(|| format!("resolve recorded delivery anchor for {id}"))?
                 }
                 None => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
             };
@@ -166,28 +176,40 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 "task artifact directory escapes its project namespace"
             );
             let path = dir.join("LEDGER.md");
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .with_context(|| {
-                    format!(
-                        "cannot create {}; existing evidence is preserved",
-                        path.display()
-                    )
-                })?
-                .write_all(body.as_bytes())?;
+            // GH #1758: a resumed task keeps its ledger. Init never rewrites
+            // existing evidence; it reports the path, or refuses with the
+            // diagnostics when that ledger does not validate for this task.
+            let resumed = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    file.write_all(body.as_bytes())?;
+                    false
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => true,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("cannot create {}; existing evidence is preserved", path.display())
+                    });
+                }
+            };
+            let mut report = check(&path, Some(&task));
+            report.require_coverage(&covers);
+            let (ok, rows, diagnostics) = (report.ok, report.rows.len(), report.diagnostics.len());
             if cli.json {
-                let mut report = check(&path, Some(&task));
-                report.require_coverage(&covers);
                 let mut json = serde_json::to_value(report)?;
                 json["path"] = serde_json::json!(path);
                 json["task"] = serde_json::json!(id);
+                json["resumed"] = serde_json::json!(resumed);
                 println!("{}", serde_json::to_string_pretty(&json)?);
             } else {
                 println!(
-                    "Created ledger: {} rows",
-                    crate::qa_ledger::parse(&body, 1).rows.len()
+                    "{}",
+                    if !resumed {
+                        format!("Created ledger: {rows} rows")
+                    } else if ok {
+                        format!("Kept existing ledger: {rows} rows")
+                    } else {
+                        format!("Existing ledger kept but invalid: {diagnostics} diagnostics")
+                    }
                 );
                 println!("Check: cas qa ledger check <path> --task {id} --covers <ids>");
                 println!(
@@ -195,6 +217,13 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                     crate::ui::widgets::truncate(&path.display().to_string(), 74)
                 );
                 println!("Use --json for the full path.");
+            }
+            if resumed && !ok {
+                let error = anyhow::anyhow!(
+                    "existing ledger {} does not validate for {id}; nothing was overwritten. Repair it, then run cas qa ledger check",
+                    path.display()
+                );
+                return Err(if cli.json { super::JsonReportedFailure(error).into() } else { error });
             }
         }
     }

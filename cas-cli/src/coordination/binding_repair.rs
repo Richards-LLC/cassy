@@ -85,6 +85,7 @@ impl OrdinaryBindingClient {
             endpoint: endpoint.trim_end_matches('/').into(),
             token: token.into(),
             agent: ureq::AgentBuilder::new()
+                .middleware(crate::cloud::TraceCloudMutation)
                 .redirects(0)
                 .timeout(Duration::from_secs(30))
                 .build(),

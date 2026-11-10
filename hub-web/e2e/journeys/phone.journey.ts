@@ -70,7 +70,11 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
         codenameShown: name !== null && name.getBoundingClientRect().width > 1,
       };
     });
-    expect(shown.machineChars, `some of ${machine} is on the line`).toBeGreaterThanOrEqual(4);
+    // The 4ch floor is for a cut machine. A whole machine name, its OS word
+    // dropped beside the one-row actions (cas-bcf0), is on the line in the
+    // proportional UI face even when narrower than 4 mono ch.
+    if (shown.machineCut) expect(shown.machineChars, `some of ${machine} is on the line`).toBeGreaterThanOrEqual(4);
+    else expect(shown.machineChars, `${machine} is on the line`).toBeGreaterThan(1);
     expect(shown.osShown && shown.machineCut, "the OS word is never cut mid-word").toBe(false);
     if (shown.machineCut) expect(shown.codenameShown, `${codename} steps aside before ${machine} is cut`).toBe(false);
     await expect(page.locator("#conversation-connection")).toBeVisible();

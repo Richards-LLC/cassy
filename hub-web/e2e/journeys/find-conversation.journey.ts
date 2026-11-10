@@ -168,7 +168,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       replies: [{ notification_id: 999, reply_to: null, message: "The bank feed for October is ready. Should I reconcile it against the statement now?", summary: "", device_id: "journey-device", kind: "answer", attachments: [], session: PELICAN, at: journeyStamp(-1_000) }],
     }],
   };
-  const hub = await journey.hub({ machines: [atlas, STUDIO, FORGE], paired: ["atlas", "studio", "forge"], history });
+  // cas-36cb: gabber-studio reports its harness, so its empty card wears the same mark as its header.
+  const studio: Machine = { ...STUDIO, sessions: STUDIO.sessions.map((session) => ({ ...session, harness: "claude" })) };
+  const hub = await journey.hub({ machines: [atlas, studio, FORGE], paired: ["atlas", "studio", "forge"], history });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
   /** "Conversations" and its New session control sit on one line (cas-865c). */
@@ -346,6 +348,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(card.locator("b")).not.toHaveClass(/codename/);
     await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
     await expect(card.locator(".proj2 > .codename")).toHaveText(OTTER);
+    await expect(page.locator(".conversation-identity .conversation-avatar")).toHaveAttribute("data-harness", "claude");
+    await expect(card.locator(".mono")).toHaveAttribute("data-harness", "claude");
   });
 
   await journey.stage("Find the conversation from the keyboard", async () => {
@@ -599,6 +603,16 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await palette.getByRole("button", { name: /Paired machines/ }).click();
     await expect(paired).toBeVisible();
     await expect(palette).toBeHidden();
+    // cas-5e8b: the chips clear the description, Close is a 40px circle and
+    // the installations control has an action pill's edge.
+    const hint = (await paired.locator(".machine-register-hint").boundingBox())!;
+    const chips = (await paired.locator("#paired-machine-filters").boundingBox())!;
+    expect(chips.y - (hint.y + hint.height)).toBeGreaterThanOrEqual(12);
+    expect(await paired.locator("#paired-machines-close").evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      return [box.width, box.height, parseFloat(getComputedStyle(node).borderTopLeftRadius) >= box.height / 2];
+    })).toEqual([40, 40, true]);
+    expect(await paired.getByRole("button", { name: /^Browser installations on / }).first().evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
     await page.locator("#paired-machines-close").click();
     await expect(paired).toBeHidden();
     await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();

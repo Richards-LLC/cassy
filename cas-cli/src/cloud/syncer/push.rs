@@ -236,6 +236,14 @@ impl CloudSyncer {
         to: &str,
         team: &str,
     ) -> Result<bool, CasError> {
+        // An explicit retry requests revalidation, not permission to bypass a
+        // known ownership/tombstone refusal. Pull clears it after scoped proof.
+        if let Some(reason @ ("dependency_endpoint_foreign" | "dependency_endpoint_moved" | "dependency_endpoint_deleted")) = item.last_reason.as_deref() {
+            if let Some(error) = item.last_error.as_deref().filter(|error| error.contains(reason)) {
+                self.queue.park_intentionally_with_error(item.id, reason, error, self.config.max_retries)?;
+                return Ok(false);
+            }
+        }
         match self.queue.dependency_endpoint_state(from, to, team, self.config.max_retries)? {
             crate::cloud::DependencyEndpointState::Clear => Ok(true),
             crate::cloud::DependencyEndpointState::Pending => {
@@ -436,7 +444,7 @@ impl CloudSyncer {
         let compressed = Self::gzip_json(&json_bytes)?;
         self.check_personal_payload_size(json_bytes.len(), compressed.len())?;
 
-        let response = ureq::post(&push_url)
+        let response = crate::cloud::mutation_request("POST", &push_url)
             .timeout(self.config.timeout)
             .set("Authorization", &format!("Bearer {token}"))
             .set("Content-Type", "application/json")
@@ -953,7 +961,7 @@ impl CloudSyncer {
                 self.personal_push_project_id()?.replace('/', "%2F")
             );
 
-            let response = ureq::delete(&delete_url)
+            let response = crate::cloud::mutation_request("DELETE", &delete_url)
                 .timeout(self.config.timeout)
                 .set("Authorization", &format!("Bearer {token}"))
                 .call();
@@ -1191,18 +1199,18 @@ impl CloudSyncer {
         let compressed = Self::gzip_json(&json_bytes)?;
         self.check_personal_payload_size(json_bytes.len(), compressed.len())?;
 
+        let request = crate::cloud::mutation_request("POST", &push_url)
+            .timeout(self.config.timeout)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .set("Content-Encoding", "gzip");
         let mut last_error = None;
         for attempt in 0..3 {
             if attempt > 0 {
                 std::thread::sleep(self.config.backoff_duration(attempt as u32));
             }
 
-            let response = ureq::post(&push_url)
-                .timeout(self.config.timeout)
-                .set("Authorization", &format!("Bearer {token}"))
-                .set("Content-Type", "application/json")
-                .set("Content-Encoding", "gzip")
-                .send_bytes(&compressed);
+            let response = request.clone().send_bytes(&compressed);
 
             match response {
                 Ok(resp) => {

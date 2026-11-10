@@ -2,7 +2,7 @@
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
 import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
-const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
+const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function() { this.removeAttribute("open"); this.dispatchEvent(new Event("close")); };
@@ -50,7 +50,12 @@ it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOpera
   if (["remove", "disable", "rename"].includes(operation)) {
     expect(host.change).not.toHaveBeenCalled();
     const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+    const confirm = document.querySelector<HTMLButtonElement>("[data-accounts-confirm]")!;
     if (operation === "remove") {
+      // cas-b2e9: the confirmation sits in the acting card, and Confirm waits for the exact text.
+      expect(input.closest(".accounts-row")!.querySelector(`[data-account="${row.key}"]`)).not.toBeNull();
+      expect(input.required).toBe(false);
+      expect(confirm.disabled).toBe(true);
       input.value = "cancelled confirmation";
       click("[data-accounts-cancel]");
       expect(input.value).toBe("");
@@ -71,7 +76,8 @@ it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOpera
       expect(host.change).not.toHaveBeenCalled();
     }
     input.value = operation === "rename" ? "renamed" : row.key;
-    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(confirm.disabled).toBe(false);
     document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
   }
   await settle();
@@ -102,13 +108,16 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const healthy: AccountRow = { ...row, key: "claude:work", name: "work", display_name: "work@example.test", location: "~/.claude-work", login_state: "logged_in", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }] };
   const duplicate: AccountRow = { ...row, key: "claude:main", name: "main", location: "~/.claude", duplicate_of: "claude:work", is_default: false };
   const tight: AccountRow = { ...healthy, key: "claude:tight", name: "tight", display_name: "tight@example.test", location: "~/.claude-tight", windows: [{ name: "weekly", used_percent: 95, resets_at: "2099-11-02T18:20:00Z" }] };
+  // cas-b2e9: a protected main duplicate is never offered for cleanup.
+  const protectedMain: AccountRow = { ...duplicate, key: "claude:default", name: "default", location: "~/.claude", capabilities: { ...row.capabilities, remove: "The main account is protected" } };
   const { host, sheet } = setup(true, healthy);
-  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
+  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([2, 1]);
+  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([3, 1]);
   expect(groups[1]!.querySelector<HTMLElement>(".accounts-identity strong")!.title).toBe(duplicate.key);
-  expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-identity strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key]);
+  for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
   expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
   expect(groups[0]!.textContent).toContain("~/.claude-work");
   expect(groups[0]!.textContent).toContain("62%");
@@ -126,7 +135,9 @@ it("formats reset and observation times locally in 12-hour form and clears expir
   const now = new Date("2026-10-28T16:00:00Z").getTime();
   const fresh = accountCapacity([{ name: "weekly", used_percent: 38, resets_at: "2026-10-29T16:20:00Z" }], "2026-10-28T13:00:00Z", now)[0];
   expect(fresh).toContain("weekly"); expect(fresh).toContain("62%"); expect(fresh).toContain(accountTime("2026-10-28T13:00:00Z")); expect(fresh).toMatch(/AM|PM/);
-  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, resetPast: true });
+  expect(accountMeters([{ name: "weekly", used_percent: 38, resets_at: "2026-10-27T16:00:00Z" }], now)[0]).toMatchObject({ left: null, reset: null });
+  // cas-eae3: a reset already past is a stale fact, not a time to show.
+  expect(accountCapacity([{ name: "weekly", used_percent: null, resets_at: "2026-10-27T16:00:00Z" }], null, now)).toEqual(["weekly usage unknown"]);
   const zone = process.env.TZ;
   try { process.env.TZ = "America/New_York"; expect(accountTime("2026-10-29T17:10:00Z")).toMatch(/1:10\sPM ET$/); }
   finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }

@@ -826,6 +826,29 @@ fn overlap_refusal(cas_root: &Path, split: &EpicSplit, child: &str) -> String {
     )
 }
 
+/// A Slack work share must come from the receiver's recorded source owner.
+/// Check again on use so historical acceptances cannot bypass source admission.
+pub(crate) fn validate_slack_share_issuer(
+    cas_root: &Path,
+    task: &crate::types::Task,
+    issuer: &str,
+) -> Result<(), String> {
+    let Some(source) = task.external_ref.as_deref()
+        .filter(|source| crate::mcp::tools::core::task::source_claim::is_slack_source(source))
+    else {
+        return Ok(());
+    };
+    let project = crate::cloud::resolve_canonical_id(cas_root)
+        .ok_or("Slack work delegation requires the project's canonical identity")?;
+    let receipt = crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
+        .map_err(|error| error.to_string())?
+        .task_source_receipt(source, &project).map_err(|error| error.to_string())?;
+    if !receipt.is_some_and(|receipt| receipt["visible_owner"]["registration_id"] == issuer) {
+        return Err(format!("Only the current Slack claim owner can offer {}. Ask the owner to offer this task via epic_split; its reply authority stays with that owner.", task.id));
+    }
+    Ok(())
+}
+
 /// Propose splitting `epic_id` with peer supervisor `peer_target`: claim
 /// `mine` now, record the proposal, and send it. Either share may be empty
 /// for a one-sided request or grant, but at least one task must be named.
@@ -873,18 +896,7 @@ pub fn propose(
         if task.status == TaskStatus::Closed {
             return Err(format!("{id} is already closed"));
         }
-        if let Some(source) = task.external_ref.as_deref()
-            .filter(|source| crate::mcp::tools::core::task::source_claim::is_slack_source(source))
-        {
-            let project = crate::cloud::resolve_canonical_id(cas_root)
-                .ok_or("Slack work delegation requires the project's canonical identity")?;
-            let receipt = crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
-                .map_err(|error| error.to_string())?
-                .task_source_receipt(source, &project).map_err(|error| error.to_string())?;
-            if !receipt.is_some_and(|receipt| receipt["visible_owner"]["registration_id"] == caller.id) {
-                return Err(format!("Only the current Slack claim owner can offer {id}. Ask the owner to offer this task via epic_split; its reply authority stays with that owner."));
-            }
-        }
+        validate_slack_share_issuer(cas_root, &task, &caller.id)?;
     }
     let all: Vec<String> = mine.iter().chain(theirs).cloned().collect();
     if let Some((split, child)) = overlapping(cas_root, &all, None)? {
@@ -1106,6 +1118,12 @@ pub fn answer(
         });
     }
 
+    let tasks = crate::store::open_task_store(cas_root)
+        .map_err(|error| format!("could not open the task store: {error}"))?;
+    for task_id in split.mine.iter().chain(&split.theirs) {
+        let task = tasks.get(task_id).map_err(|error| error.to_string())?;
+        validate_slack_share_issuer(cas_root, &task, &split.peer_agent_id)?;
+    }
     if let Some((other, child)) = overlapping(cas_root, &[split.mine.clone(), split.theirs.clone()].concat(), Some(id))? {
         return Err(overlap_refusal(cas_root, &other, &child));
     }

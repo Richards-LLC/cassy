@@ -1067,6 +1067,9 @@ A task with no epic can be its own split scope: its owner offers
 `factory action=epic_split id=<task> target=<builder> theirs=<task>`, and the
 builder accepts the returned split. No parent task or dependency is created.
 For a Slack source, only the current thread claim owner may offer the work.
+The receiver checks the authenticated issuer against its own current source-owner
+receipt before accepting or claiming work, and again before an accepted split
+bypasses source admission. Missing, expired or mismatched receipts grant no bypass.
 After acceptance the builder can assign and start that task with `external_ref`
 intact; the accepted local share grants work without claiming the thread.
 Pending offers and another supervisor's shares grant no work authority. Reply
@@ -2265,10 +2268,13 @@ previous incidents or establish deployed Cloud instrumentation.
 
 `cas qa ledger init --task <id>` writes an honest scaffold in the project's task
 artifact directory, with predicted live journeys and no-code route exclusions.
-The build is the recorded task source branch tip (start binding first, then a
-legacy parked branch); an unreadable source fails before creating evidence.
-Tasks without a recorded source use the resolved repository's HEAD. Journey
-selection still uses the target repository. It preserves existing evidence.
+The build uses the local recorded source branch tip first (start binding,
+then legacy parked branch). If that local branch was cleaned, it uses the
+recorded immutable active delivery anchor, or the latest historical anchor.
+An invalid recorded anchor fails instead of borrowing another ref. Only tasks
+without a recorded source or delivery identity use the resolved repository's
+HEAD. Journey selection still uses the target repository. Existing evidence
+and task bindings remain unchanged; valid ledgers resume byte for byte.
 Edit rows after exercising the named build,
 then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
 parser checks structure, counts, labels, defect ownership and readable PASS

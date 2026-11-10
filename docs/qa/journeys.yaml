@@ -433,6 +433,10 @@ bug_families:
     title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
     tasks: [cas-a3c3]
     journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  canonical-artifact-write-root:
+    title: Configured artifact symlinks and canonical cwd writes share containment while refusals identify both roots
+    tasks: [cas-a767]
+    journeys: [FACTORY-CLOSE, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

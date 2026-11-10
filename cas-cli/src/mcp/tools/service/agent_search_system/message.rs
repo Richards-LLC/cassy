@@ -6761,6 +6761,70 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn typed_worker_respawn_queues_one_recycle_cas_53ed() {
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        let mut worker = Agent::new("worker-id".into(), "worker-a".into());
+        worker.role = AgentRole::Worker;
+        worker.factory_session = Some("factory-a".into());
+        for (key, value) in [("worker_cli", "codex"), ("worker_model", "gpt-6.1-sol"),
+            ("worker_effort", "high"), ("worker_config_dir", "/fixture/.codex-work")] {
+            worker.metadata.insert(key.into(), value.into());
+        }
+        agents.register(&worker).unwrap();
+        let mut owner = Agent::new("owner-id".into(), "owner".into());
+        owner.role = AgentRole::Supervisor;
+        owner.factory_session = worker.factory_session.clone();
+        agents.register(&owner).unwrap();
+        let mut sibling = Agent::new("sibling-id".into(), "sibling".into());
+        sibling.role = AgentRole::Supervisor;
+        sibling.factory_session = Some("factory-b".into());
+        agents.register(&sibling).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut task = Task::new("cas-respawn".into(), "Resume checkpoint".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        tasks.add(&task).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let service = gh_1171_service(&core);
+        let mut request = message_request_to("supervisor");
+        request.kind = Some("respawn".into());
+        request.task_id = Some(task.id.clone());
+        request.message = Some("status: in_progress\nneed: respawn from HANDOFF.md".into());
+        let mut foreign = request.clone();
+        foreign.target = Some(sibling.name.clone());
+        assert!(service.message_send(foreign).await.is_err());
+        service.message_send(request.clone()).await.expect("typed respawn accepted");
+        let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
+        let queued = spawns.peek(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].action, cas_store::SpawnAction::Recycle);
+        assert_eq!(queued[0].worker_names, [worker.name.clone()]);
+        assert_eq!(queued[0].factory_session, worker.factory_session);
+        let recipe: cas_mux::WorkerSpec = serde_json::from_str(queued[0].worker_spec.as_deref().unwrap()).unwrap();
+        assert_eq!(recipe.cli, cas_mux::SupervisorCli::Codex);
+        assert_eq!(recipe.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(recipe.effort, Some(cas_mux::Effort::High));
+        assert_eq!(recipe.config_dir.as_deref(), Some("/fixture/.codex-work"));
+        // Consume the lifecycle row: rate limiting must survive dequeue and a new service.
+        spawns.dequeue().unwrap();
+        let restarted = gh_1171_service(&core);
+        restarted.message_send(request).await.unwrap();
+        assert!(spawns.peek(10).unwrap().is_empty());
+        assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        let messages = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert!(!messages.is_empty());
+        assert!(messages.iter().all(|row| row.target == owner.name
+            && crate::supervisor_message_wakes::quiet(&row.prompt)
+            && crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt).is_none()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn worker_status_and_ready_kinds_are_scoped_to_the_same_session_supervisor() {
         let _env = TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().expect("temporary Cassy root");

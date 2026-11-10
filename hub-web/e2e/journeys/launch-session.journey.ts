@@ -102,6 +102,10 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     // The running project offers Attach, not a second session.
     await expect(sheet.getByRole("button", { name: `Attach to cas-src (${PELICAN})` })).toBeVisible();
     await expect(sheet.getByRole("tab", { name: "Browse" })).toBeVisible();
+    // cas-59e5: every New session control is a full touch target on a phone.
+    for (const target of [sheet.getByRole("tab", { name: "Known projects" }), sheet.getByRole("tab", { name: "Browse" }), sheet.getByRole("button", { name: "Cancel", exact: true }), sheet.getByRole("button", { name: "Start", exact: true })]) {
+      expect((await target.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
     await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("ledger");
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();

@@ -164,7 +164,7 @@ const MAX_AGENT_PAGES: usize = 20;
 
 /// Diagnostic correlation, never an idempotency or ownership key. Keep the
 /// cross-repo header contract here so Cloud alignment is a one-line change.
-const ATTEMPT_ID_HEADER: &str = "X-Cas-Attempt-Id";
+pub(crate) const ATTEMPT_ID_HEADER: &str = "X-Cassy-Attempt-Id";
 const RESPONSE_REQUEST_ID_HEADERS: [&str; 3] = ["X-Cas-Request-Id", "X-Request-Id", "cf-ray"];
 
 /// One explicit application dispatch, including any opaque ureq wire retries.
@@ -173,6 +173,45 @@ struct RequestAttempt {
     id: String,
     started: Instant,
     mutation: bool,
+}
+
+/// Cloud mutation transport. Construct once per logical attempt and clone the
+/// request for retries, preserving the diagnostic ID without implying replay
+/// safety. Separate services and signed object uploads must not use this.
+pub(crate) fn mutation_request(method: &str, url: &str) -> ureq::Request {
+    ureq::AgentBuilder::new()
+        .middleware(TraceCloudMutation)
+        .build()
+        .request(method, url)
+        .set(ATTEMPT_ID_HEADER, &uuid::Uuid::new_v4().to_string())
+}
+
+/// Also used by custom Cloud agents without changing their transport policies.
+pub(crate) struct TraceCloudMutation;
+
+impl ureq::Middleware for TraceCloudMutation {
+    fn handle(
+        &self,
+        request: ureq::Request,
+        next: ureq::MiddlewareNext,
+    ) -> Result<ureq::Response, ureq::Error> {
+        if !matches!(request.method(), "POST" | "PUT" | "PATCH" | "DELETE") {
+            return next.handle(request);
+        }
+        let attempt = RequestAttempt {
+            id: request.header(ATTEMPT_ID_HEADER)
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            started: Instant::now(),
+            mutation: true,
+        };
+        // Never include a URL, payload, token or entity identity in receipts.
+        tracing::info!(target: "cas::cloud::request", phase = "pre_dispatch",
+            attempt_id = %attempt.id, method = request.method(), route = "cloud mutation");
+        let response = next.handle(request.set(ATTEMPT_ID_HEADER, &attempt.id));
+        attempt.response(&response);
+        response
+    }
 }
 
 impl RequestAttempt {
@@ -205,7 +244,7 @@ impl RequestAttempt {
             Err(ureq::Error::Transport(error)) => {
                 // A missing response cannot prove that a claim was not applied.
                 // Log only the SDK's enum, never its URL-bearing error Display.
-                tracing::info!(
+                tracing::warn!(
                     target: "cas::cloud::request", phase = "transport_error",
                     attempt_id = %self.id, elapsed_ms = millis(self.started.elapsed()),
                     error_kind = ?error.kind(),
@@ -433,7 +472,7 @@ impl CloudCoordinator {
         if let Some(email) = self.config.email.as_deref().map(str::trim).filter(|email| !email.is_empty()) {
             metadata.insert(crate::cloud::peers::META_OWNER.to_string(), email.to_string());
         }
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
@@ -493,8 +532,9 @@ impl CloudCoordinator {
             status: None,
         })?;
         let url = format!("{}/api/agents/{}/shutdown", self.config.endpoint, agent_id);
+        let request = mutation_request("POST", &url);
         let response = rate_limit::call(self.timeout, |left| {
-            ureq::post(&url)
+            request.clone()
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
                 .call()
@@ -614,8 +654,9 @@ impl CloudCoordinator {
             self.config.endpoint, task_id
         );
 
+        let request = mutation_request("POST", &url);
         super::rate_limit::call(self.timeout, |left| {
-            ureq::post(&url)
+            request.clone()
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
                 .set("Content-Type", "application/json")
@@ -645,8 +686,9 @@ impl CloudCoordinator {
             "{}/api/agents/tasks/{}/release",
             self.config.endpoint, task_id
         );
+        let request = mutation_request("POST", &url);
         let response = super::rate_limit::call(self.timeout, |left| {
-            ureq::post(&url)
+            request.clone()
                 .timeout(left)
                 .set("Authorization", &format!("Bearer {}", self.token()))
                 .set("Content-Type", "application/json")
@@ -684,7 +726,7 @@ impl CloudCoordinator {
             self.config.endpoint, task_id
         );
 
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .timeout(self.timeout)
             .set("Authorization", &format!("Bearer {}", self.token()))
             .set("Content-Type", "application/json")
@@ -907,7 +949,7 @@ impl CloudCoordinator {
     ) -> Result<AgentInfo, HeartbeatError> {
         let url = format!("{}/api/agents/{}/heartbeat", self.config.endpoint, agent_id);
 
-        let request = ureq::post(&url)
+        let request = crate::cloud::mutation_request("POST", &url)
             .timeout(HEARTBEAT_TIMEOUT)
             .set("Authorization", &format!("Bearer {}", self.token()));
         let response = match metadata {

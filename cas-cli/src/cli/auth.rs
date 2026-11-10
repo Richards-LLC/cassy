@@ -503,7 +503,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
 
     // Step 1: Request device code
     let code_url = format!("{}/device/code", args.endpoint);
-    let response = ureq::post(&code_url)
+    let response = crate::cloud::mutation_request("POST", &code_url)
         .set("Content-Type", "application/json")
         .send_json(serde_json::json!({
             "client_name": "Cassy CLI"
@@ -627,7 +627,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
             std::thread::sleep(wait);
         }
 
-        let poll_response = ureq::post(&token_url)
+        let poll_response = crate::cloud::mutation_request("POST", &token_url)
             .set("Content-Type", "application/json")
             .send_json(serde_json::json!({
                 "device_code": device_code

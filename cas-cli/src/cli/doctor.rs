@@ -5910,9 +5910,12 @@ fn pull_id_collision_check_for(ids: &[String]) -> Option<Check> {
     ))
 }
 
-/// The doctor notice for migratable personal rows a team-linked sync holds;
-/// `None` once nothing is held.
+/// Distinguish an unlinked project's personal backlog from migratable rows
+/// retained by team-linked sync. Neither diagnostic changes queue scope.
 fn held_personal_notice(cas_root: &Path) -> Option<String> {
+    if let Some(backlog) = crate::cli::cloud::unlinked_personal_backlog(cas_root) {
+        return Some(backlog.notice());
+    }
     crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
         .ok()
         .filter(|config| config.active_team_id().is_some())
@@ -5975,7 +5978,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
     let rejections = cloud_queue_rejections(&conn);
-    let remediation = if held_notice.is_some() && rejections.is_empty() {
+    let unlinked_backlog = crate::cli::cloud::unlinked_personal_backlog(cas_root);
+    let remediation = if let Some(backlog) = &unlinked_backlog {
+        backlog.next_step
+    } else if held_notice.is_some() && rejections.is_empty() {
         "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team`; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
     } else if rejections.is_empty()
         || rejections
@@ -6415,15 +6421,26 @@ mod tests {
         let queue = crate::cloud::SyncQueue::open(&root).unwrap();
         queue.init().unwrap();
         queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        queue.enqueue_for_team(crate::cloud::EntityType::Task, "team", crate::cloud::SyncOperation::Upsert, Some("{}"), "team").unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute("UPDATE sync_queue SET created_at = '2000-01-01T00:00:00+00:00', retry_count = 5 WHERE team_id = ''", []).unwrap();
         let before = queue.list_all(10).unwrap();
+        let config_before = fs::read(root.join("cloud.json")).unwrap();
 
         assert!(held_personal_notice(&root).is_some());
         assert!(matches!(cloud_queue_check(&root).status, CheckStatus::Warning));
+        let backlog = crate::cli::cloud::unlinked_personal_backlog(&root).unwrap();
+        let json = serde_json::to_value(&backlog).unwrap();
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["oldest_created_at"], "2000-01-01T00:00:00+00:00");
+        assert!(json["oldest_age_secs"].as_i64().unwrap() > 86400);
         let after = queue.list_all(10).unwrap();
-        assert_eq!(after.len(), before.len());
-        assert_eq!(after[0].team_id, before[0].team_id);
-        assert_eq!(after[0].payload, before[0].payload);
-        assert_eq!(after[0].retry_count, before[0].retry_count);
+        assert_eq!(serde_json::to_value(after).unwrap(), serde_json::to_value(before).unwrap());
+        assert_eq!(fs::read(root.join("cloud.json")).unwrap(), config_before);
+
+        cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
+        cloud.save_to_cas_dir(&root).unwrap();
+        assert!(crate::cli::cloud::unlinked_personal_backlog(&root).is_none());
     }
 
     /// cas-9b5d: prowl's petra-stella-cloud had no open session for 13 days,

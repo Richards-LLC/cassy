@@ -1535,6 +1535,16 @@ admission, no Slack, publication or browser guards. Two pieces now close that:
   within 60 seconds of launch, marks it crashed and tells the supervisor.
   There is no silent degrade.
 
+A canary refusal retains the bounded, redacted worker boot output in the spawn
+record before removing the pane. Inspect a retained failed request with
+`cas factory debug <worker-or-request-id>` or
+`cas factory is-wedged <worker-or-request-id> --json`, even when the harness
+never registered. The JSON reports `boot_state: "failed"`, its worker/task and
+request identity, and `state: "unverified"` (exit 4): a failed admission alone
+does not establish process death. Only a completed PTY teardown releases the
+matching preassignment; an unconfirmed teardown retains it for investigation.
+These read-only records do not authorize `kill` or permission responses.
+
 Rollout: after this merges, respawn every live Claude worker. Hooks start
 denying things those workers never saw before: raw `cargo`, `&` background
 jobs under worker-memory admission, non-Violet Slack writes, publication and

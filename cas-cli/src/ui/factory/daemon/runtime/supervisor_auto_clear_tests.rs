@@ -226,6 +226,13 @@ fn cached_wake_replay_uses_latest_call_and_reported_window() {
     lane.scan();
     assert!(lane.handoffs().is_empty());
     assert!(lane.rows(CONTEXT_RESET_CONTROL).is_empty());
+    lane.scan();
+    let skipped: Vec<_> = lane.queue.peek_all(500).unwrap().into_iter()
+        .filter(|row| row.source == "supervisor-auto-clear:latest-call-below-threshold")
+        .collect();
+    assert_eq!(skipped.len(), 1);
+    assert_eq!(skipped[0].target, lane.agents[0].name);
+    assert!(crate::supervisor_message_wakes::quiet(&skipped[0].prompt));
 
     // A prompt at 85% of a harness-reported 200K window triggers even
     // though the absolute cap is 1M. Reuse the daemon scanner, not a helper.

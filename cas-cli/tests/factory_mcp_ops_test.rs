@@ -1583,6 +1583,8 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     published.release_version = Some("v1.2.3".into());
     cas_store::record_quality_event(&env.cas_root, &published).unwrap();
     let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
+    let merged_tree = git_stdout(repo, &["merge-tree", "--write-tree", "--no-messages", "main", &epic_tip]);
+    let synced_origin = git_stdout(repo, &["commit-tree", &merged_tree, "-p", "main", "-p", &epic_tip, "-m", "origin synced with release"]);
     for (behind, pinned, refs) in [
         (true, false, "local"), (false, false, "local"), (true, true, "local"),
         (true, false, "remote-only"), (false, false, "remote-only"),
@@ -1590,7 +1592,7 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     ] {
         git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind || refs == "remote-newer" { &epic_tip } else { "main" }]);
         if refs != "local" {
-            git_stdout(repo, &["update-ref", "refs/remotes/origin/epic/requested", if behind { &epic_tip } else { "main" }]);
+            git_stdout(repo, &["update-ref", "refs/remotes/origin/epic/requested", if refs == "remote-newer" { &synced_origin } else if behind { &epic_tip } else { "main" }]);
         }
         if refs == "remote-only" {
             git_stdout(repo, &["update-ref", "-d", "refs/heads/epic/requested"]);
@@ -1624,7 +1626,7 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         })).unwrap();
         let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
         for response in [assignment, spawn, created] {
-            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "{response}");
+            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "behind={behind} pinned={pinned} refs={refs}: {response}");
             if behind && !pinned {
                 assert!(response.contains("tag=v1.2.3"), "{response}");
                 assert!(response.contains(&format!("missing_commits={gap}")), "{response}");

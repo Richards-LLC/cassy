@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn publish_and_promotion_reconcile_once_and_installed_is_a_no_op() {
-        let (temp, root, train, owner, _) = super::super::release_automation::tests::fixture();
+        let (temp, root, train, owner, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();
         let sha = git(repo, &["rev-parse", "HEAD"]).unwrap();
         let scope = |release_id: &str| ReleaseScope {

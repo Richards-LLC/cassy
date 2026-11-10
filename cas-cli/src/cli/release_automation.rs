@@ -921,7 +921,12 @@ pub(super) mod tests {
     use super::*;
     use cas_types::{Agent, AgentRole, Task, TaskType, WorkTarget};
 
-    pub(in crate::cli) fn fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
+    /// Shared with the release adapters' tests under a crate-unique name.
+    pub(in crate::cli) fn release_fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
+        fixture()
+    }
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();

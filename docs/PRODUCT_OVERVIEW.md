@@ -129,7 +129,7 @@ A new Claude supervisor confirms its startup only after the native transcript re
 
 ## Primary Journeys
 
-Completed native Claude, Codex and Grok turns mirror into durable Commander history, including answers to questions typed in the terminal. When an undelivered transcript replay expires, the current supervisor receives a notice; the durable operator outbox keeps retrying. Long key-shaped credentials are redacted while ordinary hyphenated words stay verbatim. Grok text streams appear only after native turn completion; thoughts, text before tool calls and cancelled turns stay out of the reply. Native synthetic prompts never become operator questions, and text/image chunks in one pasted prompt keep the answer linked to that question. OpenCode transcript mirroring remains unsupported.
+Completed native Claude, Codex and Grok turns mirror into durable Commander history, including answers to questions typed in the terminal. Expired transcript replays retire quietly while the durable operator outbox keeps retrying. Explicit undelivered operator asks and blockers retain delivery alerts. Long key-shaped credentials are redacted while ordinary hyphenated words stay verbatim. Grok text streams appear only after native turn completion; thoughts, text before tool calls and cancelled turns stay out of the reply. Native synthetic prompts never become operator questions, and text/image chunks in one pasted prompt keep the answer linked to that question. OpenCode transcript mirroring remains unsupported.
 
 A Commander history read that receives no answer within 15 seconds shows an error and Retry history. Retrying an older page preserves its cursor; cached turns remain readable without implying the history is complete.
 

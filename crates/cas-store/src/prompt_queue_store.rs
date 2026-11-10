@@ -10203,24 +10203,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
-            // cas-1a73: even a status mirror can contain an operator decision.
-            // Capture undelivered copies before retiring them, and notify the
-            // sender in this transaction. The pane copy is not a device receipt.
-            let undelivered = {
-                let mut stmt = tx.prepare(&format!(
-                    "SELECT factory_session, MIN(id), GROUP_CONCAT(id, ', ')
-                     FROM prompt_queue
-                     WHERE processed_at IS NULL AND created_at < ?1 AND {TRANSCRIPT_MIRROR}
-                       AND transport_delivered_at IS NULL AND acked_at IS NULL
-                     GROUP BY factory_session"
-                ))?;
-                stmt.query_map(params![cutoff], |row| {
-                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
-                })?.collect::<std::result::Result<Vec<_>, _>>()?
-            };
-
             // Retire aged transcript duplicates without fabricating a device
-            // receipt or altering their durable operator outbox retry.
+            // receipt or altering their durable operator outbox retry. These
+            // completed pane copies need no operator response, so expiry must
+            // not raise a delivery blocker to the current supervisor (cas-0afdd).
             tx.execute(
                 &format!(
                     "UPDATE prompt_queue
@@ -10232,21 +10218,6 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 params![now, cutoff],
             )?;
-            for (session, first_id, ids) in undelivered {
-                let (sender, session, _) = Self::abandonment_recipient_in_tx(
-                    &tx, None, "supervisor", session.as_deref(),
-                )?;
-                tx.execute(
-                    "INSERT OR IGNORE INTO prompt_queue
-                        (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, dedupe_key)
-                     VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', ?6)",
-                    params![sender,
-                        format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
-                        now, session, "Operator messages not delivered before transcript expiry",
-                        format!("operator-mirror-undelivered:{first_id}")],
-                )?;
-            }
-
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
             // rows, so this roster-independent expiry skips them as the roster
             // sweep does. The rest are classified the same way: surfaced rows
@@ -16476,6 +16447,7 @@ mod tests {
 
         let report = store.message_delivery_report(mirrors[0]).unwrap().unwrap();
         assert_eq!(report.stage, DeliveryStage::Suppressed);
+        assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
         assert!(report.delivered_at.is_none(), "expiry cannot fabricate a device receipt");
         let conn = store.conn.lock().unwrap();
         let fresh_pending: bool = conn.query_row(

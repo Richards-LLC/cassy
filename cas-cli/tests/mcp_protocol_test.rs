@@ -855,7 +855,7 @@ fn long_sandbox_serve_discovers_hook_session_for_reminders_and_handoff() {
     }
     drop(client);
     let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-    let handoffs: i64 = conn.query_row("SELECT COUNT(*) FROM entries WHERE entry_type = 'handoff'", [], |row| row.get(0)).unwrap();
+    let handoffs: i64 = conn.query_row("SELECT COUNT(*) FROM entries WHERE type = 'handoff'", [], |row| row.get(0)).unwrap();
     assert_eq!(handoffs, 1);
 }
 

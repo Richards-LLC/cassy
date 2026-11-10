@@ -216,6 +216,13 @@ module.exports = { chromium: {
 #[cfg(unix)]
 #[test]
 fn cli_release_report_renders_fixture_html_and_preserves_source() {
+    let assert_verdict_quality = |html: &str| {
+        let findings: Vec<_> = cas::deliverable::report_quality::check(html, None)
+            .into_iter()
+            .filter(|finding| finding.code.starts_with("verdict-"))
+            .collect();
+        assert!(findings.is_empty(), "{findings:?}");
+    };
     let project = TempDir::new().unwrap();
     for args in [
         vec!["init", "-q", "-b", "feature/report"],
@@ -272,6 +279,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     let html_path = project.path().join("docs/release-reports/v3.19.0.html");
     let source = fs::read_to_string(&source_path).unwrap();
     let html = fs::read_to_string(&html_path).unwrap();
+    assert_verdict_quality(&html);
     if let Some(fixture_dir) = std::env::var_os("CAS_RELEASE_REPORT_FIXTURE_DIR") {
         let fixture_dir = PathBuf::from(fixture_dir);
         fs::create_dir_all(&fixture_dir).unwrap();
@@ -352,6 +360,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(second["issue_count"], 2);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
     let html = fs::read_to_string(&html_path).unwrap();
+    assert_verdict_quality(&html);
     assert_eq!(html.matches("class=\"captures\"").count(), 2, "{html}");
     for title in ["Paired change", "Explicit change"] {
         assert!(html.contains(&format!("alt=\"Before: {title}\"")), "{html}");

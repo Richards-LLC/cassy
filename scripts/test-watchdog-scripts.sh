@@ -76,7 +76,7 @@ case "$*" in
   *'event=merge_group&status=queued&per_page=100'*)
     printf '%s\n' '{"workflow_runs":[{"id":204,"name":"CI","run_started_at":null,"created_at":"1970-01-01T00:00:00Z","head_branch":"queued","status":"queued"},{"id":205,"name":"CI","run_started_at":null,"created_at":"1970-01-01T00:00:00Z","head_branch":"raced","status":"queued"}]}' ;;
   *'actions/runs?status=queued&per_page=100'*)
-    printf '%s\n' '{"workflow_runs":[{"id":101,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"main"},{"id":102,"created_at":"1970-01-01T00:00:00Z","event":"merge_group","head_branch":"queue"},{"id":103,"created_at":"1970-01-01T00:31:00Z","event":"pull_request","head_branch":"fresh"},{"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"raced"},{"id":105,"created_at":"not-a-date","event":"push","head_branch":"invalid"},{"id":106,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"next"}]}' ;;
+    printf '%s\n' '{"workflow_runs":[{"id":101,"run_attempt":1,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"main"},{"id":102,"created_at":"1970-01-01T00:00:00Z","event":"merge_group","head_branch":"queue"},{"id":103,"created_at":"1970-01-01T00:31:00Z","event":"pull_request","head_branch":"fresh"},{"id":104,"created_at":"1970-01-01T00:00:00Z","event":"workflow_dispatch","head_branch":"raced"},{"id":105,"created_at":"not-a-date","event":"push","head_branch":"invalid"},{"id":106,"created_at":"1970-01-01T00:00:00Z","event":"push","head_branch":"next"},{"id":107,"run_attempt":3,"created_at":"1970-01-01T00:00:00Z","run_started_at":"1970-01-01T00:31:00Z","event":"push","head_branch":"factory/rerun"},{"id":108,"run_attempt":2,"created_at":"1970-01-01T00:00:00Z","run_started_at":null,"event":"push","head_branch":"factory/unknown-attempt"}]}' ;;
   *'actions/runs/201/jobs?filter=latest&per_page=100'*|*'actions/runs/204/jobs?filter=latest&per_page=100'*)
     printf '%s\n' '{"jobs":[{"name":"Fast Validation — suite archive build","status":"in_progress","started_at":"1970-01-01T00:00:00Z","created_at":"1970-01-01T00:00:00Z"}]}' ;;
   *'actions/runs/202/jobs?filter=latest&per_page=100'*)
@@ -89,7 +89,7 @@ case "$*" in
   *'actions/runs/204 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/205 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/101 --jq .status'*) printf 'queued\n' ;;
-  *'actions/runs/106 --jq .status'*) printf 'queued\n' ;;
+  *'actions/runs/106 --jq .status'*|*'actions/runs/107 --jq .status'*|*'actions/runs/108 --jq .status'*) printf 'queued\n' ;;
   *'actions/runs/104 --jq .status'*) printf 'completed\n' ;;
   *'--method POST'*'actions/runs/'*) exit 0 ;;
   *) printf 'unexpected fake gh invocation: %s\n' "$*" >&2; exit 2 ;;
@@ -126,6 +126,8 @@ if env "${run_env[@]}" "$queued_script" >"$queued_output" 2>&1; then
     expect_text "$(<"$tmp/gh.log")" 'actions/runs/101/cancel' 'queued watchdog cancels stale non-merge-group run'
     expect_absent "$gh_log" 'actions/runs/102' 'queued watchdog leaves merge-group scope alone'
     expect_absent "$gh_log" 'actions/runs/103' 'queued watchdog preserves threshold-fresh run'
+    expect_absent "$gh_log" 'actions/runs/107/cancel' 'queued watchdog preserves a fresh rerun of an old run'
+    expect_absent "$gh_log" 'actions/runs/108/cancel' 'queued watchdog preserves a rerun with an unknown attempt age'
     expect_text "$gh_log" 'actions/runs/101/cancel' 'queued watchdog sends cancel only after status re-read'
     expect_text "$queued_text" 'selected=2 cancel_accepted=2 cancel_rejected=0 unresolved=0 status_failed=0 dry_run=0' 'queued watchdog reports accepted requests separately from reclamation'
 else

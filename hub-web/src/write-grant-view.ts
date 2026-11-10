@@ -89,7 +89,7 @@ export function writeAccessPanel(document: Document, context: WriteAccessContext
   } else {
     const task = document.createElement("select");
     task.className = "write-grant-task";
-    for (const item of context.tasks) task.append(new Option(`${item.id}${item.title ? ` · ${item.title}` : ""}`, item.id));
+    for (const item of context.tasks) task.append(new Option(`${item.title?.trim() || "Untitled task"} · ${item.id}`, item.id));
     task.value = state.draft.task;
     task.dataset.fleetFocus = "header:grant-task";
     task.onchange = () => { state.draft.task = task.value; on.changed(); };

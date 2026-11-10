@@ -61,12 +61,10 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   const state = subject.stateLabel ?? statusLabel(subject.status);
   const line = dialog.querySelector<HTMLElement>("#worker-timeline-subject")!;
   const chip = document.createElement("span"); chip.className = `status-chip status-chip--${statusClass(state)}`; chip.textContent = state;
-  line.replaceChildren(chip);
-  if (subject.task) {
-    const id = document.createElement("span"); id.className = "status-identifier"; id.textContent = subject.task;
-    line.append(" ", id);
-    if (subject.taskTitle) line.append(` ${subject.taskTitle}`);
-  } else line.append(" No task assigned");
+  line.replaceChildren();
+  line.title = subject.task ?? "";
+  if (subject.task) line.append(subject.taskTitle?.trim() || "Task title not reported", " ", chip);
+  else line.append(chip, " No task assigned");
   const body = dialog.querySelector<HTMLElement>(".worker-timeline-body")!;
   const scroll = new Map([...body.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")].map(detail => [detail.dataset.focusKey, detail.scrollTop]));
   const children: HTMLElement[] = [];

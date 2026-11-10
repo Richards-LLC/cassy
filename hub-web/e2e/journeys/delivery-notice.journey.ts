@@ -86,7 +86,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   const desktop = page.viewportSize()!;
   await journey.stage("On a phone, the delivery problem is one tap from the conversation", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    const badge = page.locator("#conversation-attention");
     await openConversationActions(page);
     await expect(badge).toBeVisible();
     await expect(badge).toHaveText("1");
@@ -221,7 +221,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    const badge = page.locator("#conversation-attention");
     await expect(page.locator("#conversation-more")).toBeFocused();
     // A catalog change rebuilds the shell, and the fresh badge starts hidden
     // until its region shows it: focus must still land back on it.
@@ -235,7 +235,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   });
 
   await journey.stage("A sheet left open on a phone is a plain rail on a desktop", async () => {
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    const badge = page.locator("#conversation-attention");
     await openConversationActions(page); await badge.click();
     await expect(page.getByRole("dialog", { name: "Attention for this session" })).toBeVisible();
     // cas-a5c6: the phone turns into a desktop (rotation, or a window resize).

@@ -208,7 +208,7 @@ exactly one fenced `cassy-release-epics` JSON block:
 
 The actual fence label is `cassy-release-epics`, beside the existing
 `cassy-release-transformations` block in the same bound review bytes. Each
-parent requires its exact generation and complete immediate-child set, and the
+parent requires its exact generation and complete child set returned by `TaskStore::get_subtasks` (including nested descendants), and the
 reviewer must be independent of the parent and every descendant. The validator
 reuses the existing artifact binding, candidate mapping and author checks.
 Missing or stale acceptance queues one existing epic proof cycle and records

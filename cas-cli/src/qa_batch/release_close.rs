@@ -526,7 +526,7 @@ struct ParentReleaseEvidence {
     task_id: String,
     generation: String,
     child_versions: BTreeMap<String, String>,
-    immediate_ids: std::collections::BTreeSet<String>,
+    covered_child_ids: std::collections::BTreeSet<String>,
     review: Option<String>,
     integration: Option<String>,
 }
@@ -535,7 +535,7 @@ impl ParentReleaseEvidence {
     fn validate_children(&self, root: &Path) -> Result<(), String> {
         let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
         let children = store.get_subtasks(&self.task_id).map_err(|e| e.to_string())?;
-        let immediate: std::collections::BTreeSet<_> = children.iter().map(|c| c.id.clone()).collect();
+        let covered: std::collections::BTreeSet<_> = children.iter().map(|c| c.id.clone()).collect();
         let mut pending = children;
         let mut current = BTreeMap::new();
         while let Some(child) = pending.pop() {
@@ -546,7 +546,7 @@ impl ParentReleaseEvidence {
             }
             current.insert(child.id.clone(), child.updated_at.to_rfc3339());
         }
-        if immediate.is_empty() || immediate != self.immediate_ids || current != self.child_versions {
+        if covered.is_empty() || covered != self.covered_child_ids || current != self.child_versions {
             return Err("RELEASE_PARENT_CHILDREN_CHANGED".into());
         }
         Ok(())
@@ -626,7 +626,7 @@ impl ReleaseClose {
         self.parent = Some(ParentReleaseEvidence {
             task_id: task.id.clone(), generation: task.updated_at.to_rfc3339(),
             child_versions: descendants.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect(),
-            immediate_ids: children.iter().map(|c| c.id.clone()).collect(), review, integration,
+            covered_child_ids: children.iter().map(|c| c.id.clone()).collect(), review, integration,
         });
         Ok(self)
     }

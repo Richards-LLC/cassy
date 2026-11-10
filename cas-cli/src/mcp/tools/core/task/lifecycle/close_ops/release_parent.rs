@@ -238,7 +238,7 @@ pub(super) async fn probe_deleted_parent_and_single_pending_cycle(
         "reviewed_sha": scope.reviewed_sha, "final_release_sha": scope.final_release_sha,
         "epics": [
             {"task_id": parents[0].id, "generation": parents[0].updated_at.to_rfc3339(), "child_ids":[leaf], "acceptance":"pass"},
-            {"task_id": parents[1].id, "generation": parents[1].updated_at.to_rfc3339(), "child_ids":[parents[0].id], "acceptance":"pass"},
+            {"task_id": parents[1].id, "generation": parents[1].updated_at.to_rfc3339(), "child_ids":[parents[0].id, leaf], "acceptance":"pass"},
             // A signed row with an incomplete child set grants no acceptance.
             {"task_id": parents[2].id, "generation": parents[2].updated_at.to_rfc3339(), "child_ids":[], "acceptance":"pass"}
         ]

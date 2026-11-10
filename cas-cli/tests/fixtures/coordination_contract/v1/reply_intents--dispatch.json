@@ -176,6 +176,62 @@
       }
     },
     {
+      "name": "not-posted readback inside the dispatch window",
+      "request": {
+        "path_params": {
+          "id": "00007e91-1111-4111-8111-000000007e91"
+        },
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "request_id": "0000009a-2222-4222-8222-00000000009a",
+          "transition": "rejected",
+          "claim_generation": 1,
+          "observed_at": "2026-10-16T14:00:00.000Z"
+        }
+      },
+      "response": {
+        "status": 409,
+        "payload": {
+          "schema": "cassy.coordination/v1",
+          "code": "rejected",
+          "guidance": "The original dispatch may still land. Read the thread back again after the dispatch window; record posted as soon as the reply is found.",
+          "reason": "reply_unresolved",
+          "receipt": {
+            "operation_id": "00000d0a-1111-4111-8111-000000000d0a",
+            "request_id": "0000009a-2222-4222-8222-00000000009a",
+            "resource": {
+              "id": "6d1f0c3a-2b4e-4f6a-8c9d-0e1f2a3b4c5d",
+              "kind": "slack_thread",
+              "project_id": "github.com/richards-llc/cassy",
+              "external_ref": {
+                "provider": "slack",
+                "workspace_id": "T07ABCDEF",
+                "channel_id": "C08COORD01",
+                "root_ts": "1760616000.123456"
+              },
+              "state": "claimed"
+            },
+            "visible_owner": {
+              "slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
+              "registration_id": "reg-supervisor-alpha-01",
+              "label": "alpha (laptop)",
+              "is_caller": false
+            },
+            "generation": 1,
+            "expires_at": "2026-10-16T14:05:00.000Z",
+            "observed_at": "2026-10-16T14:00:00.000Z",
+            "next_action": "retry_later",
+            "reply_intent": {
+              "id": "00007e91-1111-4111-8111-000000007e91",
+              "status": "outcome_unknown",
+              "claim_generation": 1,
+              "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2"
+            }
+          }
+        }
+      }
+    },
+    {
       "name": "reconciled as never posted",
       "request": {
         "path_params": {

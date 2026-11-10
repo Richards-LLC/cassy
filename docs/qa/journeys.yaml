@@ -464,6 +464,10 @@ bug_families:
     title: The default account card shows its badge without Set default, and a reset already past is never shown as a time
     tasks: [cas-eae3]
     journeys: [HUB-J13]
+  dead-holder-slack-reply-readback:
+    title: Expired dead-owner Slack claims recover only after matching reply settlement; uncertain outcomes and live owners stay held without reposting
+    tasks: [cas-f039]
+    journeys: [FACTORY-SPAWN]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

@@ -746,7 +746,7 @@ fn process_evidence_silent_background_child_ignores_harness_cpu() {
 #[cfg(target_os = "linux")]
 #[test]
 fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
-    use crate::ui::factory::{daemon::runtime::progress_watchdog, director::events::{run_worker_health_probe, WorkerHealthRequest}};
+    use crate::ui::factory::{daemon::runtime::progress_watchdog, run_worker_health_probe, WorkerHealthRequest};
     use cas_types::{Agent, AgentRole, Task, TaskStatus};
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     const SESSION: &str = "child-progress-cas-8a87";

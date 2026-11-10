@@ -1,0 +1,4 @@
+title: Unanswered conversation history must expose missing answers and permit retry
+tasks: [cas-3590]
+invariants: [HUB-J23-HISTORY-FAILURE]
+journeys: [HUB-J23]

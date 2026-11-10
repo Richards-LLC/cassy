@@ -68,3 +68,38 @@ for (const [name, viewport, colorScheme] of [
     });
   });
 }
+
+
+test("HUB-J23 recover unanswered history without hiding missing answers (cas-3590)", journeyPart, async ({ page, journey }) => {
+  const reply = (id: number) => ({ notification_id: id, reply_to: null, message: `Recovered answer ${id}`, summary: "", device_id: "journey-device", kind: "answer", at: journeyStamp(-60_000) });
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
+    { messages: [], replies: [reply(51)], has_earlier: true, next_before: 51 },
+    { messages: [], replies: [reply(50)], has_earlier: false },
+  ] } });
+  hub.pausedHistory.add(PELICAN);
+  const failure = page.getByRole("alert").filter({ has: page.getByRole("button", { name: "Retry history" }) });
+  await journey.stage("An unanswered reopen names the gap and offers recovery", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await expect.poll(() => hub.historyRequests.length).toBe(1);
+    await page.clock.fastForward(15_000);
+    await expect(failure).toBeVisible();
+    hub.pausedHistory.delete(PELICAN);
+    await failure.getByRole("button").click();
+    await expect(page.getByRole("log").locator('[data-key="reply:51"]')).toBeVisible();
+    await expect(failure).toBeHidden();
+  });
+  await journey.stage("An unanswered older page can retry its original cursor", async () => {
+    hub.pausedHistory.add(PELICAN);
+    await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+    await expect.poll(() => hub.historyRequests.length).toBe(3);
+    await page.clock.fastForward(15_000);
+    await expect(failure).toBeVisible();
+    hub.pausedHistory.delete(PELICAN);
+    await failure.getByRole("button").click();
+    await expect(page.getByRole("log").locator('[data-key="reply:50"]')).toBeVisible();
+    expect(hub.historyRequests.at(-1)).toMatchObject({ before: 51 });
+    await expect(failure).toBeHidden();
+    await expect(page.getByRole("log").locator('[data-key="reply:51"]')).toHaveCount(1);
+  });
+});

@@ -355,8 +355,8 @@ function dismissedAskStorage(): DismissedAsksStorage | undefined {
  * `unavailable`: the session attached without durable history (a daemon
  * from before conversation_history), so no first page will ever arrive.
  */
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean } {
+const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean; failure?: { detail: string; before?: number } }>();
+function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean; failure?: { detail: string; before?: number } } {
   let page = conversationHistoryPages.get(key);
   if (!page) {
     page = { hasEarlier: false, loading: false, loaded: false };
@@ -672,7 +672,12 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // session whose daemon keeps no history resolves on attach.
       loadingHistory: () => {
         const page = conversationHistoryPage(threadKey);
-        return !page.loaded && !page.unavailable;
+        return !page.loaded && !page.unavailable && !page.failure;
+      },
+      historyError: () => conversationHistoryPage(threadKey).failure?.detail,
+      retryHistory: () => {
+        const page = conversationHistoryPage(threadKey);
+        if (page.failure) connections.get(threadMachineId)?.requestConversationHistory(threadSession, page.failure.before);
       },
       openingSince: () => conversationOpenedAt.get(threadKey),
       historyEnd: () => {
@@ -1207,12 +1212,19 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       scheduleReceiptCheck(sessionKey(machine.id, session));
       scheduleReplyPresentation();
     },
-    onConversationHistoryRequested: (session) => {
+    onConversationHistoryRequested: (session, before) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
-      if (cursor.loaded) return;
-      // The first page, not an earlier one: the thread shows its own loading
-      // line, and the "Load earlier" control stays out of it.
+      cursor.failure = undefined;
+      // A retry of an older page holds the paging control just like its first read.
+      cursor.loading = before !== undefined;
       cursor.requested = true;
+      updateConversationViews();
+    },
+    onConversationHistoryFailed: (session, detail, before) => {
+      const cursor = conversationHistoryPage(sessionKey(machine.id, session));
+      cursor.loading = false;
+      cursor.requested = false;
+      cursor.failure = { detail, before };
       updateConversationViews();
     },
     onConversationHistoryUnavailable: (session) => {
@@ -1229,6 +1241,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const cursor = conversationHistoryPage(key);
       // Only "Load earlier" sets loading; the first page is not a look back.
       if (cursor.loading) countUsage("history.older");
+      cursor.failure = undefined;
       applyHistoryCursor(cursor, page);
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {

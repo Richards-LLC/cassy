@@ -12463,6 +12463,21 @@ impl FactoryDaemon {
                     .collect();
                 for name in &workers_to_stop {
                     self.dead_workers.insert(name.clone());
+                    // GH #1592: an intentional stop ends the boot watch. The
+                    // exit is this request taking effect, never a boot failure.
+                    if let Some(verification) = self.spawn_verifications.remove(name)
+                        && verification.registered_at.is_none()
+                    {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            verification.request_id,
+                            Some(name),
+                            "shutdown",
+                            "completed",
+                            "Stopped by a shutdown request before registration.",
+                        );
+                    }
                     // Also release bindings for workers that never made it into
                     // worker_names (early pre-assign only) — shutdown_worker
                     // only runs for live workers.
@@ -20305,6 +20320,56 @@ mod tests {
             !daemon.spawn_verifications.contains_key(worker),
             "completed failure must remove the spawn verification"
         );
+    }
+
+    /// GH #1592/#1666: registered, worked, then shut down on purpose inside the
+    /// boot window. The intentional exit must not become a failed boot.
+    #[tokio::test]
+    async fn intentional_shutdown_retires_the_boot_watch_gh_1592() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let worker = "gh-1592-reviewer";
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request = queue
+            .enqueue_spawn(1, &[], false, None, Some(&daemon.session_name), None)
+            .unwrap();
+        queue
+            .record_spawn_state(request, cas_store::SpawnLifecycleState::Registered, Some(worker), None)
+            .unwrap();
+        daemon.spawn_verifications.insert(
+            worker.into(),
+            SpawnVerification {
+                request_id: Some(request),
+                launched_at: Instant::now() - Duration::from_secs(40),
+                registered_at: Some(Instant::now() - Duration::from_secs(30)),
+                task_id: None,
+                launched_wall: std::time::SystemTime::now() - Duration::from_secs(40),
+            },
+        );
+
+        daemon.pending_spawns.push_back(PendingSpawn::Shutdown {
+            request_id: Some(request + 1),
+            count: None,
+            names: vec![worker.into()],
+            force: false,
+            expected_generation: None,
+        });
+        daemon.process_pending_spawns().await;
+        // The boot window closes after the stop; the worker is gone by design.
+        if let Some(verification) = daemon.spawn_verifications.get_mut(worker) {
+            verification.registered_at = Some(Instant::now() - Duration::from_secs(61));
+        }
+        daemon.reconcile_spawn_verifications().await;
+
+        let row = queue
+            .recent_spawn_lifecycle(&daemon.session_name, 20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == request)
+            .unwrap();
+        assert_eq!(row.state, cas_store::SpawnLifecycleState::Registered);
+        assert!(!daemon.spawn_verifications.contains_key(worker));
     }
 
     #[test]

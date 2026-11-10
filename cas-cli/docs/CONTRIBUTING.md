@@ -1,5 +1,17 @@
 # Contributing to Cassy
 
+## Managed Slack file replies
+
+`artifact action=post reply_to=...` and `cas violet post --reply-to ... --file ...`
+resolve the caller's live reply intent from the project's coordination journal.
+Both external-upload steps carry its operation ID, claim generation and one
+request UUID. The CLI's `--request-id` reuses that UUID for the same reply.
+An expired, released or absent caller intent on a locally known managed thread
+fails before contacting Violet. Unknown and unmanaged threads retain Violet's
+ordinary posting policy; Violet owns authoritative checks before allocation,
+including authority changes on other machines. Never retry an uncertain reply
+with a new request ID.
+
 ## Memory update receipts
 
 `memory action=update id=<id> title=<title>` saves the title alone or together

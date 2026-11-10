@@ -798,56 +798,70 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reap_kills_leaderless_cas_named_child_holding_registry_file() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::fd::FromRawFd;
         use std::os::unix::process::CommandExt;
-        use std::process::Command;
+        use std::process::{Command, Stdio};
+
+        // Clean up only this test's fingerprinted group, including on panic.
+        struct GroupCleanup<'a>(&'a Path, &'a TrackedProcessGroup);
+        impl Drop for GroupCleanup<'_> {
+            fn drop(&mut self) { let _ = reap_blocking(self.0, self.1); }
+        }
+        struct ChildCleanup(std::process::Child);
+        impl Drop for ChildCleanup {
+            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+        }
 
         let temp = tempfile::tempdir().unwrap();
         let db_path = temp.path().join("cas.db");
         fs::write(&db_path, b"sentinel").unwrap();
-        let child_pid_path = temp.path().join("cas-child.pid");
-        let script = format!(
-            "bash -c 'exec -a cas sleep 300' 9>>\"$DB_PATH\" & echo $! > '{}'; sleep 0.25",
-            child_pid_path.display()
-        );
+        // The cas-named child reports readiness after exec and after FD 9
+        // opens the registry. Keep its leader alive until tracking and the
+        // exit monitor are installed; no scheduling sleep establishes either.
+        let script = r#"
+exec -a cas bash -c 'printf "%s\n" "$BASHPID"; sleep 300 & wait' 9>>"$DB_PATH" &
+read -r release
+"#;
         let mut command = Command::new("bash");
-        command.args(["-c", &script]).env("DB_PATH", &db_path);
+        command.args(["-c", script]).env("DB_PATH", &db_path)
+            .stdin(Stdio::piped()).stdout(Stdio::piped());
         // SAFETY: isolate the synthetic worker lane from cargo's group.
         unsafe {
             command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
+                if libc::setsid() == -1 { return Err(io::Error::last_os_error()); }
                 Ok(())
             });
         }
         let mut leader = command.spawn().unwrap();
         let pgid = leader.id();
         let record = track(temp.path(), "cas-worker", "dead-factory", pgid).unwrap();
+        let _cleanup = GroupCleanup(temp.path(), &record);
+        let mut ready = String::new();
+        BufReader::new(leader.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        let child_pid: u32 = ready.trim().parse().unwrap();
+        let child_start = crate::mcp::daemon::read_pid_starttime(child_pid).unwrap();
+        assert_eq!(fs::read_link(format!("/proc/{child_pid}/fd/9")).unwrap(), db_path);
+        assert_eq!(fs::read(format!("/proc/{child_pid}/cmdline")).unwrap()
+            .split(|byte| *byte == 0).next(), Some(b"cas".as_slice()));
 
+        // SAFETY: pidfd_open returns a new owned descriptor for this live PID.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", io::Error::last_os_error());
+        // SAFETY: the successful syscall above transfers this descriptor to File.
+        let exit = tokio::io::unix::AsyncFd::new(unsafe { fs::File::from_raw_fd(fd as i32) }).unwrap();
+        leader.stdin.take().unwrap().write_all(b"release\n").unwrap();
         assert!(leader.wait().unwrap().success());
-        let child_pid: u32 = fs::read_to_string(&child_pid_path)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        let child_holds_db = fs::read_dir(format!("/proc/{child_pid}/fd"))
-            .unwrap()
-            .flatten()
-            .any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target == db_path));
-        assert!(
-            child_holds_db,
-            "precondition: cas-named orphan must hold the registry file open"
-        );
-        assert!(is_live(&record));
+        assert_eq!(crate::mcp::daemon::read_pid_starttime(child_pid), Some(child_start));
+        assert!(is_live(&record), "the ready registry holder outlives its leader");
 
-        assert_eq!(
-            reap(temp.path(), &record).await.unwrap(),
-            ReapOutcome::Reaped
-        );
-        assert!(
-            !crate::mcp::daemon::pid_alive(child_pid)
-                || process_state_and_group(child_pid).is_some_and(|(state, _)| state == 'Z'),
-            "worker teardown must kill a Cassy child holding the registry"
-        );
+        let mut unrelated = ChildCleanup(Command::new("sleep").arg("300").spawn().unwrap());
+        assert_eq!(reap(temp.path(), &record).await.unwrap(), ReapOutcome::Reaped);
+        // One kernel exit event observes this exact incarnation. A separate
+        // kill(0), then stat read can falsely fail when exit happens between them.
+        let _exited = tokio::time::timeout(Duration::from_secs(5), exit.readable()).await
+            .expect("registry holder did not exit").unwrap();
+        assert!(unrelated.0.try_wait().unwrap().is_none(), "unrelated child must survive teardown");
+        assert!(list(temp.path()).unwrap().is_empty());
     }
 }

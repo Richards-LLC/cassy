@@ -135,6 +135,7 @@ fn options() -> PostOptions {
         reply_to: Some("1710000000.000001".to_string()),
         title: Some("Release report".to_string()),
         initial_comment: None,
+        reply_claim: None,
     }
 }
 
@@ -161,7 +162,12 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
         begin_reply(&server),
         complete,
     ]);
-    let receipt = post_verified(&violet, &view, bytes, &options())
+    let mut options = options();
+    options.reply_claim = Some(json!({
+        "coordination_operation_id": "00007e91-1111-4111-8111-000000007e91",
+        "expected_generation": 1,
+    }));
+    let receipt = post_verified(&violet, &view, bytes, &options)
         .await
         .expect("the post succeeds");
 
@@ -190,6 +196,10 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
         assert_eq!(call["sha256"], HELLO_SHA256);
         assert_eq!(call["reply_to"], "1710000000.000001");
         assert_eq!(call["title"], "Release report");
+        assert_eq!(call["coordination_operation_id"], options.reply_claim.as_ref().unwrap()["coordination_operation_id"]);
+        assert_eq!(call["expected_generation"], 1);
+        assert_eq!(call["request_id"], calls[0]["request_id"]);
+        assert!(uuid::Uuid::parse_str(call["request_id"].as_str().unwrap()).is_ok());
         assert!(
             call.get("initial_comment").is_none(),
             "unset options are omitted"
@@ -204,6 +214,15 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
     }
     assert!(calls[0].get("file_id").is_none());
     assert_eq!(calls[1]["file_id"], "F1148");
+    for code in ["managed_reply_required", "stale_generation", "reply_target_mismatch"] {
+        let violet = ScriptedViolet::new(vec![wrapped(json!({
+            "ok": false, "error": {"code": code, "message": "authority refused", "retryable": false},
+        }))]);
+        let error = post_verified(&violet, &view, b"hello world".to_vec(), &options).await.unwrap_err();
+        assert_eq!(error.code, code);
+        assert!(error.file_id.is_none());
+        assert_eq!(violet.calls().len(), 1);
+    }
 }
 
 #[tokio::test]

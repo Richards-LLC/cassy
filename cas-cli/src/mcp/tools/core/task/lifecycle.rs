@@ -1897,15 +1897,16 @@ impl CasCore {
                 format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let triage_notice = if task.assignee.is_some() {
-            format!("{}{}",
-                crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id)),
-                epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task),
-            )
+            crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
         } else { String::new() };
-        let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
+        let mut assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
         };
+
+        if task.assignee.is_some() {
+            assignment_warning.push_str(&epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task));
+        }
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.

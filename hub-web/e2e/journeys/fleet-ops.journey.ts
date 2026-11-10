@@ -199,10 +199,10 @@ for (const colorScheme of ["light", "dark"] as const) {
         expect(await items.evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.fleetFocus))).toEqual(["header:item:focus:train", "header:item:focus:cas-c4d3"]);
         await expect(items.nth(0)).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
         await expect(items.nth(1)).toContainText(world.epics[1]!.title!);
+      });
+      await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
         await page.keyboard.press("Escape");
         await expect(page.locator("#status-view").getByRole("button", { name: "Focus epic…" })).toBeFocused();
-      });
-      await journey.stage("cas-b200: desktop offers the same named live choices and sends their exact identity", async () => {
         await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
         await page.setViewportSize({ width: 1280, height: 800 });
         const rail = page.locator("#status-view");
@@ -213,7 +213,10 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(items.first()).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
         const box = (await menu.boundingBox())!;
         expect(box.height).toBeLessThanOrEqual(400);
-        await items.first().click();
+      });
+      await journey.stage("Focus sends the exact epic identity and reports its title", async () => {
+        const rail = page.locator("#status-view");
+        await rail.locator(".fleet-ops-epics").getByRole("menuitem").first().click();
         await expect.poll(() => hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "focus_epic", epic_id: "train" }, expected: { epic_id: "cas-f29b" } });
         await expect(rail.locator(".fleet-ops-undo")).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
       });

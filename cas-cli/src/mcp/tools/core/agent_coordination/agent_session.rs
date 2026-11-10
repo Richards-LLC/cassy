@@ -65,7 +65,8 @@ mod tests {
         env.set("CAS_FACTORY_SESSION", "registration-pane");
         for action in ["register", "session_start"] {
             for (role, state) in [
-                (AgentRole::Supervisor, "live"), (AgentRole::Supervisor, "retired"),
+                (AgentRole::Supervisor, "live"), (AgentRole::Supervisor, "fresh-core"),
+                (AgentRole::Supervisor, "retired"),
                 (AgentRole::Supervisor, "different-pane"), (AgentRole::Supervisor, "other-name"),
                 (AgentRole::Worker, "live"), (AgentRole::Director, "live"), (AgentRole::Standard, "live"),
             ] {
@@ -87,6 +88,9 @@ mod tests {
                     foreign.ppid = None;
                     agents.update(&foreign).unwrap();
                 }
+                let core = if state == "fresh-core" {
+                    crate::mcp::CasCore::with_daemon(root.clone(), None, None)
+                } else { core };
                 let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
                 let new_id = format!("harness-{action}-{role}");
                 let name = if state == "other-name" { "another-owner" } else { "registration-owner" };
@@ -94,7 +98,7 @@ mod tests {
                     "action": action, "name": name, "agent_type": role.to_string(),
                     "session_id": new_id,
                 })).unwrap())).await.unwrap();
-                let reuses = (role == AgentRole::Supervisor && state == "live")
+                let reuses = (role == AgentRole::Supervisor && matches!(state, "live" | "fresh-core"))
                     || (role == AgentRole::Worker && action == "session_start");
                 assert_eq!(agents.list(None).unwrap().len(), if reuses { 1 } else { 2 }, "{action}/{role}/{state}");
                 assert_eq!(service.inner.get_agent_id().unwrap(), old_id);

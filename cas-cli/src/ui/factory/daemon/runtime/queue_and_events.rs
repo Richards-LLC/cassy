@@ -20188,7 +20188,7 @@ mod tests {
             assert_eq!(row.worker_name.as_deref(), Some(worker));
             assert_eq!(row.task_id.as_deref(), Some(task_id));
             let detail = row.detail.unwrap();
-            assert!(detail.contains("BOOT_FIXTURE_E_SETTINGS"));
+            assert!(detail.contains("BOOT_FIXTURE_E_SETTINGS"), "{worker}: {detail}");
             assert!(!detail.contains(&"x".repeat(2_100)));
             assert!(!detail.contains("fixture-secret-4cdd"));
             let task = tasks.get(task_id).unwrap();

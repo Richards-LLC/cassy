@@ -1547,6 +1547,60 @@ async fn test_factory_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
+/// Staffing receipts warn about published release history without refusing work.
+#[tokio::test]
+async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    let worker = "release-gap-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    let repo = env.cas_root.parent().unwrap();
+    add_epic_with_id(&env, "cas-release-gap", TaskStatus::Open, "epic/requested");
+    env.register_worker_with_metadata(worker, HashMap::from([
+        ("clone_path".into(), worker_path.display().to_string()),
+    ]));
+    std::fs::write(repo.join("release.txt"), "published release\n").unwrap();
+    git_stdout(repo, &["add", "release.txt"]);
+    git_stdout(repo, &["commit", "-qm", "published release"]);
+    git_stdout(repo, &["tag", "v1.2.3"]);
+    // A tag alone is not publication evidence.
+    git_stdout(repo, &["tag", "v99.0.0"]);
+    let mut published = cas_store::NewQualityEvent::new(
+        "release|1.2.3",
+        cas_store::QualityPayload::Release {
+            commit_to_main_minutes: None, main_to_published_minutes: None,
+            ejections: 0, rescues: 0,
+        },
+    );
+    published.release_version = Some("v1.2.3".into());
+    cas_store::record_quality_event(&env.cas_root, &published).unwrap();
+    let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
+    for behind in [true, false] {
+        if !behind {
+            git_stdout(repo, &["update-ref", "refs/heads/epic/requested", "main"]);
+        }
+        let task_id = child_task_of_epic(&env, "cas-release-gap", "Staff published base");
+        let assignment = assign(&env, &task_id, worker).await.unwrap();
+        assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
+        let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
+        let mut req = factory_req("spawn_workers");
+        req.cli = Some("grok".into());
+        req.isolate = Some(true);
+        req.task_id = Some(spawn_task);
+        let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+        for response in [assignment, spawn] {
+            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind, "{response}");
+            if behind {
+                assert!(response.contains("tag=v1.2.3"), "{response}");
+                assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
+            }
+        }
+        let queued = env.spawn_queue().peek(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        env.spawn_queue().mark_processed(queued[0].id).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn spawn_workers_refuses_diverged_base_before_enqueue_cas_52b7() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);

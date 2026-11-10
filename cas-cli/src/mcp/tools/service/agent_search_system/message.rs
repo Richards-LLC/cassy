@@ -1933,6 +1933,7 @@ impl CasService {
                 attachments: attachments.clone(),
                 options,
                 reply_to_session,
+                task_id: req.task_id.clone(),
             })
             .map_err(|error| {
                 Self::error(
@@ -8437,6 +8438,7 @@ mod cas_89e1_post_merge_message_type_tests {
             "action": "message",
             "target": "operator",
             "kind": "ask",
+            "task_id": "cas-operator-decision",
             "options": ["Approve", "Keep testing"],
             "summary": "need approval",
             "message": "Can you approve this release?",
@@ -8457,6 +8459,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(reply.recipient_device_id.as_deref(), Some("phone-9"));
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&reply.prompt).expect("operator reply payload");
+        assert_eq!(payload.task_id.as_deref(), Some("cas-operator-decision"));
         assert_eq!(payload.reply_to, None);
         assert_eq!(payload.device_id, "phone-9");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Ask);

@@ -1,10 +1,12 @@
 import type { FleetAgent, FleetTask } from "./fleet-ops";
+import type { ConversationHistory } from "./conversation-history";
+import type { OperatorReply } from "./types";
 
 const LABELS: Readonly<Record<string, string>> = {
   inprogress: "In progress", awaitingmerge: "Awaiting merge", open: "Open", ready: "Ready",
   blocked: "Blocked", closed: "Closed", cancelled: "Cancelled", canceled: "Cancelled",
   active: "Active", idle: "Idle", held: "Paused", paused: "Paused", stopped: "Stopped",
-  working: "Working", offline: "Offline", awaitingverification: "Awaiting verification",
+  planned: "Planned", working: "Working", offline: "Offline", awaitingverification: "Awaiting verification",
 };
 
 /** One wire state has the same human label in CamelCase, snake_case or uppercase. */
@@ -73,9 +75,26 @@ export function epicCounts(epic: ReleaseEpic | undefined): (EpicCounts & { total
 }
 export type ProgressTask = FleetTask & { readonly epic_id?: string | null; readonly delivery_state?: string | null };
 
+/** Explicit operator-channel requests retain their conversation identity and resolution. */
+export interface OperatorAction {
+  readonly owner: "operator";
+  readonly request_id: number;
+  readonly task_id?: string;
+  readonly request: OperatorReply;
+}
+
+export function operatorActions(history: ConversationHistory | undefined): OperatorAction[] {
+  const pinned = history?.pinnedAsk()?.notification_id;
+  return [...new Map((history?.waiting() ?? [])
+    .filter(request => !request.notice && request.notification_id !== pinned)
+    .map(request => [request.notification_id, { owner: "operator" as const, request_id: request.notification_id, task_id: request.task_id, request }])).values()];
+}
+
+const LIVE_EPIC = ["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification", "Paused", "Planned"];
+
 /** Status epics are a project catalog, never a session ownership list. */
 function supervisorEpics(epics: readonly ReleaseEpic[], focused: string | null, supervisors: readonly string[]): ReleaseEpic[] {
-  const open = epics.filter(epic => ["Open", "Ready", "In progress", "Blocked", "Awaiting merge"].includes(statusLabel(epic.status)));
+  const open = epics.filter(epic => LIVE_EPIC.includes(statusLabel(epic.status)));
   const pinned = open.find(epic => epic.id === focused) ?? open.find(epic => epic.focused);
   return pinned ? [pinned] : open.filter(epic =>
     (epic.assignee != null && supervisors.includes(epic.assignee))
@@ -92,12 +111,10 @@ export function releaseProgress(epics: readonly ReleaseEpic[], focused: string |
 export function taskGroups(tasks: readonly ProgressTask[], epics: readonly ReleaseEpic[], workers: readonly string[], all: boolean, supervisors: readonly string[] = [], focused: string | null = null): { label: string; tasks: ProgressTask[] }[] {
   const epicIds = new Set(supervisorEpics(epics, focused, supervisors).map(epic => epic.id));
   const scoped = tasks.filter(task => all || (task.epic_id ? epicIds.has(task.epic_id) : (task.assignee != null && workers.includes(task.assignee))));
-  const needs = (task: ProgressTask) => task.delivery_state !== "merged" && ["Awaiting merge", "Blocked", "Ask"].includes(statusLabel(task.status));
   const ready = (task: ProgressTask) => ["Open", "Ready"].includes(statusLabel(task.status));
   const done = (task: ProgressTask) => ["Closed", "Cancelled"].includes(statusLabel(task.status));
   return [
-    { label: "Needs you", tasks: scoped.filter(needs) },
-    { label: "In progress", tasks: scoped.filter(task => !needs(task) && !ready(task) && !done(task)) },
+    { label: "In progress", tasks: scoped.filter(task => !ready(task) && !done(task)) },
     { label: "Ready", tasks: scoped.filter(ready) },
     ...(all ? [{ label: "Finished", tasks: scoped.filter(done) }] : []),
   ];
@@ -147,7 +164,26 @@ export interface EpicSessionProgress {
   readonly epics: readonly ReleaseEpic[];
   readonly stale: boolean;
   readonly received: number;
+  /** Only completed reconciliation populates this optional bridge seam. */
+  readonly release_scope?: ReconciledReleaseScope;
+  /** The selected conversation supplies the current reconciliation identity. */
+  readonly authoritative?: boolean;
 }
+export interface ReconciledReleaseScope { readonly release_id: string; readonly final_release_sha: string }
+
+/** Missing peer proof is unknown; a reported older pair is last-known. */
+export function releaseSnapshots(sources: readonly EpicSessionProgress[]): EpicSessionProgress[] {
+  const current = new Map<string, ReconciledReleaseScope>();
+  for (const source of [...sources].sort((a, b) => Number(b.authoritative === true) - Number(a.authoritative === true) || b.received - a.received)) {
+    if (!source.stale && source.release_scope && !current.has(source.project)) current.set(source.project, source.release_scope);
+  }
+  return sources.map(source => {
+    const scope = current.get(source.project), peer = source.release_scope;
+    const mismatch = scope && peer && (scope.release_id !== peer.release_id || scope.final_release_sha !== peer.final_release_sha);
+    return mismatch ? { ...source, stale: true } : source;
+  });
+}
+
 export type EpicTaskGroup = "In progress" | "Open" | "Merged";
 
 /** One task-state source for an epic's sections and its split: a merged
@@ -194,16 +230,14 @@ function epicTaskState(task: ProgressTask, worker: WorkerProgress | undefined): 
   return state === "Executing" ? "Building" : state;
 }
 
-const LIVE_EPIC = ["Open", "Ready", "In progress", "Blocked", "Awaiting merge", "Awaiting verification"];
-
 /** The selected session's project only, joined across machines by epic id.
- * The release train has its own header; open epics without in-flight work or
- * a live worker only add to the quiet count. Untitled epics never render. */
+ * The release train has its own header. Planned and paused work remains
+ * visible; terminal catalogs cannot be resurrected by a stale peer. */
 export function projectEpics(sources: readonly EpicSessionProgress[], project: string, train?: string): { live: ProjectEpic[]; quiet: number } {
   const epics = new Map<string, { epic: ReleaseEpic; machines: Set<string>; workers: Map<string, ProjectEpic["workers"][number]>; rows: Map<string, EpicTaskRow>; stale: boolean }>();
   const latest = new Map<string, ReleaseEpic>();
   // Prefer the newest authoritative task/progress snapshot when sessions overlap.
-  for (const source of [...sources].filter(source => source.project === project).sort((a, b) => b.received - a.received)) {
+  for (const source of releaseSnapshots(sources).filter(source => source.project === project).sort((a, b) => Number(a.stale) - Number(b.stale) || Number(b.authoritative === true) - Number(a.authoritative === true) || b.received - a.received)) {
     const workers = workerProgress(source.roster, source.agents, source.tasks, source.supervisor);
     for (const epic of source.epics) {
       if (!latest.has(epic.id)) latest.set(epic.id, epic);
@@ -211,6 +245,7 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
       let entry = epics.get(epic.id);
       if (!entry) epics.set(epic.id, entry = { epic, machines: new Set(), workers: new Map(), rows: new Map(), stale: true });
       else if (!epicCounts(entry.epic) && epicCounts(epic)) entry.epic = { ...entry.epic, counts: epic.counts };
+      if (source.stale && !entry.stale) continue;
       entry.machines.add(source.machineLabel);
       entry.stale &&= source.stale;
       const tasks = source.tasks.filter(task => task.epic_id === epic.id);
@@ -238,7 +273,7 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
     return { key, epic: entry.epic, title: epicTitle(entry.epic), counts: displayCounts(entry.epic, rows.map(row => row.task)), machines: [...entry.machines], workers: [...entry.workers.values()], rows, stale: entry.stale,
       blocked, parked, building: rows.filter(row => row.group === "In progress").length - parked };
   });
-  const live = all.filter(item => item.building + item.parked + item.blocked > 0 || item.workers.length > 0);
+  const live = all;
   return {
     live: live.sort((a, b) => Number(b.blocked > 0) - Number(a.blocked > 0)
       || (b.building + b.parked + b.blocked) - (a.building + a.parked + a.blocked)

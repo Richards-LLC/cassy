@@ -946,9 +946,13 @@ invariants:
     check: Run cas-pty pty::tests::copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt; inspect live PTY argv with ps and the child-scoped pgrep full-command matcher, verify the path is inside the worktree plus exact brief bytes, mode 0600 and removal after teardown. Claude and Codex cover initial and resumed selectors; Grok and OpenCode cover initial launch.
     bug: {task: cas-2453}
   HUB-J26-SAME-STATE:
-    statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead with named attention shortcuts; the count includes worker trouble once, and task titles distinguish the remaining lanes.
+    statement: Among workers sharing a liveness state, reported blocked tasks and stalled workers lead as agent staffing details; task titles distinguish the remaining lanes. Agent trouble never contributes to the operator action count.
     check: Run HUB-J26 same-state and lifecycle stages at desktop/light and phone/dark; compare a real-hub same-state capture with the task and worker readbacks, then obtain an independent distinctiveness, fit and hierarchy score of at least four.
     bug: {task: cas-a147}
+  HUB-J26-OPERATOR-ACTIONS:
+    statement: Tasks & progress and Team list only explicit unresolved operator requests with their durable request ID and optional task ID; the pinned ask is not duplicated, and answering or dismissing removes the action. Agent merge, verify, sync and blocked work never adds an operator action. Terminal epics and trains contribute zero navigation rows or quiet debt; planned and paused work stays visible. Stale peer data is last known, and an older reconciliation pair cannot resurrect terminal work.
+    check: Run progress-model, context-rail, epic-progress and team-view targeted vitest; during release QA walk HUB-J7, HUB-J13 and HUB-J26 at desktop and phone with explicit task-linked asks, a resolved request, a closed train and a stale peer. Missing release_scope remains unknown until completed reconciliation populates it.
+    bug: {task: cas-2b13b}
   HUB-J26-PROJECT-EPICS:
     statement: Tasks & progress shows the selected session's project's live epics only, joined across paired machines by epic id, after the release header; each row and the train header show the TUI's open / in progress / merged split with a segmented bar, untitled epics and placeholder counts never render, and nothing sits between the conversation tabs and the conversation. Phone reads the same section in the Tasks & progress sheet with focus return.
     check: Run the HUB-J26 project epics cases in team.journey.ts at 1280x800 and 390x844 in light and dark; confirm the foreign project's epic is absent from this list (its status is read only for its own project card), expand the peer epic, observe a merge event update its split, and inspect forced colors, reduced motion and overflow.
@@ -3011,7 +3015,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
+  invariants: [HUB-J26-OPERATOR-ACTIONS, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

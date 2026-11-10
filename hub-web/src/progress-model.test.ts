@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
-import { statusClass, statusLabel, workerProgress } from "./progress-model";
+import { ConversationHistory } from "./conversation-history";
+import { operatorActions, projectEpics, releaseSnapshots, statusClass, statusLabel, workerProgress, type EpicSessionProgress } from "./progress-model";
 
 it.each(["InProgress", "in_progress", "INPROGRESS"])("labels %s in human terms", state => {
   expect(statusClass(state)).toBe("in-progress");
@@ -44,7 +45,7 @@ it("scopes server-shaped project epics to the supervisor and keeps the full boar
   const supervisors = ["supervisor", "supervisor-id"];
   expect(releaseProgress(epics, "release", tasks, supervisors)).toMatchObject({ title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5 } });
   expect(taskGroups(tasks, epics, [], false, supervisors, "release").map(group => group.tasks.map(task => task.id))).toEqual([
-    ["merge", "blocked"], ["work"], ["ready"],
+    ["merge", "blocked", "work"], ["ready"],
   ]);
   expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("other");
   expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("unknown");
@@ -96,7 +97,7 @@ it("keeps Live epics to the selected project across machines, titled, deduplicat
   ], "cas-src", "train");
   expect(epicTitle({ title: "EPIC: Conversational search" })).toBe("Conversational search");
   // Blocked first, then most in flight; the train, untitled, closed and foreign epics never appear.
-  expect(live.map(epic => [epic.key, epic.title])).toEqual([["blocked", "Blocked work"], ["busy", "Busy"], ["shared", "Commander rail"]]);
+  expect(live.map(epic => [epic.key, epic.title])).toEqual([["blocked", "Blocked work"], ["busy", "Busy"], ["shared", "Commander rail"], ["quiet", "Someday"]]);
   const shared = live[2]!;
   expect(shared.machines).toEqual(["prowl", "soundwave"]);
   expect(shared.counts).toEqual({ open: 0, in_progress: 1, merged: 6, total: 7 });
@@ -104,7 +105,7 @@ it("keeps Live epics to the selected project across machines, titled, deduplicat
   expect(shared.rows.map(row => [row.task.title, row.group, row.state])).toEqual([["Ship the rail", "In progress", "Building"]]);
   expect(live[1]).toMatchObject({ building: 1, parked: 1, blocked: 0, counts: undefined });
   expect(live[0]).toMatchObject({ blocked: 1, rows: [{ group: "Open", state: "Blocked" }] });
-  expect(quiet).toBe(1);
+  expect(quiet).toBe(0);
 });
 
 it("links a parked task to its running preview only, never this page or a non-loopback origin", async () => {
@@ -119,4 +120,35 @@ it("links a parked task to its running preview only, never this page or a non-lo
   expect(deliveryPreview(parked, preview("http://127.0.0.1:4999"), now, "http://127.0.0.1:4999")).toBeUndefined();
   expect(deliveryPreview(parked, preview("javascript:alert(1)"), now, "https://commander.example")).toBeUndefined();
   expect(deliveryPreview(parked, preview("https://evil.example"), now, "https://commander.example")).toBeUndefined();
+});
+
+it("projects only unresolved explicit operator requests, once, preserving task links and excluding the pinned ask", () => {
+  const history = new ConversationHistory();
+  const request = { notification_id: 21, reply_to: null, device_id: "*", kind: "blocker" as const, task_id: "blocked", summary: "Choose", message: "Choose a release" };
+  history.reply(request);
+  history.reply(request);
+  history.reply({ ...request, notification_id: 22, kind: "ask", task_id: "shipped" });
+  expect(operatorActions(history).map(({ owner, request_id, task_id }) => ({ owner, request_id, task_id }))).toEqual([{ owner: "operator", request_id: 21, task_id: "blocked" }]);
+  history.submit("answer", "supervisor", "Chosen", undefined, 21);
+  expect(operatorActions(history)).toEqual([]);
+  history.dismissAsk(22);
+  expect(operatorActions(history)).toEqual([]);
+});
+
+it("keeps terminal navigation empty despite a newer stale peer, retains planned and paused work and compares completed release pairs", () => {
+  const scope = { release_id: "v4.13.0", final_release_sha: "a".repeat(40) };
+  const fresh: EpicSessionProgress = { project: "cassy", machine: "prowl", machineLabel: "prowl", session: "s", supervisor: "lead", roster: [], agents: [], stale: false, received: 2, authoritative: true, release_scope: scope,
+    tasks: [], epics: [{ id: "shipped", title: "Shipped", status: "closed" }, { id: "cancelled", title: "Cancelled train", status: "cancelled" }, { id: "paused", title: "Paused work", status: "held" }, { id: "planned", title: "Planned work", status: "open" }] };
+  const peer: EpicSessionProgress = { ...fresh, machine: "soundwave", machineLabel: "soundwave", authoritative: false, received: 3, release_scope: { ...scope, final_release_sha: "b".repeat(40) },
+    tasks: [{ id: "old", epic_id: "shipped", status: "awaiting_merge" }], epics: [{ id: "shipped", title: "Shipped", status: "in_progress" }] };
+  const sources = releaseSnapshots([fresh, peer]);
+  expect(sources.map(source => source.stale)).toEqual([false, true]);
+  const result = projectEpics([fresh, { ...peer, stale: true }], "cassy");
+  expect(result.live.map(item => item.key)).toEqual(["paused", "planned"]);
+  expect(result.quiet).toBe(0);
+  expect(projectEpics([fresh, { ...peer, release_scope: scope }], "cassy").live.map(item => item.key)).toEqual(["paused", "planned"]);
+  expect(projectEpics([fresh, { ...peer, received: 1 }], "cassy").live.map(item => item.key)).toEqual(["paused", "planned"]);
+  expect(releaseSnapshots([fresh, { ...peer, release_scope: undefined }]).map(source => source.stale)).toEqual([false, false]);
+  expect(releaseSnapshots([fresh, { ...peer, release_scope: scope }]).map(source => source.stale)).toEqual([false, false]);
+  expect(projectEpics([{ ...peer, stale: true }], "cassy").live[0]?.stale).toBe(true);
 });

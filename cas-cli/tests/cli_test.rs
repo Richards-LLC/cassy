@@ -3322,7 +3322,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
         sourced.id = format!("cas-ledger-source-{suffix}");
         sourced.assignee = Some("ledger-worker".into());
         sourced.deliverables.work_target = Some(target.clone());
-        sourced.deliverables.factory_branch_anchor = Some(primary_head.clone());
+        sourced.deliverables.factory_branch_anchor = succeeds.then(|| primary_head.clone());
         sourced.deliverables.parked_branch = Some(parked.into());
         sourced.deliverables.factory_branch_start = start_branch.map(|branch| cas::types::FactoryBranchStart {
             work_target: target.clone(), assignee: "ledger-worker".into(), branch: branch.into(), base_sha: primary_head.clone(),
@@ -3352,8 +3352,10 @@ fn qa_ledger_init_check_and_no_overwrite() {
 
     // GH #1745: a cleaned local branch must not lose the immutable delivery
     // or borrow the primary checkout, colliding tag, or advanced remote tip.
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "merge", "--no-ff", source, "-m", "land historical delivery"]);
+    let landed_head = git(&["rev-parse", "HEAD"]);
     git(&["-C", worker.to_str().unwrap(), "checkout", "--detach", &source_head]);
-    git(&["update-ref", &format!("refs/remotes/origin/{source}"), &primary_head]);
+    git(&["update-ref", &format!("refs/remotes/origin/{source}"), &landed_head]);
     git(&["update-ref", "-d", &format!("refs/heads/{source}")]);
     let mut historical = task.clone();
     historical.id = "cas-ledger-historical".into();
@@ -3363,6 +3365,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
         work_target: target, assignee: "ledger-worker".into(), branch: source.into(), base_sha: primary_head.clone(),
     });
     historical.deliverables.factory_branch_anchor = Some(source_head.clone());
+    historical.deliverables.merge_commit = Some(landed_head.clone());
     let store = cas::store::open_task_store_local(&cas_root).unwrap();
     store.add(&historical).unwrap();
     let before = serde_json::to_value(store.get(&historical.id).unwrap()).unwrap();
@@ -3385,6 +3388,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
     assert!(!cas_cmd(root).current_dir(root)
         .args(["qa", "ledger", "init", "--task", &historical.id]).output().unwrap().status.success());
     assert_eq!(std::fs::read(path).unwrap(), evidence);
+    assert_eq!(git(&["rev-parse", "HEAD"]), landed_head);
 
     #[cfg(unix)]
     {

@@ -2258,10 +2258,13 @@ previous incidents or establish deployed Cloud instrumentation.
 
 `cas qa ledger init --task <id>` writes an honest scaffold in the project's task
 artifact directory, with predicted live journeys and no-code route exclusions.
-The build is the recorded task source branch tip (start binding first, then a
-legacy parked branch); an unreadable source fails before creating evidence.
-Tasks without a recorded source use the resolved repository's HEAD. Journey
-selection still uses the target repository. It preserves existing evidence.
+The build uses the local recorded source branch tip first (start binding,
+then legacy parked branch). If that local branch was cleaned, it uses the
+recorded immutable active delivery anchor, or the latest historical anchor.
+An invalid recorded anchor fails instead of borrowing another ref. Only tasks
+without a recorded source or delivery identity use the resolved repository's
+HEAD. Journey selection still uses the target repository. Existing evidence
+and task bindings remain unchanged; valid ledgers resume byte for byte.
 Edit rows after exercising the named build,
 then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
 parser checks structure, counts, labels, defect ownership and readable PASS

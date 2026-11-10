@@ -64,18 +64,26 @@ impl NormalProbeJobs {
     }
 }
 /// A probe is about its original notification, never merely a quiet pane.
-/// Read/ack receipts can retire it even when no authored reply or native turn
-/// is observable. None means retry the read, never guess that mail is waiting.
-fn normal_probe_still_unread(
+/// A read, acknowledgment, or completed worker-check handoff can retire it
+/// without an authored reply. None means retry the read.
+fn normal_probe_still_needed(
     queue: &dyn cas_store::PromptQueueStore,
     session: &str,
     row_id: i64,
     probe: &NormalDeliveryProbe,
 ) -> Option<bool> {
     let Some(row) = queue.queued_prompt(row_id).ok()? else { return Some(false) };
-    if row.target != probe.target || row.prompt != probe.prompt
+    if row.target != probe.target || row.source != probe.source || row.prompt != probe.prompt
         || row.factory_session.as_deref().is_some_and(|owner| owner != session)
         || row.created_at > probe.delivered_at_utc
+    {
+        return Some(false);
+    }
+    // The detached runner's completion has already reached the worker.
+    // Keep its inbox receipt independent from this redundant wake.
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && row.source == "worker-check"
+        && queue.message_delivery_report(row_id).ok()??.delivered_at.is_some()
     {
         return Some(false);
     }
@@ -95,7 +103,7 @@ pub(crate) fn read_normal_probe(
             // Native startup has its own pane/turn observation lifetime. An
             // ordinary probe must stop once its notification leaves the inbox.
             if probe.startup_pane.is_none() {
-                match normal_probe_still_unread(queue.as_ref(), session, row_id, &probe) {
+                match normal_probe_still_needed(queue.as_ref(), session, row_id, &probe) {
                     Some(false) => return RecipientActivity::Found,
                     None => return RecipientActivity::Unknown,
                     Some(true) => {}
@@ -167,7 +175,7 @@ pub(crate) fn write_normal_flag(
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return false;
     };
-    match normal_probe_still_unread(queue.as_ref(), session, row_id, probe) {
+    match normal_probe_still_needed(queue.as_ref(), session, row_id, probe) {
         Some(false) => return true,
         None => return false,
         Some(true) => {}

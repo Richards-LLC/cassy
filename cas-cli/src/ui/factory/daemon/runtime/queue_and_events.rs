@@ -15,6 +15,8 @@ pub(crate) const SUPERVISOR_STARTUP_SOURCE: &str = "cas-startup";
 /// cas-d511: the delivery watchdog's pane nudge has no queue row of its own;
 /// the turn ledger matches this exact text to attribute the turn to the daemon.
 pub(crate) const DELIVERY_WATCHDOG_NUDGE: &str =
+    "Cassy delivery watchdog: a message may be waiting.";
+pub(crate) const LEGACY_DELIVERY_WATCHDOG_NUDGE: &str =
     "Cassy delivery watchdog: a normal supervisor message may be waiting; please surface and act on it.";
 
 /// The daemon's own reminder to its owner is not an inter-agent relay.
@@ -3350,6 +3352,7 @@ const NORMAL_DELIVERY_BUSY_RECHECK: std::time::Duration = std::time::Duration::f
 /// A normal write that has not yet produced evidence of a harness turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NormalDeliveryProbe {
+    pub(crate) source: String,
     pub(crate) pane: String,
     pub(crate) target: String,
     pub(crate) bytes_at_delivery: u64,
@@ -5368,7 +5371,7 @@ impl FactoryDaemon {
                 NormalDeliveryProbeAction::RetryNormalNudge => {
                     let source = "lifecycle-wake:delivery-watchdog";
                     let nudge = format!("{DELIVERY_WATCHDOG_NUDGE}\n{}",
-                        super::delivery::pointer_wake_payload("supervisor", Some(row_id)));
+                        super::delivery::pointer_wake_payload(&probe.source, Some(row_id)));
                     let payload = super::delivery::prepare_pty_machine_delivery(
                         self.app.cas_dir(),
                         &pane,
@@ -8681,6 +8684,7 @@ impl FactoryDaemon {
                 self.normal_delivery_probes.insert(
                     queued.id,
                     NormalDeliveryProbe {
+                        source: queued.source.clone(),
                         pane: normal_delivery_pane,
                         target: queued.target.clone(),
                         bytes_at_delivery,
@@ -22135,6 +22139,7 @@ mod gh_1153_idle_pty_delivery_tests {
         daemon.normal_delivery_probes.insert(
             row,
             NormalDeliveryProbe {
+                source: source.into(),
                 pane: WORKER.to_string(),
                 target: WORKER.to_string(),
                 bytes_at_delivery,
@@ -22286,6 +22291,7 @@ mod gh_1153_idle_pty_delivery_tests {
                     rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
                         .execute("UPDATE prompt_queue SET source=?, target=? WHERE id=?", rusqlite::params![source, target, row]).unwrap();
                     probe.target = target.into();
+                    probe.source = source.into();
                     daemon.normal_delivery_probes.insert(row, probe.clone());
                 }
                 match receipt {

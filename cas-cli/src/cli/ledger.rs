@@ -594,7 +594,7 @@ struct LedgerReport {
     deliveries: Measure<usize>,
     /// The merges behind `deliveries`, oldest first.
     merged: Vec<MergedRow>,
-    /// Skills, guards and gates the release changed, from git between its tags.
+    /// Skills, guards, rules and gates the release changed, from git between its tags.
     changes: Measure<Vec<String>>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
@@ -963,13 +963,14 @@ fn merged_in_window(
 const GATE_PATHS: &[(&str, &str)] = &[
     ("cas-cli/src/builtins/skills/", "skill"),
     ("cas-cli/src/hooks/", "guard"),
+    (".claude/rules/", "rule"),
     ("cas-cli/src/mcp/tools/core/task/lifecycle/close_ops", "close gate"),
     ("cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs", "merge gate"),
     ("cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs", "merge gate"),
 ];
 
-/// The skills, guards and gates touched between a release's tags: "skill
-/// cas-worker", "guard handlers", "close gate".
+/// The skills, guards, rules and gates touched between a release's tags:
+/// "skill cas-worker", "guard handlers", "rule rule-176", "close gate".
 fn gate_changes(repo: &Path, from: &str, to: &str) -> Measure<Vec<String>> {
     let range = format!("{from}..{to}");
     let mut args = vec!["log", "--format=", "--name-only", range.as_str(), "--"];
@@ -983,7 +984,7 @@ fn gate_changes(repo: &Path, from: &str, to: &str) -> Measure<Vec<String>> {
             let (prefix, kind) = GATE_PATHS.iter().find(|(prefix, _)| path.starts_with(prefix))?;
             Some(match *kind {
                 "skill" => format!("skill {}", path[prefix.len()..].split('/').next()?),
-                "guard" => format!("guard {}", Path::new(path).file_stem()?.to_string_lossy()),
+                "guard" | "rule" => format!("{kind} {}", Path::new(path).file_stem()?.to_string_lossy()),
                 gate => gate.to_string(),
             })
         })
@@ -1463,11 +1464,13 @@ mod tests {
         git_in(repo, &["init", "-q", "-b", "main"]);
         for (tag, date) in [("v1.0.0", "2026-10-01T12:00:00Z"), ("v1.1.0", "2026-10-02T12:00:00Z")] {
             if tag == "v1.1.0" {
-                // A skill change inside the release is its change marker.
-                let skill = repo.join("cas-cli/src/builtins/skills/cas-worker/SKILL.md");
-                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-                std::fs::write(&skill, "changed\n").unwrap();
-                git_in(repo, &["add", "cas-cli"]);
+                // A skill and a rule changed inside the release are its change markers.
+                for path in ["cas-cli/src/builtins/skills/cas-worker/SKILL.md", ".claude/rules/rule-176.md"] {
+                    let file = repo.join(path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(&file, "changed\n").unwrap();
+                    git_in(repo, &["add", path]);
+                }
             }
             let commit = Command::new("git")
                 .current_dir(repo)
@@ -1651,7 +1654,7 @@ mod tests {
         assert_eq!(json["turns_by_actor"]["sup-a"]["director"]["input_tokens"], 30);
         assert_eq!(json["deliveries"], 2, "distinct tasks merged in the window");
         assert_eq!(json["merged"][0]["task"], "cas-a");
-        assert_eq!(json["changes"], serde_json::json!(["skill cas-worker"]));
+        assert_eq!(json["changes"], serde_json::json!(["rule rule-176", "skill cas-worker"]));
         let quality = quality_reports(&cas_root, 5).unwrap();
         let shown: Vec<_> = quality["releases"].as_array().unwrap().iter().map(|r| r["release"].clone()).collect();
         assert_eq!(shown, ["v1.1.0", "unreleased"], "oldest release first, work in progress last");

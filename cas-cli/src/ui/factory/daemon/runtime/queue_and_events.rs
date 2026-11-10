@@ -22150,6 +22150,49 @@ mod gh_1153_idle_pty_delivery_tests {
         );
     }
 
+    /// GH #1687: the original message has already left the recipient's
+    /// unread inbox, but no authored reply or new harness turn exists. The
+    /// pending watchdog must retire instead of typing another empty-inbox wake.
+    #[tokio::test]
+    async fn empty_inbox_stops_delivery_watchdog_but_new_mail_wakes_cas_40ed() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for target in [WORKER, "supervisor"] {
+            for receipt in ["ack", "poll", "hook"] {
+                let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+                let mut probe = daemon.normal_delivery_probes[&row].clone();
+                if target != WORKER {
+                    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
+                        .execute("UPDATE prompt_queue SET target=? WHERE id=?", rusqlite::params![target, row]).unwrap();
+                    probe.target = target.into();
+                    daemon.normal_delivery_probes.insert(row, probe.clone());
+                }
+                match receipt {
+                    "ack" => queue.ack(row).unwrap(),
+                    "poll" => assert_eq!(queue.poll_unseen_for_recipient(target, Some("provision-test"), 10).unwrap().len(), 1),
+                    "hook" => assert_eq!(queue.surface_unseen_for_recipient(target, Some("provision-test"), 10).unwrap().len(), 1),
+                    _ => unreachable!(),
+                }
+                assert_eq!(queue.count_unseen_for_recipient(target, Some("provision-test")).unwrap(), 0);
+                for _ in 0..3 {
+                    if let Some(current) = daemon.normal_delivery_probes.get_mut(&row) {
+                        current.next_check_at = Some(Instant::now());
+                    }
+                    daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+                    assert!(!daemon.normal_delivery_probes.contains_key(&row), "{target} {receipt}: drained mail still has a delivery wake probe");
+                }
+                // A new notification, even with the same body and pane, owns
+                // its own undelivered wake; retiring the old one cannot mute it.
+                let next = queue.enqueue_with_session("supervisor", target, &probe.prompt, "provision-test").unwrap();
+                queue.mark_transport_delivered(next).unwrap();
+                probe.next_check_at = Some(Instant::now());
+                daemon.normal_delivery_probes.insert(next, probe);
+                daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+                assert_eq!(daemon.normal_delivery_probes[&next].nudges, 1);
+                assert_eq!(queue.message_delivery_report(next).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn gh_1163_outbound_reply_after_delivery_retires_the_watchdog() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

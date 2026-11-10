@@ -122,7 +122,7 @@
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing and durable operator input.
 - `cas-cli/src/cli/hub_preview.rs`, `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs` - time-boxed candidate previews and authorized media.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversations and reply grants.
-- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams and ordered publication.
+- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, history read deadlines and ordered publication.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/early-thread.ts` - transcript paging and bounded windows.
 - `hub-web/src/project-navigation.ts`, `hub-web/src/epic-progress.ts`, `hub-web/src/team-view.ts` - project cards, train/task progress and team status.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity.

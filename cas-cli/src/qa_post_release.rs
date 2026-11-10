@@ -306,11 +306,29 @@ mod tests {
         tasks.update(&epic).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
-        let transferred = queue.peek_all(10).unwrap();
+        let mut transferred = queue.peek_all(10).unwrap();
         assert_eq!(transferred.len(), 1);
         assert_eq!(transferred[0].target, unrelated.name);
         assert_eq!(transferred[0].factory_session, unrelated.factory_session);
         assert!(batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
+
+        // cas-b26e: a superseded episode can return to the same owner/session.
+        for owner in [&supervisor, &unrelated] {
+            epic.epic_verification_owner = Some(owner.id.clone());
+            tasks.update(&epic).unwrap();
+            let prior = transferred[0].id;
+            for row in &transferred {
+                assert!(!batch_notice_deliverable(&cas, queue.as_ref(), row).unwrap());
+            }
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 1);
+            assert_eq!(offer_batch_receipts(&cas).unwrap(), 0);
+            transferred = queue.peek_all(10).unwrap();
+            assert_eq!(transferred.len(), 1);
+            assert_ne!(transferred[0].id, prior);
+            assert_eq!(transferred[0].target, owner.name);
+            assert_eq!(transferred[0].factory_session, owner.factory_session);
+            assert!(batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
+        }
 
         // GH #1656: both delivered tasks remain covered after their worker retires.
         let mut retired = tasks.get("cas-live").unwrap();

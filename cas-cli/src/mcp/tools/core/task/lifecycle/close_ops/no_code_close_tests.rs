@@ -2644,6 +2644,86 @@ async fn queue_control(f: &Fixture, ids: Option<Vec<&str>>) -> String {
         .collect::<Vec<_>>().join("\n")
 }
 
+/// GH #1760: resuming blocked, untouched work through the queue binds its
+/// fresh lane before a first commit, without discarding earlier delivery.
+#[tokio::test]
+async fn queued_blocked_successor_records_fresh_start_cas_57df() {
+    let mut env = TestEnvGuard::temp_home();
+    for case in ["same-target", "retarget", "old-commit", "anchor", "history", "dirty", "prepared", "missing-old"] {
+        let f = queue_control_fixture(&mut env);
+        let repo = f.dir.path();
+        let checkout = f.cas_dir().join("worktrees").join(WORKER);
+        let id = "cas-8488-one";
+        let old_branch = "factory/former-worker";
+        let new_branch = format!("{LANE}-{id}");
+        let target_tip = git(repo, &["rev-parse", "origin/main"]);
+        git(repo, &["branch", old_branch, &f.foreign_tip]);
+        let mut task = f.task(id);
+        task.status = TaskStatus::Blocked;
+        task.assignee = Some("former-worker".into());
+        let mut old_target = task.deliverables.work_target.clone().unwrap();
+        if case == "retarget" {
+            old_target.target_branch = "epic/obsolete".into();
+            git(repo, &["branch", "epic/obsolete", &target_tip]);
+        }
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: old_target, assignee: "former-worker".into(),
+            branch: old_branch.into(), base_sha: f.foreign_tip.clone(),
+        });
+        if case == "old-commit" {
+            git(repo, &["checkout", "-q", old_branch]);
+            git(repo, &["commit", "-q", "--allow-empty", "-m", "fix(cas-8488-one): pending delivery"]);
+            git(repo, &["checkout", "-q", "main"]);
+        } else if case == "anchor" {
+            task.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
+        } else if case == "history" {
+            task.deliverables.historical_factory_branch_anchors.push(f.foreign_tip.clone());
+        } else if case == "dirty" {
+            std::fs::write(checkout.join("other.rs"), "unrelated local edit\n").unwrap();
+        } else if case == "prepared" {
+            git(repo, &["branch", &new_branch, &f.foreign_tip]);
+        } else if case == "missing-old" {
+            git(repo, &["branch", "-D", old_branch]);
+        }
+        f.put(&task);
+        let previous = task.deliverables.factory_branch_start.clone();
+        let old_tip = if case == "missing-old" { None } else {
+            Some(git(repo, &["rev-parse", old_branch]))
+        };
+        // Unblock and reassign through the supervisor API, then consume the
+        // predecessor's actual no-code close and ordinary queue/start path.
+        let _ = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "status":"open", "assignee":WORKER,
+        })).await;
+        let _ = queue_control(&f, Some(vec![id])).await;
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":"cas-8488-current", "reason":"Portable proof recorded",
+        })).await;
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        let next = f.task(id);
+        if matches!(case, "same-target" | "retarget") {
+            assert_eq!(next.status, TaskStatus::InProgress, "{case}: {response}");
+            let start = next.deliverables.factory_branch_start.as_ref().unwrap();
+            assert_eq!(start.branch, new_branch, "{case}");
+            assert_eq!(start.base_sha, target_tip, "{case}");
+            assert_eq!(start.assignee, WORKER);
+            assert_eq!(Some(&start.work_target), next.deliverables.work_target.as_ref());
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), target_tip);
+            assert!(next.deliverables.handoff_branches.contains(&old_branch.to_string()));
+        } else {
+            assert_eq!(next.deliverables.factory_branch_start, previous, "{case}: {response}");
+            assert_eq!(next.deliverables.factory_branch_anchor, task.deliverables.factory_branch_anchor);
+            assert_eq!(next.deliverables.historical_factory_branch_anchors, task.deliverables.historical_factory_branch_anchors);
+        }
+        if let Some(old_tip) = old_tip {
+            assert_eq!(git(repo, &["rev-parse", old_branch]), old_tip, "{case}");
+        }
+        if case == "dirty" {
+            assert_eq!(std::fs::read_to_string(checkout.join("other.rs")).unwrap(), "unrelated local edit\n");
+        }
+    }
+}
+
 /// GH #1670: a held execution retains its queue cursor while another task
 /// runs. Display execution from task state without moving that durable cursor.
 #[tokio::test]

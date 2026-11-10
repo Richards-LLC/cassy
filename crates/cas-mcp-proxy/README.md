@@ -197,7 +197,7 @@ The dispatch formats remain:
 github.list_issues({"repo": "myorg/app"})
 ```
 
-## Hot-reload
+## Violet recovery
 
 Violet's next call reconnects immediately after a live transport closes;
 failed connection attempts keep the normal backoff. The same proxy session
@@ -210,6 +210,8 @@ posted receipt is returned to the caller; a definite `not_posted` result or
 an unresolved outcome remains a failure with its request ID. The proxy never
 resends the post. Reconciliation goes through the same authorization boundary;
 an unavailable or denied lookup leaves the outcome unknown.
+
+## Hot-reload
 
 The daemon watches `.cas/proxy.toml` for changes. On config change,
 `ProxyEngine::reload()` compares stored configs against new ones, disconnects

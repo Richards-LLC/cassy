@@ -10072,6 +10072,9 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
+                        if crate::release_reconcile::active() && task.task_type != TaskType::Epic {
+                            return Ok(Self::tool_error("RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch."));
+                        }
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
@@ -10513,9 +10516,6 @@ impl CasCore {
                             let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
                         }
 
-                        if crate::release_reconcile::active() && task.task_type != TaskType::Epic {
-                            return Ok(Self::tool_error("RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch."));
-                        }
                         let requester_id = self.get_agent_id()?;
                         let owner_id = self.verification_dispatch_owner(&requester_id)?;
                         let supervisor_direct_recovery = self

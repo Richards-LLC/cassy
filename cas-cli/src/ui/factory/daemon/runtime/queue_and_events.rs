@@ -25,10 +25,10 @@ pub(super) fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
         && cas_store::parse_reminder_delivery_id(&row.prompt).is_some()
 }
 
-/// What a delivery probe learned about recipient-authored activity (GH #1163).
+/// What a delivery probe learned about recipient activity or a satisfied message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecipientActivity {
-    /// A reply or attributed task note after delivery.
+    /// The message was read/resolved, or a reply/attributed task note followed delivery.
     Found,
     /// The store answered: none yet.
     Absent,
@@ -5367,12 +5367,14 @@ impl FactoryDaemon {
                 }
                 NormalDeliveryProbeAction::RetryNormalNudge => {
                     let source = "lifecycle-wake:delivery-watchdog";
+                    let nudge = format!("{DELIVERY_WATCHDOG_NUDGE}\n{}",
+                        super::delivery::pointer_wake_payload("supervisor", Some(row_id)));
                     let payload = super::delivery::prepare_pty_machine_delivery(
                         self.app.cas_dir(),
                         &pane,
                         self.app.harness_for(&pane),
                         source,
-                        DELIVERY_WATCHDOG_NUDGE,
+                        &nudge,
                         Some(row_id),
                     );
                     let nudge = self.app.mux.inject(&pane, &payload).await;
@@ -12463,6 +12465,21 @@ impl FactoryDaemon {
                     .collect();
                 for name in &workers_to_stop {
                     self.dead_workers.insert(name.clone());
+                    // GH #1592: an intentional stop ends the boot watch. The
+                    // exit is this request taking effect, never a boot failure.
+                    if let Some(verification) = self.spawn_verifications.remove(name)
+                        && verification.registered_at.is_none()
+                    {
+                        append_spawn_audit(
+                            self.app.cas_dir(),
+                            &self.session_name,
+                            verification.request_id,
+                            Some(name),
+                            "shutdown",
+                            "completed",
+                            "Stopped by a shutdown request before registration.",
+                        );
+                    }
                     // Also release bindings for workers that never made it into
                     // worker_names (early pre-assign only) — shutdown_worker
                     // only runs for live workers.
@@ -20307,6 +20324,56 @@ mod tests {
         );
     }
 
+    /// GH #1592/#1666: registered, worked, then shut down on purpose inside the
+    /// boot window. The intentional exit must not become a failed boot.
+    #[tokio::test]
+    async fn intentional_shutdown_retires_the_boot_watch_gh_1592() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let worker = "gh-1592-reviewer";
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let request = queue
+            .enqueue_spawn(1, &[], false, None, Some(&daemon.session_name), None)
+            .unwrap();
+        queue
+            .record_spawn_state(request, cas_store::SpawnLifecycleState::Registered, Some(worker), None)
+            .unwrap();
+        daemon.spawn_verifications.insert(
+            worker.into(),
+            SpawnVerification {
+                request_id: Some(request),
+                launched_at: Instant::now() - Duration::from_secs(40),
+                registered_at: Some(Instant::now() - Duration::from_secs(30)),
+                task_id: None,
+                launched_wall: std::time::SystemTime::now() - Duration::from_secs(40),
+            },
+        );
+
+        daemon.pending_spawns.push_back(PendingSpawn::Shutdown {
+            request_id: Some(request + 1),
+            count: None,
+            names: vec![worker.into()],
+            force: false,
+            expected_generation: None,
+        });
+        daemon.process_pending_spawns().await;
+        // The boot window closes after the stop; the worker is gone by design.
+        if let Some(verification) = daemon.spawn_verifications.get_mut(worker) {
+            verification.registered_at = Some(Instant::now() - Duration::from_secs(61));
+        }
+        daemon.reconcile_spawn_verifications().await;
+
+        let row = queue
+            .recent_spawn_lifecycle(&daemon.session_name, 20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == request)
+            .unwrap();
+        assert_eq!(row.state, cas_store::SpawnLifecycleState::Registered);
+        assert!(!daemon.spawn_verifications.contains_key(worker));
+    }
+
     #[test]
     fn spawn_stage_audit_writes_both_daemon_logs() {
         let temp = tempfile::TempDir::new().unwrap();
@@ -22148,6 +22215,54 @@ mod gh_1153_idle_pty_delivery_tests {
                 .iter()
                 .all(|queued| !queued.prompt.contains("worker_delivery_stalled"))
         );
+    }
+
+    /// GH #1687: the original message has already left the recipient's
+    /// unread inbox, but no authored reply or new harness turn exists. The
+    /// pending watchdog must retire instead of typing another empty-inbox wake.
+    #[tokio::test]
+    async fn empty_inbox_stops_delivery_watchdog_but_new_mail_wakes_cas_40ed() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for target in [WORKER, "supervisor"] {
+            for receipt in ["ack", "poll", "hook"] {
+                let Fixture { _tmp, mut daemon, queue, row, .. } = deliver_to_idle_worker().await;
+                let mut probe = daemon.normal_delivery_probes[&row].clone();
+                let source = if target == WORKER { "supervisor" } else { "worker-b" };
+                if target != WORKER {
+                    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap()
+                        .execute("UPDATE prompt_queue SET source=?, target=? WHERE id=?", rusqlite::params![source, target, row]).unwrap();
+                    probe.target = target.into();
+                    daemon.normal_delivery_probes.insert(row, probe.clone());
+                }
+                match receipt {
+                    "ack" => queue.ack(row).unwrap(),
+                    "poll" => assert_eq!(queue.poll_unseen_for_recipient(target, Some("provision-test"), 10).unwrap().len(), 1),
+                    "hook" => assert_eq!(queue.surface_unseen_for_recipient(target, Some("provision-test"), 10).unwrap().len(), 1),
+                    _ => unreachable!(),
+                }
+                assert_eq!(queue.count_unseen_for_recipient(target, Some("provision-test")).unwrap(), 0);
+                for _ in 0..3 {
+                    if let Some(current) = daemon.normal_delivery_probes.get_mut(&row) {
+                        current.next_check_at = Some(Instant::now());
+                    }
+                    daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+                    assert!(!daemon.normal_delivery_probes.contains_key(&row), "{target} {receipt}: drained mail still has a delivery wake probe");
+                }
+                // A new directed request owns its own undelivered wake;
+                // retiring the old notification cannot mute it. Repeated
+                // worker reports with identical bodies are intentionally deduped.
+                probe.prompt.push_str(" New directed request.");
+                let next = queue.enqueue_with_session(source, target, &probe.prompt, "provision-test").unwrap();
+                assert_ne!(next, row);
+                queue.mark_transport_delivered(next).unwrap();
+                probe.delivered_at_utc = chrono::Utc::now();
+                probe.next_check_at = Some(Instant::now());
+                daemon.normal_delivery_probes.insert(next, probe);
+                daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+                assert_eq!(daemon.normal_delivery_probes.get(&next).unwrap_or_else(|| panic!("{target} {receipt}: fresh directed mail lost its probe")).nudges, 1);
+                assert_eq!(queue.message_delivery_report(next).unwrap().unwrap().wake_attempt, cas_store::WakeAttempt::Fired);
+            }
+        }
     }
 
     #[tokio::test]

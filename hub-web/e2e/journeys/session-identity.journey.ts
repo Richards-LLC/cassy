@@ -61,6 +61,15 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
   machine.sessions[0]!.liveness = "stale_metadata";
   await page.addInitScript(() => {
+    const fetch = window.fetch;
+    let releaseCatalog!: () => void;
+    const catalogReady = new Promise<void>(resolve => { releaseCatalog = resolve; });
+    (window as unknown as { releaseCatalog: () => void }).releaseCatalog = releaseCatalog;
+    window.fetch = async (...args: Parameters<typeof fetch>) => {
+      const url = new URL(args[0] instanceof Request ? args[0].url : String(args[0]), location.href);
+      if (url.pathname === "/v1/sessions") await catalogReady;
+      return fetch(...args);
+    };
     const original = IDBFactory.prototype.open;
     const pending: (() => void)[] = [];
     let released = false;
@@ -80,6 +89,7 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   await expect(page.locator(".conversation-row")).toHaveCount(0);
   // Later polls fail: the first positive stopped response must be enough.
   await page.route("https://atlas.test/v1/sessions", route => route.abort("failed"));
+  await page.evaluate(() => (window as unknown as { releaseCatalog: () => void }).releaseCatalog());
   await page.evaluate(() => (window as unknown as { releaseDelivery: () => void }).releaseDelivery());
   await journey.stage("Journal restoration applies the already confirmed stop", async () => {
     const saved = page.getByRole("region", { name: "Saved messages" });

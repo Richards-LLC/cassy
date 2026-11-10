@@ -68,7 +68,9 @@ independent-author check runs against the closing machine's own record of who
 implemented each task.
 
 A release verdict uses the same action with `verification_type=release`: one
-review of the assembled tip, whose published report names every delivery. It rides
+review of the assembled tip, whose published report names every delivery. Scaffold
+that report with `cas qa ledger init --task <id> --release-scope scope.json` so it
+publishes the release's transformation and epic blocks. It rides
 task sync on a reserved `RELEASE_VERDICT_PROOF:` line. For Tier 1 deliveries
 owned by release review, its exact-anchor coverage also satisfies deferred
 batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes

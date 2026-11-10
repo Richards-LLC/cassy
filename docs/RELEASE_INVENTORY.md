@@ -230,7 +230,7 @@ exceptions, and partial or failed GitHub issues.
 | Trigger | Adapter | Evidence read |
 | --- | --- | --- |
 | `Publish{tag}` | `cas release published --receipt <release.json> --repo <slug>`, run by `scripts/install-on-publish.sh` once per newly seen publication, before installing | The timer's existing latest-release read; tag SHA verified on origin |
-| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, run once after a staging-to-main promotion PR merges | One `gh pr view`: merged into the default branch, merge commit on origin |
+| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, started in the background by the supervisor's PostToolUse hook after its successful raw PR merge into the default branch of a staging-promotion project (log: `.cas/release-reconcile/promotion.log`). A queued or auto-merge PR prints the command to run once it lands | One `gh pr view`: merged into the default branch, merge commit on origin |
 | `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: the same operation with its own trigger, a no-op once complete. `cas release backfill --dry-run` is a read-only preview |
 
 The scope comes from the tracked cut receipt (cas-src) or the merged PR
@@ -239,8 +239,8 @@ final commit contains, plus every QA/review receipt at that candidate. With no
 review, closes hold as named residuals; publication never stands in for review.
 No CI job, poller or test rerun is added, and GitHub is read only as evidence.
 
-`cas release review-blocks --scope scope.json` prints the release review's
-`cassy-release-transformations` and `cassy-release-epics` fenced blocks for that
-scope. Each epic's `child_ids` is its full recursive subtree, nested epics'
-descendants included. The reviewer includes them in the published ledger. Remove any epic
-whose acceptance was not verified before publishing.
+`cas qa ledger init --task <id> --release-scope scope.json` scaffolds the release
+review ledger with the `cassy-release-transformations` and `cassy-release-epics`
+fenced blocks for that scope, so the published RELEASE_VERDICT bytes carry them.
+Each epic's `child_ids` is its full recursive subtree, nested epics' descendants
+included. Remove any epic whose acceptance was not verified before publishing.

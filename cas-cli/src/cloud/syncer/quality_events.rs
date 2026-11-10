@@ -239,7 +239,7 @@ impl CloudSyncer {
             }
             Self::insert_client_version(&mut payload);
             let body = Self::gzip_json(&serde_json::to_vec(&payload)?)?;
-            let response = ureq::post(&url)
+            let response = crate::cloud::mutation_request("POST", &url)
                 .timeout(self.config.timeout.min(StdDuration::from_secs(30)))
                 .set("Authorization", &format!("Bearer {token}"))
                 .set("Content-Type", "application/json")

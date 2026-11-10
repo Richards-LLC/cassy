@@ -626,7 +626,7 @@ impl<'a> TeamRegistration<'a> {
             interaction: format!("POST {url} (gzip failed)"),
         })?;
 
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .set("Content-Encoding", "gzip")

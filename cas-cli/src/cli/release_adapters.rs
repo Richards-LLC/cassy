@@ -682,7 +682,7 @@ mod tests {
             reviewed_sha: base.clone(),
             final_release_sha: base.clone(),
             promotion_pr: None,
-            release_tag: Some("v9.99.2".into()),
+            release_tag: None,
             constituent_epic_ids: vec!["cas-e000".into()],
             included_task_ids: Vec::new(),
             no_code_members: BTreeMap::new(),

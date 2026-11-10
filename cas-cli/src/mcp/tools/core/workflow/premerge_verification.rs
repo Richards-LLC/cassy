@@ -1760,6 +1760,59 @@ mod tests {
     }
 
     #[test]
+    fn cas_da35c_expired_supervisor_approval_reuses_only_unchanged_candidate() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "epic/train"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        std::fs::write(repo.join(".git/info/exclude"), ".cas\n").unwrap();
+        std::fs::write(root.join("config.toml"), "[qa]\nmode = 'batch'\n[verification]\nenabled = true\n").unwrap();
+        commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nfourth\nfifth\nlast\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/worker"]);
+        let source = commit_file(repo, "src/lib.rs", "delivery\nsecond\nthird\nfourth\nfifth\nlast\n", "delivery");
+        run(repo, &["checkout", "-q", "epic/train"]);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.bind_agent_identity(owner.id.clone(), crate::mcp::AgentIdentitySource::ServerInternal).unwrap();
+        let mut task = Task::new("cas-da35c-reuse".into(), "Review approval reuse".into());
+        task.depth = cas_types::TaskDepth::Deep;
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source);
+        core.open_task_store().unwrap().add(&task).unwrap();
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
+        let dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+            "UPDATE verification_dispatches SET deadline_at = ?2 WHERE id = ?1",
+            rusqlite::params![dispatch.id, (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339()],
+        ).unwrap();
+        let expired = cas_store::timeout_verification_dispatch(&root, &task.id, chrono::Utc::now()).unwrap().unwrap();
+        assert_eq!(expired.state, cas_types::VerificationDispatchState::TimedOut);
+        let request = serde_json::from_value(serde_json::json!({
+            "task_id": task.id, "dispatch_id": dispatch.id, "status": "approved",
+            "summary": "Supervisor reviewed the expired exact candidate", "issues": "[]",
+        })).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let response = runtime.block_on(core.cas_verification_add(rmcp::handler::server::wrapper::Parameters(request))).unwrap();
+        assert_ne!(response.is_error, Some(true), "{response:?}");
+        let approval = core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").unwrap().unwrap();
+        assert_eq!(approval.dispatch_id, dispatch.id);
+        assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
+        // The real incident moved the target in reviewed code after approval.
+        // A clean merge with different reviewed context must request another review.
+        commit_file(repo, "src/lib.rs", "first\nsecond\nthird\nchanged\nfifth\nlast\n", "target moved");
+        assert!(core.prepare_premerge_verification(&task, repo, "factory/worker", "epic/train").is_err());
+        let replacement = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+        assert_ne!(replacement.id, dispatch.id);
+        assert_eq!(cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().state, cas_types::VerificationDispatchState::Invalidated);
+    }
+
+    #[test]
     fn shared_upkeep_keeps_back_to_back_candidate_approvals_cas_e79d() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();

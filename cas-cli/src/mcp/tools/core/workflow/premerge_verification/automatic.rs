@@ -518,6 +518,52 @@ mod tests {
     }
 
     #[test]
+    fn cas_da35c_fenced_verifier_response_records_exact_dispatch() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-da35c-transport".into(), "Verifier transport".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        // Replay the Claude final-message framing captured in both incident attempts.
+        // Malformed or mixed prose must still fail closed, preserving the raw capture.
+        for (body, records) in [
+            ("```json\n{\"status\":\"rejected\",\"summary\":\"fixture\",\"issues\":\"[]\",\"task_id\":\"other\",\"dispatch_id\":\"other\"}\n```\n", true),
+            ("```\r\n{\"status\":\"rejected\",\"summary\":\"fixture\"}\r\n```", true),
+            ("```json\nnot JSON\n```", false),
+            ("prose\n```json\n{\"status\":\"approved\",\"summary\":\"fixture\"}\n```", false),
+        ] {
+            let dispatch = cas_store::create_verification_dispatch_bound(
+                &root, &task.id, &owner.id, &owner.id,
+                &cas_types::VerificationProofBoundary::task(),
+                chrono::Utc::now() + chrono::Duration::minutes(10), true,
+            ).unwrap();
+            let directory = root.join("verification-runs").join(&dispatch.id);
+            std::fs::create_dir_all(&directory).unwrap();
+            let response = directory.join("provider.txt");
+            std::fs::write(&response, body).unwrap();
+            let mut command = Command::new("cat");
+            command.arg(&response);
+            launch_command(&core, &task, &dispatch, command, directory.join("verdict.json"), None)
+                .unwrap().unwrap().join().unwrap();
+            let verdict = cas_store::get_verification_for_dispatch(&root, &dispatch.id).unwrap();
+            assert_eq!(verdict.is_some(), records, "{body}");
+            if let Some(verdict) = verdict {
+                assert_eq!(verdict.task_id, task.id);
+                assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+                assert_eq!(verdict.status, VerificationStatus::Rejected);
+                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
+            }
+            assert_eq!(std::fs::read(directory.join("harness.stdout")).unwrap(), body.as_bytes());
+        }
+    }
+
+    #[test]
     fn automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f() {
         let child = std::env::var_os("CAS_TEST_PREMERGE_ACCOUNT_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();

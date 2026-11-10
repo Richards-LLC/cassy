@@ -1,7 +1,7 @@
 # Violet tool contract (client summary)
 
 This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
-2026-10-09). The hub document wins on any disagreement. Every call answers
+2026-11-10). The hub document wins on any disagreement. Every call answers
 `{"ok": true, "schema_version": 1, …}` or
 `{"ok": false, "error": {"code", "message", "retryable"}}`, with optional
 `retry_after_ms` and a safe `error.upstream` object. There is no `ts` field.
@@ -97,16 +97,56 @@ as Cassy metadata the hub ignores (the Cassy publication gate reads them).
 
 | Kind | Fields |
 | --- | --- |
-| `message` | `text`, `reply_to?`, `request_id?` (UUID; supplied by Cassy's proxy only when advertised alongside request-ID reconciliation) |
+| `message` | `text`, `blocks?`, `reply_to?`, `request_id?` (UUID; supplied by Cassy's proxy only when advertised alongside request-ID reconciliation) |
 | `file` | `file {filename, content, content_encoding?, content_type?, sha256?, size_bytes?, title?}` or `files[]` of the same (1–10), `initial_comment?`, `reply_to?` |
 | `file_external` | `step` (`begin`/`complete`), `filename`, `size_bytes`, `sha256`, `title?`, `initial_comment?`, `reply_to?`, and `file_id` on `complete`; or `files[]` (1–10) of that metadata |
-| `thread` | `text`, `idempotency_key` (1–200 chars), `replies[]` (1–20) of `{text?, files?}` |
+| `thread` | `text`, `blocks?`, `idempotency_key` (1–200 chars), `replies[]` (1–20) of `{text?, blocks?, files?}` |
 | `reaction` | `message_id`, `reaction`, `action` (`add`/`remove`) |
 | `edit` | `message_id`, `text` (Violet-authored messages only) |
 | `delete` | `message_id` (Violet-authored messages only) |
 
 `file` and each reply are nested objects; every other field is top level, for
 example `{"channel":"cas-scratch","kind":"edit","message_id":"1710000000.000002","text":"Updated"}`.
+
+### Layout blocks (default)
+
+For `kind: "message"` and `kind: "thread"`, send `blocks` alongside required
+nonempty `text`. Each text-only thread reply can carry its own `blocks` and
+`text`; blocks do not replace file replies. `blocks` is an array of 1–50 strict
+layout objects, not raw Slack Block Kit. Violet renders these parts:
+
+| Part | Fields and schema limits |
+| --- | --- |
+| `header` | `text`: 1–100 characters; use one header first |
+| `section` | `text`: 1–3000 characters |
+| `fields` | `fields`: 1–10 `{label, value}` pairs; label 1–60, value 1–1900 characters |
+| `bullets` | `items`: 1–30 nonempty strings, each ≤1000 characters; optional boolean `ordered` |
+| `divider` | only `type` |
+| `context` | `text`: 1–2000 characters; put source/owner/date last |
+| `table` | `rows`: 2–100 rows, 1–20 cells each, equal widths; cells 1–500 characters; first row is the header; at most one table per message |
+
+Strings are trimmed and unknown keys rejected. Schema sizes are ceilings,
+not writing targets: every visible text still passes the readability guard
+(≤300 characters per line; ≤900 visible characters in a root). Tight bullets
+need no blank-line padding. Plain-text fallback titles may be wholly bold up
+to 100 characters; body sentences do not get that exemption.
+
+Use the **status**, **release-note thread**, or **decision** JSON templates in
+[slack-formatting](../../slack-formatting/SKILL.md#shape-templates), matching
+violet_ps `apps/violet/DESIGN.md` “Slack posts” at `9d21e07d8`. Project rubrics
+still own audience, content, thread order and reply count. For example:
+
+```json
+{"channel":"cas-scratch","kind":"message","text":"All checks passed; ready for review.","blocks":[{"type":"header","text":"Ready for review"},{"type":"fields","fields":[{"label":"Checks","value":"4 of 4 passed"}]},{"type":"bullets","items":["*Next:* review the preview"]},{"type":"context","text":"Preview · 10:30 AM ET"}]}
+```
+
+The `text` is the one-part notification/screen-reader fallback, never a JSON
+serialization of the blocks. Keep it meaningful on its own. For a text-only
+client or a confirmed older hub that cannot accept blocks, omit `blocks` and
+write the complete verdict and Was → Now detail in Slack mrkdwn; keep the same
+thread and receipt rules. An uncertain write is never retried as plain text:
+resolve its receipt first. The local `cas violet` text flags do not construct
+blocks; use the authenticated `violet.violet_post` proxy for layouts.
 
 ### File content
 
@@ -137,7 +177,8 @@ example `{"channel":"cas-scratch","kind":"edit","message_id":"1710000000.000002"
 `kind: "thread"` posts the root and every reply in one call, paced at one
 second, and answers `{kind: "thread", idempotency_key, posted: [{index,
 message_id, thread_id, permalink, files?}], failed_index, resume_safe}`. Index 0
-is the root. A reply holds inline files or external metadata
+is the root. Root and text-only replies use layouts plus fallback text by
+default. A file reply holds inline files or external metadata
 (`{file_id, filename, size_bytes, sha256, title?}`), never both. Resending
 identical content with the same key returns the stored receipts without
 reposting; different content on a used key is `invalid_input`. After a failure,

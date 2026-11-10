@@ -587,7 +587,7 @@ owner_groups:
 invariants:
   HUB-WORKER-TIMELINE-HEADER:
     statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.
-    check: Run work-picture.test.ts through the name opener and timeline renderer for active, executing, blocked, parked and offline data. In batch QA open and close timelines from desktop/phone cards and Team, compare state words and inspect long-title wrapping and keyboard focus.
+    check: Verify committed dist/app.js reads the card's stateLabel and omits the legacy Activity button. Run work-picture.test.ts for active, executing, blocked, parked and offline data and both HUB-J25 worker timeline parts. Inspect J03 for the flat name opener and restored focus, including the phone overflow route. In batch QA compare card, timeline and Team state words and inspect long-title wrapping.
     bug: {task: cas-0d5e}
   FACTORY-MANAGED-MENTION-CLAIMS:
     statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker that wakes that owner without claiming proactively.

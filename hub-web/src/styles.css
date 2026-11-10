@@ -833,7 +833,7 @@ main {
 .fleet-ops-panel { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
 .fleet-ops-panel select { min-height: var(--rail-item-min); max-width: 100%; }
 /* cas-ab04: Write access — task, folder, modes and reason; then confirm. */
-.write-grant { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
+.write-grant, .fleet-ops-add-panel { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-2); align-items: stretch; }
 .write-grant-field { display: grid; gap: var(--space-1); font-size: var(--fs-meta); color: var(--text-mid); }
 .write-grant-field select, .write-grant-field input { min-height: var(--rail-item-min); width: 100%; min-width: 0; box-sizing: border-box; padding: 0 var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--text-hi); font: var(--weight-regular) var(--fs-base)/1.3 var(--font-ui); }
 .write-grant-path { font-family: var(--font-mono); }
@@ -1949,8 +1949,8 @@ dialog form > *,
   .conversation-tabs [role="tab"] { border-bottom-color: Canvas; }
   .conversation-tabs [aria-selected="true"] { color: Highlight; border-bottom-color: Highlight; }
 }
-/* The single header above the thread (cas-5b2d): Pebble thead shape, cas-11b01 controls on the row above. */
-.conversation-heading { display: flex; flex-direction: column; gap: var(--space-3); padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
+/* One shared row: identity left, actions right, with secondary phone actions in overflow. */
+.conversation-heading { container: conversation-thread-heading / inline-size; display: block; padding: calc(var(--space-3) + env(safe-area-inset-top)) 30px 17px; background: var(--canvas); color: var(--ink); box-shadow: var(--lift-head); position: relative; z-index: 1; }
 .conversation-topline { display: flex; justify-content: space-between; align-items: center; gap: var(--space-2); }
 /* Journey F17: where the list is on screen beside the thread, "‹ Conversations"
    is a step that goes nowhere; the phone layout below shows it again. */
@@ -1958,22 +1958,32 @@ dialog form > *,
 
 .conversation-topline .cloud-brand { display: none; }
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
-/* cas-0546: the conversation's own actions — Raw output and Interrupt —
-   on the row above the identity. Unavailable, they stay focusable and in
-   full ink (the global aria-disabled fade would put them below AA), marked
-   by a dashed edge; their reason is their description. */
+/* Unavailable actions remain focusable, with their existing reason description. */
 .conversation-header-actions { display: inline-flex; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
+/* The popover UA sheet adds overflow: auto; inline, the menu is not a scroller. */
+.conversation-more-menu { display: contents; overflow: visible; }
+.conversation-topline .conversation-action.conversation-more-toggle { display: none; }
+.conversation-title-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; block-size: var(--space-6); }
+.conversation-title-line h1 { min-width: 0; }
+.conversation-more-count { color: var(--state-warn); }
+.conversation-state { flex: none; font-weight: var(--weight-regular); }
+.conversation-state[data-phase="live"] { color: var(--state-ok); }
+.conversation-state[data-phase="live"][data-degraded="true"] { color: var(--state-warn); }
+@container conversation-thread-heading (max-width: 40rem) {
+  .conversation-header-actions .conversation-action .action-label { display: none; }
+}
+
 .conversation-topline .conversation-action { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 var(--space-3); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--ink); font: var(--weight-medium) var(--fs-meta)/1 var(--font-ui); white-space: nowrap; }
 .conversation-topline .conversation-action:hover:not([aria-disabled="true"]) { background: var(--bg-hover); }
 .conversation-topline .conversation-action:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: 2px; }
 .conversation-action .action-icon { width: 16px; height: 16px; flex: none; }
 .conversation-topline .conversation-interrupt { border-color: currentColor; color: var(--state-crit); }
 .conversation-topline .conversation-action[aria-disabled="true"] { opacity: 1; border-style: dashed; border-color: var(--line-strong); color: var(--ink-mid); cursor: not-allowed; }
-.conversation-identity { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.conversation-identity { display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; }
 .conversation-identity .conversation-avatar { flex: none; }
 .conversation-identity .id { min-width: 0; }
-.conversation-identity h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
-.conversation-identity h1 b { font-weight: inherit; }
+.conversation-identity h1 { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-2); margin: 0; font: var(--weight-semibold) 16px/1.25 var(--font-ui); overflow-wrap: anywhere; }
+.conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: inherit; }
 /* One line at every width (3.30.0 journey F9): a long codename ellipsises
    inside "machine · codename" (its title carries it whole) and the connection
    state after it stays visible, instead of the line wrapping to three. */
@@ -1997,7 +2007,12 @@ dialog form > *,
    technique), never display:none, so the line is heard whole at any width. */
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
-#conversation-connection, #conversation-control { flex: none; white-space: pre; }
+#conversation-control { flex: none; white-space: pre; }
+/* cas-e1db: the state chip is one fixed-height line in any font, so swapping
+   Live for a reconnecting state cannot change the header's height and move
+   the reader's thread. */
+#conversation-connection { flex: none; display: inline-block; block-size: var(--space-6); line-height: var(--space-6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#conversation-connection[hidden] { display: none; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .conversation-stage { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
@@ -2614,38 +2629,36 @@ button.chip:disabled { cursor: default; }
      Interrupt with its word). The lockup stays on the list screen only
      (DESIGN.md §Brand). The topline dissolves into the heading grid so its
      buttons flank the identity on the same row. */
-  .conversation-heading { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-1); padding: calc(6px + env(safe-area-inset-top)) calc(var(--space-2) + env(safe-area-inset-right)) 6px calc(var(--space-1) + env(safe-area-inset-left)); }
-  .conversation-topline { display: contents; }
+  .conversation-heading { display: block; padding: calc(6px + env(safe-area-inset-top)) calc(var(--space-2) + env(safe-area-inset-right)) 6px calc(var(--space-1) + env(safe-area-inset-left)); }
+  .conversation-topline { display: flex; gap: var(--space-1); }
   .conversation-topline .cloud-brand { display: none; }
   #conversation-back { grid-column: 1; grid-row: 1; width: 40px; min-width: 40px; min-height: 44px; padding: 0; display: flex; align-items: center; justify-content: center; background: var(--color-transparent); color: var(--ink); }
   #conversation-back .back-glyph { font: var(--weight-regular) 30px/1 var(--font-ui); }
   #conversation-back .back-label { display: none; } /* aria-label keeps the full name */
-  /* cas-d043 G01: the identity takes its own full-width row beneath the back
-     link and the actions, always (cas-97d58 F07 did it only with the
-     attention chip). Beside Raw output and Interrupt it had about 150px, so a
-     plain "Atlas" read "A… · Reconnecting" and "Build Server" "Build Se…". */
-  .conversation-identity { grid-column: 1 / -1; grid-row: 2; gap: 10px; padding: 2px var(--space-1) 2px 40px; }
+  /* Keep the identity in the same row as the compact action cluster. */
+  .conversation-identity { flex: 1; gap: var(--space-2); padding: 0; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
   /* The actions always take the last column, whichever others show. */
-  .conversation-header-actions { grid-column: -2 / -1; grid-row: 1; gap: 4px; margin: 0; }
+  .conversation-header-actions { flex: none; gap: var(--space-1); margin: 0; }
+  .conversation-topline .conversation-action.conversation-more-toggle { display: inline-flex; }
+  #conversation-raw-output .action-label, #conversation-interrupt .action-label { display: none; }
+  .conversation-more-menu:not(:popover-open) { display: none; }
+  .conversation-more-menu:popover-open { display: flex; flex-direction: column; gap: var(--space-1); inset: auto var(--space-2) auto auto; top: calc(56px + env(safe-area-inset-top)); max-height: calc(100dvh - 56px - env(safe-area-inset-top)); overflow: auto; width: max-content; max-width: calc(100vw - 2 * var(--space-2)); margin: 0; padding: var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-card); background: var(--bg-panel); color: var(--ink); box-shadow: var(--lift-strong); }
+  .conversation-more-menu :is(#conversation-commands, #conversation-show-work) .action-label { display: inline; }
+  .conversation-more-menu .conversation-action, .conversation-more-menu #conversation-fleet { justify-content: flex-start; border: 0; border-radius: var(--radius-card); padding-inline: var(--space-2); font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); }
+  .conversation-more-menu #conversation-attention:not([hidden]) { border: 0; justify-content: flex-start; font: var(--weight-medium) var(--fs-meta)/1.3 var(--font-ui); }
   .conversation-topline .conversation-action { min-height: 44px; min-width: 44px; justify-content: center; padding: 0 10px; font-size: var(--fs-xs); }
-  /* cas-d043 G02: the identity has its own row (G01), so Raw output keeps
-     its word beside Interrupt instead of a bare ">_" glyph; the glyph steps
-     aside, as Interrupt's does. */
+  /* Direct phone actions keep their accessible names and 44px targets. */
   #conversation-raw-output { padding: 0 var(--space-2); }
-  #conversation-raw-output .action-icon { display: none; }
-  /* Interrupt keeps its word, not its glyph, so the project title keeps its room. */
+  #conversation-raw-output .action-icon { display: block; }
+  /* Interrupt keeps its critical icon beside Raw output. */
   #conversation-interrupt { padding: 0 var(--space-2); }
-  #conversation-interrupt .action-icon { display: none; }
+  #conversation-interrupt .action-icon { display: block; }
 
   /* cas-5c22: the session's open Attention, one tap from the thread. */
   /* Its column exists only while it shows, so the identity keeps its width otherwise. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
   #conversation-attention:not([hidden]) { grid-column: 3; grid-row: 1; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; min-width: 44px; justify-content: center; padding: 0 10px; border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); background: var(--color-transparent); color: var(--warn-text); font: var(--weight-semibold) var(--fs-xs)/1 var(--font-ui); }
-  /* With a warning badge, Raw output uses its existing icon to keep every
-     phone action inside the header; its accessible name and 44px target stay. */
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-label { display: none; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-raw-output .action-icon { display: block; }
+
   #conversation-attention svg { width: 16px; height: 16px; flex: none; }
   #conversation-attention:hover:not(:disabled) { background: var(--bg-hover); }
   /* The rail, laid over the thread as a sheet holding only Attention. */
@@ -2657,7 +2670,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #conversation-connection { flex: none; white-space: pre; }
+  #conversation-connection { flex: none; white-space: nowrap; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
   .conversation-composer { column-gap: 2px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 10px; }
@@ -2695,12 +2708,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity .conversation-host { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
   /* One row again, so the toast sits under 56 px (cas-002e). */
   body:has(.conversation-shell.thread-open) #toast { top: calc(env(safe-area-inset-top) + 56px + var(--space-2)); }
-  /* With the machine line hidden the title alone fits beside the actions, so
-     a short screen (a phone with its keyboard up) keeps the one-row header
-     and the thread keeps its room (cas-d043 G01). The attention chip still
-     takes the row, so the identity stays beneath it then. */
-  .conversation-identity { gap: var(--space-2); grid-column: 2; grid-row: 1; padding: 0; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) .conversation-identity { grid-column: 1 / -1; grid-row: 2; padding: 0 var(--space-1) 0 40px; }
+
   .conversation-composer { padding-top: var(--space-2); padding-bottom: max(var(--space-2), env(safe-area-inset-bottom)); }
   .conversation-composer textarea { height: var(--rail-item-min); min-height: var(--rail-item-min); padding-top: 10px; padding-bottom: 10px; }
   .conversation-composer .composer-clip { width: var(--rail-item-min); height: var(--rail-item-min); }
@@ -2727,7 +2735,10 @@ button.chip:disabled { cursor: default; }
 .pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
+/* cas-5e8b: Close is an icon-only 40px circle; touch still reaches 44px. */
+.machines-dialog-heading button { position: relative; width: var(--button-height); min-width: var(--button-height); padding: 0; border-radius: var(--radius-pill); }
+.machines-dialog-heading button::after { content: ""; position: absolute; inset: calc((var(--button-height) - var(--rail-item-min)) / 2); }
+#paired-machine-filters { flex-wrap: wrap; margin-block: var(--space-3) var(--space-2); }
 /* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
    visual-qa probe read a third paired machine below the fold as clipped. */
 #paired-machines-dialog { padding: var(--space-6); overflow: auto; }
@@ -3126,7 +3137,7 @@ button.chip:disabled { cursor: default; }
   }
   #fleet-phone-undo > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   #fleet-phone-undo > button { flex: none; min-width: var(--rail-item-min); }
-  .fleet-ops-picker h2 { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
+  .fleet-ops-picker h2, .fleet-sheet-title { margin: 0; font: var(--weight-semibold) var(--fs-lg)/1.3 var(--font-ui); overflow-wrap: anywhere; }
   .fleet-picker-context { margin: 0; color: var(--text-mid); overflow-wrap: anywhere; }
 }
 @media (forced-colors: active) {
@@ -3135,11 +3146,7 @@ button.chip:disabled { cursor: default; }
 }
 
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
-  .conversation-heading { grid-template-columns: 40px minmax(0, 1fr) auto auto; }
-  #conversation-fleet { grid-column: 3; grid-row: 1; }
 
-  .conversation-heading:has(#conversation-attention:not([hidden])) { grid-template-columns: 40px minmax(0, 1fr) auto auto auto; }
-  .conversation-heading:has(#conversation-attention:not([hidden])) #conversation-fleet { grid-column: 4; }
 
   .fleet-ops-picker { display: grid; gap: var(--space-3); }
   .fleet-ops-picker [role="menuitem"][hidden], .fleet-ops-no-match[hidden], #fleet-phone-undo[hidden] { display: none; }
@@ -3334,7 +3341,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0; padding: 0 var(--space-2); list-style: none; }
 .work-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink-mid); font-size: var(--fs-xs); }
 .work-chip-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: currentColor; flex: none; }
-.work-chip-id { font-family: var(--font-mono); color: var(--ink); }
+.work-chip-title { color: var(--ink); }
 .work-chip--ok { color: var(--state-ok); }
 .work-chip--warn { color: var(--warn-text); }
 .work-chip--crit { color: var(--state-crit); }

@@ -8,6 +8,8 @@ File a finding using the existing task labels: `severity:money|data_loss|broken|
 
 On `task action=update`, ordinary labels are additive; a supplied `severity:`, `reach:` or `journey:` label replaces the previous value for that axis. Omitted axes stay unchanged. An explicit empty `labels=""` clears user labels and resets an existing finding to broken/theoretical, retaining `from-finding` provenance and runtime evidence from its notes. Normalization restores the canonical axes, so clearing labels cannot turn a finding into manually prioritized work. To correct a stale P4 finding with a recorded repro, update `labels="severity:broken,reach:main,journey:FACTORY-SUPERVISE"`; the stored priority becomes P1. CLI workflow findings use the same MCP task handler and registry.
 
+Requesting `reach:main` on update requires a `journey:<id>` naming a declared live main journey, either supplied in that update or retained from the task. Missing, empty or undeclared journeys return `finding_main_journey_required` with `axis: journey` before any task fields change. Every successful update, including an unchanged request, prints the resulting priority; structured output includes the task `id` and numeric `priority`. A recorded creation-time reproduction remains available when correcting or clearing labels.
+
 Verification and QA issue objects carry `triage`, for example:
 
 ```json

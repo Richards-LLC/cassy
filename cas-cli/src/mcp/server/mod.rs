@@ -573,6 +573,13 @@ impl CasCore {
     /// it. Security-sensitive proof submission uses this read-only variant so
     /// a dead or unknown caller can be rejected before any durable mutation.
     pub(crate) fn get_registered_agent_id_read_only(&self) -> Result<String, McpError> {
+        let id = self.resolve_registered_agent_id_read_only()?;
+        let _ = self.agent_id.set(Some(id.clone()));
+        Ok(id)
+    }
+
+    /// The uncached half of [`Self::get_registered_agent_id_read_only`].
+    fn resolve_registered_agent_id_read_only(&self) -> Result<String, McpError> {
         let harness = self.cli_harness.unwrap_or_else(crate::agent_id::get_cc_pid_for_mcp);
         let candidate = self.agent_id.get().and_then(Clone::clone).or_else(|| {
             std::env::var("CAS_SESSION_ID").ok()
@@ -623,7 +630,6 @@ impl CasCore {
             message: Cow::from(error.to_string()),
             data: None,
         })?;
-        let _ = self.agent_id.set(Some(id.clone()));
         Ok(id)
     }
 
@@ -795,6 +801,54 @@ impl CasCore {
             AgentIdentitySource::PublicRegistration => role_hint.or(environment_role),
         };
 
+        // A new transcript does not create a new supervisor in the same pane.
+        // Only the authenticated caller's live, same-name process can rebind;
+        // unrelated registrations and retired predecessors keep their identity.
+        let rebound_supervisor = if source == AgentIdentitySource::PublicRegistration
+            && configured_role == Some(crate::types::AgentRole::Supervisor)
+            && parent_id.is_none()
+        {
+            let inspect_error = |error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Could not inspect existing registration: {error}")),
+                data: None,
+            };
+            // Registration can be the first tool call after reconnect. Only a
+            // server-internal identity, or the harness's own CAS_SESSION_ID
+            // authenticated read-only and uncached, may name the predecessor.
+            // A row a public registration created (its session file or PID
+            // mapping) never becomes server-internal (cas-e1db), and a
+            // caller-supplied name alone never selects an identity.
+            let caller = match self.agent_id.get() {
+                Some(Some(id)) => self.has_server_internal_identity(id).then(|| id.clone()),
+                Some(None) => None,
+                None => std::env::var("CAS_SESSION_ID").ok()
+                    .filter(|id| !id.trim().is_empty())
+                    .and_then(|_| self.resolve_registered_agent_id_read_only().ok()),
+            };
+            let existing = caller.as_deref()
+                .map(|id| agent_store.get(id)).transpose().map_err(inspect_error)?;
+            let harness = crate::agent_id::get_cc_pid_for_mcp();
+            match existing.filter(|agent| {
+                // The row this call itself registered (session_start writes
+                // it first) is not a predecessor to rebind.
+                agent.id != session_id
+                    && agent.name == name && agent.role == crate::types::AgentRole::Supervisor
+                    && agent.is_alive()
+                    && (agent.pid == Some(pid) || agent.pid == Some(harness) || agent.ppid == Some(harness))
+                    && matches!(crate::mcp::daemon::evaluate_liveness(agent,
+                        crate::mcp::daemon::pid_alive, crate::mcp::daemon::pid_matches_fingerprint),
+                        crate::mcp::daemon::LivenessOutcome::Alive { .. })
+            }) {
+                Some(agent) => {
+                    let ended = cas_store::SqliteAgentStore::open(&self.cas_root)
+                        .and_then(|store| store.session_end_recorded(&agent.id)).map_err(inspect_error)?;
+                    (!ended).then_some(agent)
+                }
+                None => None,
+            }
+        } else { None };
+
         // clear_context stores the new harness session id on the existing
         // worker row. Rebind to that row before constructing a new one so its
         // durable name and task leases survive the SessionStart transition.
@@ -807,14 +861,20 @@ impl CasCore {
                     .filter(|agent| agent.role == crate::types::AgentRole::Worker)
             })
             .flatten();
-        let canonical_id = rebound_worker
+        let bind_source = if rebound_supervisor.is_some() {
+            AgentIdentitySource::ServerInternal
+        } else {
+            source
+        };
+        let rebound = rebound_supervisor.or(rebound_worker);
+        let canonical_id = rebound
             .as_ref()
             .map(|agent| agent.id.clone())
             .unwrap_or_else(|| session_id.clone());
 
         // Create and register the agent, or refresh the durable worker row
         // matched by the post-reset session id.
-        let mut agent = rebound_worker.unwrap_or_else(|| {
+        let mut agent = rebound.unwrap_or_else(|| {
             if let Some(parent) = parent_id.clone() {
                 crate::types::Agent::new_sub_agent(session_id.clone(), name.clone(), parent)
             } else {
@@ -883,7 +943,8 @@ impl CasCore {
             data: None,
         })?;
 
-        self.bind_agent_identity(canonical_id.clone(), source)?;
+        crate::mcp::tools::service::mutation_receipt::registration_committed(&canonical_id, &session_id);
+        self.bind_agent_identity(canonical_id.clone(), bind_source)?;
         if let Ok(registered) = agent_store.get(&canonical_id)
             && let Err(error) = crate::supervisor_continuity::resume(&self.cas_root, &registered)
         {

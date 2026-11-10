@@ -744,10 +744,10 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
     new MutationObserver(() => {
       const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
       if (!armed.__focusLoadEarlierAtLive) return;
-      if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+      if (document.querySelector("#conversation-connection")?.getAttribute("data-phase") !== "live") return;
       armed.__focusLoadEarlierAtLive = false;
       document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
-    }).observe(document, { subtree: true, childList: true, characterData: true });
+    }).observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-phase"] });
   });
   const log = page.getByRole("log");
   const header = page.locator("#conversation-connection");
@@ -816,10 +816,10 @@ for (const [name, viewport, rest] of [
       new MutationObserver(() => {
         const armed = window as unknown as { __focusLoadEarlierAtLive?: boolean };
         if (!armed.__focusLoadEarlierAtLive) return;
-        if (document.querySelector("#conversation-connection")?.textContent !== " · Live") return;
+        if (document.querySelector("#conversation-connection")?.getAttribute("data-phase") !== "live") return;
         armed.__focusLoadEarlierAtLive = false;
         document.querySelector<HTMLElement>(".conversation-load-earlier")?.focus();
-      }).observe(document, { subtree: true, childList: true, characterData: true });
+      }).observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ["data-phase"] });
     });
     const log = page.getByRole("log");
     const header = page.locator("#conversation-connection");

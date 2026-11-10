@@ -8,6 +8,18 @@ This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
 
 ## `violet_reconcile_reply`
 
+For a message with a known `request_id`, use `{request_id}` as the only selector.
+The caller-scoped lookup returns `posted` with the original `receipt`,
+`not_posted`, or `outcome_unknown`; it never posts. Cassy's proxy supplies a
+request UUID for messages only when the live catalog advertises it on
+`violet_post` and the reconciliation schema accepts `request_id` alone. It
+automatically performs this lookup after an uncertain response or transport
+close on a capable hub. Older hubs receive unchanged arguments and outcomes;
+Cassy does not send unsupported request-ID lookups. Reconnect refreshes the
+catalog before the next call. An unavailable or denied lookup
+keeps the outcome unknown and returns the retained ID; never resend blindly.
+The next Violet call reconnects a dropped upstream in the same session.
+
 Pass the original reply intent's `coordination_operation_id` after an
 `outcome_unknown` write. This tool reads Slack to settle the intent; it never
 posts. Already-settled intents return their stored `posted` or `rejected` state
@@ -85,7 +97,7 @@ as Cassy metadata the hub ignores (the Cassy publication gate reads them).
 
 | Kind | Fields |
 | --- | --- |
-| `message` | `text`, `reply_to?` |
+| `message` | `text`, `reply_to?`, `request_id?` (UUID; supplied by Cassy's proxy only when advertised alongside request-ID reconciliation) |
 | `file` | `file {filename, content, content_encoding?, content_type?, sha256?, size_bytes?, title?}` or `files[]` of the same (1–10), `initial_comment?`, `reply_to?` |
 | `file_external` | `step` (`begin`/`complete`), `filename`, `size_bytes`, `sha256`, `title?`, `initial_comment?`, `reply_to?`, and `file_id` on `complete`; or `files[]` (1–10) of that metadata |
 | `thread` | `text`, `idempotency_key` (1–200 chars), `replies[]` (1–20) of `{text?, files?}` |

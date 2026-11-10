@@ -331,3 +331,14 @@ async function watchConversationFrames(page: Page): Promise<string[]> {
   });
   return defects;
 }
+
+/** Follow the visible phone overflow route before using a secondary header action. */
+export async function openConversationActions(page: Page): Promise<void> {
+  const more = page.locator("#conversation-more");
+  if (await more.isVisible() && !await page.locator("#conversation-more-menu").isVisible()) await more.click();
+}
+export async function clickConversationHeaderAction(page: Page, selector: string): Promise<void> {
+  const action = page.locator(selector);
+  if (!await action.isVisible()) await openConversationActions(page);
+  await action.click();
+}

@@ -358,12 +358,14 @@ export function turnNotice(event: WorkEvent): boolean {
     && (event.lifecycle?.stage === "start" || event.lifecycle?.stage === "end");
 }
 
-/** A task event as a chip: its task id and transition. Others stay rows. */
+/** A task event as a chip: its reported title and transition. Others stay rows. */
 export function taskChip(event: WorkEvent): TaskChip | undefined {
   if (event.kind !== "task") return undefined;
-  const match = CHIP_VERBS.find(([pattern]) => pattern.test(event.label));
+  const separator = event.label.indexOf(":");
+  const transition = separator < 0 ? event.label : event.label.slice(0, separator);
+  const match = CHIP_VERBS.find(([pattern]) => pattern.test(transition));
   if (!match) return undefined;
-  const subject = /^(\S+)\s/.exec(event.label)?.[1] ?? "task";
+  const subject = (separator < 0 ? "" : event.label.slice(separator + 1).trim()) || "Task title not reported";
   return { id: event.id, subject, verb: match[2], tone: match[1], label: event.label };
 }
 

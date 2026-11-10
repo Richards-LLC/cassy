@@ -666,7 +666,7 @@ describe('conversation evidence', () => {
     expect(header.querySelector('.host-machine')?.textContent).toBe('Atlas · Linux');
     expect(header.querySelector('.host-where')?.getAttribute('title')).toBe('Atlas · Linux · patient-pelican-9');
     expect(header.querySelector('.conversation-host > .host-where > .codename')?.textContent).toBe('patient-pelican-9');
-    expect(header.querySelector('.conversation-host > .host-where + #conversation-connection')).not.toBeNull();
+    expect(header.querySelector('.conversation-title-line > #conversation-connection.status-chip')).not.toBeNull();
     expect(header.querySelector('#conversation-connection')).not.toBeNull();
     expect(main.querySelector('.conversation-identity h1')).not.toBeNull(); expect(main.querySelectorAll('h1')).toHaveLength(1);
     const view = new ConversationView(document, new ConversationHistory(), { supervisor: 'patient-pelican-9', machine: 'Atlas', project: 'cas-src', header: false });

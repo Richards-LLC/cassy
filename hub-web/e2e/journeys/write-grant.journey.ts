@@ -1,4 +1,4 @@
-import { test, expect, journeyPart } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
 
@@ -35,7 +35,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       await journey.stage("Open the fleet", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expect(rail.getByRole("button", { name: "Write access…" })).toBeVisible();
       });
       await journey.stage("Open Write access on the current task", async () => {

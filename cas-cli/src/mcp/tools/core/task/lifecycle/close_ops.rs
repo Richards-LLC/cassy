@@ -7,6 +7,8 @@ mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
 mod gate_preflight;
+pub(crate) use gate_preflight::is_merge_handoff;
+use crate::mcp::tools::core::task::close_refusal;
 #[cfg(test)]
 mod loaded_proof_tests;
 pub(crate) mod task_attribution;
@@ -7689,6 +7691,9 @@ impl CasCore {
                 inline_external_ref, inline_execution_note)
         })
         .await;
+        if let Err(error) = crate::mcp::tools::core::task::close_refusal::record(&self.cas_root, &id, &result) {
+            tracing::warn!(task_id = %id, %error, "could not record latest close outcome for progress watchdog");
+        }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;
@@ -7736,7 +7741,7 @@ impl CasCore {
         if !task.is_terminal()
             && let Err(message) = crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id, true)
         {
-            return Ok(Self::tool_error(message));
+            return Ok(close_refusal::gate("phase_outcome_gate", "provide_outcome_receipt", message));
         }
         if task.task_type == TaskType::Epic && !task.is_terminal() {
             if let Ok(actor) = self.get_agent_id() {
@@ -7745,7 +7750,7 @@ impl CasCore {
                 }
             }
             if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
-                return Ok(Self::tool_error(reason));
+                return Ok(close_refusal::gate("post_release_gate", "complete_post_release_check", reason));
             }
             // An override use appends an audit note; do not overwrite it later.
             task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
@@ -8312,7 +8317,8 @@ impl CasCore {
                     target,
                 ) {
                     Ok(context) => Some(context),
-                    Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
+                    Err(message) => return Ok(close_refusal::gate("work_target_gate", "resolve_work_target",
+                        gate_preflight::refusal_reply(gate_refusals, message))),
                 }
             }
             None => None,
@@ -8673,7 +8679,8 @@ impl CasCore {
                     // supervisor-only, and audited, and it only exists once the
                     // gate has actually blocked.
                     let Some(reason) = req.stranded_branch_override.as_deref() else {
-                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, msg)));
+                        return Ok(close_refusal::gate("epic_close_merge_gate", "reconcile_child_deliveries",
+                            gate_preflight::refusal_reply(gate_refusals, msg)));
                     };
                     let narrative = match validate_stranded_branch_override_reason(reason) {
                         Ok(narrative) => narrative,
@@ -18504,7 +18511,19 @@ pub(crate) fn resolve_close_gate_repo_root(
 ) -> Result<std::path::PathBuf, String> {
     use std::process::Command;
 
-    for ancestor in cas_root.ancestors() {
+    // Like Git's own discovery, never move up into a GIT_CEILING_DIRECTORIES
+    // entry: a fixture beneath an unrelated checkout must not bind to it.
+    let canonical = |path: &std::path::Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let ceilings: Vec<std::path::PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
+        .map(|value| std::env::split_paths(&value)
+            .filter(|path| path.is_absolute())
+            .map(|path| canonical(&path))
+            .collect())
+        .unwrap_or_default();
+    for (index, ancestor) in cas_root.ancestors().enumerate() {
+        if index > 0 && ceilings.contains(&canonical(ancestor)) {
+            break;
+        }
         if !ancestor.join(".git").exists() {
             continue;
         }
@@ -19008,6 +19027,11 @@ mod parent_branch_resolver_tests {
 
         let resolved = resolve_close_gate_repo_root(&cas_root).expect("ancestor repo must resolve");
         assert_eq!(resolved, dir.path().canonicalize().unwrap());
+
+        // cas-e1db: a ceiling between the root and the checkout stops the walk.
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("GIT_CEILING_DIRECTORIES", dir.path().join("state"));
+        resolve_close_gate_repo_root(&cas_root).expect_err("the walk must not cross a ceiling");
     }
 
     #[test]
@@ -24878,7 +24902,7 @@ fn stale_rebased_anchor_rejection(
     let retry = current_tip
         .map(|tip| {
             format!(
-                " The current worker branch tip is `{tip}`. If that commit carries this task's work, first merge it into `{parent_branch}`, then retry close with `{tool_prefix}task action=close id={task_id} commit_receipt={tip}`."
+                " The current worker branch tip is `{tip}`. If that commit carries this task's work, park it with `{tool_prefix}task action=close id={task_id} commit_receipt={tip}`; the supervisor merges the delivery into `{parent_branch}`."
             , tool_prefix = crate::mcp::tools::core::guidance::caller_prefix())
         })
         .unwrap_or_else(|| {

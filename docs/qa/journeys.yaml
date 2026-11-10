@@ -12,11 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  queued-blocked-successor-source:
-    title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
-    tasks: [cas-57df]
-    journeys: [FACTORY-CLOSE]
-    invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]
@@ -447,6 +442,11 @@ bug_families:
     tasks: [cas-e466c]
     invariants: [HUB-J17-WORKER-NAME]
     journeys: [HUB-J17]
+  worker-timeline-header-polish:
+    title: Worker names open timelines without an action pill and cards share their state vocabulary with the timeline
+    tasks: [cas-0d5e]
+    journeys: [HUB-J17, HUB-J25, HUB-J26]
+    invariants: [HUB-WORKER-TIMELINE-HEADER]
   launch-sheet-phone-touch-targets:
     title: New session's project tabs and its Cancel and Start actions are 44px touch targets on a phone
     tasks: [cas-59e5]
@@ -478,14 +478,6 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
-  nested-shell-worker-commit-scope:
-    title: Nested shell and eval history writes obey the worker worktree and branch guards
-    tasks: [cas-4923e]
-    journeys: [FACTORY-SUPERVISE]
-  regenerated-merge-candidate-bundle:
-    title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
-    tasks: [cas-e4b9]
-    journeys: [FACTORY-MERGE]
   dialog-action-bar-sheet-at-rest:
     title: New session and Operator inbox action bars frost only while fields scroll beneath them and are otherwise the sheet with its hairline
     tasks: [cas-6c0d]
@@ -533,6 +525,19 @@ bug_families:
     title: An empty conversation's card wears the same provider mark as its header and list row when the session reports a harness
     tasks: [cas-36cb]
     journeys: [HUB-J3]
+  queued-blocked-successor-source:
+    title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
+    tasks: [cas-57df]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
+  nested-shell-worker-commit-scope:
+    title: Nested shell and eval history writes obey the worker worktree and branch guards
+    tasks: [cas-4923e]
+    journeys: [FACTORY-SUPERVISE]
+  regenerated-merge-candidate-bundle:
+    title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
+    tasks: [cas-e4b9]
+    journeys: [FACTORY-MERGE]
   conversation-header-single-row:
     title: Conversation identity and actions share one row with a state pill and reachable compact phone controls
     tasks: [cas-bcf0]
@@ -547,11 +552,6 @@ bug_families:
     title: The first worker answer to an explicit supervisor ask wakes over the cap while instruction replies and repeated answers stay held
     tasks: [cas-6c32]
     journeys: [FACTORY-SUPERVISE]
-  worker-timeline-header-polish:
-    title: Worker names open timelines without an action pill and cards share their state vocabulary with the timeline
-    tasks: [cas-0d5e]
-    journeys: [HUB-J17, HUB-J25, HUB-J26]
-    invariants: [HUB-WORKER-TIMELINE-HEADER]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

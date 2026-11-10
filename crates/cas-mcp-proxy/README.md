@@ -197,6 +197,20 @@ The dispatch formats remain:
 github.list_issues({"repo": "myorg/app"})
 ```
 
+## Violet recovery
+
+Violet's next call reconnects immediately after a live transport closes;
+failed connection attempts keep the normal backoff. The same proxy session
+and caller policy remain in force.
+
+Every Violet `kind: "message"` post receives a UUID `request_id` unless the
+caller supplied one. A lost response or `outcome_unknown` result triggers a
+read-only `violet_reconcile_reply` lookup using that same ID. A confirmed
+posted receipt is returned to the caller; a definite `not_posted` result or
+an unresolved outcome remains a failure with its request ID. The proxy never
+resends the post. Reconciliation goes through the same authorization boundary;
+an unavailable or denied lookup leaves the outcome unknown.
+
 ## Hot-reload
 
 The daemon watches `.cas/proxy.toml` for changes. On config change,

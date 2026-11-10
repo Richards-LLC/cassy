@@ -102,6 +102,9 @@ describe("Commander write grants (cas-ab04, GH #1169)", () => {
     let panel = writeAccessPanel(document, { state, tasks, on: handlers });
     const task = panel.querySelector<HTMLSelectElement>("select.write-grant-task")!;
     expect([...task.options].map((option) => option.value)).toEqual(["cas-1169", "cas-2001"]);
+    const options = [...panel.querySelectorAll<HTMLOptionElement>(".write-grant-task option")];
+    expect(options.map(option => option.value)).toEqual(tasks.map(task => task.id));
+    expect(options.every((option, index) => option.textContent?.startsWith(tasks[index]!.title!))).toBe(true);
     const path = panel.querySelector<HTMLInputElement>("input.write-grant-path")!;
     expect(path.value).toBe("~/soundwave-config/docs/requests");
     path.value = "~/other";

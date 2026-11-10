@@ -27,6 +27,7 @@ Managed project updates recognize the owned content Cassy previously wrote, incl
 - **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.
 - **Supervisor agent** - plans epics, assigns one task at a time to workers, merges pushed deliveries once CI is green and the plan target is met, and coordinates with supervisors on other projects or machines.
 - **Worker agent** - executes one assigned task in its own worktree, runs the targeted tests, and pushes a committed result for review.
+- **Worker Git scope** - history writes inside shell command strings inherit the effective directory and must remain in the assigned worktree on an allowed branch. Child shell directory changes stay local; `eval` changes the enclosing shell directory. Nesting beyond the inspection limit is refused.
 - **QA reviewer** - walks the journeys a delivery touches on the real build and records an approve or reject verdict in a QA ledger. Walks share a project-pinned, versioned harness: wait for actual visible replies, open delivered artifacts and record one row per defect across surfaces. New schema-2 ledgers require cited source lines and captured visible, terminal or HTTP results; database read-back only corroborates. Existing ledger receipts retain their original schema. Batch ledger init accepts `--covers` for every intended receipt delivery; check with the same IDs before publishing. QA and release receipts enforce declared coverage.
 
 ## Core Concepts

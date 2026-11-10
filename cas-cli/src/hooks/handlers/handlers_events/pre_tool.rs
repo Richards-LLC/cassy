@@ -2757,6 +2757,7 @@ struct GitCommandTarget {
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
     is_detached_checkout: bool,
+    uncertain_scope: bool,
 }
 
 impl GitCommandTarget {
@@ -2771,6 +2772,7 @@ impl GitCommandTarget {
             git_dir: None,
             work_tree: None,
             is_detached_checkout: false,
+            uncertain_scope: false,
         }
     }
 
@@ -2845,10 +2847,27 @@ fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::Pat
 /// parsed before the operation so a linked worktree is checked instead of the
 /// hook's cwd. Explicit `cd` statements are carried forward across `&&`, `;`,
 /// and `|` statements because the hook receives the whole shell command.
+/// Shell command strings inherit cwd; only eval changes the enclosing cwd.
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
-    let default_target = GitCommandTarget::from_cwd(cwd);
+    let mut shell_cwd = GitCommandTarget::from_cwd(cwd).cwd;
     let mut targets = Vec::new();
-    let mut shell_cwd = default_target.cwd.clone();
+    collect_git_write_targets(&mut shell_cwd, command, 0, &mut targets);
+    targets
+}
+
+fn collect_git_write_targets(
+    shell_cwd: &mut std::path::PathBuf,
+    command: &str,
+    depth: usize,
+    targets: &mut Vec<GitCommandTarget>,
+) {
+    let default_target = GitCommandTarget::from_cwd(&shell_cwd.to_string_lossy());
+    if depth > 6 {
+        let mut target = default_target;
+        target.uncertain_scope = true;
+        targets.push(target);
+        return;
+    }
 
     // Strip only literal heredoc data for this allowance. Expanding bodies
     // can run $(git ...); retain the raw subprocess scopes in that case.
@@ -2865,6 +2884,39 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         let Some(command_index) = unwrapped_command_index(&words) else {
             continue;
         };
+        let name = shell_word_basename(&words[command_index]);
+        let args = &words[command_index + 1..];
+        if name == "eval" {
+            let args = if args.first().is_some_and(|arg| arg == "--") {
+                &args[1..]
+            } else {
+                args
+            };
+            // eval runs in this shell: its cd also affects following commands.
+            collect_git_write_targets(shell_cwd, &args.join(" "), depth + 1, targets);
+            continue;
+        }
+        if matches!(
+            name,
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser"
+        ) {
+            for (position, arg) in args.iter().enumerate() {
+                let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
+                if flags_c || arg == "--command" {
+                    if let Some(payload) = args.get(position + 1) {
+                        // A child inherits cwd but cannot change its parent's cwd.
+                        collect_git_write_targets(
+                            &mut shell_cwd.clone(), payload, depth + 1, targets,
+                        );
+                    }
+                    break;
+                }
+                if arg == "--" {
+                    break;
+                }
+            }
+            continue;
+        }
         if shell_word_basename(&words[command_index]) == "find" {
             // find runs each -exec/-execdir payload as a command. Inspect
             // these scopes before later statements can change shell_cwd.
@@ -2881,10 +2933,10 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         }
         if words[command_index] == "cd" {
             if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
-                shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
+                *shell_cwd = resolve_worker_cd_path(shell_cwd, path);
             } else if words.get(command_index + 1).is_some_and(|path| path == "--") {
                 if let Some(path) = words.get(command_index + 2) {
-                    shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
+                    *shell_cwd = resolve_worker_cd_path(shell_cwd, path);
                 }
             }
             continue;
@@ -2950,8 +3002,6 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         }
         targets.push(target);
     }
-
-    targets
 }
 
 fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {
@@ -3071,6 +3121,9 @@ fn check_worker_git_commit_scope_at_target(
     target: &GitCommandTarget,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
+    if target.uncertain_scope {
+        return Some("WORKER COMMIT GUARD: Nested shell scope exceeds the inspection limit. Split the command into explicit operations inside your assigned worktree.".to_string());
+    }
     let cwd = target.path_for_scope().display().to_string();
     let clone_path = registered_worktree_root
         .map(|path| path.to_string_lossy().into_owned())
@@ -12656,6 +12709,10 @@ mod worker_commit_guard_tests {
         env.set("CAS_AGENT_NAME", "nested-worker");
         env.set("CAS_CLONE_PATH", &linked_path);
 
+        let mut deep_command = format!("cd '{repo_path}'; git commit -m probe");
+        for _ in 0..8 {
+            deep_command = shell_words_as_command(&["sh".into(), "-c".into(), deep_command]);
+        }
         let mut mismatches = Vec::new();
         for (command, denied) in [
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
@@ -12665,7 +12722,9 @@ mod worker_commit_guard_tests {
             (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
             (format!("eval 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("eval -- 'cd \"{repo_path}\"'; git commit -m probe"), true),
             (format!("cd '{repo_path}'; bash -c 'git commit -m probe'"), true),
+            (deep_command, true),
             ("bash -c 'git commit -m work'".to_string(), false),
             (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
             (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),

@@ -51,7 +51,7 @@
 - `cas-cli/src/mcp/tools/core/search.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - retrieval dispatch and read-only search request deadlines.
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
 - `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, registered nested-checkout publication with checkout-relative secret guards, audited supervisor revocation with explicit Cloud acknowledgement, brand resolution, HTML/PDF finalization and immutable captures.
-- `cas-cli/src/mcp/tools/core/task/close_refusal.rs` - input-bound local close refusals shared by every close handler and the progress watchdog.
+- `cas-cli/src/mcp/tools/core/task/close_refusal.rs` - input-bound task-state close gate facts shared by every close handler and the progress watchdog.
 - `cas-cli/src/builtins/` - canonical skills, agents, jobs, harness catalogs and reference-history manifest.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` - rule-marker navigation and reference contract.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` - dataset-bound proof, measured phase outcomes and verifier prompt replays.

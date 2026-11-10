@@ -51,7 +51,7 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let mut refusals = CloseHeld::new();
     for task in &tasks {
         // An unreadable receipt is uncertainty, never proof of a stall.
-        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(cas_dir, task).ok()? {
+        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
             refusals.insert(task.id.clone(), refusal);
         }
     }
@@ -127,8 +127,8 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let waiting = tasks.iter().map(|task| {
         let title: String = task.title.chars().take(70).collect();
         let gate = refusals.get(&task.id).map(|refusal| format!(
-            "\n  operator action required; code={}; next_action={}\n{}",
-            refusal.code, refusal.next_action, refusal.message,
+            "\n  operator action required; code={}; next_action={}",
+            refusal.code, refusal.next_action,
         )).unwrap_or_default();
         format!("- {} {} ({}): {title}{gate}", task.id, task.status, task.assignee.as_deref().unwrap_or_default())
     }).collect();
@@ -161,12 +161,12 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
 
 fn report_close_held(cas_dir: &Path, held: CloseHeld) {
     for (id, refusal) in held {
-        let key = format!("close-gate-held:{id}:{}", refusal.key());
+        let key = format!("close-gate-held:{id}:{}", crate::mcp::tools::core::task::close_refusal::key(&refusal));
         super::lifecycle::enqueue_worker_attention_relay_detail_with_key(
             cas_dir, "progress_close_refused", "supervisor", Some(&id), None,
             |prefix| format!(
-                "Close is held by a Cassy gate: {id}; code={}; next_action={}.\n{}\nResolve the recorded refusal, then retry `{prefix}task action=close id={id}`. The watchdog will not page the operator for this held close.",
-                refusal.code, refusal.next_action, refusal.message,
+                "Close is held by a Cassy gate: {id}; code={}; next_action={}.\nResolve the recorded refusal, then retry `{prefix}task action=close id={id}`. The watchdog will not page the operator for this held close.",
+                refusal.code, refusal.next_action,
             ), &key, Some(&key),
         );
     }
@@ -476,6 +476,8 @@ mod tests {
             })).unwrap()
         )).await.unwrap_err();
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(crate::store::open_task_store_local(&root).unwrap()
+            .get_execution_state(&task.id).unwrap().is_none_or(|state| state.get("close_refusal").is_none()));
         let now = chrono::Utc::now();
         for minutes in [0, 45, 90, 135] {
             super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
@@ -515,6 +517,8 @@ mod tests {
             serde_json::from_value(serde_json::json!({"id":epic.id,"reason":"Delivered work is ready"})).unwrap()
         )).await.unwrap();
         assert_eq!(refused.is_error, Some(true));
+        assert_eq!(refused.structured_content.as_ref().unwrap()["code"], "phase_outcome_gate");
+        assert_eq!(tasks.get_execution_state(&epic.id).unwrap().unwrap()["close_refusal"]["code"], "phase_outcome_gate");
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         let now = chrono::Utc::now();
         for minutes in [0, 45, 90, 135] {
@@ -522,9 +526,9 @@ mod tests {
         }
         let rows = queue.peek_all(50).unwrap();
         assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 0, "{rows:?}");
-        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("task_close_refused")).collect();
+        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("phase_outcome_gate")).collect();
         assert_eq!(notices.len(), 1, "{rows:?}");
-        assert!(notices[0].prompt.contains("resolve_close_gate"));
+        assert!(notices[0].prompt.contains("provide_outcome_receipt"));
 
         // Timeline notes do not resolve the gate or start an escalation clock.
         epic.notes.push_str("\nMore diagnostic evidence");
@@ -538,6 +542,8 @@ mod tests {
         for minutes in [181, 226, 271] {
             super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
         }
+        assert!(tasks.get_execution_state(&epic.id).unwrap()
+            .is_none_or(|state| state.get("close_refusal").is_none()));
         assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 1);
     }
 

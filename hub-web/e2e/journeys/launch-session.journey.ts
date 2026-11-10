@@ -105,6 +105,12 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("ledger");
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
+    // cas-6c0d: the action bar frosts only while fields scroll beneath it; at the end it is the sheet, not a slab.
+    const frost = () => sheet.locator(".launch-actions").evaluate(node => getComputedStyle(node).backdropFilter);
+    await expect.poll(frost).not.toBe("none");
+    await sheet.locator(".launch-flow").evaluate(node => node.scrollTo({ top: node.scrollHeight }));
+    await expect.poll(frost).toBe("none");
+    await sheet.locator(".launch-flow").evaluate(node => node.scrollTo({ top: 0 }));
     await expect(sheet.getByRole("radio", { name: "Claude Default" })).toBeChecked();
     // Capture the same project/account state on phone and desktop, including
     // the failing base build where main remains selected.

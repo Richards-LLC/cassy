@@ -256,6 +256,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             get(status::<R>).options(preflight::<R>),
         )
         .route(
+            "/v1/sessions/{session}/quality",
+            get(quality::<R>).options(preflight::<R>),
+        )
+        .route(
             "/v1/sessions/{session}/lease",
             get(lease_status::<R>)
                 .post(acquire_lease::<R>)
@@ -2630,6 +2634,33 @@ async fn status<R: SessionReadModel>(
         Ok(Ok(status)) => with_cors(Json(status).into_response(), &headers),
         Ok(Err(_)) => generic_not_found(),
         Err(error) => internal_error(error.into()),
+    }
+}
+
+/// Commander's Quality sheet (cas-3dd7): the session project's friction ledger,
+/// per release, read-only.
+async fn quality<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path(session): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/quality");
+    if let Err(error) =
+        authorize(&state, HubAction::SessionRead, Scope::SessionRead, &headers, "GET", &uri)
+    {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    match tokio::task::spawn_blocking(move || {
+        let session = crate::bridge::server::session::resolve_session_by_name(&session)?;
+        let root =
+            crate::bridge::server::session::cas_root_for_session_with_fallback(&session, None)?;
+        crate::cli::ledger::quality_reports(&root, 5)
+    })
+    .await
+    {
+        Ok(Ok(quality)) => with_cors(Json(quality).into_response(), &headers),
+        Ok(Err(_)) => with_cors(generic_not_found(), &headers),
+        Err(error) => with_cors(internal_error(error.into()), &headers),
     }
 }
 

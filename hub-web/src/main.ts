@@ -1419,6 +1419,23 @@ function openAccounts(): void {
   });
 }
 
+let qualitySheet: Promise<import("./quality-panel").QualitySheet> | undefined;
+/** The selected conversation's project, release over release (cas-3dd7). */
+function openQuality(): void {
+  const machineId = selectedMachineId, session = selectedSession;
+  if (!machineId || !session) return;
+  qualitySheet ??= import("./quality-panel").then(({ QualitySheet }) => new QualitySheet({
+    load: () => launchConnection(qualityTarget!.machineId).quality(qualityTarget!.session),
+    returnFocus: () => document.querySelector<HTMLButtonElement>("#command-palette-toggle")?.focus(),
+  }));
+  qualityTarget = { machineId, session };
+  void qualitySheet.then(sheet => sheet.open(conversationLabel(machineId, session))).catch(() => {
+    qualitySheet = undefined;
+    toast("Could not open Quality. Try again or reload Commander.");
+  });
+}
+let qualityTarget: { machineId: string; session: string } | undefined;
+
 function ensureConnection(machine: StoredMachine): HubConnectionSupervisor {
   return ensureMachineConnection(machine, connections, createConnection);
 }
@@ -4667,6 +4684,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
             <h3 id="palette-group-machines" class="palette-group-heading">Machines</h3>
             ${launchAvailability() === "ready" ? '<button type="button" class="palette-command" data-palette-action="new-session"><span>New session</span><small>Start a supervisor on a project</small></button>' : ""}
             <button type="button" class="palette-command" id="palette-paired-machines"><span>Paired machines</span><small>Hosts, connection and last seen</small></button>
+            ${selectedMachineId && selectedSession ? `<button type="button" class="palette-command" data-palette-action="quality"><span>Quality</span><small>${escapeHtml(conversationLabel(selectedMachineId, selectedSession))}, release over release</small></button>` : ""}
             ${launchAvailability() === "grant" ? '<button type="button" class="palette-command" data-palette-action="new-session" data-launch-grant="true"><span>New session</span><small>Asks this browser\'s permission first</small></button>' : ""}
             ${infoItems.length > 0 ? `<button type="button" class="palette-command" data-palette-action="dismiss-info"><span>Dismiss all info</span><small>${infoItems.length} outstanding</small></button>` : ""}
           </section>
@@ -6192,6 +6210,8 @@ function bindEvents(): void {
   }
   const paletteDormant = palette.querySelector<HTMLButtonElement>("[data-palette-action='dormant']");
   if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
+  const paletteQuality = palette.querySelector<HTMLButtonElement>("[data-palette-action='quality']");
+  if (paletteQuality) paletteQuality.onclick = () => { closePalette(); openQuality(); };
   const paletteLaunch = palette.querySelector<HTMLButtonElement>("[data-palette-action='new-session']");
   if (paletteLaunch) paletteLaunch.onclick = () => { closePalette(); launchSheet.open(); };
   const accountsToggle = document.querySelector<HTMLButtonElement>("#accounts-toggle");

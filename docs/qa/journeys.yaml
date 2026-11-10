@@ -2408,12 +2408,16 @@ journeys:
     stays visible and the page does not scroll sideways
   - Open Accounts from the shell, inspect per-machine login and capacity, confirm a named profile removal and see New session refresh without a page reload
   - Check usage on Claude and Codex rows in Accounts and New session without selecting or switching an account; see Checked at, Usage as of, Eastern reset times and stale/missing reasons
+  - Open Quality from the palette for the selected conversation; read the rubric that moved most with its factor on one line, every rubric per merged delivery with pending sources, and supervisor tokens by wake source
   owner_groups:
   - commander_runtime
   - commander_dependencies
   owners:
   - hub-web/src/accounts-panel.ts
   - hub-web/src/provider-mark.ts
+  - hub-web/src/quality-panel.ts
+  - hub-web/src/quality-panel.css
+  - hub-web/src/quality-model.ts
   - hub-web/src/accounts-panel.css
   - hub-web/src/accounts-model.ts
   - hub-web/src/account-usage-check.ts

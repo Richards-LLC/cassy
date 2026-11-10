@@ -32,6 +32,8 @@ pub(crate) struct ReleaseClose {
     transformations: Vec<(QaBatchReceipt, ReleaseTransformations)>,
     member_errors: BTreeMap<String, String>,
     strict_proofs: bool,
+    reviews: Vec<(QaBatchReceipt, String)>,
+    parent: Option<ParentReleaseEvidence>,
 }
 
 tokio::task_local! {
@@ -85,6 +87,7 @@ impl ReleaseClose {
         let receipts = cas_store::list_qa_batch_receipts(root, &inventory.scope.project_id)
             .map_err(|e| e.to_string())?;
         let mut transformations = Vec::new();
+        let mut reviews = Vec::new();
         for proof in inventory
             .scope
             .proof_refs
@@ -118,6 +121,7 @@ impl ReleaseClose {
             let (_, path) =
                 validate_ledger(root, &proof.artifact_id, Path::new(&receipt.ledger_path))?;
             let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            reviews.push((receipt.clone(), body.clone()));
             if let Some(manifest) = parse_manifest(&body)? {
                 if manifest.project_id != inventory.scope.project_id
                     || manifest.release_id != inventory.scope.release_id
@@ -169,6 +173,8 @@ impl ReleaseClose {
             transformations,
             member_errors,
             strict_proofs: true,
+            reviews,
+            parent: None,
         })
     }
 
@@ -194,6 +200,8 @@ impl ReleaseClose {
             transformations: Vec::new(),
             member_errors: BTreeMap::new(),
             strict_proofs: false,
+            reviews: Vec::new(),
+            parent: None,
             inventory: ReleaseInventory {
                 scope: ReleaseScope {
                     project_id: receipt.project_id.clone(),
@@ -278,6 +286,12 @@ pub(crate) fn validate_task(root: &Path, task: &Task) -> Result<(), String> {
             if context.root != root {
                 return Err("RELEASE_PROJECT_CHANGED".into());
             }
+            if let Some(parent) = context.parent.as_ref().filter(|p| p.task_id == task.id) {
+                if parent.generation != task.updated_at.to_rfc3339() {
+                    return Err("RELEASE_PARENT_GENERATION_CHANGED".into());
+                }
+                return parent.validate_children(root);
+            }
             let Some(delivery) = context.delivery(&task.id) else {
                 return Err("RELEASE_MEMBERSHIP_CHANGED".into());
             };
@@ -311,7 +325,7 @@ pub(crate) fn validate_task(root: &Path, task: &Task) -> Result<(), String> {
 pub(crate) fn target(root: &Path, task_id: &str) -> Option<String> {
     CURRENT
         .try_with(|context| {
-            (context.root == root && context.delivery(task_id).is_some())
+            (context.root == root && (context.delivery(task_id).is_some() || context.parent.as_ref().is_some_and(|p| p.task_id == task_id)))
                 .then(|| context.inventory.scope.final_release_sha.clone())
         })
         .ok()
@@ -320,7 +334,7 @@ pub(crate) fn target(root: &Path, task_id: &str) -> Option<String> {
 
 pub(crate) fn binding_note(root: &Path, task_id: &str) -> Option<String> {
     CURRENT.try_with(|context| {
-        (context.root == root && context.delivery(task_id).is_some()).then(|| format!(
+        (context.root == root && (context.delivery(task_id).is_some() || context.parent.as_ref().is_some_and(|p| p.task_id == task_id))).then(|| format!(
             "Release {}: close evidence fixed at {}; reviewed candidate {}; proof artifacts: {}.",
             context.inventory.scope.release_id, context.inventory.scope.final_release_sha,
             context.inventory.scope.reviewed_sha,
@@ -481,4 +495,151 @@ fn transformation_matches(
         && output == tree(target)
         && previous.is_some()
         && previous != output
+}
+
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EpicManifest {
+    project_id: String,
+    release_id: String,
+    reviewed_sha: String,
+    final_release_sha: String,
+    epics: Vec<EpicAcceptance>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EpicAcceptance {
+    task_id: String,
+    generation: String,
+    child_ids: Vec<String>,
+    acceptance: EpicPass,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EpicPass { Pass }
+
+#[derive(Clone)]
+struct ParentReleaseEvidence {
+    task_id: String,
+    generation: String,
+    child_versions: BTreeMap<String, String>,
+    review: Option<String>,
+    integration: Option<String>,
+}
+
+impl ParentReleaseEvidence {
+    fn validate_children(&self, root: &Path) -> Result<(), String> {
+        let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+        let children = store.get_subtasks(&self.task_id).map_err(|e| e.to_string())?;
+        let current: BTreeMap<_, _> = children.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect();
+        if children.is_empty() || !children.iter().all(Task::is_terminal) || current != self.child_versions {
+            return Err("RELEASE_PARENT_CHILDREN_CHANGED".into());
+        }
+        Ok(())
+    }
+}
+
+impl ReleaseClose {
+    /// Extend the already validated release context with explicit parent review.
+    /// An absent/mismatched block grants no review authority and queues the
+    /// ordinary epic verifier; it never turns prose or shipping into acceptance.
+    pub(crate) async fn for_parent(mut self, task: &Task, children: &[Task]) -> Result<Self, String> {
+        if children.is_empty() || !children.iter().all(Task::is_terminal) {
+            return Err("RELEASE_PARENT_CHILDREN_INCOMPLETE".into());
+        }
+        let store = crate::store::open_task_store(&self.root).map_err(|e| e.to_string())?;
+        let mut descendants = Vec::new();
+        let mut pending = children.to_vec();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(child) = pending.pop() {
+            if !seen.insert(child.id.clone()) { return Err("RELEASE_PARENT_CYCLE".into()); }
+            if child.task_type == cas_types::TaskType::Epic {
+                let nested = store.get_subtasks(&child.id).map_err(|e| e.to_string())?;
+                if nested.is_empty() { return Err("RELEASE_EMPTY_PARENT".into()); }
+                pending.extend(nested);
+            }
+            descendants.push(child);
+        }
+        let leaves: Vec<_> = descendants.iter().filter(|c| c.task_type != cas_types::TaskType::Epic && c.status != cas_types::TaskStatus::Cancelled).collect();
+        if leaves.is_empty() { return Err("RELEASE_EMPTY_PARENT: no delivered descendants; operator disposition required".into()); }
+        for child in &leaves {
+            if child.status != cas_types::TaskStatus::Closed || self.delivery(&child.id).is_none() || self.member_error(&child.id).is_some() {
+                return Err(format!("RELEASE_PARENT_MEMBER_HELD: {}", child.id));
+            }
+        }
+        let expected: std::collections::BTreeSet<_> = children.iter().map(|c| c.id.as_str()).collect();
+        let mut review = None;
+        for (receipt, body) in &self.reviews {
+            let mut blocks = body.split("```cassy-release-epics\n");
+            blocks.next();
+            let Some(block) = blocks.next() else { continue; };
+            if blocks.next().is_some() { return Err("RELEASE_EPIC_COVERAGE_AMBIGUOUS".into()); }
+            let (json, _) = block.split_once("\n```").ok_or("RELEASE_EPIC_COVERAGE_UNTERMINATED")?;
+            let manifest: EpicManifest = serde_json::from_str(json).map_err(|e| format!("RELEASE_EPIC_COVERAGE_INVALID: {e}"))?;
+            let scope = &self.inventory.scope;
+            if manifest.project_id != scope.project_id || manifest.release_id != scope.release_id
+                || manifest.reviewed_sha != scope.reviewed_sha || manifest.final_release_sha != scope.final_release_sha {
+                return Err("RELEASE_EPIC_COVERAGE_BINDING".into());
+            }
+            let rows: Vec<_> = manifest.epics.iter().filter(|e| e.task_id == task.id).collect();
+            if rows.len() > 1 { return Err("RELEASE_EPIC_COVERAGE_AMBIGUOUS".into()); }
+            let Some(row) = rows.first() else { continue; };
+            let actual: std::collections::BTreeSet<_> = row.child_ids.iter().map(String::as_str).collect();
+            if row.generation != task.updated_at.to_rfc3339() || actual != expected || actual.len() != row.child_ids.len() { continue; }
+            let author = receipt.ledger_author_id.as_deref().ok_or("RELEASE_REVIEW_AUTHOR_MISSING")?;
+            for member in std::iter::once(task).chain(descendants.iter()) {
+                if !author_is_independent(&self.root, member, &self.repo, author)? {
+                    return Err(format!("RELEASE_EPIC_REVIEW_NOT_INDEPENDENT: {}", member.id));
+                }
+            }
+            match row.acceptance { EpicPass::Pass => review = Some(receipt.id.clone()) }
+        }
+        // Reuse independently recorded QA of every delivered leaf at the same
+        // mapped release tree, including their published-byte checks. No new run.
+        let integration = self.clone().scope(async {
+            let mut proofs = std::collections::BTreeSet::new();
+            for child in &leaves {
+                let anchor = self.delivery(&child.id).and_then(|d| d.anchor.as_deref());
+                let Some(anchor) = anchor else { return Ok::<_, String>(None); };
+                let qa = satisfying_receipt(&self.root, child, &self.repo, &self.inventory.scope.final_release_sha, anchor)?;
+                let Some(qa) = qa else { return Ok(None); };
+                proofs.insert(qa.ledger_artifact_id);
+            }
+            Ok(Some(format!("Release QA of the mapped tree: {}", proofs.into_iter().collect::<Vec<_>>().join(", "))))
+        }).await?;
+        self.parent = Some(ParentReleaseEvidence {
+            task_id: task.id.clone(), generation: task.updated_at.to_rfc3339(),
+            child_versions: children.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect(), review, integration,
+        });
+        Ok(self)
+    }
+}
+
+pub(crate) fn parent_review(root: &Path, id: &str) -> Option<String> {
+    CURRENT.try_with(|c| (c.root == root).then(|| c.parent.as_ref().filter(|p| p.task_id == id).and_then(|p| p.review.clone())).flatten()).ok().flatten()
+}
+
+pub(crate) fn parent_integration(root: &Path, id: &str) -> Option<String> {
+    CURRENT.try_with(|c| (c.root == root).then(|| c.parent.as_ref().filter(|p| p.task_id == id).and_then(|p| p.integration.clone())).flatten()).ok().flatten()
+}
+
+pub(crate) fn parent_authority(root: &Path, id: &str) -> Option<String> {
+    CURRENT.try_with(|c| {
+        (c.root == root && c.parent.as_ref().is_some_and(|p| p.task_id == id)).then(|| {
+            let scope = &c.inventory.scope;
+            cas_store::release_reconcile_store::ReleaseOperationKey {
+                project_id: scope.project_id.clone(), release_id: scope.release_id.clone(), final_release_sha: scope.final_release_sha.clone(),
+            }.id().map(|id| format!("release:{id}"))
+        }).transpose()
+    }).ok().and_then(Result::ok).flatten()
+}
+
+pub(crate) fn revalidate_parent_children(root: &Path, id: &str) -> Result<(), String> {
+    CURRENT.try_with(|c| {
+        if c.root != root { return Ok(()); }
+        c.parent.as_ref().filter(|p| p.task_id == id).map(|p| p.validate_children(root)).unwrap_or(Ok(()))
+    }).unwrap_or(Ok(()))
 }

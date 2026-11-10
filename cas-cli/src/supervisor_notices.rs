@@ -96,10 +96,35 @@ pub(crate) fn enqueue_with_context(
     occurrence: &str,
     context: Option<serde_json::Value>,
 ) -> Result<(), crate::error::CasError> {
+    enqueue_notice(root, recipient, kind, detail, occurrence, None, context)
+}
+
+/// Keep routing identity separate from the operator-facing summary.
+pub(crate) fn enqueue_with_summary(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    occurrence: &str,
+    summary: &str,
+) -> Result<(), crate::error::CasError> {
+    enqueue_notice(root, recipient, kind, detail, occurrence, Some(summary), None)
+}
+
+fn enqueue_notice(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    occurrence: &str,
+    summary: Option<&str>,
+    context: Option<serde_json::Value>,
+) -> Result<(), crate::error::CasError> {
     let sq = open_supervisor_queue_store(root)?;
     let pq = open_prompt_queue_store(root)?;
     let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
     let mut payload = serde_json::json!({ "kind": kind, "detail": detail, "recipient": recipient.name, "factory_session": recipient.session });
+    if let Some(summary) = summary { payload["summary"] = summary.into(); }
     if let Some(context) = context { payload["context"] = context; }
     let payload = payload.to_string();
     let id = match sq.notify_idempotent(
@@ -177,7 +202,7 @@ pub(crate) fn adopt_operator_notices(
         pq.enqueue_idempotent(
             &format!("supervisor-notice:{}", notice.id),
             "operator",
-            &operator_prompt(detail, kind)?,
+            &operator_prompt(detail, payload.get("summary").and_then(|value| value.as_str()).unwrap_or(kind))?,
             Some(session),
             Some(kind),
             Some(NotificationPriority::High),
@@ -299,7 +324,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red"]
+    let valid_kind = ["premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red", "registration_outcome"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

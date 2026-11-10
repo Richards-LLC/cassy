@@ -3282,9 +3282,17 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let primary_head = git(&["rev-parse", "HEAD"]);
     assert!(String::from_utf8_lossy(&original).contains(&format!("build: {primary_head}")));
     cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--task", &task.id]).assert().success();
-    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    // GH #1758: rerunning init resumes a valid ledger, byte for byte.
+    let resumed = cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id, "--covers", "cas-delivery-a,cas-delivery-b", "--json"]).output().unwrap();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    let resumed: serde_json::Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!((resumed["resumed"].clone(), resumed["path"].clone()), (serde_json::json!(true), init["path"].clone()));
     assert_eq!(std::fs::read(path).unwrap(), original);
-    std::fs::write(path, String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" )).unwrap();
+    let invalid = String::from_utf8(original).unwrap().replace("NOT A ROUTE |", "partial |" );
+    std::fs::write(path, &invalid).unwrap();
+    // An existing ledger that does not validate is refused and left untouched.
+    cas_cmd(root).current_dir(root).args(["qa", "ledger", "init", "--task", &task.id]).assert().failure();
+    assert_eq!(std::fs::read_to_string(path).unwrap(), invalid);
     let bad = cas_cmd(root).current_dir(root).args(["qa", "ledger", "check", path.to_str().unwrap(), "--json"]).output().unwrap();
     assert!(!bad.status.success());
     let report: serde_json::Value = serde_json::from_slice(&bad.stdout).expect("one JSON document on failure");
@@ -3314,7 +3322,7 @@ fn qa_ledger_init_check_and_no_overwrite() {
         sourced.id = format!("cas-ledger-source-{suffix}");
         sourced.assignee = Some("ledger-worker".into());
         sourced.deliverables.work_target = Some(target.clone());
-        sourced.deliverables.factory_branch_anchor = Some(primary_head.clone());
+        sourced.deliverables.factory_branch_anchor = succeeds.then(|| primary_head.clone());
         sourced.deliverables.parked_branch = Some(parked.into());
         sourced.deliverables.factory_branch_start = start_branch.map(|branch| cas::types::FactoryBranchStart {
             work_target: target.clone(), assignee: "ledger-worker".into(), branch: branch.into(), base_sha: primary_head.clone(),
@@ -3341,6 +3349,46 @@ fn qa_ledger_init_check_and_no_overwrite() {
     assert_eq!(git(&["rev-parse", "HEAD"]), primary_head, "init leaves primary HEAD untouched");
     let unchanged_source = git(&["rev-parse", &format!("refs/heads/{source}")]);
     assert_eq!(unchanged_source, source_head);
+
+    // GH #1745: a cleaned local branch must not lose the immutable delivery
+    // or borrow the primary checkout, colliding tag, or advanced remote tip.
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "merge", "--no-ff", source, "-m", "land historical delivery"]);
+    let landed_head = git(&["rev-parse", "HEAD"]);
+    git(&["-C", worker.to_str().unwrap(), "checkout", "--detach", &source_head]);
+    git(&["update-ref", &format!("refs/remotes/origin/{source}"), &landed_head]);
+    git(&["update-ref", "-d", &format!("refs/heads/{source}")]);
+    let mut historical = task.clone();
+    historical.id = "cas-ledger-historical".into();
+    historical.status = cas::types::TaskStatus::Closed;
+    historical.deliverables.work_target = Some(target.clone());
+    historical.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target, assignee: "ledger-worker".into(), branch: source.into(), base_sha: primary_head.clone(),
+    });
+    historical.deliverables.factory_branch_anchor = Some(source_head.clone());
+    historical.deliverables.merge_commit = Some(landed_head.clone());
+    let store = cas::store::open_task_store_local(&cas_root).unwrap();
+    store.add(&historical).unwrap();
+    let before = serde_json::to_value(store.get(&historical.id).unwrap()).unwrap();
+    let historical_init = || cas_cmd(root).current_dir(root)
+        .args(["qa", "ledger", "init", "--task", &historical.id, "--json"]).output().unwrap();
+    let output = historical_init();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = std::path::Path::new(init["path"].as_str().unwrap());
+    let evidence = std::fs::read(path).unwrap();
+    let body = std::str::from_utf8(&evidence).unwrap();
+    assert_eq!(body.lines().find_map(|line| line.strip_prefix("build: ")), Some(source_head.as_str()));
+    let resumed = historical_init();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&resumed.stdout).unwrap()["resumed"], true);
+    assert_eq!(std::fs::read(path).unwrap(), evidence);
+    assert_eq!(serde_json::to_value(store.get(&historical.id).unwrap()).unwrap(), before);
+    historical.deliverables.factory_branch_anchor = Some("0".repeat(40));
+    store.update(&historical).unwrap();
+    assert!(!cas_cmd(root).current_dir(root)
+        .args(["qa", "ledger", "init", "--task", &historical.id]).output().unwrap().status.success());
+    assert_eq!(std::fs::read(path).unwrap(), evidence);
+    assert_eq!(git(&["rev-parse", "HEAD"]), landed_head);
 
     #[cfg(unix)]
     {

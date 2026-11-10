@@ -1440,12 +1440,30 @@ impl ProxyEngine {
         dispatch_kind: ProxyDispatchKind,
         server_name: &str,
         tool_name: &str,
-        arguments: Option<serde_json::Map<String, Value>>,
+        mut arguments: Option<serde_json::Map<String, Value>>,
     ) -> Result<rmcp::model::CallToolResult> {
         use rmcp::model::CallToolRequestParams;
 
+        let violet_message = server_name == config::VIOLET_SERVER && tool_name == "violet_post"
+            && arguments.as_ref().is_some_and(|args| args.get("kind").and_then(Value::as_str) == Some("message"));
         self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
+        let violet_request_lookup = server_name == config::VIOLET_SERVER && tool_name == "violet_reconcile_reply"
+            && arguments.as_ref().is_some_and(|args| args.contains_key("request_id"));
+        if violet_message || violet_request_lookup {
+            // Reconnect lists tools again. Consult that live schema before
+            // changing a write or issuing a request-ID lookup, never the old catalog.
+            if !self.servers.read().await.contains_key(server_name) {
+                self.reconnect_if_due(server_name).await;
+            }
+            let supported = self.violet_request_ids_supported().await;
+            if violet_request_lookup && !supported {
+                anyhow::bail!("Violet does not advertise standalone request-ID reconciliation");
+            }
+            if violet_message && supported && let Some(args) = arguments.as_mut() {
+                args.entry("request_id").or_insert_with(|| Value::String(uuid::Uuid::new_v4().to_string()));
+            }
+        }
 
         let interceptor = self.interceptor.read().await.clone();
         let prepared = if let Some(interceptor) = &interceptor {
@@ -1469,6 +1487,13 @@ impl ProxyEngine {
                 },
             )
             .await;
+        let result = if violet_message
+            && let Some(request_id) = arguments.as_ref().and_then(|args| args.get("request_id")).and_then(Value::as_str)
+        {
+            self.reconcile_violet_message(caller, dispatch_kind, request_id, result).await
+        } else {
+            result
+        };
         let mut result = match prepared.failure_context {
             Some(context) => result.with_context(|| context)?,
             None => result?,
@@ -1526,6 +1551,81 @@ impl ProxyEngine {
         }
 
         Ok(result)
+    }
+
+    /// Older hubs expose post.request_id only for managed replies. Standalone
+    /// messages are safe only when the companion lookup accepts that ID alone.
+    async fn violet_request_ids_supported(&self) -> bool {
+        let catalog = self.catalog.read().await;
+        let Some(tools) = catalog.get(config::VIOLET_SERVER) else { return false };
+        let advertises_id = |tool: &Tool| tool.input_schema.get("properties")
+            .and_then(|properties| properties.get("request_id")).is_some_and(Value::is_object);
+        tools.iter().find(|tool| tool.name == "violet_post").is_some_and(|tool| advertises_id(tool))
+            && tools.iter().find(|tool| tool.name == "violet_reconcile_reply").is_some_and(|tool| {
+                advertises_id(tool) && tool.input_schema.get("required").and_then(Value::as_array)
+                    .is_none_or(|required| required.iter().all(|field| field.as_str() == Some("request_id")))
+            })
+    }
+
+    /// A lost response is never permission to repeat a write. Reconcile only
+    /// the locally retained ID, through the same caller and policy boundary.
+    async fn reconcile_violet_message(
+        &self,
+        caller: &ProxyCaller,
+        dispatch_kind: ProxyDispatchKind,
+        request_id: &str,
+        original: Result<rmcp::model::CallToolResult>,
+    ) -> Result<rmcp::model::CallToolResult> {
+        let prior = original.as_ref().ok().and_then(violet_payload);
+        let uncertain = match &original {
+            Ok(_) => prior.as_ref().is_some_and(|body| body.pointer("/error/code").and_then(Value::as_str) == Some("outcome_unknown")),
+            Err(error) => upstream_call_is_reconnectable(error),
+        };
+        if !uncertain {
+            return original;
+        }
+        let lookup = Box::pin(self.call_tool_raw(
+            caller, dispatch_kind, config::VIOLET_SERVER, "violet_reconcile_reply",
+            Some(serde_json::Map::from_iter([("request_id".into(), Value::String(request_id.into()))])),
+        )).await.ok().as_ref().and_then(violet_payload);
+        if let Some(lookup) = lookup
+            && lookup["ok"] == true
+            && lookup["request_id"].as_str().is_some_and(|id| id.eq_ignore_ascii_case(request_id))
+        {
+            let state = lookup["state"].as_str().unwrap_or_default();
+            if matches!(state, "posted" | "not_posted") {
+                if let Some(mut receipt) = lookup.get("receipt").filter(|body| body.is_object()).cloned()
+                    && receipt["ok"] == (state == "posted")
+                    && receipt.get("request_id").is_none_or(|id| id.as_str().is_some_and(|id| id.eq_ignore_ascii_case(request_id)))
+                {
+                    receipt["request_id"] = Value::String(request_id.into());
+                    receipt["state"] = Value::String(state.into());
+                    return Ok(violet_result(receipt));
+                }
+                if state == "not_posted" {
+                    return Ok(violet_result(serde_json::json!({
+                        "ok": false, "state": "not_posted", "request_id": request_id,
+                        "error": {"code": "not_posted", "retryable": false,
+                            "message": "Violet confirmed that this request did not post."},
+                    })));
+                }
+            }
+        }
+        let mut body = prior.unwrap_or_else(|| serde_json::json!({}));
+        body["ok"] = Value::Bool(false);
+        body["state"] = Value::String("outcome_unknown".into());
+        body["request_id"] = Value::String(request_id.into());
+        body["reconcile"] = serde_json::json!({"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}});
+        if !body["error"].is_object() {
+            body["error"] = serde_json::json!({});
+        }
+        body["error"]["code"] = Value::String("outcome_unknown".into());
+        body["error"]["retryable"] = Value::Bool(false);
+        if let Some(error) = body["error"].as_object_mut() {
+            error.entry("message").or_insert_with(|| Value::String(
+                "Violet may have posted; reconcile this request ID before another write.".into()));
+        }
+        Ok(violet_result(body))
     }
 
     async fn authorize(
@@ -1757,7 +1857,14 @@ impl ProxyEngine {
             let Some(record) = health.get_mut(server_name) else {
                 return;
             };
-            record_failure(record, code, now_ms())
+            let visibility = record_failure(record, code, now_ms());
+            // A live Violet transport can close after accepting a message.
+            // Let the next call reconnect immediately so its read-only
+            // reconciliation can run. Failed reconnects retain normal backoff.
+            if server_name == config::VIOLET_SERVER && code == "connection_failed" {
+                record.next_retry_at_ms = Some(now_ms());
+            }
+            visibility
         };
         self.health_epoch.fetch_add(1, Ordering::AcqRel);
         drop(servers);
@@ -1992,6 +2099,27 @@ pub fn upstream_call_is_reconnectable(error: &anyhow::Error) -> bool {
         .filter_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
         .any(|cause| classify_live_failure(cause) == Some("connection_failed"));
     transport || error.chain().any(|cause| cause.to_string().contains(RECONNECTING_UPSTREAM_MARKER))
+}
+
+fn violet_payload(result: &rmcp::model::CallToolResult) -> Option<Value> {
+    if let Some(body) = result.structured_content.as_ref().filter(|body| body.is_object()) {
+        return Some(body.clone());
+    }
+    result.content.iter().find_map(|content| {
+        let rmcp::model::RawContent::Text(text) = &content.raw else { return None };
+        serde_json::from_str::<Value>(&text.text).ok().filter(Value::is_object)
+    })
+}
+
+fn violet_result(body: Value) -> rmcp::model::CallToolResult {
+    let content = vec![rmcp::model::Content::text(body.to_string())];
+    let mut result = if body["ok"] == true {
+        rmcp::model::CallToolResult::success(content)
+    } else {
+        rmcp::model::CallToolResult::error(content)
+    };
+    result.structured_content = Some(body);
+    result
 }
 
 fn classify_live_failure(error: &rmcp::service::ServiceError) -> Option<&'static str> {
@@ -3369,13 +3497,20 @@ mod tests {
     /// `echo` answers, `drop` exits the process mid-call (a transport error)
     /// and `hang` never answers. Every tool call is appended to `calls.log`.
     fn fake_upstream(dir: &Path) -> ServerConfig {
+        fake_upstream_mode(dir, false)
+    }
+
+    fn fake_upstream_mode(dir: &Path, violet: bool) -> ServerConfig {
         let script = dir.join("fake_mcp.py");
         std::fs::write(
             &script,
             r#"import json, os, sys, time
 log = sys.argv[1]
+violet = len(sys.argv) > 2 and sys.argv[2] == "violet"
 with open(os.path.join(os.path.dirname(log), "starts.log"), "a") as handle:
     handle.write("start\n")
+def schema_mode():
+    return open(log + ".schema").read() if os.path.exists(log + ".schema") else "modern"
 def send(message):
     sys.stdout.write(json.dumps(message) + "\n")
     sys.stdout.flush()
@@ -3392,13 +3527,58 @@ for line in sys.stdin:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fake", "version": "1"}}})
     elif method == "tools/list":
-        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}}
-                 for name in ("echo", "drop", "hang")]
+        names = ("violet_read", "violet_post", "violet_reconcile_reply") if violet else ("echo", "drop", "hang")
+        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}} for name in names]
+        if violet:
+            # Both hubs advertise request_id on post; the legacy hub accepts it
+            # only with managed-reply authority. Only the new lookup accepts it alone.
+            tools[1]["inputSchema"]["properties"] = {"kind": {"enum": ["message"]}, "request_id": {"type": "string"}}
+            selector = "request_id" if schema_mode() == "modern" else "coordination_operation_id"
+            tools[2]["inputSchema"].update({"properties": {selector: {"type": "string"}}, "required": [selector]})
         send({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools}})
     elif method == "tools/call":
         name = message["params"]["name"]
         with open(log, "a") as handle:
             handle.write(name + "\n")
+        args = message["params"].get("arguments", {})
+        if violet:
+            request_id = args.get("request_id")
+            with open(log + ".requests", "a") as handle:
+                handle.write(json.dumps({"name": name, "request_id": request_id, "arguments": args}) + "\n")
+            state_path = log + ".state"
+            if name == "violet_read" and args.get("channel") == "close":
+                os._exit(0)
+            if name == "violet_post":
+                mode = args.get("text", "posted")
+                state = mode if mode in ("outcome_unknown", "not_posted") else "posted"
+                with open(state_path, "w") as handle:
+                    json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch"}, handle)
+                if mode == "transport_rollback":
+                    with open(log + ".schema", "w") as handle:
+                        handle.write("legacy")
+                if mode in ("transport", "transport_rollback"):
+                    os._exit(0)
+                body = {"ok": False, "request_id": request_id, "error": {"code": "outcome_unknown", "retryable": False},
+                        "reconcile": {"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}}}
+                if schema_mode() == "legacy":
+                    body = {"ok": mode != "outcome_unknown", "state": state}
+                    if mode == "outcome_unknown":
+                        body["error"] = {"code": "outcome_unknown", "retryable": False}
+                    if "request_id" in args:
+                        body = {"ok": False, "error": {"code": "invalid_params", "retryable": False}}
+            elif name == "violet_reconcile_reply":
+                with open(state_path) as handle:
+                    state = json.load(handle)
+                body = {"ok": state["state"] != "outcome_unknown", **state}
+                if state["state"] == "posted":
+                    body["receipt"] = {"ok": True, **state, "message": {"message_id": "1710000000.000001"}}
+                if state.get("mismatch"):
+                    body["request_id"] = "00000092-2222-4222-8222-000000000092"
+            else:
+                body = {"ok": True}
+            result = {"content": [{"type": "text", "text": json.dumps(body)}], "isError": not body["ok"]}
+            send({"jsonrpc": "2.0", "id": ident, "result": result})
+            continue
         if name == "drop":
             os._exit(0)
         if name == "hang":
@@ -3417,6 +3597,7 @@ for line in sys.stdin:
                 "-I".to_string(),
                 script.display().to_string(),
                 dir.join("calls.log").display().to_string(),
+                if violet { "violet".into() } else { "fake".into() },
             ],
             env: HashMap::new(),
         }
@@ -3435,6 +3616,90 @@ for line in sys.stdin:
 
     async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
         engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    #[tokio::test]
+    async fn violet_transport_close_recovers_on_the_next_call_in_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "violet".into(), fake_upstream_mode(dir.path(), true),
+        )])).await.unwrap();
+        let caller = registered_worker_caller();
+        let dropped = engine.call_tool(&caller, "violet", "violet_read",
+            Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await;
+        assert!(dropped.is_err());
+        let recovered = engine.call_tool(&caller, "violet", "violet_read", None).await.unwrap();
+        let body: Value = serde_json::from_str(recovered["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(std::fs::read_to_string(dir.path().join("starts.log")).unwrap().lines().count(), 2);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn violet_uncertain_message_is_reconciled_by_request_id_without_reposting() {
+        for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
+            ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
+            ("modern", "denied", "outcome_unknown"), ("modern", "mismatch", "outcome_unknown"),
+            ("modern", "transport_rollback", "outcome_unknown"),
+            ("legacy", "posted", "posted"), ("legacy", "outcome_unknown", "outcome_unknown"),
+            ("rollback", "posted", "posted"), ("upgrade", "posted", "posted")] {
+            let dir = tempfile::tempdir().unwrap();
+            let schema_path = dir.path().join("calls.log.schema");
+            std::fs::write(&schema_path, if matches!(schema, "legacy" | "upgrade") { "legacy" } else { "modern" }).unwrap();
+            let engine = ProxyEngine::from_configs(HashMap::from([(
+                "violet".into(), fake_upstream_mode(dir.path(), true),
+            )])).await.unwrap();
+            if mode == "denied" {
+                engine.set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
+                    ExternalToolRoute::new("violet", "violet_post"),
+                ]))).await;
+            }
+            let caller = registered_worker_caller();
+            if matches!(schema, "rollback" | "upgrade") {
+                std::fs::write(&schema_path, if schema == "rollback" { "legacy" } else { "modern" }).unwrap();
+                assert!(engine.call_tool(&caller, "violet", "violet_read",
+                    Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
+            }
+            let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": mode});
+            if mode == "transport" {
+                args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
+            }
+            let result = engine.call_tool(&caller, "violet", "violet_post", args.as_object().cloned()).await.unwrap();
+            let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["state"], expected, "{mode}: {body}");
+            let requests = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap();
+            let calls: Vec<Value> = requests.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call["name"] != "violet_read").collect();
+            if matches!(schema, "legacy" | "rollback") {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0]["name"], "violet_post");
+                assert!(calls[0]["request_id"].is_null());
+                assert_eq!(calls[0]["arguments"], args);
+                assert!(body.get("request_id").is_none());
+                assert!(body.get("reconcile").is_none());
+                assert_eq!(body["ok"], expected == "posted");
+                engine.shutdown().await;
+                continue;
+            }
+            assert_eq!(calls.len(), if matches!(mode, "denied" | "transport_rollback") { 1 } else { 2 }, "{mode}: {calls:?}");
+            assert_eq!(calls[0]["name"], "violet_post");
+            let request_id = calls[0]["request_id"].as_str().unwrap();
+            assert!(uuid::Uuid::parse_str(request_id).is_ok());
+            if !matches!(mode, "denied" | "transport_rollback") {
+                assert_eq!(calls[1]["name"], "violet_reconcile_reply");
+                assert_eq!(calls[1]["request_id"], request_id);
+            } else {
+                let audit = engine.policy_audit();
+                assert_eq!(audit.last().unwrap().tool, "violet_reconcile_reply");
+                assert_eq!(audit.last().unwrap().allowed, mode == "transport_rollback");
+            }
+            assert_eq!(body["request_id"], request_id);
+            if mode == "transport" {
+                assert_eq!(request_id, args["request_id"].as_str().unwrap());
+            }
+            assert_eq!(body["ok"], expected == "posted");
+            engine.shutdown().await;
+        }
     }
 
     /// cas-b3b4a: with a cached catalog a serve spawns no upstream until one

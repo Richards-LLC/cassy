@@ -9,7 +9,7 @@ import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
-import { releaseHeader } from "./progress-view";
+import { releaseHeader, workerTaskLine } from "./progress-view";
 import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
@@ -25,7 +25,7 @@ import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
-import { HistoryPageState, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { HistoryPageState, ConversationHistory, supervisorWorking, waitingQuestion } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
@@ -41,7 +41,7 @@ import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, re
 import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { sentAttachments } from "./sent-attachments";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
-import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
+import { focusConversationAction, applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
 import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
@@ -577,6 +577,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
       project: hubSession?.project_name?.trim() || projectTitle(hubSession?.project_dir),
+      harness: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.harness,
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
       // Older daemons can establish activity but cannot name its phase/time.
@@ -2325,11 +2326,6 @@ function refreshCardStatuses(machineId: string, items: readonly HubSession[]): v
     cardStatusAt.set(key, now);
     void loadStatus(machineId, item.name);
   }
-}
-/** The question a waiting conversation asks, as its ask summarises it. */
-function waitingQuestion(history: ConversationHistory | undefined): string | undefined {
-  const ask = history?.waiting()[0];
-  return ask ? (ask.summary?.trim() || ask.message?.trim() || undefined) : undefined;
 }
 
 async function loadStatus(machineId: string, session: string): Promise<void> {
@@ -4635,6 +4631,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
   const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
   preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#conversation-stage");
+  const priorHeaderMenu = document.querySelector<HTMLElement>("#conversation-more-menu");
+  const keepHeaderMenu = Boolean(typeof priorHeaderMenu?.showPopover === "function" && selectedThreadKey
+    && currentGrid?.dataset.sessionKey === selectedThreadKey && priorHeaderMenu.matches(":popover-open"));
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
@@ -4692,7 +4691,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, model: selectedHubSession?.model, effort: selectedHubSession?.effort, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, harness: selectedHubSession?.harness, model: selectedHubSession?.model, effort: selectedHubSession?.effort, ended: selectedHubSession?.ended, connectionLabel: selectedMachineId ? conversationHeaderLabel(selectedMachineId, selectedSession) : undefined, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -4717,6 +4716,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
     if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
   }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
+  if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
+    document.getElementById("conversation-more")?.click();
+  }
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),
@@ -5028,16 +5030,15 @@ function renderConversationList(): void {
     state.dataset.phase = observedConnection?.phase ?? "unknown";
     state.dataset.degraded = String(observedConnection?.phase === "live" && observedConnection.degraded === true);
     const label = conversationHeaderLabel(selectedMachineId, selectedSession);
-    // The dot separates it from the codename on screen; the status reads just
-    // the state ("Live", not "· Live") (cas-17e3).
+    // The observed state is a pill beside the project title.
     // Journey F42: while the reconnect banner says what happened (in its own
     // live region), the header's one word is not a second announcement of
     // the same outage. It speaks again for the return to Live.
     state.setAttribute("aria-live", bannerStatesConnection(selectedMachineId, selectedSession) ? "off" : "polite");
     if (state.dataset.label !== label) {
       state.dataset.label = label;
-      const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
-      state.replaceChildren(separator, label);
+      state.textContent = label;
+      state.hidden = !label;
     }
   }
   // The state's width changes the room the machine · codename line has.
@@ -5178,6 +5179,10 @@ function syncConversationAttention(count: number): void {
     badge.setAttribute("aria-expanded", String(attentionSheetOpen && count > 0));
     const text = badge.querySelector(".conversation-attention-count");
     if (text && text.textContent !== view.text) text.textContent = view.text;
+    const more = document.querySelector<HTMLButtonElement>("#conversation-more");
+    const moreCount = more?.querySelector<HTMLElement>(".conversation-more-count");
+    if (moreCount) { moreCount.hidden = view.hidden; moreCount.textContent = view.text; }
+    more?.setAttribute("aria-label", view.hidden ? "More conversation actions" : `More conversation actions; ${view.label}`);
   }
   // Nothing left (the last item dismissed in the sheet) closes it with focus
   // back in the conversation; leaving the conversation, or the viewport
@@ -5318,7 +5323,7 @@ function closeContextSheet(): void {
   progressSheetSession = undefined;
   syncConversationContext();
   applyAttentionSheet();
-  document.querySelector<HTMLButtonElement>("#conversation-fleet")?.focus();
+  focusConversationAction(document, "conversation-fleet");
 }
 
 function closeAttentionSheet(): void {
@@ -5327,7 +5332,7 @@ function closeAttentionSheet(): void {
   applyAttentionSheet();
   const badge = document.querySelector<HTMLButtonElement>("#conversation-attention");
   badge?.setAttribute("aria-expanded", "false");
-  if (badge && !badge.hidden) badge.focus(); else landFocus([focusTargets.thread]);
+  if (badge && !badge.hidden) focusConversationAction(document, "conversation-attention"); else landFocus([focusTargets.thread]);
 }
 
 /**
@@ -5469,7 +5474,10 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   if (!machine || !selectedSession) return undefined;
   const rerender = (focus?: string) => { fleetFocusNext = focus; renderStatus(status); };
-  const epics = ((status.epics as any[]) ?? []).map((epic) => String(epic?.id ?? epic)).filter(Boolean);
+  const epics = (status.epics as ReleaseEpic[] | undefined) ?? [];
+  const session = sessions.get(machine.id)?.find(session => session.name === selectedSession);
+  const agents = (status.agents as FleetAgent[] | undefined) ?? [];
+  const supervisors = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
   const currentEpic = typeof status.focused_epic === "string" ? status.focused_epic : (((status.epics as any[]) ?? []).find((epic) => epic?.focused)?.id ?? null);
   const tasks = [...((status.tasks_in_progress as any[]) ?? []), ...((status.tasks_ready as any[]) ?? [])] as FleetTask[];
   return {
@@ -5481,6 +5489,7 @@ function fleetOpsContext(status: Record<string, unknown>): FleetOpsViewContext |
     agents: ((status.agents as any[]) ?? []) as FleetAgent[],
     tasks,
     epics,
+    supervisors,
     currentEpic,
     asked: fleetAskedFor(selectedMachineId, selectedSession),
     relative: (at) => { const label = relativeTimestamp(at); return label === "now" ? "just now" : `${label} ago`; },
@@ -5732,7 +5741,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       const fallback = progressSheetOpen() || !phoneLayout() ? container.querySelector<HTMLElement>('[data-fleet-focus="header:add"]') : document.querySelector<HTMLElement>("#conversation-fleet");
       fallback?.focus(); return;
     }
-    if (phoneLayout() && !progressSheetOpen()) { document.querySelector<HTMLElement>("#conversation-fleet")?.focus(); return; }
+    if (phoneLayout() && !progressSheetOpen()) { focusConversationAction(document, "conversation-fleet"); return; }
     // Its row is gone: the next row's ⋯, else the list itself.
     const at = priorTriggers.indexOf(`${want.slice(0, want.lastIndexOf(":"))}:trigger`);
     if (at < 0) return;
@@ -5864,9 +5873,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
       line.append(open);
     }
-    const work = document.createElement("p"); work.className = "status-activity";
-    if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
-    work.append(document.createTextNode(worker.work)); row.append(work);
+    row.append(workerTaskLine(document, worker));
     const activity = document.createElement("small"); activity.className = "status-last-activity";
     const at = metadata?.latest_activity?.created_at_rfc3339 ? Date.parse(metadata.latest_activity.created_at_rfc3339) : NaN;
     activity.textContent = Number.isFinite(at) ? `Last activity ${new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last activity not reported";
@@ -5980,6 +5987,10 @@ function bindEvents(): void {
     render();
     queueMicrotask(() => returnToConversationRow(opened));
   };
+  const moreMenu = document.querySelector<HTMLElement>("#conversation-more-menu");
+  moreMenu?.addEventListener("click", (event) => {
+    if ((event.target as Element).closest("button") && moreMenu.matches(":popover-open")) moreMenu.hidePopover();
+  }, { capture: true });
   const commands = document.querySelector<HTMLButtonElement>("#conversation-commands");
   if (commands) commands.onclick = () => {
     const input = document.querySelector<HTMLTextAreaElement>("#message-text");

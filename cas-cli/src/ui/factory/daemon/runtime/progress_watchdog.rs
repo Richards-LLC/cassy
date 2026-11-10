@@ -2,9 +2,11 @@
 //! with locally actionable work and no task, lane or message change for 45 minutes wakes
 //! its supervisor once with what is waiting on whom; still nothing after
 //! another 45, it pages the operator once. Heartbeats and liveness never
-//! count, nor do the daemon's own rows (relays, fired reminders).
+//! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
 //! lift, not on anyone here: it is reported once per freeze, never chased.
+//! A current gate-refused close is reported with its code and remedy instead
+//! of starting an operator-page clock, unless the gate explicitly needs the operator.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -25,11 +27,12 @@ static HELD_REPORTED: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 /// Parked deliveries held by a train freeze, by train: when the freeze
 /// started and since when it holds, then the held task ids.
 type FreezeHeld = BTreeMap<String, (i64, String, Vec<String>)>;
+type CloseHeld = BTreeMap<String, crate::mcp::tools::core::task::close_refusal::Refusal>;
 
 /// The session's open work, and a fingerprint of every task, lane and
 /// message change. `None` when a store is unreadable: uncertainty is
 /// neither progress nor a stall.
-fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld)> {
+fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String, Vec<String>, String, FreezeHeld, CloseHeld)> {
     use cas_types::{AgentRole, TaskStatus};
     let agents: Vec<_> = crate::store::open_agent_store(cas_dir).ok()?.list(None).ok()?
         .into_iter().filter(|agent| agent.factory_session.as_deref() == Some(session)).collect();
@@ -45,6 +48,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     }
     tasks.retain(|task| task.assignee.as_ref()
         .is_some_and(|who| agents.iter().any(|agent| &agent.name == who || &agent.id == who)));
+    let mut refusals = CloseHeld::new();
+    for task in &tasks {
+        // An unreadable receipt is uncertainty, never proof of a stall.
+        if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
+            refusals.insert(task.id.clone(), refusal);
+        }
+    }
     // cas-c1fb: historical local assignees do not make a peer's release
     // train actionable here. Only structured ownership and Git proof count.
     let peer_tasks: HashSet<_> = crate::cloud::epic_split::current_epic_splits(cas_dir).ok()?
@@ -54,7 +64,16 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .filter_map(|task| task.effective_epic_branch().map(str::to_string)).collect();
     let mut all_tasks = None;
     let mut freeze_held = FreezeHeld::new();
+    let mut close_held = CloseHeld::new();
     tasks.retain(|task| {
+        // Applies to every close path and status, including finished epics.
+        // Only explicit machine metadata can make a gate an operator action.
+        if let Some(refusal) = refusals.get(&task.id)
+            && !refusal.operator_action_required
+        {
+            close_held.insert(task.id.clone(), refusal.clone());
+            return false;
+        }
         // cas-e239: a blocked operator check is not locally actionable.
         // Inspect only the current blocker, never historical operator waits.
         if task.status == TaskStatus::Blocked {
@@ -107,10 +126,24 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
         .map(|task| format!("{} {} {}", task.id, task.status, task.updated_at.to_rfc3339())).collect();
     let waiting = tasks.iter().map(|task| {
         let title: String = task.title.chars().take(70).collect();
-        format!("- {} {} ({}): {title}", task.id, task.status, task.assignee.as_deref().unwrap_or_default())
+        let gate = refusals.get(&task.id).map(|refusal| format!(
+            "\n  operator action required; code={}; next_action={}",
+            refusal.code, refusal.next_action,
+        )).unwrap_or_default();
+        format!("- {} {} ({}): {title}{gate}", task.id, task.status, task.assignee.as_deref().unwrap_or_default())
     }).collect();
     let latest = crate::store::open_prompt_queue_store(cas_dir).ok()?.latest_agent_message_id(&names, session).ok()?;
     fingerprint.push(format!("message {}", latest.unwrap_or(0)));
+    // Long non-Rust gates can advance only their child logs. Reuse status's
+    // worker/session/PID fences; unchanged counters never reset the episode.
+    for agent in agents.iter().filter(|agent| agent.role == AgentRole::Worker
+        && tasks.iter().any(|task| task.status == TaskStatus::InProgress
+            && task.assignee.as_ref().is_some_and(|who| who == &agent.id || who == &agent.name)))
+    {
+        if let Some(at) = crate::mcp::tools::service::worker_liveness::child_progress(agent, now) {
+            fingerprint.push(format!("child {} {}", agent.id, at.to_rfc3339()));
+        }
+    }
     // Worker lane tips; a repo git cannot read contributes nothing.
     // cas-e239: a release commit pushed to a train is progress too.
     let mut lanes: Vec<String> = agents.iter().filter(|agent| agent.role == AgentRole::Worker)
@@ -123,7 +156,20 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     {
         fingerprint.push(String::from_utf8_lossy(&output.stdout).into_owned());
     }
-    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held))
+    Some((fingerprint.join("\n"), waiting, supervisor, freeze_held, close_held))
+}
+
+fn report_close_held(cas_dir: &Path, held: CloseHeld) {
+    for (id, refusal) in held {
+        let key = format!("close-gate-held:{id}:{}", crate::mcp::tools::core::task::close_refusal::key(&refusal));
+        super::lifecycle::enqueue_worker_attention_relay_detail_with_key(
+            cas_dir, "progress_close_refused", "supervisor", Some(&id), None,
+            |prefix| format!(
+                "Close is held by a Cassy gate: {id}; code={}; next_action={}.\nResolve the recorded refusal, then retry `{prefix}task action=close id={id}`. The watchdog will not page the operator for this held close.",
+                refusal.code, refusal.next_action,
+            ), &key, Some(&key),
+        );
+    }
 }
 
 /// Tell the supervisor once per freeze which deliveries it holds and who
@@ -176,8 +222,9 @@ fn delivery_is_contained(repo: &Path, task: &cas_types::Task, target: &str) -> b
 
 /// One watchdog sample for `session` at `now`.
 pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
-    let Some((fingerprint, waiting, supervisor, freeze_held)) = observe(cas_dir, session, now) else { return };
+    let Some((fingerprint, waiting, supervisor, freeze_held, close_held)) = observe(cas_dir, session, now) else { return };
     report_freeze_held(cas_dir, freeze_held);
+    report_close_held(cas_dir, close_held);
     let mut episodes = EPISODES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let episodes = episodes.get_or_insert_with(HashMap::new);
     // A project hold is the operator's own stop, not a stall.
@@ -406,6 +453,128 @@ mod tests {
         }
         assert_eq!(queue.peek_all(100).unwrap().iter()
             .filter(|row| row.target == "operator" && row.prompt.contains("cas-c1fb-peer-handoff")).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn plain_close_parameter_error_does_not_hold_stall_escalation_cas_098dd() {
+        const SESSION: &str = "bad-close-parameter-098dd";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let mut supervisor = Agent::new_with_role("supervisor-bad-close".into(), "supervisor".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let mut task = Task::new("cas-098dd-parameter".into(), "Unfinished work".into());
+        task.assignee = Some(supervisor.name.clone());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        let error = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id":task.id, "reason":"--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---"
+            })).unwrap()
+        )).await.unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(crate::store::open_task_store_local(&root).unwrap()
+            .get_execution_state(&task.id).unwrap().is_none_or(|state| state.get("close_refusal").is_none()));
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn gate_refused_close_is_reported_without_a_stall_page_cas_098dd() {
+        const SESSION: &str = "gate-refused-098dd";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let repo = env.home().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let mut supervisor = Agent::new_with_role("supervisor-098dd".into(), "supervisor".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut epic = Task::new("cas-098dd-epic".into(), "Finished delivery awaiting close".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        // The live refused-close incident left the finished epic Blocked.
+        epic.status = TaskStatus::Blocked;
+        epic.assignee = Some(supervisor.name.clone());
+        epic.deliverables.phase_outcome = Some(serde_json::json!({
+            "target": {"completed": {"min": 1}}, "evidence": null
+        }));
+        tasks.add(&epic).unwrap();
+        let mut child = Task::new("cas-098dd-child".into(), "Delivered child".into());
+        child.status = TaskStatus::Closed;
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(child.id, epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        let refused = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(serde_json::json!({"id":epic.id,"reason":"Delivered work is ready"})).unwrap()
+        )).await.unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        assert_eq!(refused.structured_content.as_ref().unwrap()["code"], "phase_outcome_gate");
+        assert_eq!(tasks.get_execution_state(&epic.id).unwrap().unwrap()["close_refusal"]["code"], "phase_outcome_gate");
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 0, "{rows:?}");
+        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("phase_outcome_gate")).collect();
+        assert_eq!(notices.len(), 1, "{rows:?}");
+        assert!(notices[0].prompt.contains("provide_outcome_receipt"));
+
+        // Timeline notes do not resolve the gate or start an escalation clock.
+        epic.notes.push_str("\nMore diagnostic evidence");
+        tasks.update(&epic).unwrap();
+        super::sweep(&root, SESSION, now + chrono::Duration::minutes(180));
+        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 0);
+        // A changed close input makes the old refusal stale; ordinary stalls
+        // must still page, without requiring a process restart.
+        epic.deliverables.phase_outcome = None;
+        tasks.update(&epic).unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert!(tasks.get_execution_state(&epic.id).unwrap()
+            .is_none_or(|state| state.get("close_refusal").is_none()));
+        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 1);
+
+        // Another real close gate used to be omitted by the identity-only
+        // recorder. Its untyped response must be held too, while a specific
+        // identity still wins when supplied by the gate.
+        epic.status = TaskStatus::Closed;
+        tasks.update(&epic).unwrap();
+        let mut post_release = Task::new("cas-098dd-post-release".into(), "Post-release observation pending".into());
+        post_release.task_type = cas_types::TaskType::Epic;
+        post_release.status = TaskStatus::Blocked;
+        post_release.assignee = epic.assignee.clone();
+        tasks.add(&post_release).unwrap();
+        std::fs::write(root.join("config.toml"), "[qa.post_release]\ncommand = 'probe'\n").unwrap();
+        let refused = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(serde_json::json!({"id":post_release.id,"reason":"Delivered work is ready"})).unwrap()
+        )).await.unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        for (metadata, code) in [(None, "close_gate"), (refused.structured_content.clone(), "post_release_gate")] {
+            let mut reply = refused.clone();
+            reply.structured_content = metadata;
+            crate::mcp::tools::core::task::close_refusal::record(&root, &post_release.id, &Ok(reply)).unwrap();
+            for minutes in [300, 345, 390, 435] {
+                super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+            }
+            let rows = queue.peek_all(50).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.target == "operator" && row.prompt.contains(&post_release.id)).count(), 0, "{rows:?}");
+            assert_eq!(tasks.get_execution_state(&post_release.id).unwrap().unwrap()["close_refusal"]["code"], code);
+            assert_eq!(rows.iter().filter(|row| row.prompt.contains(code) && row.prompt.contains(&post_release.id)).count(), 1, "{rows:?}");
+        }
     }
 
     /// cas-1f65: the Nov 9 overnight. A train frozen for release (lift is

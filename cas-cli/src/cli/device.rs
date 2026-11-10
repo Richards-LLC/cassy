@@ -93,7 +93,7 @@ fn api_post(
 ) -> Result<ureq::Response, ureq::Error> {
     let url = format!("{}{}", config.endpoint, path);
     let token = config.token.as_deref().unwrap_or("");
-    ureq::post(&url)
+    crate::cloud::mutation_request("POST", &url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -107,7 +107,7 @@ fn api_patch(
 ) -> Result<ureq::Response, ureq::Error> {
     let url = format!("{}{}", config.endpoint, path);
     let token = config.token.as_deref().unwrap_or("");
-    ureq::patch(&url)
+    crate::cloud::mutation_request("PATCH", &url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("Content-Type", "application/json")
         .send_json(body)
@@ -117,7 +117,7 @@ fn api_patch(
 fn api_delete(config: &CloudConfig, path: &str) -> Result<ureq::Response, ureq::Error> {
     let url = format!("{}{}", config.endpoint, path);
     let token = config.token.as_deref().unwrap_or("");
-    ureq::delete(&url)
+    crate::cloud::mutation_request("DELETE", &url)
         .set("Authorization", &format!("Bearer {token}"))
         .call()
 }

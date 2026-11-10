@@ -2088,6 +2088,8 @@ pub(crate) fn recycle_resume_brief(
         "Your context was reset; your worktree and every task binding were kept.\n"
             .to_string();
     brief.push_str(&crate::finding_triage::focus_brief(cas_dir));
+    let config = crate::config::Config::load(cas_dir).unwrap_or_default();
+    let artifacts = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
     for task in held
         .iter()
@@ -2100,6 +2102,11 @@ pub(crate) fn recycle_resume_brief(
             task.id,
             task.id
         ));
+        if let Some(handoff) = crate::config::factory_task_artifact_dirs(cas_dir, &artifacts, &task.id)
+            .into_iter().map(|directory| directory.join("HANDOFF.md")).find(|path| path.is_file())
+        {
+            brief.push_str(&format!("  Read the saved checkpoint before continuing: {}\n", handoff.display()));
+        }
     }
     let parked: Vec<String> = held
         .iter()
@@ -5504,8 +5511,8 @@ mod spawn_base_tests {
     }
 
     /// Cassy #413: WorkTarget spawns must use the freshly fetched remote tip
-    /// even when the matching local branch exists but is stale. This is the
-    /// regression shape that otherwise starts a worker before the bug exists.
+    /// even when both local and cached tracking refs are stale. cas-307e:
+    /// narrowing origin's fetch mapping to main must not strand staging at A.
     #[test]
     fn work_target_checkout_uses_fetched_origin_tip_when_local_branch_is_stale_cas_7a87() {
         let tmp = TempDir::new().unwrap();
@@ -5517,8 +5524,6 @@ mod spawn_base_tests {
             .current_dir(&origin)
             .output()
             .unwrap();
-        commit_file(&origin, "regression.txt", "only on staging");
-        let remote_sha = short_sha(&origin, "staging");
         Command::new("git")
             .args(["checkout", "-q", "main"])
             .current_dir(&origin)
@@ -5541,6 +5546,14 @@ mod spawn_base_tests {
             .output()
             .unwrap();
         let local_sha = short_sha(&repo, "staging");
+        assert_eq!(short_sha(&repo, "origin/staging"), local_sha);
+        assert!(Command::new("git")
+            .args(["config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main"])
+            .current_dir(&repo).status().unwrap().success());
+        assert!(Command::new("git").args(["checkout", "-q", "staging"])
+            .current_dir(&origin).status().unwrap().success());
+        commit_file(&origin, "regression.txt", "only on staging");
+        let remote_sha = short_sha(&origin, "staging");
         assert_ne!(
             local_sha, remote_sha,
             "fixture must have a stale local staging ref"
@@ -5552,6 +5565,9 @@ mod spawn_base_tests {
         };
         let (base_ref, notice, checkout_ref) =
             checkout_ref_for_spawn_base(&repo, "staging", &source).unwrap();
+        assert_eq!(short_sha(&repo, "FETCH_HEAD"), remote_sha);
+        assert_eq!(short_sha(&repo, "origin/staging"), remote_sha,
+            "a successful spawn fetch must refresh the branch outside the configured fetch mapping");
         let base_ref = base_ref.expect("WorkTarget must check out an immutable fetched tip");
         assert_eq!(checkout_ref, "origin/staging");
         assert_eq!(short_sha(&repo, &base_ref), remote_sha);

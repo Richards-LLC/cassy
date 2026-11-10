@@ -7,6 +7,7 @@ import { appendEmojiText } from "./emoji-text";
  */
 import { createCodeFrame } from "./code-frame";
 import { imagePlaceholder, imageReference } from "./reply-images";
+import { URL_PATTERN } from "./terminal-links";
 
 interface ListMarker {
   indent: number;
@@ -111,6 +112,36 @@ function normalizePlainText(source: string): string {
   return `# ${lead}${source.slice(lead.length)}`;
 }
 
+const BARE_URL = new RegExp(URL_PATTERN.source, "y");
+
+/** Only https URLs become anchors; every other scheme stays literal. */
+function isSafeLinkUrl(url: string): boolean {
+  return /^https:\/\//i.test(url) && !/[\s<>]/.test(url);
+}
+
+function linkElement(document: Document, url: string): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.className = "markdown-link";
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener";
+  return link;
+}
+
+/** A bare URL at `index`, without trailing sentence punctuation or an unbalanced ')'. */
+function bareUrlAt(source: string, index: number): string | undefined {
+  if (index > 0 && /[\w/]/.test(source[index - 1]!)) return undefined;
+  BARE_URL.lastIndex = index;
+  let url = BARE_URL.exec(source)?.[0];
+  while (url) {
+    const trimmed = url.replace(/[.,;:!?*]+$/, "");
+    if (trimmed !== url) { url = trimmed; continue; }
+    if (url.endsWith(")") && url.split(")").length > url.split("(").length) { url = url.slice(0, -1); continue; }
+    break;
+  }
+  return url && isSafeLinkUrl(url) && url.length > "https://".length ? url : undefined;
+}
+
 export function appendInline(document: Document, parent: HTMLElement, source: string): void {
   let index = 0;
   let plainStart = 0;
@@ -157,12 +188,8 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
         const label = source.slice(index + 1, labelEnd);
         const url = source.slice(labelEnd + 2, urlEnd);
         flush(index);
-        if (/^https:\/\//i.test(url) && !/[\s<>]/.test(url)) {
-          const link = document.createElement("a");
-          link.className = "markdown-link";
-          link.href = url;
-          link.target = "_blank";
-          link.rel = "noopener";
+        if (isSafeLinkUrl(url)) {
+          const link = linkElement(document, url);
           nested(link, label);
           parent.append(link);
         } else {
@@ -174,6 +201,17 @@ export function appendInline(document: Document, parent: HTMLElement, source: st
         plainStart = index;
         continue;
       }
+    }
+
+    const bare = source[index] === "h" ? bareUrlAt(source, index) : undefined;
+    if (bare) {
+      flush(index);
+      const link = linkElement(document, bare);
+      link.textContent = bare;
+      parent.append(link);
+      index += bare.length;
+      plainStart = index;
+      continue;
     }
 
     const strong = source.startsWith("**", index);
@@ -231,7 +269,7 @@ function inlinePlainText(source: string): string {
       if (labelEnd > index + 1 && urlEnd > labelEnd + 2) {
         const label = source.slice(index + 1, labelEnd);
         const url = source.slice(labelEnd + 2, urlEnd);
-        if (/^https:\/\//i.test(url) && !/[\s<>]/.test(url)) {
+        if (isSafeLinkUrl(url)) {
           output += inlinePlainText(label); index = urlEnd + 1; continue;
         }
         output += source.slice(index, urlEnd + 1); index = urlEnd + 1; continue;

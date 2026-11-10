@@ -30,6 +30,15 @@ const HUB_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const _: () = assert!(HUB_STARTUP_LOCK_TIMEOUT.as_nanos() < HUB_LAUNCH_TIMEOUT.as_nanos());
 const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
 const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const OPERATOR_STOP_FILE: &str = "operator-stopped";
+
+fn clear_operator_stop(paths: &HubRuntimePaths) -> Result<()> {
+    match std::fs::remove_file(paths.root().join(OPERATOR_STOP_FILE)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("clear explicit hub stop"),
+    }
+}
 
 fn hub_launch_timeout(tailscale_serve: bool) -> Duration {
     if tailscale_serve {
@@ -77,6 +86,7 @@ fn factory_worker_session() -> Option<String> {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(max_term_width = 80)]
 pub struct HubArgs {
     /// Publish through tailnet-only Tailscale Serve HTTPS (on by default)
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]
@@ -1260,9 +1270,14 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop(stop_args) => stop(cli, stop_args.force),
         HubCommands::Restart(serve) => {
+            validate_control_bind(
+                SocketAddr::new(serve.bind, serve.port),
+                TransportSecurity::Plaintext,
+            )?;
             let paths = HubRuntimePaths::default_for_user()?;
             let (tailscale_serve, tailscale_port) =
                 resolve_lifecycle_tailscale_request(requested, args.tailscale_serve_port, &paths)?;
+            clear_operator_stop(&paths)?;
             if super::hub_service::restart_supervised(cli, tailscale_serve, tailscale_port)? {
                 return status(cli);
             }
@@ -1334,12 +1349,17 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
                 }
             }
         }
-        HubCommands::Service(service) => super::hub_service::manage_service(
-            &service.command,
-            cli,
-            requested,
-            args.tailscale_serve_port,
-        ),
+        HubCommands::Service(service) => {
+            if matches!(&service.command, HubServiceCommands::Install(install) if !install.dry_run) {
+                clear_operator_stop(&HubRuntimePaths::default_for_user()?)?;
+            }
+            super::hub_service::manage_service(
+                &service.command,
+                cli,
+                requested,
+                args.tailscale_serve_port,
+            )
+        }
         HubCommands::Pair(pair) => pair_device(&pair, cli),
         HubCommands::Preview(preview) => super::hub_preview::preview(&preview, cli),
         HubCommands::Authorize(authorize) => super::hub_reverse_pairing::authorize(&authorize, cli),
@@ -1398,8 +1418,9 @@ fn reap_factory_daemon(_args: &HubReapDaemonArgs) -> Result<()> {
 }
 
 fn start(args: &HubServeArgs, cli: &Cli, tailscale_serve: bool, tailscale_port: u16) -> Result<()> {
+    validate_control_bind(SocketAddr::new(args.bind, args.port), TransportSecurity::Plaintext)?;
+    clear_operator_stop(&HubRuntimePaths::default_for_user()?)?;
     if super::hub_service::installed_service_exists()? {
-        validate_control_bind(SocketAddr::new(args.bind, args.port), TransportSecurity::Plaintext)?;
         let paths = HubRuntimePaths::default_for_user()?;
         let (enabled, port) = resolve_lifecycle_tailscale_request(tailscale_serve, tailscale_port, &paths)?;
         let record = paths.read_process_record().ok();
@@ -3277,6 +3298,12 @@ fn lock_holder_json(holder: &HubLockHolder) -> serde_json::Value {
 }
 
 fn stop(cli: &Cli, force: bool) -> Result<()> {
+    let paths = HubRuntimePaths::default_for_user()?;
+    crate::hub::ensure_private_dir(paths.root())?;
+    // Record intent before stopping: even a failed stop must not authorize
+    // update (including install-on-publish) to relaunch the hub later.
+    std::fs::write(paths.root().join(OPERATOR_STOP_FILE), chrono::Utc::now().to_rfc3339())
+        .context("record explicit hub stop")?;
     let deadline = super::hub_service::stop_deadline();
     super::hub_service::stop_supervised(deadline)?;
     // No relaunch intent: a live hub can never mean success here, so this
@@ -3720,6 +3747,16 @@ pub(crate) fn restart_stale_hub(
         .context("cannot refresh hub service; run `cas hub service install` before retrying `cas update`")?
         || pin_advanced;
     let paths = HubRuntimePaths::default_for_user()?;
+    if paths.root().join(OPERATOR_STOP_FILE).try_exists()? {
+        if !cli.json {
+            println!("cas update: hub stopped by operator; leaving stopped (resume with `cas hub start`)");
+        }
+        return Ok(HubRestartOutcome {
+            prior_state: "operator_stopped".to_owned(),
+            action: "skipped".to_owned(),
+            ..Default::default()
+        });
+    }
     let record = paths.read_process_record().ok();
     let holder = paths.lock_holders().into_iter().next();
     let receipt = TailscaleServeManager::new(paths.root())

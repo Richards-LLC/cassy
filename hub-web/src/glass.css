@@ -472,6 +472,14 @@ html[data-scheme="dark"] {
      only while fields scroll on beneath it (main.ts marks .fields-beneath),
      so nothing ever shows through it. */
   :root #pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath) { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  /* cas-6c0d: New session's and the Operator inbox's bars follow the same
+     rule without script. Their scroller's timeline frosts the bar only while
+     fields remain beneath it; at the end, or with nothing to scroll (no active
+     timeline), the bar is the sheet with its hairline. */
+  @supports (animation-timeline: scroll()) {
+    :root :is(.launch-sheet, #operator-inbox-dialog) .dialog-actions { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; animation: dialog-bar-frost linear; animation-timeline: scroll(nearest block); animation-range: 0 calc(100% - 2px); }
+  }
+  @keyframes dialog-bar-frost { from, to { background: var(--look-glass-bar); -webkit-backdrop-filter: var(--look-blur); backdrop-filter: var(--look-blur); } }
   /* cas-a56c: a status line straight above the bar already draws the rule; a
      second hairline after a gap read as an empty bordered row. */
   :root #pair-dialog > :is(.pair-flow, #pair-form) > .pair-status:not([hidden]) + .dialog-actions:not(.fields-beneath) { margin-top: 0; border-top: 0; }
@@ -480,7 +488,7 @@ html[data-scheme="dark"] {
 
   /* Paired machines: the installations link and Remove sit apart, and Remove
      reads as the destructive action it is (cas-205e). */
-  :root .paired-machine-installations { margin-inline-end: var(--space-2); }
+  :root .paired-machine .paired-machine-installations { margin-inline-end: var(--space-2); background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
   :root .paired-machine .paired-machine-remove { color: var(--crit-bg); background: var(--look-glass-strong); border: 1.5px solid var(--crit-bg); border-radius: var(--radius-pill); }
 
   /* A confirmation such as "Details copied" is a solid card that appears at
@@ -566,6 +574,9 @@ html[data-scheme="dark"] {
 :root .provider-avatar--lane { width: var(--avatar-lane-size); height: var(--avatar-lane-size); }
 :root .provider-avatar--lane .provider-mark { width: var(--avatar-lane-mark); height: var(--avatar-lane-mark); }
 :root .provider-avatar .supervisor-state { right: -1px; bottom: -1px; width: var(--status-dot); height: var(--status-dot); }
+/* cas-36cb: the empty conversation's disc wears the session's mark, as the header does, scaled to the disc. */
+:root .thread .empty .mono.harness-mark { background: var(--bg-panel); color: var(--ink); border: var(--line-width) solid var(--line-subtle); box-sizing: border-box; }
+:root .thread .empty .mono .provider-mark { width: calc(var(--avatar-mark) * 76 / 42); height: calc(var(--avatar-mark) * 76 / 42); }
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root .conversation-identity .provider-avatar { width: 36px; height: 36px; }
 }
@@ -580,14 +591,8 @@ html[data-scheme="dark"] {
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   :root .conversation-identity .conversation-host > .conversation-model { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; margin: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 }
-/* Conversation header on one row (operator, 2026-10-29): identity left, actions right.
-   Line 2 (model, machine, session) is one typeface. */
+/* Header metadata shares the UI typeface. */
 :root .conversation-identity .conversation-host { font-family: var(--font-ui); }
-@media not ((max-width: 53rem) or ((max-height: 30rem) and (pointer: coarse))) {
-  :root .conversation-heading { flex-direction: row-reverse; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3) var(--space-4); }
-  /* Too narrow for both (the rail open on a small desktop): the actions keep their row above. */
-  :root .conversation-heading > .conversation-identity { flex: 1 1 20rem; min-width: 0; }
-  :root .conversation-heading > .conversation-topline { flex: none; }
-}
+
 /* Machine chip runtime: a version number is mono; "Version unknown" is evidence in UI type. */
 :root .project-machine-chip .machine-version-installed.unknown { font-family: var(--font-ui); font-variant-numeric: normal; }

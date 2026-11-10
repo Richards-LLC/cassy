@@ -293,6 +293,7 @@ impl KnowledgeEmbedder {
         // overall deadline), which made callers report every semantic
         // request as a timeout even when the endpoint itself was healthy.
         let agent = ureq::AgentBuilder::new()
+            .middleware(super::coordinator::TraceCloudMutation)
             .timeout_connect(self.timeout)
             .timeout(self.timeout)
             .build();

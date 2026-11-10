@@ -669,6 +669,10 @@ def file_receipt(envelope: dict[str, Any]) -> tuple[str, str, str | None]:
     message_id, message_permalink = message_receipt(envelope, "PDF")
     file_block = envelope.get("file")
     if not isinstance(file_block, dict):
+        files = envelope.get("files")
+        if isinstance(files, list) and len(files) == 1:
+            file_block = files[0]
+    if not isinstance(file_block, dict):
         fail("PDF post returned no file id")
     file_id = file_block.get("file_id") or file_block.get("id")
     file_permalink = file_block.get("permalink") or file_block.get("url") or message_permalink
@@ -887,12 +891,12 @@ def main(argv: list[str]) -> int:
                 "channel": channel,
                 "kind": "file",
                 "reply_to": user_thread,
-                "file": {
+                "files": [{
                     "filename": pdf_path.name,
                     "title": f"Cassy {tag} release report",
                     "content": base64.b64encode(pdf_bytes).decode("ascii"),
                     "content_encoding": "base64",
-                },
+                }],
             },
         )
         pdf_message_id, pdf_message_permalink = message_receipt(pdf_envelope, "PDF")

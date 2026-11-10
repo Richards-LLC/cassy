@@ -1547,6 +1547,97 @@ async fn test_factory_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
+/// Staffing receipts warn about published release history without refusing work.
+#[tokio::test]
+async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    std::fs::write(env.cas_root.join("config.toml"), "[project]\ncanonical_id = \"cas-a3c3-fixture\"\n").unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let worker = "release-gap-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    let repo = env.cas_root.parent().unwrap();
+    let epic_tip = git_stdout(repo, &["rev-parse", "epic/requested"]);
+    add_epic_with_id(&env, "cas-release-gap", TaskStatus::Open, "epic/requested");
+    let mut epic = env.task_store().get("cas-release-gap").unwrap();
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "epic/requested".into(),
+    });
+    env.task_store().update(&epic).unwrap();
+    env.register_worker_with_metadata(worker, HashMap::from([
+        ("clone_path".into(), worker_path.display().to_string()),
+    ]));
+    std::fs::write(repo.join("release.txt"), "published release\n").unwrap();
+    git_stdout(repo, &["add", "release.txt"]);
+    git_stdout(repo, &["commit", "-qm", "published release"]);
+    git_stdout(repo, &["tag", "v1.2.3"]);
+    // A tag alone is not publication evidence.
+    git_stdout(repo, &["tag", "v99.0.0"]);
+    let mut published = cas_store::NewQualityEvent::new(
+        "release|1.2.3",
+        cas_store::QualityPayload::Release {
+            commit_to_main_minutes: None, main_to_published_minutes: None,
+            ejections: 0, rescues: 0,
+        },
+    );
+    published.release_version = Some("v1.2.3".into());
+    cas_store::record_quality_event(&env.cas_root, &published).unwrap();
+    let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
+    let merged_tree = git_stdout(repo, &["merge-tree", "--write-tree", "--no-messages", "main", &epic_tip]);
+    let synced_origin = git_stdout(repo, &["commit-tree", &merged_tree, "-p", "main", "-p", &epic_tip, "-m", "origin synced with release"]);
+    for (behind, pinned, refs) in [
+        (true, false, "local"), (false, false, "local"), (true, true, "local"),
+        (true, false, "remote-only"), (false, false, "remote-only"),
+        (false, false, "remote-newer"),
+    ] {
+        git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind || refs == "remote-newer" { &epic_tip } else { "main" }]);
+        if refs != "local" {
+            git_stdout(repo, &["update-ref", "refs/remotes/origin/epic/requested", if refs == "remote-newer" { &synced_origin } else if behind { &epic_tip } else { "main" }]);
+        }
+        if refs == "remote-only" {
+            git_stdout(repo, &["update-ref", "-d", "refs/heads/epic/requested"]);
+        }
+        let pin = |id: &str| {
+            if pinned {
+                let mut task = env.task_store().get(id).unwrap();
+                task.deliverables.work_target = Some(WorkTarget {
+                    repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "main".into(),
+                });
+                task.deliverables.work_target_pinned = true;
+                env.task_store().update(&task).unwrap();
+            }
+        };
+        let task_id = child_task_of_epic(&env, "cas-release-gap", "Staff published base");
+        pin(&task_id);
+        let assignment = assign(&env, &task_id, worker).await.unwrap();
+        assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
+        let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
+        pin(&spawn_task);
+        let mut req = factory_req("spawn_workers");
+        req.cli = Some("grok".into());
+        req.isolate = Some(true);
+        req.task_id = Some(spawn_task);
+        let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned} refs={refs}"),
+            "task_type":"task", "risk":"none", "confirm_warning":true,
+            "epic":"cas-release-gap", "assignee":worker,
+            "target_branch":pinned.then_some("main"),
+        })).unwrap();
+        let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
+        for response in [assignment, spawn, created] {
+            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "behind={behind} pinned={pinned} refs={refs}: {response}");
+            if behind && !pinned {
+                assert!(response.contains("tag=v1.2.3"), "{response}");
+                assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
+            }
+        }
+        let queued = env.spawn_queue().peek(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        env.spawn_queue().mark_processed(queued[0].id).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn spawn_workers_refuses_diverged_base_before_enqueue_cas_52b7() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
@@ -12375,8 +12466,13 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
     held.assignee = Some(worker.into());
     held.status = TaskStatus::Blocked;
     store.add(&held).unwrap();
-    let mut started_on = Vec::new();
+    let mut started_on: Vec<(String, String)> = Vec::new();
     for id in ["cas-bbbb", "cas-cccc"] {
+        // cas-ce0d / GH #1677: the supervisor preserves the held delivery
+        // and hands the successor a clean detached target checkout.
+        if id == "cas-cccc" {
+            git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
+        }
         let mut task = Task::new(id.into(), format!("independent hotfix {id}"));
         task.assignee = Some(worker.into());
         task.deliverables.work_target = Some(WorkTarget {
@@ -12384,6 +12480,30 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
             target_branch: "main".into(),
         });
         store.add(&task).unwrap();
+        if id == "cas-cccc" {
+            // Off-target detached work and tracked edits must refuse before
+            // acquiring a lease, changing refs or accepting the successor.
+            for dirty in [false, true] {
+                if !dirty {
+                    git_stdout(&worker_path, &["checkout", "--detach", &started_on.first().unwrap().0]);
+                } else {
+                    git_stdout(&worker_path, &["checkout", "--detach", &target_tip]);
+                    std::fs::write(worker_path.join("README"), "held tracked edit\n").unwrap();
+                }
+                let refs = git_stdout(&worker_path, &["show-ref"]);
+                let head = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+                let status = git_stdout(&worker_path, &["status", "--porcelain"]);
+                let refused = env.service.task(Parameters(start(id))).await
+                    .expect_err("unsafe detached checkout must refuse before accepting start");
+                assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+                assert_eq!(store.get(id).unwrap().status, TaskStatus::Open);
+                assert!(env.agent_store().get_lease(id).unwrap().is_none());
+                assert_eq!(git_stdout(&worker_path, &["show-ref"]), refs);
+                assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), head);
+                assert_eq!(git_stdout(&worker_path, &["status", "--porcelain"]), status);
+            }
+            git_stdout(&worker_path, &["restore", "README"]);
+        }
         let started = get_text(
             &env.service
                 .task(Parameters(start(id)))
@@ -12399,25 +12519,35 @@ async fn test_fresh_start_cuts_its_own_branch_beside_an_occupied_lane_cas_dd0e()
         }
         assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), own);
         assert_eq!(git_stdout(&worker_path, &["rev-parse", "HEAD"]), target_tip);
+        assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
         assert_eq!(
             store.get(id).unwrap().deliverables.factory_branch_start.map(|start| start.branch),
             Some(own.clone())
         );
+        if id == "cas-cccc" {
+            git_stdout(&worker_path, &["checkout", "--detach", "HEAD"]);
+            let refused = env.service.task(Parameters(start(id))).await
+                .expect_err("a detached resume must name its existing task branch");
+            assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert_eq!(store.get(id).unwrap().status, TaskStatus::InProgress);
+            assert_eq!(git_stdout(&worker_path, &["branch", "--show-current"]), "");
+            git_stdout(&worker_path, &["checkout", &own]);
+        }
         // This hotfix's PR is pushed and parked; the next one must not wait.
         std::fs::write(worker_path.join(format!("{id}.txt")), "hotfix\n").unwrap();
         git_stdout(&worker_path, &["add", "."]);
         git_stdout(&worker_path, &["commit", "-m", &format!("fix({id}): hotfix")]);
         let mut parked = store.get(id).unwrap();
         parked.status = TaskStatus::AwaitingMerge;
-        parked.deliverables.factory_branch_anchor =
-            Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+        let tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+        parked.deliverables.factory_branch_anchor = Some(tip.clone());
         store.update(&parked).unwrap();
-        started_on.push(own);
+        started_on.push((own, tip));
     }
     // Each PR keeps its own branch, and the lane keeps the first hotfix.
     assert_eq!(git_stdout(&worker_path, &["rev-parse", &format!("factory/{worker}")]), lane_tip);
-    for own in &started_on {
-        assert_ne!(git_stdout(&worker_path, &["rev-parse", own]), target_tip, "{own}");
+    for (own, tip) in &started_on {
+        assert_eq!(git_stdout(&worker_path, &["rev-parse", own]), *tip, "{own}");
     }
 }
 
@@ -15104,8 +15234,16 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
         let env = FactoryTestEnv::new();
         let path = init_pushed_worker_repo(&env, "checkpoint-worker");
         let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);
-        let handoff = env.cas_root.join("HANDOFF.md");
-        std::fs::write(&handoff, "Continue from this durable checkpoint.\n").unwrap();
+        let config = cas::config::Config::load(&env.cas_root).unwrap();
+        let artifacts_base = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let handoff = cas::config::factory_task_artifact_dirs(
+            &env.cas_root, &artifacts_base, "cas-3111",
+        )[0].join("HANDOFF.md");
+        let authored_checkpoint = "Keep this authored next command and open question.\n";
+        if action == "clear_context" {
+            std::fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+            std::fs::write(&handoff, authored_checkpoint).unwrap();
+        }
         let mut before = Vec::new();
         for (id, status) in [
             ("cas-3111", TaskStatus::InProgress),
@@ -15115,7 +15253,7 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
             let mut task = Task::new(id.into(), format!("checkpoint {id}"));
             task.status = status;
             task.assignee = Some("checkpoint-worker".into());
-            task.notes = format!("HANDOFF: {}", handoff.display());
+            task.notes = "Checkpoint: finish the remaining regression and park the pushed tip.".into();
             env.task_store().add(&task).unwrap();
             before.push((
                 id,
@@ -15168,7 +15306,13 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
             agent
         );
         assert_eq!(std::fs::read(path.join("README")).unwrap(), checkout);
-        assert!(handoff.is_file(), "the durable handoff survives");
+        let checkpoint = std::fs::read_to_string(&handoff).expect("recycle writes a durable task handoff");
+        if action == "clear_context" {
+            assert_eq!(checkpoint, authored_checkpoint);
+        } else {
+            assert!(checkpoint.contains(&env.task_store().get("cas-3111").unwrap().notes));
+        }
+        assert!(!path.join("HANDOFF.md").exists(), "recycle never writes scratch notes in the checkout");
         assert!(
             env.prompt_queue().peek_all(10).unwrap().is_empty(),
             "Codex reset uses recycle, not an unsupported /clear"

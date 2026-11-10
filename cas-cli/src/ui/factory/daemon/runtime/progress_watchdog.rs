@@ -502,6 +502,8 @@ mod tests {
         let tasks = crate::store::open_task_store_local(&root).unwrap();
         let mut epic = Task::new("cas-098dd-epic".into(), "Finished delivery awaiting close".into());
         epic.task_type = cas_types::TaskType::Epic;
+        // The live refused-close incident left the finished epic Blocked.
+        epic.status = TaskStatus::Blocked;
         epic.assignee = Some(supervisor.name.clone());
         epic.deliverables.phase_outcome = Some(serde_json::json!({
             "target": {"completed": {"min": 1}}, "evidence": null

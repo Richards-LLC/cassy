@@ -5,6 +5,7 @@
 ## Pitch
 
 Cassy is a local-first multi-agent coding factory and persistent context system for developers working in Git repositories.
+Workspace write refusals name the configured artifact root and its canonical target; logical and canonical in-root writes share containment checks, and symlink escapes remain refused.
 The `cas` binary runs a supervisor with isolated workers; `cas serve` gives coding agents durable project context through MCP.
 Initial MCP startup validates the store and reports readiness before the client handshake; replacement backends stay inactive until the serving connection can switch safely.
 On Unix, new `cas serve` connections keep a stable stdio front while compatible installed backends change. A candidate negotiates privately before the front drains both request directions and partial messages; failed startup, changed protocol/capabilities/tool schemas or a drain timeout keep the current backend serving. Deferred reasons are logged, including the changed tool for a schema mismatch. Startup and compatibility deferrals wait for another install; a drain timeout retries the same binary at a later idle boundary. Serving reports distinguish the backend version from the front version; existing connections started before this transport need one normal harness reconnect to adopt it.

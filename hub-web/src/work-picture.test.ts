@@ -5,8 +5,9 @@ import { WorkPicture, type WorkEventTransport } from "./work-picture";
 import { renderWork, workSignature } from "./work-rows-view";
 import { ConversationHistory } from "./conversation-history";
 import { threadModel } from "./thread-model";
+import { workerProgress, workerState } from "./progress-model";
+import { renderWorkerTimeline, workerTimelineDialog, workerTimelineButton } from "./worker-timeline";
 import { workerTaskLine } from "./progress-view";
-import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
@@ -20,6 +21,38 @@ function livePicture(agent?: string) {
 }
 
 describe("work events (cas-ff22)", () => {
+  it("uses the worker's name as its keyboard-operable timeline opener (cas-0d5e)", () => {
+    const name = "swift-lark-3";
+    const open = vi.fn();
+    const button = workerTimelineButton(document, name, open);
+    expect(button.textContent).toBe(name);
+    expect(button.getAttribute("aria-haspopup")).toBe("dialog");
+    button.click();
+    expect(open).toHaveBeenCalledOnce();
+    expect(button.dataset.worker).toBe(name);
+  });
+  it("uses the same projected worker state in the card and timeline (cas-0d5e)", () => {
+    const task = { id: "t", title: "Repair the worker view", status: "InProgress" };
+    const handlers = { readOlder: vi.fn(), closed: vi.fn() };
+    const dialog = workerTimelineDialog(document, handlers);
+    for (const [status, liveness, taskStatus] of [
+      ["active", undefined, "InProgress"],
+      ["active", "executing", "InProgress"],
+      ["active", "waiting_for_input", "Blocked"],
+      ["active", "executing", "AwaitingMerge"],
+      ["active", "dead", "InProgress"],
+    ] as const) {
+      const tasks = [{ ...task, status: taskStatus }];
+      const worker = workerProgress(["swift-lark-3"], [{ name: "swift-lark-3", status, liveness, current_task: task.id }], tasks)[0]!;
+      const stateLabel = workerState(worker, tasks);
+      const subject = { worker: worker.name, status, task: task.id, taskTitle: task.title, stateLabel };
+      renderWorkerTimeline(dialog, subject, undefined, undefined, handlers);
+      expect(dialog.querySelector("#worker-timeline-subject .status-chip")?.textContent).toBe(stateLabel);
+      const line = dialog.querySelector("#worker-timeline-subject")!;
+      expect([...line.childNodes].some(node => node.nodeType === Node.TEXT_NODE && /^\s*·/.test(node.textContent ?? ""))).toBe(false);
+    }
+    dialog.remove();
+  });
   it("leads worker card task text with the reported title (cas-943b)", () => {
     const title = "Repair <stale> worker routing";
     const line = workerTaskLine(document, { currentTask: "cas-b200", work: title });

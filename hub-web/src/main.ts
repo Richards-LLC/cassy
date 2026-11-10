@@ -100,7 +100,7 @@ import { operatorOrigin } from "./inbox/wire";
 import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
-import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
+import { renderWorkerTimeline, workerTimelineDialog, workerTimelineButton } from "./worker-timeline";
 import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -2752,6 +2752,7 @@ function syncWorkerTimeline(): void {
   const unavailable = workPicture.timelineSupported(machineId, session) ? undefined : "This machine's Cassy does not serve worker timelines yet. Update Cassy there, or read the worker's terminal on the machine.";
   renderWorkerTimeline(dialog, {
     worker,
+    stateLabel: workerState(workerProgress([worker], agent ? [agent] : [], tasks)[0]!, tasks),
     ...(agent?.status ? { status: agent.status } : {}),
     ...(task ? { task } : {}),
     ...(task && tasks.find((candidate) => candidate.id === task)?.title ? { taskTitle: String(tasks.find((candidate) => candidate.id === task)!.title) } : {}),
@@ -5878,18 +5879,13 @@ function renderStatus(status?: Record<string, unknown>): void {
     const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
     const avatar = document.createElement("template");
     avatar.innerHTML = providerAvatarMarkup({ harness: metadata?.harness, fallback: avatarLetters(worker.name), size: "lane" });
-    line.append(avatar.content, identifier(worker.name), chip(workerState(worker, tasks)));
+    const name = identifier(worker.name);
+    line.append(avatar.content, name, chip(workerState(worker, tasks)));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
       const machineId = selectedMachineId, sessionName = selectedSession;
-      const open = document.createElement("button");
-      open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
-      open.setAttribute("aria-haspopup", "dialog");
-      open.setAttribute("aria-label", `${worker.name} timeline`);
-      open.textContent = "Activity";
-      open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
-      line.append(open);
+      name.replaceWith(workerTimelineButton(document, worker.name, () => openWorkerTimeline(machineId, sessionName, worker.name)));
     }
     row.append(workerTaskLine(document, worker));
     const activity = document.createElement("small"); activity.className = "status-last-activity";

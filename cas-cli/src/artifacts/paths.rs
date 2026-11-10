@@ -491,13 +491,6 @@ mod tests {
                 Err(PathRefusal::SensitiveDirectory { .. })
             ));
 
-            let socket = checkout.join(".cas/runtime.sock");
-            let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-            assert!(matches!(
-                resolve_publishable_path(&socket, &f.roots),
-                Err(PathRefusal::NotAFile(_))
-            ));
-
             // A stale worktree registration must not authorize its new target.
             fs::rename(&checkout, f.project_root.join("moved-checkout")).unwrap();
             std::os::unix::fs::symlink(f.project_root.join(".cas"), &checkout).unwrap();

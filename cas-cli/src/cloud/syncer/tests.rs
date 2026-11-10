@@ -5439,7 +5439,12 @@ async fn cas_9b5d_personal_daemon_sync_is_unchanged() {
 /// GH1268: only an exact, itemized equivalent write retires personal transport.
 /// All stores and the HTTP boundary are disposable; no live queue is opened.
 #[tokio::test]
-async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
+async fn cas_5986_team_linked_mixed_transport_requires_exact_delivery_cas_d152() {
+    for (explicit_team, team_only) in [(true, false), (true, true), (false, false)] {
+        check(explicit_team, team_only).await;
+    }
+
+    async fn check(explicit_team: bool, team_only: bool) {
     use crate::cloud::{CloudConfig, EntityType, SyncOperation};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -5451,9 +5456,14 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
-    crate::store::open_task_store_local(temp.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
+    let mut legacy = crate::types::Task::new("legacy".into(), "Legacy personal copy".into());
+    legacy.origin_project = Some("p".into());
+    tasks.add(&legacy).unwrap();
+    queue.enqueue(EntityType::Task, "legacy", SyncOperation::Upsert,
+        Some(&serde_json::to_string(&legacy).unwrap())).unwrap();
     for id in [
         "absent",
         "different",
@@ -5500,15 +5510,20 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             let replacement = serde_json::json!({"id":"raced", "scope":"project", "origin_project":"p", "title":"newer mutation"}).to_string();
             race_queue.enqueue(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement)).unwrap();
             race_queue.enqueue_for_team(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement), "team-1").unwrap();
+            let mut rows = vec![
+                    serde_json::json!({"id":"different","outcome":"updated"}),
+                    serde_json::json!({"id":"duplicate","outcome":"inserted"}),
+                    serde_json::json!({"id":"lww","outcome":"skipped_lww"}),
+                    serde_json::json!({"id":"transformed","outcome":"inserted"}),
+                    serde_json::json!({"id":"raced","outcome":"inserted"})
+                ];
+            let has_legacy = body["tasks"].as_array().unwrap().iter().any(|row| row["id"] == "legacy");
+            if has_legacy {
+                rows.push(serde_json::json!({"id":"legacy","outcome":"inserted"}));
+            }
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "canonical_id":"p", "synced":{"tasks":{"inserted":3,"updated":1,"skipped":1}},
-                "rows":[
-                    {"id":"different","outcome":"updated"},
-                    {"id":"duplicate","outcome":"inserted"},
-                    {"id":"lww","outcome":"skipped_lww"},
-                    {"id":"transformed","outcome":"inserted"},
-                    {"id":"raced","outcome":"inserted"}
-                ]
+                "canonical_id":"p", "synced":{"tasks":{"inserted":3 + usize::from(has_legacy),"updated":1,"skipped":1}},
+                "rows":rows
             }))
         }).mount(&server).await;
     let syncer = CloudSyncer::new_for_project(
@@ -5516,8 +5531,9 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         CloudConfig {
             endpoint: server.uri(),
             token: Some("test-token".into()),
-            team_id: Some("team-1".into()),
-            team_only: true,
+            team_id: explicit_team.then(|| "team-1".into()),
+            team_auto_promote: Some(true),
+            team_only,
             ..Default::default()
         },
         CloudSyncerConfig::default(),
@@ -5532,14 +5548,14 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             .iter()
             .map(|row| row.entity_id.as_str())
             .collect::<Vec<_>>(),
-        [
+        if explicit_team { vec![
             "absent",
             "different",
             "lww",
             "transformed",
             "raced",
             "aggregate"
-        ]
+        ] } else { vec!["legacy", "absent", "different", "duplicate", "lww", "transformed", "raced", "aggregate"] }
     );
     let remaining_team = queue.pending_for_team("team-1", 20, 5).unwrap();
     assert_eq!(
@@ -5548,14 +5564,16 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         "HTTP acknowledgment cannot consume a newer queued team mutation"
     );
     assert_eq!(remaining_team[0].entity_id, "raced");
-    assert!(
+    assert_eq!(
         queue
             .list_metadata()
             .unwrap()
             .iter()
-            .all(|(key, _)| !key.starts_with("team_delivery_ack:")),
-        "successful cleanup removes only its receipt"
+            .filter(|(key, _)| key.starts_with("team_delivery_ack:")).count(),
+        usize::from(!explicit_team),
+        "only an explicit team link consumes delivery receipts"
     );
+    }
 }
 
 /// cas-abad: Cloud answers a personal pull for a team-owned project with an

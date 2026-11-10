@@ -349,6 +349,11 @@ bug_families:
     title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
     tasks: [cas-3623]
     journeys: [FACTORY-CLOSE]
+  stopped-catalog-journal-arrival:
+    title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
+    tasks: [cas-c724]
+    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
+    journeys: [HUB-J14]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

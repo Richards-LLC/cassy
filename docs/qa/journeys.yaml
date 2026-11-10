@@ -16,6 +16,11 @@ bug_families:
     title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
     tasks: [cas-1a73]
     journeys: [HUB-J5]
+  operator-release-freeze-pairing:
+    title: A verified default pairing can freeze and lift a release train without either worker-management scope; revoked and preview credentials cannot lift it
+    tasks: [cas-16c0a]
+    invariants: [HUB-J17-RELEASE-FREEZE-PAIRING]
+    journeys: [HUB-J17]
   published-peer-landing-wake:
     title: Published landing approvals wake idle supervisors while explicit receipt and quiet intent stay quiet
     tasks: [cas-35563]
@@ -847,6 +852,10 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-RELEASE-FREEZE-PAIRING:
+    statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and supervisors have no lift action.
+    check: Run hub::tests::release_freeze_default_pairing_cas_16c0a and the existing fleet-ops view freeze/lift case. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
+    bug: {task: cas-16c0a}
   HUB-J17-STATUS-TRUTH:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
@@ -899,6 +908,9 @@ invariants:
       `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml` with
       the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub tests
       (cas-ab04)'
+  HUB-J23-HISTORY-FAILURE:
+    statement: A history request without a daemon answer exposes an error and retry, including an older page, without claiming the visible history is complete.
+    check: Run the cas-3590 HUB-J23 recovery case; suppress replies, advance the browser clock, retry and verify both the reopened answer and the older cursor's answer render once.
   HUB-J23-GOAL:
     statement: I reach the latest exchange immediately and scroll back through older turns without losing my place
     check: Walk HUB-J23 on the production bundle and read cursor requests back from the protocol double; measure the frozen real thread separately.
@@ -998,6 +1010,10 @@ invariants:
     statement: Only an accepted owner-issued split grants a peer task work with external_ref intact; pending or unrelated shares grant no task work, tasks without a matching accepted split leave caller identity unchanged, and thread replies keep their separate claim authority.
     check: Run standalone_source_work_split_keeps_reply_owner_cas_ad2c through integration_factory plus the existing one-sided grant/request cases; read back the assignment, source link, split release ledger and both reply-intent results. Run shared_clone_supervisors_cannot_mutate_each_others_fleet_cas_bebc to verify unrelated staffing preserves each session's fleet isolation.
     bug: {task: cas-ad2c}
+  FACTORY-BOOT-DIAGNOSTICS:
+    statement: Missing Claude SessionStart canaries refuse admission while retaining bounded redacted boot output and worker/request identity; inspection does not invent process liveness or grant mutation authority, and only completed teardown releases a matching task binding.
+    check: Run canary_failure_retains_boot_diagnostics_cas_4cdd through the real daemon with completed and unconfirmed teardown, debug and JSON is-wedged by worker/request; run launch_without_registration_records_failed_with_reason for retained lookup and fresh-retry identity.
+    bug: {task: cas-4cdd}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SUPERVISE
@@ -1058,8 +1074,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION]
+  owners: [cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT
@@ -2496,6 +2512,7 @@ journeys:
   - HUB-J17-GOAL
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
+  - HUB-J17-RELEASE-FREEZE-PAIRING
   - HUB-J17-SUPERVISOR-SCOPE
   - HUB-J17-FLEET-INVALIDATION
   - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
@@ -2941,6 +2958,7 @@ journeys:
   - hub-web/e2e/journeys/history-window.journey.ts
   invariants:
   - HUB-J23-GOAL
+  - HUB-J23-HISTORY-FAILURE
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

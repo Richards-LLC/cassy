@@ -215,6 +215,8 @@ export class HubDouble {
   /** The hub origin each pairing exchange was posted to, in order. */
   readonly exchangeOrigins: string[] = [];
   readonly historyRequests: Array<Record<string, unknown>> = [];
+  /** Model a hub that accepts history reads without a daemon answer. */
+  readonly pausedHistory = new Set<string>();
   /** Browser application ACKs, separate from socket forwarding. */
   readonly persistedReplies: Array<{ session: string; notification_id: number }> = [];
   readonly pendingReplies = new Map<string, Array<Record<string, unknown>>>();
@@ -1487,6 +1489,7 @@ export class HubDouble {
     if (message.ConversationHistoryRequest) {
       const request = message.ConversationHistoryRequest;
       this.historyRequests.push({ session, ...request });
+      if (this.pausedHistory.has(session)) return;
       const page = request.before === undefined ? pages[0] : pages.find((p, i) => i > 0 && pages[i - 1].next_before === request.before);
       let reply: HistoryPage = page ?? { messages: [], replies: [], has_earlier: false };
       const live = this.live.get(session);

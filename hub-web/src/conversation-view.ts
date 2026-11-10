@@ -214,6 +214,8 @@ export interface ConversationViewOptions {
    * line rather than claiming nothing is waiting (cas-04ee).
    */
   loadingHistory?: () => boolean;
+  historyError?: () => { detail: string; before?: number } | undefined;
+  retryHistory?: () => void;
   /**
    * When this conversation began to open (cas-813a). The loading line keeps
    * the attach's motion clock, so it doesn't start its motion over.
@@ -481,6 +483,8 @@ export class ConversationView {
   private readonly above: HTMLElement;
   private readonly below: HTMLElement;
   private readonly loadLater: HTMLButtonElement;
+  private readonly historyFailure: HTMLElement;
+  private readonly historyFailureDetail: HTMLElement;
   private windowFrame?: number;
   private model?: readonly ThreadItem[];
   private earlierIntent = false;
@@ -599,6 +603,15 @@ export class ConversationView {
     this.loadLater = document.createElement("button"); this.loadLater.type = "button";
     this.loadLater.className = "conversation-load-earlier"; this.loadLater.textContent = "Load later"; this.loadLater.hidden = true;
     this.loadLater.onclick = () => this.moveWindow(false);
+    this.historyFailure = document.createElement("div");
+    this.historyFailure.className = "conversation-history-error";
+    this.historyFailure.setAttribute("role", "alert");
+    this.historyFailure.hidden = true;
+    this.historyFailureDetail = document.createElement("p");
+    const retryHistory = document.createElement("button"); retryHistory.type = "button";
+    retryHistory.className = "conversation-load-earlier"; retryHistory.textContent = "Retry history";
+    retryHistory.onclick = () => this.options.retryHistory?.();
+    this.historyFailure.append(this.historyFailureDetail, retryHistory);
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
@@ -608,7 +621,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.commands, this.endReceipt, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.historyFailure, this.commands, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -822,7 +835,15 @@ export class ConversationView {
     if (!same || window.above > 0 || window.below > 0) reconcileChildren(this.msgs, [...(window.above > 0 ? [this.above] : []), ...children, ...(window.below > 0 ? [this.below] : [])]);
     this.renderPinned(document);
     this.renderUnsent();
-    this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
+    const historyError = this.options.historyError?.();
+    const revealHistoryFailure = this.historyFailure.hidden && !!historyError;
+    this.historyFailure.hidden = !historyError;
+    this.historyFailureDetail.textContent = historyError?.detail ?? "";
+    // An older-page failure belongs beside the paging control the reader
+    // used, not beyond the cached tail of a long conversation.
+    const failureAnchor = historyError?.before === undefined ? this.empty : this.loadEarlier;
+    if (failureAnchor.nextElementSibling !== this.historyFailure) failureAnchor.after(this.historyFailure);
+    this.renderEmpty(model.length === 0 && !historyError, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
     this.endReceipt.hidden = !ended;
     if (ended) {
@@ -853,6 +874,7 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+    if (revealHistoryFailure) this.historyFailure.scrollIntoView?.({ block: "nearest" });
   }
 
   /** Explicit paging through rows already held in memory. */

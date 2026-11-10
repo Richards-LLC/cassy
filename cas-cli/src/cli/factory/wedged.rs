@@ -1244,6 +1244,40 @@ pub(crate) fn execute_answer_permission(
     Ok(())
 }
 
+/// A durable failed spawn is read-only evidence, never a synthetic Agent or
+/// PID. Killing or answering permissions still requires `resolve_worker`.
+fn failed_boot_record(cas_root: &Path, worker: &str) -> Result<Option<cas_store::SpawnLifecycle>> {
+    Ok(cas_store::SqliteSpawnQueueStore::open(cas_root)?
+        .find_spawn_lifecycle(worker)?
+        .filter(|record| record.state == cas_store::SpawnLifecycleState::Failed))
+}
+
+fn print_boot_record(record: &cas_store::SpawnLifecycle, json: bool, tail: usize) {
+    if json {
+        println!("{}", serde_json::json!({
+            "state": "unverified",
+            "boot_state": record.state.as_str(),
+            "request_id": record.id,
+            "worker": record.worker_name,
+            "task_id": record.task_id,
+            "detail": record.detail,
+            "state_at": record.state_at,
+            "pid_alive": null,
+        }));
+    } else {
+        println!("Worker boot failed: {} (spawn request {})",
+            record.worker_name.as_deref().unwrap_or("unregistered"), record.id);
+        println!("Process state: unverified; no registered worker evidence.");
+        if let Some(task_id) = record.task_id.as_deref() {
+            println!("Task: {task_id}");
+        }
+        let lines: Vec<_> = record.detail.as_deref().unwrap_or("Boot output unavailable").lines().collect();
+        for line in &lines[lines.len().saturating_sub(tail)..] {
+            println!("{line}");
+        }
+    }
+}
+
 pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -1251,7 +1285,16 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
     // pending WAL checkpoint) before we call `std::process::exit` — that
     // function skips Rust destructors entirely. cas-4513 adversarial P2.
     let exit_code = {
-        let w = resolve_worker(cas_root, worker)?;
+        let w = match resolve_worker(cas_root, worker) {
+            Ok(worker) => worker,
+            Err(error) => {
+                if let Some(record) = failed_boot_record(cas_root, worker)? {
+                    print_boot_record(&record, json, 20);
+                    std::process::exit(WorkerLivenessState::Unverified.exit_code());
+                }
+                return Err(error);
+            }
+        };
         // cas-c655 / cas-f781: the agent-store PID is frequently the MCP
         // `cas serve` child (self-registration), not the real worker. Prefer
         // a live process-table match (argv --agent-name / CAS_AGENT_NAME,
@@ -1341,7 +1384,16 @@ pub(crate) fn execute_is_wedged(cas_root: Option<&Path>, worker: &str, json: boo
 pub(crate) fn execute_debug(cas_root: Option<&Path>, worker: &str, tail: usize) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
-    let w = resolve_worker(cas_root, worker)?;
+    let w = match resolve_worker(cas_root, worker) {
+        Ok(worker) => worker,
+        Err(error) => {
+            if let Some(record) = failed_boot_record(cas_root, worker)? {
+                print_boot_record(&record, false, tail);
+                return Ok(());
+            }
+            return Err(error);
+        }
+    };
     if w.cli == cas_mux::SupervisorCli::OpenCode {
         let process_alive = w.pid.is_some_and(crate::mcp::daemon::pid_alive);
         let observation = opencode_liveness::observe(

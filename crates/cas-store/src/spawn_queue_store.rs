@@ -459,6 +459,39 @@ impl SqliteSpawnQueueStore {
         Ok(Self { conn })
     }
 
+    /// Read the latest spawn for a worker, or an exact request id, including
+    /// processed requests whose harness never registered an agent.
+    pub fn find_spawn_lifecycle(&self, worker_or_request: &str) -> Result<Option<SpawnLifecycle>> {
+        use rusqlite::OptionalExtension;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let request_id = worker_or_request.parse::<i64>().ok();
+        Ok(conn.query_row(
+            "SELECT id, worker_names, task_id, created_at, spawn_state, spawn_worker, spawn_detail, spawn_state_at
+             FROM spawn_queue WHERE action = 'spawn'
+               AND ((?1 IS NOT NULL AND id = ?1) OR (?1 IS NULL AND spawn_worker = ?2))
+             ORDER BY id DESC LIMIT 1",
+            params![request_id, worker_or_request],
+            Self::lifecycle_from_row,
+        ).optional()?)
+    }
+
+    fn lifecycle_from_row(row: &rusqlite::Row) -> rusqlite::Result<SpawnLifecycle> {
+        let created_at: String = row.get(3)?;
+        let state: Option<String> = row.get(4)?;
+        let state_at: Option<String> = row.get(7)?;
+        Ok(SpawnLifecycle {
+            id: row.get(0)?,
+            requested_names: Self::parse_worker_names(row.get(1)?),
+            task_id: row.get(2)?,
+            created_at: Self::parse_datetime(&created_at).unwrap_or_else(Utc::now),
+            state: state.as_deref().and_then(SpawnLifecycleState::from_str)
+                .unwrap_or(SpawnLifecycleState::Queued),
+            worker_name: row.get(5)?,
+            detail: row.get(6)?,
+            state_at: state_at.as_deref().and_then(Self::parse_datetime),
+        })
+    }
+
     fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
         if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
             return Some(dt.with_timezone(&Utc));
@@ -935,26 +968,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         )?;
 
         let rows = stmt
-            .query_map(params![factory_session, limit as i64], |row| {
-                let created_at: String = row.get(3)?;
-                let state: Option<String> = row.get(4)?;
-                let state_at: Option<String> = row.get(7)?;
-                Ok(SpawnLifecycle {
-                    id: row.get(0)?,
-                    requested_names: Self::parse_worker_names(row.get(1)?),
-                    task_id: row.get(2)?,
-                    created_at: Self::parse_datetime(&created_at).unwrap_or_else(Utc::now),
-                    // A row the daemon has never touched is still `queued` —
-                    // never "unknown". Silence is the thing GH #60 is about.
-                    state: state
-                        .as_deref()
-                        .and_then(SpawnLifecycleState::from_str)
-                        .unwrap_or(SpawnLifecycleState::Queued),
-                    worker_name: row.get(5)?,
-                    detail: row.get(6)?,
-                    state_at: state_at.as_deref().and_then(Self::parse_datetime),
-                })
-            })?
+            .query_map(params![factory_session, limit as i64], Self::lifecycle_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(rows)
@@ -1555,6 +1569,23 @@ mod tests {
         assert_eq!(row.state, SpawnLifecycleState::Failed);
 
         assert!(row.state.is_terminal());
+        store.mark_processed(id).unwrap();
+        for selector in [id.to_string(), "quiet-lynx-3".to_string()] {
+            let found = store.find_spawn_lifecycle(&selector).unwrap().unwrap();
+            assert_eq!(found.id, id);
+            assert_eq!(found.state, row.state);
+            assert_eq!(found.detail, row.detail);
+        }
+        assert!(store.find_spawn_lifecycle("missing-worker").unwrap().is_none());
+        let shutdown = store.enqueue_shutdown(Some(1), &[], false, Some("session-a")).unwrap();
+        assert!(store.find_spawn_lifecycle(&shutdown.to_string()).unwrap().is_none());
+        // A later boot attempt must not be diagnosed from its prior failure.
+        let retry = store.enqueue_spawn(1, &[], false, None, Some("session-b"), None).unwrap();
+        store.record_spawn_state(retry, SpawnLifecycleState::Launched, Some("quiet-lynx-3"), None).unwrap();
+        let latest = store.find_spawn_lifecycle("quiet-lynx-3").unwrap().unwrap();
+        assert_eq!(latest.id, retry);
+        assert_eq!(latest.state, SpawnLifecycleState::Launched);
+        assert_eq!(store.find_spawn_lifecycle(&id.to_string()).unwrap().unwrap().state, SpawnLifecycleState::Failed);
     }
 
     /// State never walks backwards. The daemon emits several audit lines per

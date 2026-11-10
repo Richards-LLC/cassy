@@ -149,6 +149,47 @@ function networkHints(): EventTarget {
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("settles unanswered history separately from sends and permits recovery (cas-3590)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const failed = vi.fn(), rejected = vi.fn(), received = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("history-timeout"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
+      onConversationHistoryFailed: failed, onConversationHistory: received, onMessageRejected: rejected,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    vi.useFakeTimers();
+    socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
+    const requests = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.ConversationHistoryRequest).map(frame => frame.ConversationHistoryRequest);
+    expect(requests()).toHaveLength(1);
+    // Replay the incident: the hub takes the request, but no daemon page arrives.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(failed.mock.calls[0]![0]).toBe("session-a");
+    expect(rejected).not.toHaveBeenCalled();
+    expect(connection.requestConversationHistory("session-a")).toBe(true);
+    const page = { request_id: requests().at(-1).request_id, messages: [], replies: [], has_earlier: false };
+    socket.receive({ ConversationHistory: page });
+    expect(received).toHaveBeenCalledWith("session-a", page, expect.anything());
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(1);
+    // An explicit daemon refusal is the same history failure, never a send refusal.
+    connection.requestConversationHistory("session-a", 42);
+    socket.receive({ Error: { client_ref: requests().at(-1).request_id, message: "read failed" } });
+    expect(failed).toHaveBeenCalledTimes(2);
+    expect(rejected).not.toHaveBeenCalled();
+    connection.requestConversationHistory("session-a");
+    connection.stop();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(2);
+  });
   it("authenticates before loading the catalog and stays live while that catalog is stalled", async () => {
     const hub = transport();
     hub.stallRefresh(true);

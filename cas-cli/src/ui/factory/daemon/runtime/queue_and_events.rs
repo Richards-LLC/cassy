@@ -20324,54 +20324,69 @@ mod tests {
         );
     }
 
-    /// GH #1592/#1666: registered, worked, then shut down on purpose inside the
-    /// boot window. The intentional exit must not become a failed boot.
+    /// GH #1592/#1666 and cas-c74f8: a worker shut down on purpose, after
+    /// registering and working or while still booting, is never a failed boot
+    /// and gets no death record or relay.
     #[tokio::test]
     async fn intentional_shutdown_retires_the_boot_watch_gh_1592() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
         let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
-        let worker = "gh-1592-reviewer";
         let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
-        let request = queue
-            .enqueue_spawn(1, &[], false, None, Some(&daemon.session_name), None)
-            .unwrap();
-        queue
-            .record_spawn_state(request, cas_store::SpawnLifecycleState::Registered, Some(worker), None)
-            .unwrap();
-        daemon.spawn_verifications.insert(
-            worker.into(),
-            SpawnVerification {
-                request_id: Some(request),
-                launched_at: Instant::now() - Duration::from_secs(40),
-                registered_at: Some(Instant::now() - Duration::from_secs(30)),
-                task_id: None,
-                launched_wall: std::time::SystemTime::now() - Duration::from_secs(40),
-            },
-        );
+        let now = Instant::now();
+        let mut requests = Vec::new();
+        for (worker, registered) in [("gh-1592-reviewer", true), ("c74f8-booting", false)] {
+            let request = queue
+                .enqueue_spawn(1, &[], false, None, Some(&daemon.session_name), None)
+                .unwrap();
+            let state = if registered {
+                cas_store::SpawnLifecycleState::Registered
+            } else {
+                cas_store::SpawnLifecycleState::Launched
+            };
+            queue.record_spawn_state(request, state, Some(worker), None).unwrap();
+            daemon.spawn_verifications.insert(
+                worker.into(),
+                SpawnVerification {
+                    request_id: Some(request),
+                    launched_at: now - Duration::from_secs(40),
+                    registered_at: registered.then(|| now - Duration::from_secs(30)),
+                    task_id: None,
+                    launched_wall: std::time::SystemTime::now() - Duration::from_secs(40),
+                },
+            );
+            requests.push((worker, request, registered));
+        }
 
         daemon.pending_spawns.push_back(PendingSpawn::Shutdown {
-            request_id: Some(request + 1),
+            request_id: Some(i64::MAX),
             count: None,
-            names: vec![worker.into()],
+            names: requests.iter().map(|(worker, _, _)| worker.to_string()).collect(),
             force: false,
             expected_generation: None,
         });
         daemon.process_pending_spawns().await;
-        // The boot window closes after the stop; the worker is gone by design.
-        if let Some(verification) = daemon.spawn_verifications.get_mut(worker) {
-            verification.registered_at = Some(Instant::now() - Duration::from_secs(61));
+        // Both boot windows close after the stop; the workers are gone by design.
+        for verification in daemon.spawn_verifications.values_mut() {
+            verification.launched_at = now - Duration::from_secs(121);
+            if verification.registered_at.is_some() {
+                verification.registered_at = Some(now - Duration::from_secs(61));
+            }
         }
         daemon.reconcile_spawn_verifications().await;
 
-        let row = queue
-            .recent_spawn_lifecycle(&daemon.session_name, 20)
-            .unwrap()
-            .into_iter()
-            .find(|row| row.id == request)
-            .unwrap();
-        assert_eq!(row.state, cas_store::SpawnLifecycleState::Registered);
-        assert!(!daemon.spawn_verifications.contains_key(worker));
+        let rows = queue.recent_spawn_lifecycle(&daemon.session_name, 20).unwrap();
+        for (worker, request, registered) in requests {
+            let row = rows.iter().find(|row| row.id == request).unwrap();
+            let expected = if registered {
+                cas_store::SpawnLifecycleState::Registered
+            } else {
+                cas_store::SpawnLifecycleState::Stopped
+            };
+            assert_eq!(row.state, expected, "{worker}");
+            assert!(!daemon.spawn_verifications.contains_key(worker), "{worker}");
+        }
+        assert!(daemon.relay_jobs.crash_cleanups.is_empty(), "no death record or relay");
     }
 
     #[test]

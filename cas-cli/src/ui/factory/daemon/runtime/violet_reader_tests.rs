@@ -487,6 +487,7 @@ fn unknown_registration_stops_consumption_until_successor_cas_c186() {
         cloud.claim = fixture(CLAIM, "leases this reader's deliveries");
         cloud.ack_response = None;
         cloud.registration_id = "successor-registration";
+        cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(cloud.registration_id);
         let outcome = tick_with(&mut reader, &cloud, cloud.registration_id, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(ReaderReport { typed: 1, .. })));
         assert_eq!(cloud.claim_calls.load(Ordering::Relaxed), 2);
@@ -504,10 +505,12 @@ fn successor_recovers_each_admission_once_and_never_retypes_an_uncertain_ask() {
     let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     cloud.registration_id = "reg-supervisor-beta-07";
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(cloud.registration_id);
     cloud.ack_response = Some(json!({})); // the predecessor crashes before its ack lands
     tick_as(&mut VioletReader::new("factory-session"), &cloud);
 
     cloud.registration_id = SUCCESSOR;
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(SUCCESSOR);
     cloud.ack_response = None;
     // cas-3f9b: keep different-width seconds eligible for actual delivery,
     // so their timeline distinguishes numeric sorting from text sorting.
@@ -737,6 +740,7 @@ fn recovery_resume_of_history_is_quarantined_without_rebind_cas_b94d() {
     let (resumed, uncertain) = ("0000de1b-1111-4111-8111-00000000de1b", "0000de1c-1111-4111-8111-00000000de1c");
     let mut cloud = FixtureCloud::new("leases this reader's deliveries");
     cloud.registration_id = SUCCESSOR;
+    cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(SUCCESSOR);
     cloud.recover = fixture(RECOVER, "successor on another machine");
     // The resumed admission (12:00:00Z) predates activation; the claim (12:00:42Z) does not.
     cloud.activation = Some(activation("C08COORD01", Some("2025-10-16T12:00:20.000Z")));

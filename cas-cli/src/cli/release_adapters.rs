@@ -783,7 +783,6 @@ mod tests {
         }
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
-        let _cwd = env.enter_dir(repo);
         let reconciler = Recording { recipient: owner.id.clone(), calls: Default::default(), done: Default::default() };
         let launch = |pr: u64| promoted_with(&root, pr, &reconciler).map(drop);
         let command = ["gh", "pr", "merge", "4396", "--merge"].join(" ");

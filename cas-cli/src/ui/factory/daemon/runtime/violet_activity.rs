@@ -2238,9 +2238,6 @@ impl VioletWakeRuntime {
             intake.as_ref().is_ok_and(|intake| intake.channel_legacy_allowed(channel))
         };
         let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
-        if let Some(supervisor) = presence.as_ref() {
-            super::violet_reactions::reconcile(&self.cas_dir, &supervisor.agent_id, &self.factory_session);
-        }
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
             return (PollReport::default(), Vec::new(), None);
@@ -2299,6 +2296,14 @@ impl VioletWakeRuntime {
             Vec::new()
         };
         (report, sweeps, presence)
+    }
+
+    // Called from the owned sweep job after admission output has already
+    // woken the supervisor and due channel sweeps have been applied.
+    pub(crate) fn reconcile_reactions(&self, registration: &str) {
+        if !self.stopping.load(std::sync::atomic::Ordering::Acquire) {
+            super::violet_reactions::reconcile(&self.cas_dir, registration, &self.factory_session);
+        }
     }
 
     pub(crate) fn stop_blocking(&self) -> Result<usize, String> {

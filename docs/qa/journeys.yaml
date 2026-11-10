@@ -572,8 +572,8 @@ owner_groups:
     - hub-web/src/usage.ts
 invariants:
   FACTORY-SOURCE-REACTIONS:
-    statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, and observed takeover revokes the former owner's status-only authority even after claim expiry.
-    check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
+    statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, observed takeover revokes the former owner's status-only authority even after claim expiry, confirmed terminal sources quiesce until task changes or explicit retry, and a shared five-second pass budget cannot delay mention admission.
+    check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences plus source_reaction_deadline_defers_remaining_calls against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
     bug: {task: cas-c610}
   FACTORY-QUEUED-SOURCE-BOUNDARY:
     statement: A queued first-delivery successor records its fresh branch and target base atomically with start while retaining the former branch and refusing to replace pending, unknown or unrelated work.

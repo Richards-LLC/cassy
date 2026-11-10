@@ -15,6 +15,7 @@ use std::{
 const MARKS: [&str; 3] = ["eyes", "pick", "white_check_mark"];
 const REFRESH_SECONDS: i64 = 60;
 const LEASE_SECONDS: i64 = 90;
+pub(crate) const PASS_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceStatus {
@@ -27,6 +28,9 @@ pub struct SourceStatus {
     pub pending: bool,
     pub error: Option<Value>,
     pub next_attempt: Option<DateTime<Utc>>,
+    // Persisted only in reconciliation snapshots; local audit omits it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    task_revisions: BTreeMap<String, i64>,
 }
 
 #[derive(Clone)]
@@ -67,7 +71,7 @@ impl Target {
 
 /// A green task merge must actually be contained in the remote staging/main
 /// history. Closing or landing on an epic branch alone is insufficient.
-fn staged(root: &Path, task: &Task) -> bool {
+fn staged(root: &Path, task: &Task, deadline: crate::bounded_process::Deadline) -> bool {
     if task.status != TaskStatus::Closed
         || task.deliverables.merge_ci_admission.unwrap_or_default() != MergeCiAdmission::Green
     {
@@ -86,7 +90,6 @@ fn staged(root: &Path, task: &Task) -> bool {
     else {
         return false;
     };
-    let deadline = crate::bounded_process::Deadline::after(std::time::Duration::from_secs(3));
     let contains = |ancestor: &str, descendant: &str| {
         crate::bounded_process::run_command(
             std::process::Command::new("git")
@@ -104,21 +107,102 @@ fn staged(root: &Path, task: &Task) -> bool {
             .any(|reference| contains(merge, reference))
 }
 
-fn sources(root: &Path) -> anyhow::Result<BTreeMap<String, (Target, Vec<Task>)>> {
-    let mut grouped: BTreeMap<String, (Target, Vec<Task>)> = BTreeMap::new();
-    for task in crate::store::open_task_store(root)?.list(None)? {
-        if let Some(target) = task.external_ref.as_deref().and_then(Target::parse) {
-            grouped
-                .entry(target.source.clone())
-                .or_insert_with(|| (target, Vec::new()))
-                .1
-                .push(task);
-        }
-    }
-    Ok(grouped)
+struct SourceGroup {
+    target: Target,
+    revisions: BTreeMap<String, i64>,
+    terminal: bool,
 }
 
-fn desired(root: &Path, tasks: &[Task], prove_staging: bool) -> Option<String> {
+impl SourceGroup {
+    fn confirmed(&self, old: &SourceStatus) -> bool {
+        self.terminal
+            && self.revisions == old.task_revisions
+            && !old.pending
+            && old.error.is_none()
+            && old.observed_at.is_some()
+            && (old.desired.is_none() || old.desired.as_deref() == Some("white_check_mark"))
+            && old.observed == old.desired.iter().cloned().collect::<Vec<_>>()
+    }
+}
+
+// Filter before decoding Task's potentially large notes/deliverables. The
+// small revision index detects new related tasks, reopening and delivery edits
+// without rehydrating terminal-confirmed history on every daemon tick.
+fn source_index(
+    root: &Path,
+    source: Option<&str>,
+) -> anyhow::Result<BTreeMap<String, SourceGroup>> {
+    let conn = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
+    let conn = conn
+        .lock()
+        .map_err(|_| anyhow::anyhow!("source status database poisoned"))?;
+    let mut stmt = conn.prepare(
+        "SELECT t.id,t.external_ref,COALESCE(r.revision,0),t.status FROM tasks t
+         LEFT JOIN task_mutation_revisions r ON r.entity_id=t.id
+         WHERE trim(t.external_ref) LIKE ?1 ORDER BY t.id",
+    )?;
+    let pattern = source
+        .map(|source| format!("{source}%"))
+        .unwrap_or_else(|| "%slack.com/archives/%".into());
+    let rows = stmt.query_map([pattern], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?;
+    let mut groups = BTreeMap::<String, SourceGroup>::new();
+    for row in rows {
+        let (id, link, revision, status) = row?;
+        let Some(target) = Target::parse(&link) else {
+            continue;
+        };
+        if source.is_some_and(|source| source != target.source) {
+            continue;
+        }
+        let group = groups
+            .entry(target.source.clone())
+            .or_insert_with(|| SourceGroup {
+                target,
+                revisions: BTreeMap::new(),
+                terminal: true,
+            });
+        group.revisions.insert(id, revision);
+        group.terminal &= matches!(status.as_str(), "closed" | "cancelled");
+    }
+    Ok(groups)
+}
+
+fn sources(
+    root: &Path,
+    previous: Option<&BTreeMap<String, SourceStatus>>,
+) -> anyhow::Result<Vec<(SourceGroup, Vec<Task>)>> {
+    let store = crate::store::open_task_store(root)?;
+    source_index(root, None)?
+        .into_values()
+        .filter(|group| {
+            !previous
+                .and_then(|old| old.get(&group.target.source))
+                .is_some_and(|old| group.confirmed(old))
+        })
+        .map(|group| {
+            let tasks = group
+                .revisions
+                .keys()
+                .map(|id| store.get(id))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((group, tasks))
+        })
+        .collect()
+}
+
+fn desired(
+    root: &Path,
+    tasks: &[Task],
+    prove_staging: bool,
+    deadline: crate::bounded_process::Deadline,
+) -> Option<String> {
     let tasks: Vec<_> = tasks
         .iter()
         .filter(|task| task.status != TaskStatus::Cancelled)
@@ -127,7 +211,7 @@ fn desired(root: &Path, tasks: &[Task], prove_staging: bool) -> Option<String> {
         return None;
     }
     Some(
-        if prove_staging && tasks.iter().all(|task| staged(root, task)) {
+        if prove_staging && tasks.iter().all(|task| staged(root, task, deadline)) {
             "white_check_mark"
         } else if tasks.iter().all(|task| task.status == TaskStatus::Open) {
             "eyes"
@@ -201,6 +285,7 @@ fn current_status(
     target: &Target,
     tasks: &[Task],
     prove_staging: bool,
+    deadline: crate::bounded_process::Deadline,
 ) -> anyhow::Result<SourceStatus> {
     let project = crate::cloud::resolve_canonical_id(root).unwrap_or_default();
     // Keep the original link for thread_ts when a source is a reply in a
@@ -213,13 +298,14 @@ fn current_status(
     Ok(SourceStatus {
         source: target.source.clone(),
         tasks: tasks.iter().map(|task| task.id.clone()).collect(),
-        desired: desired(root, tasks, prove_staging),
+        desired: desired(root, tasks, prove_staging, deadline),
         owner,
         observed: Vec::new(),
         observed_at: None,
         pending: true,
         error: None,
         next_attempt: None,
+        task_revisions: BTreeMap::new(),
     })
 }
 
@@ -237,16 +323,26 @@ fn audit_at(root: &Path, retry: bool, now: DateTime<Utc>) -> anyhow::Result<Vec<
             .lock()
             .map_err(|_| anyhow::anyhow!("source status database poisoned"))?
             .execute(
-                "UPDATE source_reactions SET permanent=0,next_attempt=0 WHERE permanent=1",
+                "UPDATE source_reactions SET permanent=0,next_attempt=0,
+                 snapshot=json_set(snapshot,'$.pending',json('true'))
+                 WHERE permanent=1 OR (next_attempt=0 AND json_extract(snapshot,'$.pending')=0)",
                 [],
             )?;
     }
     let old = state.snapshots()?;
     let authority = SqliteRequestJournal::open(root)?;
-    sources(root)?
-        .into_values()
-        .map(|(target, tasks)| {
-            let mut current = current_status(root, &authority, &target, &tasks, true)?;
+    sources(root, None)?
+        .into_iter()
+        .map(|(group, tasks)| {
+            let target = &group.target;
+            let mut current = current_status(
+                root,
+                &authority,
+                target,
+                &tasks,
+                true,
+                crate::bounded_process::Deadline::after(PASS_BUDGET),
+            )?;
             if let Some(previous) = old.get(&target.source) {
                 let changed = current.desired != previous.desired
                     || current.owner != previous.owner
@@ -256,8 +352,9 @@ fn audit_at(root: &Path, retry: bool, now: DateTime<Utc>) -> anyhow::Result<Vec<
                 current.pending = previous.pending
                     || changed
                     || previous.observed_at.is_none_or(|at| {
-                        now.signed_duration_since(at)
-                            > chrono::Duration::seconds(REFRESH_SECONDS * 2)
+                        !group.confirmed(previous)
+                            && now.signed_duration_since(at)
+                                > chrono::Duration::seconds(REFRESH_SECONDS * 2)
                     });
                 current.error = previous.error.clone();
                 current.next_attempt = previous.next_attempt;
@@ -267,6 +364,7 @@ fn audit_at(root: &Path, retry: bool, now: DateTime<Utc>) -> anyhow::Result<Vec<
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn reconcile_with_clock(
     root: &Path,
     registration: &str,
@@ -274,7 +372,27 @@ pub(crate) fn reconcile_with_clock(
     clock: &dyn Fn() -> DateTime<Utc>,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
 ) -> anyhow::Result<()> {
+    reconcile_until(
+        root,
+        registration,
+        session,
+        clock,
+        crate::bounded_process::Deadline::after(PASS_BUDGET),
+        call,
+    )
+}
+
+pub(crate) fn reconcile_until(
+    root: &Path,
+    registration: &str,
+    session: &str,
+    clock: &dyn Fn() -> DateTime<Utc>,
+    deadline: crate::bounded_process::Deadline,
+    call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
+) -> anyhow::Result<()> {
     let now = clock();
+    let expires = now + chrono::Duration::from_std(PASS_BUDGET)?;
+    let exhausted = || deadline.remaining().is_zero() || clock() >= expires;
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(registration)?;
     if agent.role != AgentRole::Supervisor
@@ -287,14 +405,19 @@ pub(crate) fn reconcile_with_clock(
     let authority = SqliteRequestJournal::open(root)?;
     let previous = state.snapshots()?;
     let mut due = Vec::new();
-    for (target, tasks) in sources(root)?.into_values() {
-        let current = current_status(root, &authority, &target, &tasks, false)?;
+    for (group, tasks) in sources(root, Some(&previous))? {
+        if exhausted() {
+            break;
+        }
+        let target = group.target;
+        let mut current = current_status(root, &authority, &target, &tasks, false, deadline)?;
+        current.task_revisions = group.revisions;
         if current.owner.as_deref() != Some(registration) {
             continue;
         }
-        let changed = previous
-            .get(&target.source)
-            .is_none_or(|old| old.owner != current.owner);
+        let changed = previous.get(&target.source).is_none_or(|old| {
+            old.owner != current.owner || old.task_revisions != current.task_revisions
+        });
         let conn = state
             .conn
             .lock()
@@ -322,6 +445,9 @@ pub(crate) fn reconcile_with_clock(
     }
     due.sort_by_key(|(next, _, _, _)| *next);
     for (_, target, tasks, mut status) in due.into_iter().take(2) {
+        if exhausted() {
+            break;
+        }
         let now = clock();
         let acquired = state.conn.lock().map_err(|_| anyhow::anyhow!("source status database poisoned"))?.execute(
             "UPDATE source_reactions SET lease_until=?3 WHERE source=?1 AND permanent=0 AND next_attempt<=?2 AND lease_until<=?2",
@@ -330,7 +456,7 @@ pub(crate) fn reconcile_with_clock(
         if acquired == 0 {
             continue;
         }
-        status.desired = desired(root, &tasks, true);
+        status.desired = desired(root, &tasks, true, deadline);
         if let Some(old) = previous.get(&target.source) {
             status.observed = old.observed.clone();
             status.observed_at = old.observed_at;
@@ -344,7 +470,19 @@ pub(crate) fn reconcile_with_clock(
             registration,
             clock,
             &mut status,
-            call,
+            deadline,
+            &mut |tool, args| {
+                if exhausted() {
+                    let mut error = VioletError::local(
+                        "source_deadline",
+                        "Source status pass deferred at its deadline",
+                    );
+                    error.retryable = true;
+                    Err(error)
+                } else {
+                    call(tool, args)
+                }
+            },
         );
         status.next_attempt = Some(clock() + chrono::Duration::seconds(REFRESH_SECONDS));
         let mut permanent = false;
@@ -352,6 +490,16 @@ pub(crate) fn reconcile_with_clock(
             Ok(()) => {
                 status.pending = false;
                 status.error = None;
+                let terminal = tasks
+                    .iter()
+                    .all(|task| matches!(task.status, TaskStatus::Closed | TaskStatus::Cancelled));
+                if terminal
+                    && (status.desired.is_none()
+                        || status.desired.as_deref() == Some("white_check_mark"))
+                    && status.observed == status.desired.iter().cloned().collect::<Vec<_>>()
+                {
+                    status.next_attempt = None;
+                }
             }
             Err(error) => {
                 status.pending = true;
@@ -405,6 +553,7 @@ fn reconcile_one(
     registration: &str,
     clock: &dyn Fn() -> DateTime<Utc>,
     status: &mut SourceStatus,
+    deadline: crate::bounded_process::Deadline,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
 ) -> Result<(), VioletError> {
     let receipt = decode_tool_result(&call(
@@ -464,15 +613,20 @@ fn reconcile_one(
     for (action, mark) in operations {
         // Observe takeover and reverse transitions again before every write,
         // particularly before publishing check after a slow read/removal.
-        let latest = sources(root).map_err(|_| {
-            VioletError::local("source_state_unavailable", "Cannot read current tasks")
+        let latest = source_index(root, Some(&target.source)).map_err(|_| {
+            VioletError::local("source_state_unavailable", "Cannot read current task state")
         })?;
-        let current_tasks = latest
+        if latest
             .get(&target.source)
-            .map(|(_, tasks)| tasks.as_slice())
-            .unwrap_or(&[]);
+            .is_none_or(|group| group.revisions != status.task_revisions)
+        {
+            return Err(VioletError::local(
+                "source_state_changed",
+                "Source task state changed during reconciliation",
+            ));
+        }
         let current =
-            current_status(root, authority, target, current_tasks, true).map_err(|_| {
+            current_status(root, authority, target, tasks, true, deadline).map_err(|_| {
                 VioletError::local("source_state_unavailable", "Cannot read source owner")
             })?;
         if current.owner.as_deref() != Some(registration)

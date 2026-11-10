@@ -3,7 +3,8 @@
 pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &str) {
     use super::violet_activity::ProxyChannelReader;
     use crate::cli::violet_hub::VioletError;
-    use crate::coordination::external_work::CALL_REMOTE_BUDGET;
+    let deadline =
+        crate::bounded_process::Deadline::after(crate::coordination::source_reactions::PASS_BUDGET);
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -11,11 +12,12 @@ pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &st
         return;
     };
     let mut connection = None;
-    let result = crate::coordination::source_reactions::reconcile_with_clock(
+    let result = crate::coordination::source_reactions::reconcile_until(
         root,
         registration,
         session,
         &chrono::Utc::now,
+        deadline,
         &mut |tool, args| {
             runtime.block_on(async {
                 let unavailable = || {
@@ -26,6 +28,9 @@ pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &st
                     error.retryable = true;
                     error
                 };
+                if deadline.remaining().is_zero() {
+                    return Err(unavailable());
+                }
                 if connection.is_none() {
                     let caller = cmcp_core::ProxyCaller {
                         agent_id: registration.into(),
@@ -36,7 +41,7 @@ pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &st
                     };
                     connection = Some(
                         tokio::time::timeout(
-                            CALL_REMOTE_BUDGET,
+                            deadline.remaining(),
                             ProxyChannelReader::connect(root, caller),
                         )
                         .await
@@ -45,15 +50,20 @@ pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &st
                     );
                 }
                 let reader = connection.as_ref().expect("connected above");
-                tokio::time::timeout(CALL_REMOTE_BUDGET, reader.source_status(tool, args))
+                if deadline.remaining().is_zero() {
+                    return Err(unavailable());
+                }
+                tokio::time::timeout(deadline.remaining(), reader.source_status(tool, args))
                     .await
                     .map_err(|_| unavailable())?
             })
         },
     );
-    if let Some(reader) = connection {
+    if let Some(reader) = connection
+        && !deadline.remaining().is_zero()
+    {
         runtime.block_on(async {
-            let _ = tokio::time::timeout(CALL_REMOTE_BUDGET, reader.shutdown()).await;
+            let _ = tokio::time::timeout(deadline.remaining(), reader.shutdown()).await;
         });
     }
     if let Err(error) = result {

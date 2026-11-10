@@ -17,7 +17,12 @@ tracking evidence; it does not fetch or deploy.
 `cas violet reactions --json` audits expected and observed status with owner,
 pending/error envelope, retry time and observation timestamp. This command
 does not read or write Slack. The running factory refreshes snapshots, at most
-two source posts per tick. SQLite leases prevent concurrent sends for a source;
+two source posts per tick, after mention admission and due channel sweeps. One
+five-second deadline covers the pass, including connection, staging probes and
+all Violet calls; remaining work waits for a later tick. Only Slack-linked,
+unconfirmed task groups are decoded. Confirmed terminal sources stop polling
+until their task state changes or `--retry` explicitly rearms them. SQLite leases
+prevent concurrent sends for a source;
 successful and failed mutation receipts persist independently of later retries.
 Retryable errors and rate limits wait for their recorded retry time; permanent
 refusals stay pending until repaired and rearmed with `cas violet reactions

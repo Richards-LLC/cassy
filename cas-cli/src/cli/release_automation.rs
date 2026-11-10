@@ -80,6 +80,10 @@ fn save(path: &Path, context: &ReleaseContext) -> Result<()> {
     Ok(())
 }
 fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    git_with_timeout(repo, args, std::time::Duration::from_secs(30))
+}
+
+fn git_with_timeout(repo: &Path, args: &[&str], _timeout: std::time::Duration) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -918,7 +922,10 @@ mod tests {
 
     #[test]
     fn release_tracking_and_installed_notice_are_restart_safe() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, root, mut train, owner, mut args) = fixture();
+        // A pending notice must remain deliverable after the binary upgrades.
+        args.version = "0.1.0".into();
         let repo = temp.path();
         let sha = args.commit.clone();
         let audit = serde_json::json!({"checked_sha": sha, "epic_refs": ["origin/epic/constituent"],
@@ -965,9 +972,16 @@ mod tests {
         train.epic_verification_owner = None;
         open_task_store(&root).unwrap().update(&train).unwrap();
         assert!(!installed_at_root(&root, "example/other", &args.version).unwrap());
+        let publication_path = root.join("publication.json");
+        fs::write(&publication_path, serde_json::to_vec(&serde_json::json!({
+            "tag_name": tag, "draft": false, "published_at": "2026-11-05T23:00:00Z",
+        })).unwrap()).unwrap();
         for _ in 0..2 {
-            assert!(installed_at_root(&root, "example/repo", &args.version).unwrap());
+            installed(&InstalledArgs {
+                receipt: publication_path.clone(), repo: "example/repo".into(),
+            }, Some(&root)).unwrap();
         }
+        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().status, TaskStatus::Closed);
         let rows = crate::store::open_prompt_queue_store(&root)
             .unwrap()
             .peek_all(10)
@@ -977,6 +991,22 @@ mod tests {
         assert!(crate::supervisor_notices::is_action_envelope(
             &rows[0].prompt
         ));
+        fs::write(&publication_path, serde_json::to_vec(&serde_json::json!({
+            "tag_name": "v999.0.0", "draft": false, "published_at": "2026-11-05T23:00:00Z",
+        })).unwrap()).unwrap();
+        assert!(installed(&InstalledArgs {
+            receipt: publication_path, repo: "example/repo".into(),
+        }, Some(&root)).is_err());
+    }
+
+    #[test]
+    fn release_git_child_has_a_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        git(temp.path(), &["init"]).unwrap();
+        assert!(git_with_timeout(
+            temp.path(), &["-c", "alias.hang=!exec /bin/sleep 1", "hang"],
+            std::time::Duration::from_millis(20),
+        ).is_err());
     }
 
     #[tokio::test]

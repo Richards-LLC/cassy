@@ -368,18 +368,26 @@ const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
 /// COMMITTED early answer.
 const POST_COMMIT_NOTE_MARKER: &str = "POST_COMMIT_OUTCOME";
 
+fn first_tool_text(result: &rmcp::model::CallToolResult) -> Option<&str> {
+    result.content.iter().find_map(|content| match &content.raw {
+        rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+        _ => None,
+    })
+}
+
+fn refusal_text(joined: &Result<ToolResult, tokio::task::JoinError>) -> Option<&str> {
+    match joined {
+        Ok(Ok(result)) if result.is_error == Some(true) => first_tool_text(result),
+        Ok(Err(error)) => Some(&error.message),
+        _ => None,
+    }
+}
+
 /// First line of a late close's answer, bounded for a task note.
 fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
     let text = match joined {
         Ok(Ok(result)) => {
-            let text = result
-                .content
-                .iter()
-                .find_map(|content| match &content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
+            let text = first_tool_text(result).unwrap_or_default();
             if result.is_error == Some(true) {
                 // The refusal body (offending claim and remedy) is what the
                 // caller needs; the first line is only its heading.
@@ -391,7 +399,7 @@ fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> St
                 let ellipsis = if cap < body.len() { "…" } else { "" };
                 return format!("refused: {}{ellipsis}", &body[..cap]);
             } else {
-                text
+                text.to_owned()
             }
         }
         Ok(Err(error)) => format!("error: {}", error.message),
@@ -1013,16 +1021,31 @@ impl CasService {
         Some(tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
-            // A checked disposition belongs to this request, unlike the row's
-            // current status or the legacy error-shaped MERGE REQUIRED reply.
-            let summary = receipt.outcome.get().cloned()
-                .unwrap_or_else(|| late_close_summary(&joined));
             let recorded = tokio::task::spawn_blocking(move || {
                 let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
                 let status = store
                     .get(&task_id)
-                    .map(|task| task.status.to_string())
-                    .unwrap_or_else(|error| format!("unreadable ({error})"));
+                    .map_err(|error| format!("{task_id}: {error}"))?
+                    .status;
+                // A checked disposition belongs to this request, unlike the row's
+                // current status or the legacy error-shaped MERGE REQUIRED reply.
+                let summary = if let Some(outcome) = receipt.outcome.get() {
+                    outcome.clone()
+                } else if let (Some(summary), Some(detail)) =
+                    (receipt.park_refusal_summary.get(), refusal_text(&joined))
+                {
+                    let artifacts_root = service.inner.load_config().factory().artifacts_root;
+                    crate::mcp::tools::core::task::lifecycle::close_ops::gate_text::compact_receipt(
+                        &service.inner.cas_root, artifacts_root.as_deref(), &task_id,
+                        "late-close-refusal", summary, detail,
+                    )
+                    .unwrap_or_else(|error| {
+                        warn!(%task_id, %error, "full late close refusal receipt unavailable");
+                        format!("{summary}\nFull refusal receipt unavailable.")
+                    })
+                } else {
+                    late_close_summary(&joined)
+                };
                 let note = format!(
                     "[{}] 📝 PROGRESS {LATE_CLOSE_NOTE_MARKER}: a close answered IN_PROGRESS at the {:.0}s response budget finished after {:.1}s; task status now `{status}`. Result: {summary}",
                     chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -1935,6 +1958,7 @@ mod tests {
     #[tokio::test]
     async fn close_deadline_before_any_write_records_the_late_outcome_cas_3b81() {
         use crate::mcp::server::CasCore;
+        use crate::mcp::tools::core::task::lifecycle::close_ops::gate_preflight::park_reply;
         use crate::mcp::tools::service::CasService;
         use crate::test_support::TestEnvGuard;
         let _env = TestEnvGuard::temp_home();
@@ -1955,23 +1979,22 @@ mod tests {
         );
         let arguments = serde_json::json!({"action":"close", "id":"cas-late"});
         let gates = [
-            ("G3", "Fix docs/qa/journeys.yaml"),
-            ("G5", "Fix .claude/CODEMAP.md"),
-            ("G6", "Fix docs/PRODUCT_OVERVIEW.md"),
+            ("G3", "docs/qa/journeys.yaml"),
+            ("G5", ".claude/CODEMAP.md"),
+            ("G6", "docs/PRODUCT_OVERVIEW.md"),
         ];
-        let refusal_payload = format!(
-            "PARK REFUSED: more than one close gate failed.\n\n{}",
-            gates.map(|(code, action)| format!(
-                "⚠️ UPKEEP {code}\n\n{}\n\n{action} in this branch. Then retry `task action=close id=cas-late`.",
+        let [first, second, third] = gates.map(|(code, action)| {
+            format!(
+                "⚠️ UPKEEP ({code})\n\n{}\n\nNext: Fix {action} in this branch. {} Then retry `task action=close id=cas-late`.",
                 "é".repeat(400),
-            )).join("\n\n"),
-        );
-        let supplied = refusal_payload.clone();
+                if code == "G3" { "é".repeat(200) } else { String::new() },
+            )
+        });
+        let refusals = vec![format!("{first}\n\n{second}"), third];
+        let refusal_payload = park_reply(refusals.clone());
         let close = async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            Ok(rmcp::model::CallToolResult::error(vec![
-                rmcp::model::Content::text(supplied),
-            ]))
+            Ok(CasCore::tool_error(park_reply(refusals)))
         };
         let error = service
             .call_with_deadline(
@@ -1999,7 +2022,9 @@ mod tests {
         };
         assert_eq!(tasks.get("cas-late").unwrap().status, crate::types::TaskStatus::Open);
         for (code, action) in gates {
-            assert!(notes.lines().any(|line| line.contains(code) && line.contains(action)), "{notes}");
+            let row = notes.lines().find(|line| line.contains(code) && line.contains(action))
+                .unwrap_or_else(|| panic!("missing {code} and {action}: {notes}"));
+            assert!(row.len() <= 425, "{row}");
         }
         assert!(notes.len() < refusal_payload.len(), "{notes}");
         let detail = notes.split_whitespace()

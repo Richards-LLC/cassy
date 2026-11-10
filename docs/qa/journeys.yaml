@@ -456,6 +456,11 @@ bug_families:
     tasks: [cas-fd21]
     invariants: [FACTORY-CLOSE-LATE-PARK]
     journeys: [FACTORY-CLOSE]
+  late-close-park-refusals:
+    title: A late close reports every failed park gate and links to the complete refusal
+    tasks: [cas-5c77]
+    invariants: [FACTORY-CLOSE-LATE-PARK]
+    journeys: [FACTORY-CLOSE]
   peer-override-readable-reason:
     title: Peer override notices keep machine identity separate from operator reasons and retained code summaries fall back to the message
     tasks: [cas-ef6e]

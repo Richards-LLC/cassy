@@ -12947,25 +12947,43 @@ mod worker_commit_guard_tests {
         let linked = tempfile::tempdir().expect("linked worktree path");
         add_linked_worktree(repo.path(), linked.path(), "factory/cwd-worker");
         let linked_path = linked.path().to_string_lossy().to_string();
+        let backend = linked.path().join("apps/backend");
+        std::fs::create_dir_all(&backend).unwrap();
+        let backend_path = backend.to_string_lossy().to_string();
+        let reflog = || std::process::Command::new("git")
+            .args(["reflog", "show", "--format=%H"]).current_dir(linked.path())
+            .output().unwrap().stdout;
+        let original = reflog();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", None),
             ("CAS_AGENT_NAME", Some("cwd-worker")),
+            ("TASK_WORKTREE_UNSET", None),
         ]);
 
-        let input = hook_git_write_input(&linked_path, "git commit -m work");
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "linked cwd branch must be honored: {val}"
-        );
+        // cas-84ea: the guard inspects the directory of the actual commit,
+        // including relative traversal and a prior literal variable binding.
+        for (cwd, command, denied, unresolved) in [
+            (&linked_path, "git commit -m work".to_string(), false, false),
+            (&backend_path, "cd ../..; git commit -m work".into(), false, false),
+            (&linked_path, "cd apps/backend; cd ../..; git commit -m work".into(), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"$W\"; git commit -m work"), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"${{W}}\"; git commit -m work"), false, false),
+            (&linked_path, format!("W='{}'; cd \"$W\"; git commit -m work", repo.path().display()), true, false),
+            (&linked_path, "cd \"$TASK_WORKTREE_UNSET\"; git commit -m work".into(), true, true),
+        ] {
+            let input = hook_git_write_input(cwd, &command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            assert_eq!(val["hookSpecificOutput"]["permissionDecision"] == "deny", denied,
+                "cwd={cwd}, command={command}: {val}");
+            if unresolved {
+                assert!(val["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .unwrap_or_default().contains("WORKER_GIT_TARGET_UNRESOLVED"), "{val}");
+            }
+        }
+        assert_eq!(reflog(), original);
     }
 
     #[test]

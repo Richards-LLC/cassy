@@ -257,10 +257,13 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         ))
         .unwrap();
         let Some(mut post) = server.recv_timeout(Duration::from_secs(5)).unwrap() else {
-            return false;
+            return (false, None);
         };
         assert_eq!(post.method().as_str(), "POST");
         assert_eq!(post.url(), RECONCILE_PATH);
+        let attempt_id = post.headers().iter()
+            .find(|header| header.field.equiv("X-Cassy-Attempt-Id"))
+            .map(|header| header.value.to_string());
         assert_eq!(
             post.headers()
                 .iter()
@@ -287,7 +290,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
                 .with_header(tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()),
         )
         .unwrap();
-        true
+        (true, attempt_id)
     });
     let inventory = RuntimeSnapshot::capture(true);
     env.set("CAS_AGENT_ROLE", "supervisor");
@@ -319,11 +322,12 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         "{report:?}"
     );
     gui.join().unwrap();
-    let posted = remote.join().unwrap();
+    let (posted, attempt_id) = remote.join().unwrap();
     assert!(
         posted,
         "reconciliation must reach the ordinary HTTP path after actual local drain"
     );
+    assert_eq!(Uuid::parse_str(&attempt_id.expect("Cloud mutation attempt header")).unwrap().get_version_num(), 4);
     let state = IntakeJournal::new(&root).read().unwrap();
     assert_eq!(state.pauses[0].operation_id, report.operation_id);
     assert!(

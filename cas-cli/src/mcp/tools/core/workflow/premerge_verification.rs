@@ -158,6 +158,10 @@ fn is_regenerated_output(path: &str) -> bool {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args.first() == Some(&"merge-tree") {
+        // Candidate preparation precedes the manager's merge preflight.
+        crate::worktree::git::ensure_merge_drivers(repo, args.get(2..).unwrap_or_default());
+    }
     let _phase = (args.first() == Some(&"merge-tree"))
         .then(|| crate::mcp::tools::service::mutation_receipt::phase("merge-tree"));
     let output = Command::new("git")

@@ -232,6 +232,7 @@ def ordinary_merge(base, ours, theirs, marker=7):
     )
     return 0 if result.returncode == 0 else 1
 
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "install":
         return install(argv[2] if len(argv) > 2 else os.getcwd())

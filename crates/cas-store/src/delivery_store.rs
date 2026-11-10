@@ -1135,6 +1135,16 @@ mod tests {
     }
 
     #[test]
+    fn observed_merges_read_across_every_target_oldest_first() {
+        let root = TempDir::new().unwrap();
+        record_observed_delivery_merge(root.path(), "cas-a", "factory/a", "epic/train", "s1", "m1", "sup").unwrap();
+        record_observed_delivery_merge(root.path(), "cas-b", "factory/b", "main", "s2", "m2", "sup").unwrap();
+        let merges = observed_delivery_merges(root.path()).unwrap();
+        assert_eq!(merges.iter().map(|m| m.task_id.as_str()).collect::<Vec<_>>(), ["cas-a", "cas-b"]);
+        assert_eq!(observed_delivery_merges_into(root.path(), "main").unwrap().len(), 1);
+    }
+
+    #[test]
     fn supervisor_changes_request_reopens_exact_unmerged_delivery_without_losing_assignee() {
         let root = TempDir::new().unwrap();
         let task_store = SqliteTaskStore::open(root.path()).unwrap();

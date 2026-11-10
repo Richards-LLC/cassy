@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  restart-bind-preflight:
+    title: A refused restart bind preserves the running hub's PID and serving health before either service or detached lifecycle mutation
+    tasks: [cas-aa18]
+    journeys: [HUB-J11]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

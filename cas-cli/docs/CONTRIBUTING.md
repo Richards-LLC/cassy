@@ -2455,6 +2455,10 @@ This section moved here from the repository `CLAUDE.md`, where it loaded into ev
 
 ### Commands
 
+`cas hub restart` validates its plaintext bind address before restarting a
+supervised service or stopping a detached hub. A refused `--bind` keeps the
+existing hub's PID and listener available.
+
 ```bash
 # Supervisor/operator only — factory workers never run these
 cargo build                          # Dev build

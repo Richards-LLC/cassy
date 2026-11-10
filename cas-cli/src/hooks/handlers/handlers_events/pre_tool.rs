@@ -12717,7 +12717,10 @@ mod worker_commit_guard_tests {
         for (command, denied) in [
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
+            (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("bash -c -e 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("zsh -lc 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
@@ -12726,6 +12729,9 @@ mod worker_commit_guard_tests {
             (format!("cd '{repo_path}'; bash -c 'git commit -m probe'"), true),
             (deep_command, true),
             ("bash -c 'git commit -m work'".to_string(), false),
+            ("bash -c -- 'git commit -m work'".to_string(), false),
+            ("bash -c -e 'git commit -m work'".to_string(), false),
+            ("bash -c --".to_string(), true),
             (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
             (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
         ] {

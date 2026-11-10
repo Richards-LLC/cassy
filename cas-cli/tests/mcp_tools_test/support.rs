@@ -33,6 +33,19 @@ fn scrub_factory_identity_env(env: &mut TestEnvGuard) {
 /// Register the test session agent with the requested role, borrowing the
 /// test's environment owner for setup and every later handler call.
 pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir, CasCore) {
+    setup_cas_fixture(env, role, true)
+}
+
+/// Repository-less lifecycle cases must not silently bind to a parent checkout.
+pub(crate) fn setup_cas_without_git(env: &mut TestEnvGuard) -> (TempDir, CasCore) {
+    setup_cas_fixture(env, AgentRole::Standard, false)
+}
+
+fn setup_cas_fixture(
+    env: &mut TestEnvGuard,
+    role: AgentRole,
+    repository: bool,
+) -> (TempDir, CasCore) {
     let xdg = env.home().join(".config");
     std::fs::create_dir_all(&xdg).expect("sandbox XDG_CONFIG_HOME should be created");
     env.set("XDG_CONFIG_HOME", &xdg);
@@ -46,6 +59,35 @@ pub(crate) fn setup_cas_as(env: &mut TestEnvGuard, role: AgentRole) -> (TempDir,
     }
 
     let temp = TempDir::new().expect("temp dir should be created");
+    if repository {
+        // Capped runners can place TMPDIR beneath the source checkout. Own a
+        // repository boundary so Git/close/QA discovery never reaches that tree.
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=Test", "-c", "user.email=test@example.com"])
+                .args(args)
+                .current_dir(temp.path())
+                .output()
+                .expect("fixture git should run");
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(temp.path().join(".git/info/exclude"), ".cas/\n")
+            .expect("exclude fixture stores");
+        git(&["commit", "-q", "--allow-empty", "-m", "fixture"]);
+        git(&["branch", "factory/test-agent"]);
+        git(&[
+            "update-ref",
+            "refs/remotes/origin/factory/test-agent",
+            "factory/test-agent",
+        ]);
+    } else {
+        assert!(
+            !temp.path().ancestors().any(|path| path.join(".git").exists()),
+            "repository-less fixture must be outside every Git checkout: {}",
+            temp.path().display()
+        );
+    }
     let cas_dir = temp.path().join(".cas");
     std::fs::create_dir_all(&cas_dir).expect(".cas dir should be created");
     env.set("CAS_ROOT", &cas_dir);
@@ -186,6 +228,35 @@ pub(crate) fn extract_skill_id(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{ScopedFactoryEnv, TestEnvGuard, extract_skill_id, setup_cas};
+
+    #[test]
+    fn setup_cas_owns_its_repository_under_a_nested_temp_root() {
+        let mut env = TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(outer.path())
+            .output()
+            .unwrap();
+        assert!(initialized.status.success(), "{initialized:?}");
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            env.set(key, outer.path());
+        }
+
+        let (fixture, _core) = setup_cas(&mut env);
+        let root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert!(root.status.success(), "{root:?}");
+        assert_eq!(
+            std::path::Path::new(String::from_utf8_lossy(&root.stdout).trim())
+                .canonicalize()
+                .unwrap(),
+            fixture.path().canonicalize().unwrap()
+        );
+    }
 
     #[test]
     fn setup_owner_restores_environment_and_removes_home_on_unwind() {

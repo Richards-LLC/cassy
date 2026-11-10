@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ConversationHistory, waitingQuestion } from "./conversation-history";
 import { ProjectNavigation } from "./project-navigation";
 import { isNewerRelease, machineVersionMarkup } from "./machine-version";
 import type { ConversationRow } from "./conversation-list";
@@ -12,6 +13,27 @@ function setup() {
 beforeEach(() => localStorage.clear());
 
 describe("project-first navigation", () => {
+  it("uses the first message sentence for legacy code summaries in Needs you (cas-ef6e)", () => {
+    const first = "lively-stork-7 continued while ready-cobra-72 was unavailable.";
+    const message = `${first} Review the merged work.`;
+    for (const [summary, body, expected] of [
+      ["peer_ask_override", message, first],
+      ["reason_42", `${first}\nMore context`, first],
+      ["", message, first],
+      ["Review this merge", message, "Review this merge"],
+      ["peer_ask_override", "", undefined],
+      ["peer_ask_override", "peer_ask_override", undefined],
+    ] as const) {
+      const history = new ConversationHistory();
+      history.reply({ notification_id: 1, reply_to: null, summary, message: body, device_id: "*", kind: "blocker" });
+      const question = waitingQuestion(history);
+      expect(question).toBe(expected);
+      const nav = setup();
+      new ProjectNavigation().render(nav, [row("override", { attention: history.waiting().length, operatorQuestion: question })], vi.fn());
+      expect(nav.querySelector(".needs-you-question")?.textContent).toBe(expected);
+      expect(nav.querySelector(".needs-you-shortcut")).not.toBeNull();
+    }
+  });
   it("keeps Reload Cassy on skewed cards without adding conversation Tab stops, with honest receipts", () => {
     const nav = setup();
     const navigation = new ProjectNavigation();

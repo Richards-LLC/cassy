@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
-import { WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
+import { taskChip, WorkEventStream, workEventSupport, workEventsPage } from "./work-events";
 import { WorkPicture, type WorkEventTransport } from "./work-picture";
 import { renderWork, workSignature } from "./work-rows-view";
 import { ConversationHistory } from "./conversation-history";
 import { threadModel } from "./thread-model";
+import { workerTaskLine } from "./progress-view";
+import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 
 const wire = (id: string, second: number, extra: Record<string, unknown> = {}) => ({ id, kind: "tool", session: "s", at: `2026-10-27T12:00:${String(second).padStart(2, "0")}Z`, label: id, has_detail: true, ...extra });
 
@@ -18,6 +20,38 @@ function livePicture(agent?: string) {
 }
 
 describe("work events (cas-ff22)", () => {
+  it("leads worker card task text with the reported title (cas-943b)", () => {
+    const title = "Repair <stale> worker routing";
+    const line = workerTaskLine(document, { currentTask: "cas-b200", work: title });
+    expect(line.textContent).toBe(title);
+    expect(line.title).toBe("cas-b200");
+    expect(line.querySelector("stale")).toBeNull();
+  });
+  it("leads the worker timeline subject with the reported title (cas-943b)", () => {
+    const title = "Repair <stale> worker routing";
+    const handlers = { readOlder: vi.fn(), closed: vi.fn() };
+    const dialog = workerTimelineDialog(document, handlers);
+    renderWorkerTimeline(dialog, { worker: "swift-lark-3", task: "cas-b200", taskTitle: title, status: "active" }, undefined, undefined, handlers);
+    const line = dialog.querySelector<HTMLElement>("#worker-timeline-subject")!;
+    expect(line.textContent?.startsWith(title)).toBe(true);
+    expect(line.title).toBe("cas-b200");
+    expect(line.querySelector("stale")).toBeNull();
+    dialog.remove();
+  });
+  it("keeps the title from the daemon's task transition in the visible chip (cas-943b)", () => {
+    const title = "Repair blocked work: <stale> task routing";
+    const label = `cas-7e62 started: ${title}`;
+    const event = workEventsPage({ request_id: "r", events: [wire("task", 1, { kind: "task", label })], has_earlier: false })!.events[0]!;
+    expect(taskChip(event)?.subject).toBe(title);
+    expect(taskChip(event)?.tone).toBe("idle");
+    const node = document.createElement("div");
+    const context = { detail: () => undefined, requestDetail: () => {}, isOpen: () => false, setOpen: () => {} };
+    renderWork(node, { type: "work", key: "work:task", events: [event] }, context, "lead");
+    const chip = node.querySelector<HTMLElement>(".work-chip")!;
+    expect(chip.textContent?.endsWith(title)).toBe(true);
+    expect(chip.title).toBe(label);
+    expect(chip.querySelector("stale")).toBeNull();
+  });
   it("shows each turn's newest tool-reported edits once and persists lazy file evidence", () => {
     const storage = new Map<string, string>([["commander.showWork", "1"]]);
     const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: () => "page", requestWorkEventDetail: vi.fn(() => "detail") };

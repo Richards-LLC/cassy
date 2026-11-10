@@ -250,10 +250,17 @@ fn checkout_task_beside_parked_delivery(
         let base = git.resolve_fresh_base(target)
             .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
         let expected = git.resolve_commit(&base.branch_ref);
+        if crate::factory_isolation::branch_at(checkout).is_none()
+            && (expected.is_none() || git.resolve_commit("HEAD") != expected)
+        {
+            return Err(format!(
+                "Cannot start task: detached HEAD differs from target `{target}`. Preserve the detached work on a named branch, then switch to task branch `{branch}` from `{target}` before retrying."
+            ));
+        }
         for reference in [format!("refs/heads/{branch}"), format!("origin/{branch}")] {
             if let Some(existing) = git.resolve_commit(&reference)
                 && Some(existing) != expected {
-                return Err(format!("Queued branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"));
+                return Err(format!("Task branch {branch} differs from its current target {target}; inspect the prior preparation before retrying"));
             }
         }
     }
@@ -271,6 +278,9 @@ fn checkout_task_beside_parked_delivery(
     }
     git.checkout(&branch)
         .map_err(|error| format!("Cannot check out task branch {branch}: {error}"))?;
+    if crate::factory_isolation::branch_at(checkout).as_deref() != Some(branch.as_str()) {
+        return Err(format!("Cannot start task: checkout did not attach to `{branch}`. Switch to that branch before retrying."));
+    }
     Ok(branch)
 }
 
@@ -2725,7 +2735,21 @@ impl CasCore {
                     // A completed per-task lane is owned just like the base
                     // lane. Reconcile the branch actually checked out so an
                     // accepted clean-idle assignment also starts on fresh code.
-                    let mut worker_branch = crate::factory_isolation::branch_at(worker_checkout)
+                    let checkout_branch = crate::factory_isolation::branch_at(worker_checkout);
+                    let detached_checkout = checkout_branch.is_none();
+                    // cas-ce0d: only a fresh assignment may allocate a new
+                    // branch from detached HEAD; a resume must name its work.
+                    if detached_checkout
+                        && initial_factory_branch_reset_target(&task, task.status).is_none()
+                    {
+                        let own = task.deliverables.factory_branch_start.as_ref()
+                            .map(|start| start.branch.clone())
+                            .unwrap_or_else(|| crate::factory_isolation::worker_task_branch(&worker.name, &task.id));
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                            "Cannot resume task from detached HEAD. Preserve detached work and switch to its recorded branch `{own}` before retrying task start."
+                        )));
+                    }
+                    let mut worker_branch = checkout_branch
                         .filter(|branch| {
                             crate::factory_isolation::classify_worker_binding(
                                 &worker.name,
@@ -2737,13 +2761,13 @@ impl CasCore {
                         });
                     // GH #1353: both the reusable and per-task parked refs
                     // must remain stable while the next task starts.
-                    let parked_branch_note = if queued_start && task.status == TaskStatus::Open {
+                    let parked_branch_note = if (queued_start || detached_checkout) && task.status == TaskStatus::Open {
                         let previous = worker_branch.clone();
                         worker_branch = checkout_task_beside_parked_delivery(
                             worker_checkout, &worker.name, &task.id, target_branch,
                             task.deliverables.factory_branch_start.is_none(),
                         ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
-                        Some(format!("\nTask queue preserved {previous}; starting on {worker_branch}."))
+                        Some(format!("\nTask start preserved {previous}; starting on {worker_branch}."))
                     } else if task.status == TaskStatus::Open {
                         crate::mcp::tools::worktree_head(worker_checkout)
                             .and_then(|tip| crate::mcp::tools::parked_delivery_at_tip(

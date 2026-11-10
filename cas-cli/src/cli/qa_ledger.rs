@@ -125,10 +125,20 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
                 .or(task.deliverables.parked_branch.as_deref());
             let revision = match source {
                 Some(branch) => {
+                    // A local source remains authoritative for ongoing work.
+                    // After branch cleanup, use the same immutable delivery
+                    // identity as batch receipts, never a movable tag or HEAD.
                     crate::qa_impact::io::resolve_ref(&repo, &format!("refs/heads/{branch}"))
+                        .or_else(|error| crate::qa_batch::delivery_anchor(&repo, &task).ok_or(error))
                         .with_context(|| {
                             format!("resolve recorded task source branch {branch:?} for {id}")
                         })?
+                }
+                None if task.deliverables.factory_branch_anchor.is_some()
+                    || !task.deliverables.historical_factory_branch_anchors.is_empty() =>
+                {
+                    crate::qa_batch::delivery_anchor(&repo, &task)
+                        .with_context(|| format!("resolve recorded delivery anchor for {id}"))?
                 }
                 None => crate::qa_impact::io::resolve_ref(&repo, "HEAD")?,
             };

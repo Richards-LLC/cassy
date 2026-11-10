@@ -232,43 +232,31 @@ fn a_blocked_task_does_not_hide_its_idle_worker_from_ready_work_gh1302() {
     );
 }
 
-/// cas-c73a: a pinned epic cannot fall through to the project backlog.
-/// With no focus, retain the existing project-wide ready-work policy.
+/// GH #1432: an intentionally idle worker does not authorize the historical
+/// backlog, with or without a focused epic. Explicit ready children still surface.
 #[test]
-fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
+fn historical_backlog_is_not_authorized_idle_work_cas_c243() {
     let now = Utc.with_ymd_and_hms(2026, 10, 20, 11, 0, 0).unwrap();
     let mut snapshot = data();
-    // The focused epic still has work in flight, so it is not assembly time.
-    snapshot
-        .in_progress_tasks
-        .push(task("cas-running", TaskStatus::InProgress, Some("busy-owl"), Some("cas-epic")));
-    let backlog = (0..12).map(|n| format!("cas-r{n:02}")).collect::<Vec<_>>();
-    for id in &backlog {
-        snapshot.ready_tasks.push(task(id, TaskStatus::Open, None, None));
+    snapshot.in_progress_tasks.push(task(
+        "cas-running", TaskStatus::InProgress, Some("busy-owl"), Some("cas-epic"),
+    ));
+    for n in 0..220 {
+        snapshot.ready_tasks.push(task(&format!("cas-legacy-{n:03}"), TaskStatus::Open, None, None));
     }
     snapshot.agents.push(worker("gold-fox", now - Duration::hours(10)));
-    let expected = Some(SupervisorActionableState::AssignReadyWork {
-        task_ids: backlog.clone(),
-        idle_workers: vec!["gold-fox".into()],
-    });
-
-    let state = supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
-    assert_eq!(state, None, "a pinned epic has no ready children");
-    assert!(!wake_for(state, now), "unrelated backlog must produce no supervisor_stalled wake");
-    assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None), expected);
-    let text = expected.unwrap().next_step_text();
-    assert!(text.contains("cas-r09 and 2 more to idle worker(s) gold-fox"), "{text}");
+    for focus in [Some("cas-epic"), None] {
+        let state = supervisor_actionable_state(&snapshot, focus, "supervisor", &HashSet::new(), now, 600, |_| None);
+        assert_eq!(state, None);
+        assert!(!wake_for(state, now));
+    }
     snapshot.ready_tasks.push(task("cas-focused", TaskStatus::Open, None, Some("cas-epic")));
     snapshot.ready_tasks.push(task("cas-other-epic", TaskStatus::Open, None, Some("cas-other")));
     let focused = supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
     assert_eq!(focused, Some(SupervisorActionableState::AssignReadyWork {
         task_ids: vec!["cas-focused".into()], idle_workers: vec!["gold-fox".into()],
     }));
-    let mut all = backlog;
-    all.extend(["cas-focused".into(), "cas-other-epic".into()]);
-    all.sort();
-    assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None),
-        Some(SupervisorActionableState::AssignReadyWork { task_ids: all, idle_workers: vec!["gold-fox".into()] }));
+    assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None), None);
 }
 
 #[test]

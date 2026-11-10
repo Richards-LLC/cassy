@@ -39,7 +39,13 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 fn assert_no_capture_checkouts(cas_root: &Path) {
-    assert!(!fs::read_dir(cas_root.join("tmp")).unwrap().any(|entry| {
+    // The budget can expire before staging creates tmp at all.
+    let mut entries = match fs::read_dir(cas_root.join("tmp")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("could not inspect capture checkouts: {error}"),
+    };
+    assert!(!entries.any(|entry| {
         let entry = entry.unwrap();
         entry.file_type().unwrap().is_dir()
             && entry.file_name().to_string_lossy().starts_with("capture-")
@@ -246,7 +252,13 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
     );
     assert_no_capture_checkouts(&cas_root);
     // The lease directory remains as reusable lock files, without held locks.
-    for pid in fs::read_to_string(pid_file).unwrap().split_whitespace() {
+    // A pre-start timeout has no server PID file either.
+    let pids = match fs::read_to_string(pid_file) {
+        Ok(pids) => pids,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => panic!("could not read capture process evidence: {error}"),
+    };
+    for pid in pids.split_whitespace() {
         let proc = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
         if let Ok(stat) = fs::read_to_string(proc) {
             assert!(

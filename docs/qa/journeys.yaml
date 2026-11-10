@@ -493,6 +493,10 @@ bug_families:
     title: Add worker is a titled panel with labelled fields inside the rail, and a phone action sheet names the worker or task it acts on
     tasks: [cas-5d53]
     journeys: [HUB-J17]
+  accounts-default-and-stale-reset:
+    title: The default account card shows its badge without Set default, and a reset already past is never shown as a time
+    tasks: [cas-eae3]
+    journeys: [HUB-J13]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

@@ -16488,25 +16488,12 @@ mod tests {
              FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
         ).unwrap();
         assert!(outbox_pending, "the independent durable delivery snapshot still retries");
-        // cas-1a73: an automatic status mirror can carry an operator decision.
-        // Queue expiry must notify the current supervisor even after the
-        // original session ends, without claiming the outbox stopped retrying.
-        let notice: (String, Option<String>, String) = conn.query_row(
-            "SELECT target, factory_session, prompt FROM prompt_queue
-             WHERE source = 'delivery-watchdog' AND dedupe_key = ?",
-            [format!("operator-mirror-undelivered:{}", mirrors[0])],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).unwrap();
-        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", None));
-        assert!(notice.2.contains(PendingReason::SupersededStale.as_str()));
-        // FactoryDaemon::supervisor_wake_class consumes this protocol suffix
-        // on daemon-origin notices; plain watchdog prose cannot wake an idle sender.
-        assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));
+        // cas-0afdd: expiry of a completed pane copy is not a lost operator ask.
         let notice_count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM prompt_queue WHERE dedupe_key LIKE 'operator-mirror-undelivered:%'",
             [], |row| row.get(0),
         ).unwrap();
-        assert_eq!(notice_count, 1, "delivered and fresh mirrors need no failure notice");
+        assert_eq!(notice_count, 0, "expired transcript copies raise no blocker");
         drop(conn);
 
         for id in [operator, commander] {
@@ -16541,9 +16528,22 @@ mod tests {
         assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
         assert_eq!(store.message_delivery_report(mirrors[1]).unwrap().unwrap().stage,
                    DeliveryStage::Suppressed);
-        assert_eq!(notices_to(&store, "next-supervisor"), 1);
+        assert_eq!(notices_to(&store, "next-supervisor"), 0);
         assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
-        assert_eq!(notices_to(&store, "next-supervisor"), 1, "expiry notices do not replay");
+        assert_eq!(notices_to(&store, "next-supervisor"), 0, "a successor gets no stale mirror blocker");
+
+        // Explicit undelivered asks still reach the sender through the watchdog.
+        let ask = store.enqueue_with_session(
+            "next-supervisor", "operator", "Approve the move?", "factory-a",
+        ).unwrap();
+        store.stamp_operator_reply(ask, "ask", &[]).unwrap();
+        backdate(&store, ask, 31 * 60);
+        assert!(store.delivery_stalled_candidates("factory-a", 600, 1800, 50)
+            .unwrap().iter().any(|row| row.id == ask));
+        assert!(store.enqueue_delivery_stalled_bounce(
+            ask, "factory-a", "stalled", "stalled",
+        ).unwrap().is_some());
+        assert_eq!(notices_to(&store, "next-supervisor"), 1);
     }
 
     fn register_agent_at(

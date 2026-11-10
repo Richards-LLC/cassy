@@ -1221,6 +1221,65 @@ mod tests {
     }
 
     #[test]
+    fn returned_delivery_merge_resolution_fragment_counts_cas_3623() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-c568".into(), "returned delivery".into());
+        let fragment = "changelog.d/cas-c568.md";
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        git(&["branch", "-f", "main", &base]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Quiet expiry of old transcript mirrors** — Previous sessions expire quietly.\n").unwrap();
+        let parked = commit_changelog_fixture(repo.path(), "fix: quiet old mirrors (cas-c568)");
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("changelog.d/cas-beef.md"),
+            "### Fixed — Factory\n\n- **Foreign release note** — Another task's delivery.\n").unwrap();
+        commit_changelog_fixture(repo.path(), "fix: target work (cas-beef)");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-commit", "main"]);
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Preserve current-session delivery warnings** — Current mirrors still warn.\n").unwrap();
+        let merge = commit_changelog_fixture(repo.path(), "merge: preserve current-session warnings");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "fix: retain decision warnings (cas-c568)");
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![parked.clone()],
+            },
+        };
+        let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert_eq!(ranges, vec![(base, parked), (merge, head.clone())]);
+        let paths = task_attribution::paths(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert!(!paths.iter().any(|path| path == "changelog.d/cas-beef.md"));
+        assert!(changelog_refusal(repo.path(), &task, &paths, &head, "main", Some(&ranges)).is_none());
+
+        // The imported note cannot replace missing or malformed task evidence.
+        for contents in [None, Some("### Fixed — Factory\n\n- Untitled change.\n")] {
+            if let Some(contents) = contents {
+                std::fs::write(repo.path().join(fragment), contents).unwrap();
+            } else {
+                std::fs::remove_file(repo.path().join(fragment)).unwrap();
+            }
+            let invalid = commit_changelog_fixture(repo.path(), "invalid fragment control (cas-c568)");
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            assert!(changelog_refusal(repo.path(), &task, &paths, &invalid, "main", Some(&ranges)).is_some());
+        }
+    }
+
+    #[test]
     fn merge_authored_task_fragment_counts_without_crediting_imports_cas_28f8() {
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();

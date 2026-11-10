@@ -37,6 +37,8 @@ pub struct PostOptions {
     pub reply_to: Option<String>,
     pub title: Option<String>,
     pub initial_comment: Option<String>,
+    /// Current caller's registered reply intent, resolved before posting.
+    pub reply_claim: Option<Value>,
 }
 
 /// What a successful post returns, for the release-report flow to record.

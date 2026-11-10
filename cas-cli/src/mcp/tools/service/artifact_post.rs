@@ -60,6 +60,7 @@ impl CasService {
             reply_to: req.reply_to.clone(),
             title: req.title.clone(),
             initial_comment: req.initial_comment.clone(),
+            reply_claim: None,
         };
         if options.channel.trim().is_empty() {
             return Err(post_error(PostError::new(

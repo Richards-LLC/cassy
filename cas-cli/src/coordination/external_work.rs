@@ -2568,9 +2568,9 @@ mod tests {
         let post = journal.current_reply_post(me, root, before_expiry()).unwrap().expect("the live intent");
         assert_eq!(post["coordination_operation_id"], "00007e91-1111-4111-8111-000000007e91");
         assert_eq!(post["expected_generation"], 1);
-        assert!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).unwrap().is_none());
+        assert!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).is_err());
         assert!(journal.current_reply_post(me, "1760616999.000001", before_expiry()).unwrap().is_none());
-        assert!(journal.current_reply_post(me, root, at_expiry()).unwrap().is_none(), "lapsed claim");
+        assert!(journal.current_reply_post(me, root, at_expiry()).is_err(), "lapsed claim");
 
         let release = &fixture("release")["cases"][0];
         *cloud.post_result.lock().unwrap() = Ok(release["response"]["payload"].clone());
@@ -2581,7 +2581,7 @@ mod tests {
                 request_id: Some(release["request"]["payload"]["request_id"].as_str().unwrap().into()),
             })
             .unwrap();
-        assert!(journal.current_reply_post(me, root, before_expiry()).unwrap().is_none(), "released claim");
+        assert!(journal.current_reply_post(me, root, before_expiry()).is_err(), "released claim");
     }
 
     /// cas-f869: Cloud's refusals pass through with their next step and no

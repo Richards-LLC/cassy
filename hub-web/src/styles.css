@@ -1960,7 +1960,8 @@ dialog form > *,
 .conversation-topline button { font-size: var(--fs-meta); color: var(--ink); background: var(--color-transparent); }
 /* Unavailable actions remain focusable, with their existing reason description. */
 .conversation-header-actions { display: inline-flex; align-items: center; gap: var(--space-2); margin-inline-start: auto; }
-.conversation-more-menu { display: contents; }
+/* The popover UA sheet adds overflow: auto; inline, the menu is not a scroller. */
+.conversation-more-menu { display: contents; overflow: visible; }
 .conversation-topline .conversation-action.conversation-more-toggle { display: none; }
 .conversation-title-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .conversation-title-line h1 { min-width: 0; }

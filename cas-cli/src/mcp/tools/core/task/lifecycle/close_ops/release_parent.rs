@@ -89,3 +89,69 @@ impl CasCore {
 fn held(gate: String, owner: Option<String>) -> ParentOutcome {
     ParentOutcome::Held { gate, owner, next_action: "Resolve the named gate, refresh the inventory, and replay this release operation.".into() }
 }
+
+#[cfg(test)]
+pub(super) async fn probe_deleted_parent_and_single_pending_cycle(
+    core: &CasCore, root: &std::path::Path, repo: &std::path::Path,
+    scope: &crate::qa_batch::ReleaseScope, leaf: &str,
+) {
+    use cas_types::{Agent, AgentRole, AgentStatus, Dependency, DependencyType, WorkTarget};
+    let tasks = core.open_task_store().unwrap();
+    let agents = core.open_agent_store().unwrap();
+    let mut retired = Agent::new_with_role("retired-parent-owner".into(), "retired-owner".into(), AgentRole::Supervisor);
+    retired.status = AgentStatus::Shutdown;
+    agents.register(&retired).unwrap();
+    let mut parents = Vec::new();
+    for id in ["cas-release-epic", "cas-release-train", "cas-release-pending"] {
+        let mut parent = Task::new(id.into(), id.into());
+        parent.task_type = TaskType::Epic;
+        parent.branch = Some(format!("epic/deleted-{id}"));
+        parent.epic_verification_owner = Some(retired.id.clone());
+        parent.deliverables.work_target = Some(WorkTarget { repo_selector: format!("project:{}", scope.project_id), target_branch: "main".into() });
+        parent.notes = format!("ASSEMBLY_PROOF: head={} result=PASS command=fixture log=fixture.log", scope.final_release_sha);
+        tasks.add(&parent).unwrap();
+        parents.push(parent);
+    }
+    for (child, parent) in [(leaf, "cas-release-epic"), ("cas-release-epic", "cas-release-train"), (leaf, "cas-release-pending")] {
+        tasks.add_dependency(&Dependency::new(child.into(), parent.into(), DependencyType::ParentChild)).unwrap();
+    }
+    let mut review_scope = scope.clone();
+    review_scope.constituent_epic_ids = vec!["cas-release-train".into(), "cas-release-pending".into()];
+    let manifest = serde_json::json!({
+        "project_id": scope.project_id, "release_id": scope.release_id,
+        "reviewed_sha": scope.reviewed_sha, "final_release_sha": scope.final_release_sha,
+        "epics": [
+            {"task_id": parents[0].id, "generation": parents[0].updated_at.to_rfc3339(), "child_ids":[leaf], "acceptance":"pass"},
+            {"task_id": parents[1].id, "generation": parents[1].updated_at.to_rfc3339(), "child_ids":[parents[0].id], "acceptance":"pass"},
+            // A signed row with an incomplete child set grants no acceptance.
+            {"task_id": parents[2].id, "generation": parents[2].updated_at.to_rfc3339(), "child_ids":[], "acceptance":"pass"}
+        ]
+    });
+    let ledger = repo.join("parent-release-review.md");
+    std::fs::write(&ledger, format!("# Parent acceptance\n{leaf} PASS\n```cassy-release-epics\n{manifest}\n```\n")).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(root).unwrap();
+    let context = crate::artifacts::PublishContext {
+        store: &artifacts, roots: crate::artifacts::paths::PublishRoots::new(root, &repo.join("artifacts"), leaf), task_id: leaf.into(), cloud: None,
+    };
+    let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+    let receipt = crate::qa_batch::prepare_receipt(root, &agents.get("supervisor-id").unwrap(), "supervisor-id", &[leaf.into()], &scope.reviewed_sha, &artifact.id, &ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
+    cas_store::record_qa_batch_receipt(root, &receipt).unwrap();
+    review_scope.proof_refs = vec![crate::qa_batch::ReleaseProofRef {
+        kind: crate::qa_batch::ReleaseProofKind::Review, artifact_id: artifact.id, sha256: artifact.sha256,
+        size_bytes: artifact.size_bytes, reviewed_sha: scope.reviewed_sha.clone(), receipt_id: Some(receipt.id),
+    }];
+    let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &review_scope).unwrap();
+    let pending = core.close_release_parent(&inventory, "cas-release-pending").await;
+    let ParentOutcome::Pending { dispatch_id, owner } = pending else { panic!("{pending:?}"); };
+    assert_eq!(owner, "supervisor-id");
+    let again = core.close_release_parent(&inventory, "cas-release-pending").await;
+    assert!(matches!(again, ParentOutcome::Pending { dispatch_id: ref id, .. } if id == &dispatch_id));
+    for id in ["cas-release-epic", "cas-release-train"] {
+        let outcome = core.close_release_parent(&inventory, id).await;
+        assert_eq!(outcome, ParentOutcome::Closed, "{id}: {outcome:?}");
+        let closed = tasks.get(id).unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed);
+        assert!(closed.epic_verification_owner.as_deref().unwrap().starts_with("release:"));
+        assert!(cas_store::get_latest_verification_dispatch(root, id).unwrap().is_none());
+    }
+}

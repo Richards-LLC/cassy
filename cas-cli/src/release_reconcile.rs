@@ -139,8 +139,9 @@ async fn resume(
             receipt.members.entry(id.clone()).or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
         }
     }
-    let mut refused = Vec::new();
+    let mut refused: Vec<_> = inventory.exceptions.iter().map(|e| e.task_id.clone()).collect();
     for delivery in &pending.deliveries {
+        if refused.contains(&delivery.task_id) { continue; }
         let intent = effects.intent(&delivery.task_id)?;
         match receipt.close_intents.get(&delivery.task_id) {
             Some(original) if original != &intent => {
@@ -386,6 +387,7 @@ mod tests {
         let checkpoint = ReleaseOperation::open(temp.path(), key).unwrap().load().unwrap().unwrap();
         assert!(checkpoint["members"].get("cas-a").is_some());
         assert!(checkpoint["members"].get("cas-b").is_none());
+        assert!(completed_operation(temp.path(), &ReleaseOperationKey { project_id: scope.project_id.clone(), release_id: scope.release_id.clone(), final_release_sha: scope.final_release_sha.clone() }).unwrap().is_none());
         effects.owner = "replacement-supervisor".into();
         let recovered = resume(temp.path(), &scope, &inventory, ReconcileTrigger::Backfill, &mut effects).await.unwrap();
         assert!(recovered.complete);
@@ -402,5 +404,6 @@ mod tests {
         assert!(!outbox.insert(replay_intent.key.clone()));
         assert_eq!(replay_intent.recipient, intent.recipient);
         assert_eq!(effects.parent_passes, 1);
+        assert!(completed_operation(temp.path(), &replay.key).unwrap().unwrap().complete);
     }
 }

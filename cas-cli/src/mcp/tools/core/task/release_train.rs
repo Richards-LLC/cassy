@@ -4,8 +4,8 @@
 //! A task created with no epic and no explicit target joins the repository's
 //! open release-train epic (cut from the integration branch) instead of
 //! targeting that branch directly, so its delivery merges locally into the
-//! train lane. A train whose content has landed on the integration branch is
-//! closed here, and the next one opens lazily on the next create.
+//! train lane. A landed train is finalized by release reconciliation; the next
+//! train opens lazily on the next create.
 
 use std::fs::File;
 use std::path::Path;
@@ -324,20 +324,9 @@ impl CasCore {
                     ),
                 );
             }
-            let mut closed = train.clone();
-            closed.status = TaskStatus::Closed;
-            closed.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Delivered);
-            closed.closed_at = Some(chrono::Utc::now());
-            closed.updated_at = chrono::Utc::now();
-            closed.close_reason = Some(format!(
-                "Release landed: train lane is on `{integration}`; the next train opens on the next create."
+            receipt.push_str(&format!(
+                "\n\nRELEASE TRAIN: {} landed on `{integration}`; its terminal lifecycle belongs to release reconciliation.", train.id
             ));
-            if store.update(&closed).is_ok() {
-                receipt.push_str(&format!(
-                    "\n\nRELEASE TRAIN: {} landed on `{integration}` and is closed.",
-                    train.id
-                ));
-            }
         }
         let request: TaskCreateRequest = match serde_json::from_value(serde_json::json!({
             "title": RELEASE_TRAIN_TITLE,

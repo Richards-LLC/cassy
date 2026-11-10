@@ -8652,8 +8652,10 @@ impl CasCore {
                 data: None,
             })?;
             let subtasks = if crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id).is_some() {
-                let old = task.effective_epic_branch().unwrap_or(&target_branch);
-                epic_autoclose::retarget_children(&subtasks, old, &target_branch)
+                subtasks.into_iter().map(|mut child| {
+                    if let Some(target) = child.deliverables.work_target.as_mut() { target.target_branch = target_branch.clone(); }
+                    child
+                }).collect()
             } else { subtasks };
             let subtasks = match gone_epic_branch.as_deref() {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
@@ -29940,7 +29942,10 @@ mod merge_state_gate_tests {
                     let later = crate::qa_batch::release_close::ReleaseClose::for_receipt(&root, p, &snapshot, &later_receipt);
                     let loss = later.scope(async { delivery_content_presence_on_target_for_task(p, &source, &head_sha(p), &task.id) }).await;
                     assert!(matches!(loss, DeliveryContentPresence::Dropped { ref paths } if paths.contains(&"early.rs".into())));
-                    core.close_release_inventory_outcomes(&inventory).await.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")
+                    let outcomes = core.close_release_inventory_outcomes(&inventory).await;
+                    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+                    super::release_parent::probe_deleted_parent_and_single_pending_cycle(&core, &root, p, &scope, &task.id).await;
+                    outcomes.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")
                 } else { core.close_release_covered_deliveries(&receipt).await };
                 assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{row}: {report}");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);

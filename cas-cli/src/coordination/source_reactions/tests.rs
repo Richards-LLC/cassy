@@ -654,8 +654,9 @@ fn source_reaction_deadline_defers_remaining_calls() {
         slow.status(TaskStatus::Closed);
         slow.git(&["update-ref", "refs/remotes/origin/staging", &sha]);
         let repo = slow.root.parent().unwrap().canonicalize().unwrap();
-        crate::store::known_repos::open_host_known_repo_store()
-            .unwrap()
+        let registry = crate::store::known_repos::open_host_known_repo_store().unwrap();
+        registry.init().unwrap();
+        registry
             .bind("project:fixture", &repo, &repo.join(".git"))
             .unwrap();
         let bin = slow.root.join("slow-bin");

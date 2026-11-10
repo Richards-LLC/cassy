@@ -376,6 +376,10 @@ bug_families:
     title: Recycling keeps task handoffs in artifacts and parking refuses new or retained repo-root handoffs from the delivered commit
     tasks: [cas-c55fa]
     journeys: [FACTORY-CLOSE, FACTORY-SPAWN, HUB-J26]
+  advancing-owned-child-work:
+    title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
+    tasks: [cas-8a87]
+    journeys: [HUB-J26, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

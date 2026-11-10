@@ -3560,6 +3560,11 @@ for line in sys.stdin:
                     os._exit(0)
                 body = {"ok": False, "request_id": request_id, "error": {"code": "outcome_unknown", "retryable": False},
                         "reconcile": {"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}}}
+                if request_id is None:
+                    body = {"ok": False, "state": "outcome_unknown", "error": {"code": "outcome_unknown", "retryable": False}}
+                if mode == "rejected":
+                    body = {"ok": False, "state": "not_posted", "request_id": request_id,
+                            "error": {"code": "invalid_params", "retryable": False}}
                 if schema_mode() == "legacy":
                     body = {"ok": mode != "outcome_unknown", "state": state}
                     if mode == "outcome_unknown":
@@ -3637,9 +3642,21 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn violet_uncertain_message_is_reconciled_by_request_id_without_reposting() {
+        struct DenyLookup;
+        impl ProxyPolicy for DenyLookup {
+            fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
+                if request.tool == "violet_reconcile_reply" {
+                    ProxyPolicyDecision::Deny { reason: "lookup disabled".into() }
+                } else {
+                    ProxyPolicyDecision::Allow
+                }
+            }
+        }
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
             ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
-            ("modern", "denied", "outcome_unknown"), ("modern", "mismatch", "outcome_unknown"),
+            ("modern", "post_only", "posted"), ("modern", "post_only_not_posted", "not_posted"),
+            ("modern", "post_only_supervisor", "posted"), ("modern", "lookup_denied", "outcome_unknown"),
+            ("modern", "rejected", "not_posted"), ("modern", "mismatch", "outcome_unknown"),
             ("modern", "transport_rollback", "outcome_unknown"),
             ("legacy", "posted", "posted"), ("legacy", "outcome_unknown", "outcome_unknown"),
             ("rollback", "posted", "posted"), ("upgrade", "posted", "posted")] {
@@ -3649,18 +3666,30 @@ for line in sys.stdin:
             let engine = ProxyEngine::from_configs(HashMap::from([(
                 "violet".into(), fake_upstream_mode(dir.path(), true),
             )])).await.unwrap();
-            if mode == "denied" {
-                engine.set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
-                    ExternalToolRoute::new("violet", "violet_post"),
-                ]))).await;
+            if mode.starts_with("post_only") {
+                let post = ExternalToolRoute::new("violet", "violet_post");
+                let policy = if mode == "post_only_supervisor" {
+                    ExternalToolAllowlistPolicy::new([]).with_supervisor_routes([post])
+                } else {
+                    ExternalToolAllowlistPolicy::new([post])
+                };
+                engine.set_policy(Arc::new(policy)).await;
+            } else if mode == "lookup_denied" {
+                engine.set_policy(Arc::new(DenyLookup)).await;
             }
-            let caller = registered_worker_caller();
+            let mut caller = registered_worker_caller();
+            if mode == "post_only_supervisor" {
+                caller.role = cas_types::AgentRole::Supervisor;
+                assert!(engine.call_tool(&registered_worker_caller(), "violet", "violet_reconcile_reply",
+                    Some(serde_json::json!({"request_id":"blocked"}).as_object().unwrap().clone())).await.is_err());
+            }
             if matches!(schema, "rollback" | "upgrade") {
                 std::fs::write(&schema_path, if schema == "rollback" { "legacy" } else { "modern" }).unwrap();
                 assert!(engine.call_tool(&caller, "violet", "violet_read",
                     Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
             }
-            let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": mode});
+            let text = if mode == "post_only_not_posted" { "not_posted" } else { mode };
+            let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": text});
             if mode == "transport" {
                 args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
             }
@@ -3670,7 +3699,7 @@ for line in sys.stdin:
             let requests = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap();
             let calls: Vec<Value> = requests.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
                 .filter(|call| call["name"] != "violet_read").collect();
-            if matches!(schema, "legacy" | "rollback") {
+            if matches!(schema, "legacy" | "rollback") || mode == "lookup_denied" {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0]["name"], "violet_post");
                 assert!(calls[0]["request_id"].is_null());
@@ -3681,25 +3710,56 @@ for line in sys.stdin:
                 engine.shutdown().await;
                 continue;
             }
-            assert_eq!(calls.len(), if matches!(mode, "denied" | "transport_rollback") { 1 } else { 2 }, "{mode}: {calls:?}");
+            assert_eq!(calls.len(), if matches!(mode, "rejected" | "transport_rollback") { 1 } else { 2 }, "{mode}: {calls:?}");
             assert_eq!(calls[0]["name"], "violet_post");
             let request_id = calls[0]["request_id"].as_str().unwrap();
             assert!(uuid::Uuid::parse_str(request_id).is_ok());
-            if !matches!(mode, "denied" | "transport_rollback") {
+            if !matches!(mode, "rejected" | "transport_rollback") {
                 assert_eq!(calls[1]["name"], "violet_reconcile_reply");
                 assert_eq!(calls[1]["request_id"], request_id);
-            } else {
+            } else if mode == "transport_rollback" {
                 let audit = engine.policy_audit();
                 assert_eq!(audit.last().unwrap().tool, "violet_reconcile_reply");
-                assert_eq!(audit.last().unwrap().allowed, mode == "transport_rollback");
+                assert!(audit.last().unwrap().allowed);
             }
             assert_eq!(body["request_id"], request_id);
             if mode == "transport" {
                 assert_eq!(request_id, args["request_id"].as_str().unwrap());
             }
             assert_eq!(body["ok"], expected == "posted");
+            if mode.starts_with("post_only") {
+                let lookup = engine.call_tool(&caller, "violet", "violet_reconcile_reply",
+                    Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.unwrap();
+                let lookup: Value = serde_json::from_str(lookup["content"][0]["text"].as_str().unwrap()).unwrap();
+                assert_eq!(lookup["state"], expected);
+                assert!(engine.call_tool(&caller, "violet", "violet_read", None).await.is_err());
+                engine.set_policy(Arc::new(ExternalToolAllowlistPolicy::new([
+                    ExternalToolRoute::new("violet", "violet_read"),
+                ]))).await;
+                assert!(engine.call_tool(&caller, "violet", "violet_reconcile_reply",
+                    Some(serde_json::json!({"request_id": request_id}).as_object().unwrap().clone())).await.is_err());
+            }
             engine.shutdown().await;
         }
+    }
+
+    #[tokio::test]
+    async fn violet_unsubmitted_message_preserves_pre_dispatch_failure_cas_c802() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "violet".into(), fake_upstream_mode(dir.path(), true),
+        )])).await.unwrap();
+        let caller = registered_worker_caller();
+        assert!(engine.call_tool(&caller, "violet", "violet_read",
+            Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await.is_err());
+        // Simulate reconnect backoff without waiting; no post can reach the hub.
+        engine.health.write().await.get_mut("violet").unwrap().next_retry_at_ms = Some(u64::MAX);
+        let result = engine.call_tool(&caller, "violet", "violet_post",
+            Some(serde_json::json!({"kind": "message", "text": "never submitted",
+                "request_id": "00000091-2222-4222-8222-000000000091"}).as_object().unwrap().clone())).await;
+        assert!(result.is_err(), "an unsubmitted post must retain its transport failure: {result:?}");
+        assert_eq!(std::fs::read_to_string(dir.path().join("calls.log")).unwrap().lines().collect::<Vec<_>>(), vec!["violet_read"]);
+        engine.shutdown().await;
     }
 
     /// cas-b3b4a: with a cached catalog a serve spawns no upstream until one

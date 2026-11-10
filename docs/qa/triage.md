@@ -10,6 +10,8 @@ On `task action=update`, ordinary labels are additive; a supplied `severity:`, `
 
 Requesting `reach:main` on update requires a `journey:<id>` naming a declared live main journey, either supplied in that update or retained from the task. Missing, empty or undeclared journeys return `finding_main_journey_required` with `axis: journey` before any task fields change. Every successful update, including an unchanged request, prints the resulting priority; structured output includes the task `id` and numeric `priority`. A recorded creation-time reproduction remains available when correcting or clearing labels.
 
+An explicit priority that disagrees with normalized finding labels rejects the entire update with `INVALID_PARAMS` and `rule_id: finding_priority_derived`. The error includes requested, derived and current priority, the labels used for derivation, and `applied_fields: []`; accompanying design, notes and label changes do not save. Retry without `priority` to save the other fields, or change the severity, reach and journey labels to reclassify the finding. An explicit priority matching the derived value remains valid.
+
 Verification and QA issue objects carry `triage`, for example:
 
 ```json

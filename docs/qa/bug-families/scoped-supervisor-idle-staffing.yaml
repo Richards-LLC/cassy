@@ -1,0 +1,4 @@
+title: Unfocused historical backlog does not trigger staffing nudges while focused ready work respects grace, holds and cooldowns
+tasks: [cas-c243]
+invariants: [FACTORY-SCOPED-IDLE-STAFFING]
+journeys: [FACTORY-SUPERVISE]

@@ -769,6 +769,30 @@ async fn standalone_source_work_split_keeps_reply_owner_cas_ad2c() {
     assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "mine": task_id})).await.is_err());
     assert!(builder.factory(json!({"id": task_id, "target": "soundwave", "theirs": task_id})).await.is_err());
 
+    // A stale peer has no source link locally, but cannot delegate the
+    // receiver's Slack task on behalf of its recorded owner.
+    let stale = side(&cloud, "machine-stale", "st", "stale");
+    open_task_store(&stale.machine.cas_dir).unwrap()
+        .add(&Task::new(task_id.into(), "stale source-free copy".into())).unwrap();
+    let forged = split_id(&stale.factory(json!({
+        "id": task_id, "target": "prowl", "theirs": task_id,
+    })).await.unwrap());
+    assert_eq!(builder.tick().await.delivered, 1);
+    assert!(builder.factory(json!({"id": forged, "decision": "accept"})).await.is_err());
+    assert_eq!(cloud_holder(&cloud, task_id), None);
+    assert_eq!(cas_store::get_epic_split(&builder.machine.cas_dir, &forged).unwrap().unwrap().state,
+        cas_store::SplitState::Pending);
+
+    // Historical acceptances must pass the same issuer check when used.
+    assert!(cas_store::decide_epic_split(&builder.machine.cas_dir, &forged,
+        &[cas_store::SplitState::Pending], cas_store::SplitState::Accepted,
+        None, chrono::Utc::now()).unwrap());
+    assert!(builder.task(json!({"action": "update", "id": task_id, "assignee": "pr-w"})).await.is_err());
+    assert_eq!(open_task_store(&builder.machine.cas_dir).unwrap().get(task_id).unwrap().assignee, None);
+    assert_eq!(cloud_holder(&cloud, task_id), None);
+    stale.factory(json!({"id": forged, "decision": "cancel"})).await.unwrap();
+    assert_eq!(builder.tick().await.delivered, 1);
+
     let offered = owner.factory(json!({"id": task_id, "target": "prowl", "theirs": task_id})).await.unwrap();
     let id = split_id(&offered);
     assert_eq!(builder.tick().await.delivered, 1);

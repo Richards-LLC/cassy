@@ -42,6 +42,14 @@ impl CasCore {
             .into_iter().find(|split| {
                 split.state == cas_store::SplitState::Accepted
                     && split.mine.iter().any(|child| child == id)
+                    && crate::cloud::epic_split::validate_slack_share_issuer(
+                        &self.cas_root,
+                        &task,
+                        match split.direction {
+                            cas_store::SplitDirection::Incoming => &split.peer_agent_id,
+                            cas_store::SplitDirection::Outgoing => &split.local_agent_id,
+                        },
+                    ).is_ok()
                     // Resolving the actor may register it. A task without a
                     // matching split must leave the caller's identity alone.
                     && self.source_claim_actor()

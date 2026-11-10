@@ -4369,6 +4369,10 @@ statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
 Tests assert behavior or stable error/rule IDs, never human-message wording.
+Exact `.command` or `.redirect_command` fields/accessors are also machine
+projections: `assert_eq!(error.redirect_command(), "cas cloud project set")`
+checks an executable redirect. Assert the typed command, not its surrounding
+rendered error sentence; `to_string().contains(...)` remains a prose pin.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain

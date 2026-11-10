@@ -489,6 +489,10 @@ bug_families:
     title: Same-pane live supervisors retain one identity on register and session_start; delayed registration writes report their final outcome to the caller
     tasks: [cas-1550]
     journeys: [FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-QA-RECEIPT]
+  fleet-sheets-titled-labelled:
+    title: Add worker is a titled panel with labelled fields inside the rail, and a phone action sheet names the worker or task it acts on
+    tasks: [cas-5d53]
+    journeys: [HUB-J17]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

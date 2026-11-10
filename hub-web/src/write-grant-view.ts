@@ -26,7 +26,7 @@ export interface WriteAccessContext {
 export const WRITE_ACCESS_TITLE = "Write access outside the worktree";
 const WRITE_ACCESS_TITLE_ID = "write-grant-title";
 
-function labelled(document: Document, text: string, control: HTMLElement): HTMLLabelElement {
+export function labelled(document: Document, text: string, control: HTMLElement): HTMLLabelElement {
   const label = document.createElement("label");
   label.className = "write-grant-field";
   const caption = document.createElement("span");

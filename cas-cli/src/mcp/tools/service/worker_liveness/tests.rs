@@ -754,6 +754,7 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     let repo = tempfile::tempdir().unwrap();
     let root = crate::store::init_cas_dir(repo.path()).unwrap();
     let mut tree = CpuTree::new(2);
+    tree.agent.role = AgentRole::Worker;
     tree.agent.factory_session = Some(SESSION.into());
     tree.agent.metadata.insert("worker_cli".into(), "codex".into());
     tree.agent.metadata.insert("clone_path".into(), repo.path().display().to_string());
@@ -801,6 +802,7 @@ fn advancing_child_logs_prevent_false_recovery_cas_8a87() {
     // Neither a new session nor a reused root PID may borrow cached progress.
     tree.work("write");
     assert_eq!(status(silent).state, Liveness::Executing);
+    progress_watchdog::sweep(&root, SESSION, silent);
     let mut foreign = tree.agent.clone();
     foreign.factory_session = Some("another-session".into());
     assert_eq!(super::super::factory_ops::worker_liveness_for_agent(&root, &foreign, silent, 300).state, Liveness::Stalled);

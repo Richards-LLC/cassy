@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-09'
+updated: '2026-11-10'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  advancing-owned-child-work:
+    title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
+    tasks: [cas-8a87]
+    journeys: [HUB-J26, FACTORY-SUPERVISE]
   task-start-preserves-supervisor-notes:
     title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
     tasks: [cas-3045]

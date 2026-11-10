@@ -12504,7 +12504,13 @@ pub(crate) fn worker_liveness_for_agent(
         .resolution,
         cli,
     );
-    let process = super::worker_liveness::process_evidence(agent);
+    let mut process = super::worker_liveness::process_evidence(agent);
+    if super::worker_liveness::child_progress(agent, now)
+        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
+    {
+        process.cpu_busy = Some(true);
+        process.detail.push_str("; owned child CPU/output advanced within the stall window");
+    }
     if cli == cas_mux::SupervisorCli::OpenCode {
         if let Some(mapped) = super::opencode_liveness::observe(
             cas_root,

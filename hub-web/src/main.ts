@@ -25,7 +25,7 @@ import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
-import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { HistoryPageState, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
@@ -355,11 +355,11 @@ function dismissedAskStorage(): DismissedAsksStorage | undefined {
  * `unavailable`: the session attached without durable history (a daemon
  * from before conversation_history), so no first page will ever arrive.
  */
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean } {
+const conversationHistoryPages = new Map<string, HistoryPageState>();
+function conversationHistoryPage(key: string): HistoryPageState {
   let page = conversationHistoryPages.get(key);
   if (!page) {
-    page = { hasEarlier: false, loading: false, loaded: false };
+    page = new HistoryPageState();
     conversationHistoryPages.set(key, page);
   }
   return page;
@@ -672,7 +672,12 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // session whose daemon keeps no history resolves on attach.
       loadingHistory: () => {
         const page = conversationHistoryPage(threadKey);
-        return !page.loaded && !page.unavailable;
+        return !page.loaded && !page.unavailable && !page.failure;
+      },
+      historyError: () => conversationHistoryPage(threadKey).failure,
+      retryHistory: () => {
+        const page = conversationHistoryPage(threadKey);
+        if (page.failure) connections.get(threadMachineId)?.requestConversationHistory(threadSession, page.failure.before);
       },
       openingSince: () => conversationOpenedAt.get(threadKey),
       historyEnd: () => {
@@ -1207,12 +1212,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       scheduleReceiptCheck(sessionKey(machine.id, session));
       scheduleReplyPresentation();
     },
-    onConversationHistoryRequested: (session) => {
+    onConversationHistoryRequested: (session, before, requestId) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
-      if (cursor.loaded) return;
-      // The first page, not an earlier one: the thread shows its own loading
-      // line, and the "Load earlier" control stays out of it.
-      cursor.requested = true;
+      cursor.request(requestId, before);
+      updateConversationViews();
+    },
+    onConversationHistoryFailed: (session, detail, before, requestId) => {
+      const cursor = conversationHistoryPage(sessionKey(machine.id, session));
+      cursor.fail(requestId, detail, before);
       updateConversationViews();
     },
     onConversationHistoryUnavailable: (session) => {
@@ -1228,8 +1235,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
       // Only "Load earlier" sets loading; the first page is not a look back.
-      if (cursor.loading) countUsage("history.older");
-      applyHistoryCursor(cursor, page);
+      if (cursor.receive(page)) countUsage("history.older");
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {
         const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));

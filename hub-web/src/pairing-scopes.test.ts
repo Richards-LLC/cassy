@@ -327,8 +327,8 @@ describe("fleet operation scopes (cas-d382, fleet-operations brief S4)", () => {
       "assign-task": "factory-operate", "restart-worker": "factory-manage", "stop-worker": "factory-manage", "end-session": "factory-manage",
       // cas-ab04: widening an agent's write access is a management action.
       "write-access": "factory-manage",
-      // cas-2f4d: freezing is operating the train; lifting a freeze is the operator's management call.
-      "freeze-train": "factory-operate", "lift-freeze": "factory-manage",
+      // cas-16c0a: release decisions need no worker-management permission.
+      "freeze-train": "machine-read", "lift-freeze": "machine-read",
       // cas-e060: pausing or resuming auto-cut is reversible operation.
       "auto-cut": "factory-operate",
     };

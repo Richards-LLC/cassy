@@ -1535,6 +1535,16 @@ admission, no Slack, publication or browser guards. Two pieces now close that:
   within 60 seconds of launch, marks it crashed and tells the supervisor.
   There is no silent degrade.
 
+A canary refusal retains the bounded, redacted worker boot output in the spawn
+record before removing the pane. Inspect a retained failed request with
+`cas factory debug <worker-or-request-id>` or
+`cas factory is-wedged <worker-or-request-id> --json`, even when the harness
+never registered. The JSON reports `boot_state: "failed"`, its worker/task and
+request identity, and `state: "unverified"` (exit 4): a failed admission alone
+does not establish process death. Only a completed PTY teardown releases the
+matching preassignment; an unconfirmed teardown retains it for investigation.
+These read-only records do not authorize `kill` or permission responses.
+
 Rollout: after this merges, respawn every live Claude worker. Hooks start
 denying things those workers never saw before: raw `cargo`, `&` background
 jobs under worker-memory admission, non-Violet Slack writes, publication and
@@ -4616,8 +4626,10 @@ needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
 release freeze, not a temporary CI hold: only the operator can lift it in
 Commander, or a published release covering its tip ends it.
-Commander's `freeze_train` operation (factory:operate) does the
-same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
+Commander's `freeze_train` operation does the same for the operator. Both
+`freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
+`machine:read` scope, without worker-management permissions. Preview pairings
+cannot mutate a train. The freeze is a `release-train-frozen:<unix>:<tip>`
 label on the train epic, which syncs to peer machines with the task row. One
 gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
 lane (through `check_cut_merge`, before and under the target lock), CI retry
@@ -4628,7 +4640,7 @@ admission is noted on the train. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+`lift_train_freeze` operation. There is no supervisor lift.
 
 ### Temporary CI merge hold follow-up
 

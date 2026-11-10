@@ -1,10 +1,12 @@
+// @vitest-environment jsdom
 import { webcrypto } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { replaceMachineConnection } from "./connection-lifecycle";
 import { HubConnectionSupervisor, type ConnectionState, type HubCallbacks } from "./connection";
 import { HEARTBEAT_INTERVAL_MS, MACHINE_RETRY_CEILING_MS, STAGE_TIMEOUT_MS } from "./connection-state";
 import { createDeviceKey } from "./dpop";
-import { ConversationHistory } from "./conversation-history";
+import { ConversationHistory, HistoryPageState } from "./conversation-history";
+import { ConversationView } from "./conversation-view";
 import type { MessageQueued, StoredMachine } from "./types";
 
 // Poll every 5 ms rather than vitest's 50 ms default, so each wait ends soon
@@ -149,6 +151,115 @@ function networkHints(): EventTarget {
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("preserves an older read's error and retry when another page arrives late (cas-bf2f)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const cursor = new HistoryPageState();
+    const history = new ConversationHistory();
+    // The cached conversation already offers an older page when reconnect A starts.
+    cursor.receive({ request_id: "cached", has_earlier: true, next_before: 42 });
+    const connection = new HubConnectionSupervisor(await storedMachine("concurrent-history"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
+      onConversationHistoryRequested: (_session, before, id) => { cursor.request(id, before); view.update(); },
+      onConversationHistoryFailed: (_session, detail, before, id) => { cursor.fail(id, detail, before); view.update(); },
+      onConversationHistory: (_session, page) => {
+        cursor.receive(page);
+        for (const reply of page.replies) history.hydrateReply(reply);
+        view.update();
+      },
+    });
+    supervisors.push(connection);
+    const view = new ConversationView(document, history, {
+      supervisor: "sup", hasEarlier: () => cursor.hasEarlier, loadingEarlier: () => cursor.loading,
+      historyError: () => cursor.failure,
+      retryHistory: () => connection.requestConversationHistory("session-a", cursor.failure?.before),
+    });
+    onTestFinished(() => view.dispose());
+    document.body.replaceChildren(view.element);
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    vi.useFakeTimers();
+    socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
+    const requests = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.ConversationHistoryRequest).map(frame => frame.ConversationHistoryRequest);
+    const newest = requests()[0]!;
+    await vi.advanceTimersByTimeAsync(1_000);
+    connection.requestConversationHistory("session-a", 42);
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(cursor.failure).toBeDefined();
+    expect(cursor.failure?.before).toBeUndefined();
+    expect(cursor.loading).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const failure = view.element.querySelector<HTMLElement>('[role="alert"]')!;
+    expect(failure.hidden).toBe(false);
+    expect(cursor.failure?.before).toBe(42);
+    // Only A arrives. Its hydration must not claim B's older rows arrived.
+    socket.receive({ ConversationHistory: { request_id: newest.request_id, messages: [], replies: [
+      { notification_id: 50, reply_to: null, message: "Late newest answer", summary: "", device_id: "device", kind: "answer" },
+    ], has_earlier: true, next_before: 42 } });
+    expect(view.element.querySelectorAll('[data-key="reply:50"]')).toHaveLength(1);
+    expect(failure.hidden).toBe(false);
+    expect(cursor.failure?.before).toBe(42);
+    const retry = failure.querySelector<HTMLButtonElement>("button")!;
+    expect(retry.disabled).toBe(false);
+    retry.click();
+    expect(requests().at(-1)).toMatchObject({ before: 42 });
+    const page = { request_id: requests().at(-1).request_id, messages: [], replies: [
+      { notification_id: 41, reply_to: null, message: "Missing older answer", summary: "", device_id: "device", kind: "answer" },
+    ], has_earlier: false };
+    socket.receive({ ConversationHistory: page });
+    socket.receive({ ConversationHistory: page });
+    expect(failure.hidden).toBe(true);
+    expect(view.element.querySelectorAll('[data-key="reply:41"]')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failure.hidden).toBe(true);
+  });
+
+  it("settles unanswered history separately from sends and permits recovery (cas-3590)", async () => {
+    transport();
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const failed = vi.fn(), rejected = vi.fn(), received = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("history-timeout"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {},
+      onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {},
+      onConversationHistoryFailed: failed, onConversationHistory: received, onMessageRejected: rejected,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    await connection.attach("session-a");
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    vi.useFakeTimers();
+    socket.receive({ Welcome: { state: { panes: [] }, protocol_version: 3 } });
+    const requests = () => socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.ConversationHistoryRequest).map(frame => frame.ConversationHistoryRequest);
+    expect(requests()).toHaveLength(1);
+    // Replay the incident: the hub takes the request, but no daemon page arrives.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(failed.mock.calls[0]![0]).toBe("session-a");
+    expect(rejected).not.toHaveBeenCalled();
+    expect(connection.requestConversationHistory("session-a")).toBe(true);
+    const page = { request_id: requests().at(-1).request_id, messages: [], replies: [], has_earlier: false };
+    socket.receive({ ConversationHistory: page });
+    expect(received).toHaveBeenCalledWith("session-a", page, expect.anything());
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(1);
+    // An explicit daemon refusal is the same history failure, never a send refusal.
+    connection.requestConversationHistory("session-a", 42);
+    socket.receive({ Error: { client_ref: requests().at(-1).request_id, message: "read failed" } });
+    expect(failed).toHaveBeenCalledTimes(2);
+    expect(rejected).not.toHaveBeenCalled();
+    connection.requestConversationHistory("session-a");
+    connection.stop();
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(failed).toHaveBeenCalledTimes(2);
+  });
   it("authenticates before loading the catalog and stays live while that catalog is stalled", async () => {
     const hub = transport();
     hub.stallRefresh(true);

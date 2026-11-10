@@ -158,6 +158,10 @@ fn is_regenerated_output(path: &str) -> bool {
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
+    if args.first() == Some(&"merge-tree") {
+        // Candidate preparation precedes the manager's merge preflight.
+        crate::worktree::git::ensure_merge_drivers(repo, args.get(2..).unwrap_or_default());
+    }
     let _phase = (args.first() == Some(&"merge-tree"))
         .then(|| crate::mcp::tools::service::mutation_receipt::phase("merge-tree"));
     let output = Command::new("git")
@@ -1911,4 +1915,69 @@ mod tests {
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
     }
+    /// cas-ded57: replay parallel top-of-map insertions through factory's manager,
+    /// including its merge-tree preflight, before the real merge installs a driver.
+    #[test]
+    fn worktree_merge_parallel_journey_families_cas_ded57() {
+        use crate::worktree::{WorktreeConfig, WorktreeError, WorktreeManager};
+        use crate::worktree::git::GitError;
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        commit_file(repo, ".gitignore", ".cas/\n", "fixture state");
+        let config = WorktreeConfig {
+            auto_merge: true,
+            base_path: repo.join(".cas/worker-fixtures").display().to_string(),
+            ..Default::default()
+        };
+        let mut manager = WorktreeManager::new(repo, config).unwrap();
+        let path = "docs/qa/journeys.yaml";
+        std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+        commit_file(repo, ".gitattributes", "docs/qa/journeys.yaml merge=cas-journeys\n", "attributes");
+        let base = "version: 1\nupdated: '2026-11-07'\nenforce: enforce\nbug_families:\n  existing:\n    tasks: [cas-base]\njourneys: []\n";
+        commit_file(repo, path, base, "registry");
+        let target = manager.create_epic_branch("Journey Merge").unwrap();
+        manager.git().checkout(&target).unwrap();
+        // Every worker forks the same tip, before either has landed.
+        let mut lanes = Vec::new();
+        for (name, date, body) in [
+            ("one", "2026-11-08", base.replace("bug_families:\n", "bug_families:\n  one:\n    tasks: [cas-one]\n")),
+            ("two", "2026-11-09", base.replace("bug_families:\n", "bug_families:\n  two:\n    tasks: [cas-two]\n")),
+            ("same-a", "2026-11-08", base.replace("cas-base", "cas-a").replace("enforce: enforce", "enforce: warn")),
+            ("same-b", "2026-11-09", base.replace("cas-base", "cas-b")),
+            ("policy", "2026-11-09", base.replace("enforce: enforce", "enforce: off")),
+        ] {
+            let lane = manager.create_for_worker(name).unwrap();
+            commit_file(&lane.path, path, &body.replace("2026-11-07", date), name);
+            lanes.push(lane);
+        }
+        // A non-queued delivery builds its candidate before manager preflight.
+        git(repo, &["merge-tree", "--write-tree", &lanes[0].branch, &lanes[1].branch])
+            .expect("candidate preparation installs the registry driver too");
+        for lane in &mut lanes[..2] {
+            // Independently prove manager preflight reinstalls the driver,
+            // rather than inheriting the candidate preparation's config.
+            run(repo, &["config", "--remove-section", "merge.cas-journeys"]);
+            manager.merge_and_cleanup(lane, false, false).expect("disjoint families merge");
+        }
+        // Load through the actual registry loader, rather than just looking for text.
+        let registry = crate::qa_registry::load(&repo.join(path)).unwrap();
+        assert_eq!(registry.updated.as_deref(), Some("2026-11-09"));
+        assert_eq!(registry.bug_families.len(), 3);
+        for key in ["one", "two", "existing"] {
+            assert!(registry.bug_families.contains_key(key));
+        }
+        manager.merge_and_cleanup(&mut lanes[2], false, false).unwrap();
+        let before = manager.git().ref_sha(&target).unwrap();
+        for lane in &mut lanes[3..] {
+            let error = manager.merge_and_cleanup(lane, false, false).unwrap_err();
+            assert!(matches!(error, WorktreeError::Git(GitError::MergeConflictPaths(ref paths))
+                if paths == &[path.to_string()]), "{error:?}");
+            assert_eq!(manager.git().ref_sha(&target).unwrap(), before);
+            assert!(!manager.git().merge_in_progress());
+        }
+    }
+
 }

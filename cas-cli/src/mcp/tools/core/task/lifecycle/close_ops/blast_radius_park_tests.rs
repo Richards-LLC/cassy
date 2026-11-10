@@ -1165,13 +1165,32 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
     assert_eq!(report.rejected, 1);
     assert_eq!(cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap(), imported);
     assert_eq!(cas_store::get_verification_for_dispatch(&f.cas_dir(), &imported.id).unwrap().unwrap().id, local.id);
+    // cas-9839c: release bookkeeping can change the plan after the peer's
+    // published approval was admitted. It cannot undo the reviewed landing.
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    let mut released = tasks.get(ID).unwrap();
+    released.labels.push("release-train-cut".into());
+    tasks.update(&released).unwrap();
+    let core = CasCore::with_daemon(f.cas_dir(), None, None);
+    for mismatched in ["task", "source", "target"] {
+        let mut changed = released.clone();
+        match mismatched {
+            "task" => changed.id = "cas-other".into(),
+            "source" => changed.deliverables.factory_branch_anchor = Some(landed.clone()),
+            "target" => changed.deliverables.work_target.as_mut().unwrap().target_branch = LANE.into(),
+            _ => unreachable!(),
+        }
+        assert!(core.verify_premerge_promotion(&changed, &imported, &local.id).is_err(), "{mismatched}");
+    }
     // Removing the receiving queue and all source-machine state cannot erase proof.
     drop(service);
     drop(reviewer);
     let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
     for row in queue.peek_all(100).unwrap() {
         if let Some(envelope) = crate::cloud::peer_mailbox::parse_envelope(&row.prompt) {
-            assert!(!envelope.wakes_idle(), "machine receipts must not wake a supervisor model");
+            // cas-10d6: published landings wake the supervisor (cas-35563).
+            // Acknowledging that wake cannot erase the admitted close authority.
+            assert!(envelope.wakes_idle());
         }
         queue.ack(row.id).unwrap();
     }

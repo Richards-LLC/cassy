@@ -1,0 +1,3 @@
+title: Registered nested factory checkout files publish while credentials and repository internals remain refused
+tasks: [cas-9615]
+journeys: [FACTORY-CLOSE]

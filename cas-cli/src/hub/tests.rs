@@ -4760,6 +4760,52 @@ fn control_scopes() -> std::collections::BTreeSet<Scope> {
     .collect()
 }
 
+/// cas-16c0a: the release decision belongs to a verified pairing, without
+/// granting it worker management. Both directions use the real operation gate.
+#[tokio::test]
+async fn release_freeze_default_pairing_cas_16c0a() {
+    use crate::mcp::tools::core::workflow::release_freeze::freeze_of;
+
+    let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+    let fixture = ops_fixture(Scope::default_read_only());
+    let repo = fixture.cas_dir.parent().unwrap();
+    for args in [
+        vec!["init", "-q", "-b", "epic/release-train-vnext-cas-tr"],
+        vec!["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "seed", "--allow-empty"],
+    ] {
+        let output = Command::new("git").current_dir(repo).args(args).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+    }
+    let store = crate::store::open_task_store(&fixture.cas_dir).unwrap();
+    let mut train = cas_types::Task::new("cas-tr".into(), "Release train vNEXT".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.branch = Some("epic/release-train-vnext-cas-tr".into());
+    train.labels = vec!["release-train".into(), format!("release-train-frozen:1730000000:{OPS_TIP}")];
+    store.add(&train).unwrap();
+
+    for (index, (kind, frozen)) in [("lift_train_freeze", false), ("freeze_train", true)].into_iter().enumerate() {
+        let request = serde_json::json!({
+            "op_id": format!("release-decision-{index}"),
+            "op": {"kind": kind, "epic_id": "cas-tr"},
+            "expected": {},
+        });
+        let (status, body) = fixture.operate(request).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"]["kind"], kind);
+        assert_eq!(freeze_of(&store.get("cas-tr").unwrap()).is_some(), frozen);
+    }
+
+    // Possession of an expired/revoked pairing never authorizes a lift.
+    fixture.auth.revoke_device(&fixture.device_id, chrono::Utc::now()).unwrap();
+    let (status, body) = fixture.operate(serde_json::json!({
+        "op_id": "revoked-release-decision",
+        "op": {"kind": "lift_train_freeze", "epic_id": "cas-tr"},
+        "expected": {},
+    })).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
+}
+
 /// O1: the hub's "ask the supervisor to merge" reaches the supervisor as the
 /// same queue row an MCP `coordination message` produces (target, text,
 /// session, summary, priority, urgency), stamped with the device that asked,

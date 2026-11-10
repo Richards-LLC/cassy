@@ -50,7 +50,7 @@
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/`, `cas-cli/src/hybrid_search/` - distillation, indexing and composed retrieval.
 - `cas-cli/src/mcp/tools/core/search.rs`, `cas-cli/src/mcp/tools/service/server_handler.rs` - retrieval dispatch and read-only search request deadlines.
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/` - extraction, memory decay and harness synchronization.
-- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, audited supervisor revocation with explicit Cloud acknowledgement, brand resolution, HTML/PDF finalization and immutable captures.
+- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` - task artifacts, registered nested-checkout publication with checkout-relative secret guards, audited supervisor revocation with explicit Cloud acknowledgement, brand resolution, HTML/PDF finalization and immutable captures.
 - `cas-cli/src/builtins/` - canonical skills, agents, jobs, harness catalogs and reference-history manifest.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` - rule-marker navigation and reference contract.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` - dataset-bound proof, measured phase outcomes and verifier prompt replays.
@@ -66,6 +66,7 @@
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - allowlists, Finish queues and native execution/reconnect evidence.
 - `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs` - progress watchdog (frozen-train deliveries reported once) and wedged-loop monitoring.
 - `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - reminder deadlines, queue admission and supervisor wake tests.
+- `cas-cli/src/cli/factory/wedged.rs`, `crates/cas-store/src/spawn_queue_store.rs` - worker diagnostics and retained failed-boot records by worker or spawn request.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - transcript mirrors, redaction and typed turn/cost accounting.
 - `crates/cas-pty/src/pty.rs`, `crates/cas-pty/src/claude_binary.rs` - startup briefs, harness argv, native Claude selection and version probes.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - binding and ordered backlogs, including pre-registration assignment admission.
@@ -78,6 +79,7 @@
 - `crates/cas-core/src/memory/handoff.rs` - per-project/role machine selection and supersession; owner/session stamps are audit metadata.
 - `cas-cli/src/supervisor_auto_clear.rs`, `cas-cli/src/supervisor_continuity.rs` - context pressure, succession handoffs and startup recovery.
 - `cas-cli/src/supervisor_message_wakes.rs`, `cas-cli/src/peer_ask_gate.rs`, `cas-cli/src/cloud/peer_mailbox/outbox.rs` - typed wake limits and explicit-ask merge holds.
+- `cas-cli/src/worktree/git.rs`, `scripts/cas-merge-drivers.py`, `.gitattributes` - candidate preparation and manager preflight share merge drivers; shared merge-driver installation before preflight and merging; independent QA families and dates merge while same-family and policy edits remain conflicts.
 - `cas-cli/src/worktree/git/rescue.rs`, `cas-cli/src/worktree/retained.rs` - rescue refs and bounded retained-work inventories.
 - `cas-cli/src/cli/factory/hold.rs`, `crates/cas-store/src/project_hold.rs` - operator project holds, audited state and relay admission.
 
@@ -122,7 +124,7 @@
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing and durable operator input.
 - `cas-cli/src/cli/hub_preview.rs`, `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs` - time-boxed candidate previews and authorized media.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversations and reply grants.
-- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams and ordered publication.
+- `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, history read deadlines and ordered publication.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/early-thread.ts` - transcript paging and bounded windows.
 - `hub-web/src/project-navigation.ts`, `hub-web/src/epic-progress.ts`, `hub-web/src/team-view.ts` - project cards, train/task progress and team status.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/worker-timeline.ts` - operation disclosures and worker activity.

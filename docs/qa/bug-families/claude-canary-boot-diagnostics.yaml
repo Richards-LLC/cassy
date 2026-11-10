@@ -1,0 +1,4 @@
+title: Missing Claude canaries retain observed boot output and inspectable failed request identity without admitting an unsupported worker
+tasks: [cas-4cdd]
+invariants: [FACTORY-BOOT-DIAGNOSTICS]
+journeys: [FACTORY-SPAWN]

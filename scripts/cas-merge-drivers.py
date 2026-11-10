@@ -3,7 +3,7 @@
 
     cas-merge-drivers.py install [<repo>]
         Register the drivers for every merge in the repository: git config
-        `merge.cas-generated.*` and `merge.cas-changelog.*`, plus matching
+        `merge.cas-generated.*`, `merge.cas-changelog.*`, and `merge.cas-journeys.*`, plus matching
         lines in `$GIT_COMMON_DIR/info/attributes`. `info/attributes` applies
         to every merge in the clone, including `git merge-tree --write-tree`,
         whatever `.gitattributes` the checked-out tree has. That matters while
@@ -17,19 +17,28 @@
         section, or a hunk that carries a `## ` heading, such as a release
         cut) stays a conflict.
 
+    cas-merge-drivers.py journeys <base> <ours> <theirs> [<marker-size>]
+        Union independent bug_families entries and take the newest ISO updated
+        date. Competing edits to one family stay conflicts. Other fields use
+        Git's ordinary merge; unsupported YAML layouts fall back to it too.
+
 `merge=cas-generated` (hub-web/dist and the builtin reference-history ledger)
 keeps ours with no conflict; the merge then rebuilds both with
 scripts/regenerate-generated-artifacts.sh.
 """
 
+import datetime
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ATTRIBUTES = (
     "CHANGELOG.md merge=cas-changelog",
+    "docs/qa/journeys.yaml merge=cas-journeys",
     "hub-web/dist/** merge=cas-generated",
     "cas-cli/src/builtins/reference-history.json merge=cas-generated",
 )
@@ -53,6 +62,8 @@ def install(repo):
     if source != driver.resolve():
         shutil.copyfile(source, driver)
     for key, value in (
+        ("merge.cas-journeys.name", "journey registry: merge independent families and newest updated date"),
+        ("merge.cas-journeys.driver", f"python3 '{driver}' journeys %O %A %B %L"),
         ("merge.cas-generated.name", "generated build output: keep ours, regenerate after the merge"),
         ("merge.cas-generated.driver", "true"),
         ("merge.cas-changelog.name", "CHANGELOG: union [Unreleased] additions, conflict elsewhere"),
@@ -131,12 +142,104 @@ def changelog(base, ours, theirs, marker=7):
     return 1 if unresolved else 0
 
 
+def registry_parts(text):
+    """Split the registry's block map without reserializing YAML or its comments.
+
+    Only the repository's simple, two-space family keys are handled. Unusual
+    YAML (flow maps, anchors, aliases, duplicate keys) uses Git's normal merge.
+    """
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if line == "bug_families:\n"]
+    if len(starts) != 1 or re.search(r"(?:^|[\s\[,{])(?:[&*][\w-]+|<<:)", text):
+        raise ValueError("unsupported registry map")
+    start = starts[0] + 1
+    end = start
+    families = {}
+    key = None
+    while end < len(lines):
+        line = lines[end]
+        if line.strip() and not line.startswith(" "):
+            break
+        match = re.fullmatch(r"  ([A-Za-z0-9_-]+):[ \t]*\n", line)
+        if match:
+            key = match[1]
+            if key in families:
+                raise ValueError("duplicate family")
+            families[key] = ""
+        elif line.strip() and not line.startswith(("    ", "  #")):
+            raise ValueError("unsupported family key")
+        if key is None:
+            if line.strip():
+                raise ValueError("missing family key")
+        else:
+            families[key] += line
+        end += 1
+    # Preserve the rest of the document for Git's ordinary three-way merge.
+    return "".join(lines[:start] + lines[end:]), families
+
+
+def journeys(base, ours, theirs, marker=7):
+    paths = [base, ours, theirs]
+    originals = [Path(path).read_text() for path in paths]
+    try:
+        parts = [registry_parts(text) for text in originals]
+        dates = []
+        for text, _ in parts:
+            matches = re.findall(r"(?m)^updated: ['\"]?(\d{4}-\d{2}-\d{2})['\"]?[ \t]*$", text)
+            if len(matches) != 1:
+                raise ValueError("unsupported updated date")
+            if len(re.findall(r"(?m)^updated:", text)) != 1:
+                raise ValueError("duplicate updated field")
+            dates.append(datetime.date.fromisoformat(matches[0]))
+    except ValueError:
+        return ordinary_merge(base, ours, theirs, marker)
+
+    merged = []
+    conflict = False
+    maps = [families for _, families in parts]
+    # Ours-first order retains existing layout and appends incoming-only keys.
+    for key in dict.fromkeys([*maps[1], *maps[2], *maps[0]]):
+        ancestor, left, right = (families.get(key, "") for families in maps)
+        if left == right or right == ancestor:
+            merged.append(left)
+        elif left == ancestor:
+            merged.append(right)
+        else:
+            # A family is the conflict unit, including edit/delete conflicts.
+            conflict = True
+            merged.append(f"{'<' * marker} ours\n{left}{'=' * marker}\n{right}{'>' * marker} theirs\n")
+
+    newest = max(dates).isoformat()
+    with tempfile.TemporaryDirectory() as temporary:
+        inputs = []
+        for i, (text, _) in enumerate(parts):
+            path = Path(temporary) / str(i)
+            path.write_text(re.sub(r"(?m)^updated:.*$", f"updated: '{newest}'", text))
+            inputs.append(str(path))
+        result = ordinary_merge(*inputs, marker)
+        text = Path(inputs[1]).read_text()
+    # Keep conflicts in policy, journeys, and all other fields unresolved.
+    text = text.replace("bug_families:\n", "bug_families:\n" + "".join(merged), 1)
+    Path(ours).write_text(text)
+    return result or int(conflict)
+
+
+def ordinary_merge(base, ours, theirs, marker=7):
+    result = subprocess.run(
+        ["git", "merge-file", f"--marker-size={marker}",
+         "-L", "ours", "-L", "base", "-L", "theirs", ours, base, theirs],
+        capture_output=True,
+    )
+    return 0 if result.returncode == 0 else 1
+
+
 def main(argv):
     if len(argv) >= 2 and argv[1] == "install":
         return install(argv[2] if len(argv) > 2 else os.getcwd())
-    if len(argv) >= 5 and argv[1] == "changelog":
+    if len(argv) >= 5 and argv[1] in ("changelog", "journeys"):
         marker = int(argv[5]) if len(argv) > 5 and argv[5].isdigit() else 7
-        return changelog(argv[2], argv[3], argv[4], marker)
+        driver = changelog if argv[1] == "changelog" else journeys
+        return driver(argv[2], argv[3], argv[4], marker)
     print(__doc__, file=sys.stderr)
     return 2
 

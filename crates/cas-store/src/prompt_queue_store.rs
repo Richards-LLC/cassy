@@ -10203,8 +10203,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
-            // Retire only aged transcript duplicates, without fabricating a
-            // device receipt or altering their durable operator outbox retry.
+            // cas-1a73: even a status mirror can contain an operator decision.
+            // Capture undelivered copies before retiring them, and notify the
+            // sender in this transaction. The pane copy is not a device receipt.
+            let undelivered = {
+                let mut stmt = tx.prepare(&format!(
+                    "SELECT factory_session, MIN(id), GROUP_CONCAT(id, ', ')
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL AND created_at < ?1 AND {TRANSCRIPT_MIRROR}
+                       AND transport_delivered_at IS NULL AND acked_at IS NULL
+                     GROUP BY factory_session"
+                ))?;
+                stmt.query_map(params![cutoff], |row| {
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+                })?.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            // Retire aged transcript duplicates without fabricating a device
+            // receipt or altering their durable operator outbox retry.
             tx.execute(
                 &format!(
                     "UPDATE prompt_queue
@@ -10216,6 +10232,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 params![now, cutoff],
             )?;
+            for (session, first_id, ids) in undelivered {
+                let (sender, session, _) = Self::abandonment_recipient_in_tx(
+                    &tx, None, "supervisor", session.as_deref(),
+                )?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO prompt_queue
+                        (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, dedupe_key)
+                     VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', ?6)",
+                    params![sender,
+                        format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
+                        now, session, "Operator messages not delivered before transcript expiry",
+                        format!("operator-mirror-undelivered:{first_id}")],
+                )?;
+            }
 
             // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
             // rows, so this roster-independent expiry skips them as the roster
@@ -16416,14 +16446,16 @@ mod tests {
         // Only completed supervisor transcript mirrors may expire. Real operator
         // messages and fresh mirrors survive; outbox delivery remains independent.
         let mut mirrors = Vec::new();
-        for label in ["aged", "fresh"] {
-            let outcome = store.enqueue_idempotent(
-                "supervisor", "operator", label, Some("factory-a"), None, None,
-                &format!("commander-mirror:factory-a:{label}"), None,
-            ).unwrap();
-            let id = match outcome {
-                EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id,
-            };
+        for label in ["aged", "fresh", "delivered"] {
+            let now = Utc::now();
+            let id = store.mirror_supervisor_turn(
+                "factory-a", &format!("commander-mirror:factory-a:{label}"), now, now,
+                &format!(r#"{{"message":"Approve the team-only move: {label}","kind":"status"}}"#),
+                label, "*", "status",
+            ).unwrap().unwrap();
+            if label == "delivered" {
+                store.mark_transport_delivered(id).unwrap();
+            }
             if label != "fresh" {
                 backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
             }
@@ -16456,6 +16488,25 @@ mod tests {
              FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
         ).unwrap();
         assert!(outbox_pending, "the independent durable delivery snapshot still retries");
+        // cas-1a73: an automatic status mirror can carry an operator decision.
+        // Queue expiry must notify the current supervisor even after the
+        // original session ends, without claiming the outbox stopped retrying.
+        let notice: (String, Option<String>, String) = conn.query_row(
+            "SELECT target, factory_session, prompt FROM prompt_queue
+             WHERE source = 'delivery-watchdog' AND dedupe_key = ?",
+            [format!("operator-mirror-undelivered:{}", mirrors[0])],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", None));
+        assert!(notice.2.contains(PendingReason::SupersededStale.as_str()));
+        // FactoryDaemon::supervisor_wake_class consumes this protocol suffix
+        // on daemon-origin notices; plain watchdog prose cannot wake an idle sender.
+        assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));
+        let notice_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue WHERE dedupe_key LIKE 'operator-mirror-undelivered:%'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(notice_count, 1, "delivered and fresh mirrors need no failure notice");
         drop(conn);
 
         for id in [operator, commander] {
@@ -16485,11 +16536,14 @@ mod tests {
         assert_eq!(notices_to(&store, "lead-sup"), 1, "one notice, for the unread row only");
         assert_eq!(notices_to(&store, "other-sender"), 1);
         // The read-only fast path must also find a mirror-only backlog.
+        register_agent_at(&store, "next-supervisor", "supervisor", 0);
         backdate(&store, mirrors[1], PROMPT_QUEUE_STALE_TTL_SECS + 60);
         assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
         assert_eq!(store.message_delivery_report(mirrors[1]).unwrap().unwrap().stage,
                    DeliveryStage::Suppressed);
-
+        assert_eq!(notices_to(&store, "next-supervisor"), 1);
+        assert!(store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap().is_empty());
+        assert_eq!(notices_to(&store, "next-supervisor"), 1, "expiry notices do not replay");
     }
 
     fn register_agent_at(

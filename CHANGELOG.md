@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.11.0] - 2026-11-10
+
+### Fixed — Commander
+
+- **Lift a release freeze with your existing pairing** — Was: Lift freeze required the Stop and restart workers permission, which the Manage workers toggle could not grant. Now: a verified default pairing can lift or set a freeze from the release card without worker-management permissions. Revoked and preview pairings remain refused, and supervisors cannot lift a freeze.
+- **Recover missing conversation history** — A history read that receives no answer now shows an error after 15 seconds with a retry control. Failed older pages can retry their cursor, and history errors no longer appear as send refusals.
+- **History retries survive late replies** — A delayed newest page preserves the error and retry cursor for an unanswered older page. Each history read keeps its own deadline and completion state.
+
+### Fixed — Operator messages
+
+- **Undelivered decisions stay visible** — Expiring a supervisor transcript copy now tells the current supervisor when no Commander device received it, including decisions carried in status replies. Durable delivery continues retrying.
+
+### Fixed — Factory
+
+- **Released deliveries close without metadata overrides** — Was: post-release close could refuse changelog fragments consumed on a release train and codemaps regenerated during integration. Now: close follows the full release history, records the promoting release commit and accepts the generated codemap while continuing to reject missing source or unpromoted changelog entries.
+- **Published peer landings wake the receiving supervisor** — Was: automated landing approvals were implicitly marked as quiet receipts and could wait until an unrelated turn, despite reaching the local inbox promptly. Now: published approvals use the normal directed-message wake path; explicit receipt and quiet messages still wait for the next turn.
+- **Inspectable Claude boot refusals** — Missing SessionStart canaries retain bounded, redacted startup output before the pane disappears. Debug and liveness inspection can find failed boots by worker or spawn request without a registered agent; task bindings are released only after completed teardown.
+- **Close published peer approvals** — A delivery reviewed and published on another machine can close after later plan bookkeeping changes. The original task, delivery SHA, target and landed Git tree must still match; changed plans still refuse new receipt admission.
+- **Parallel QA registry merges** — Independent bug families added by parallel workers merge with the newest registry date. Competing edits to one family and conflicts in policy or journey definitions still require resolution.
+
+### Fixed — Artifacts
+
+- **Publish from factory worktrees** — Ordinary project files in registered factory checkouts under `.cas` can be published directly. Checkout credentials, Git internals, sockets and unregistered `.cas` content remain protected.
+
 ## [4.10.0] - 2026-11-10
 
 ### Fixed — Factory

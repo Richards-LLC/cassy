@@ -407,8 +407,7 @@ pub fn render_prompt(message: &ClaimedPeerMessage) -> String {
     let (attachments, body) = split_attachments(body);
     let kind = if body.starts_with(crate::supervisor_message_wakes::QUIET) {
         Some(PeerMessageKind::Quiet)
-    } else if body.starts_with("CAS_PEER_PREMERGE_V1 ")
-        || crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
+    } else if crate::supervisor_message_wakes::pure_ack(body) { Some(PeerMessageKind::Receipt) } else { kind };
     // Split decisions carry typed wake intent independent of reply ids. Preserve their
     // protocol body for epic_split::ingest instead of wrapping it in a new tag.
     let kind = kind.or_else(|| {

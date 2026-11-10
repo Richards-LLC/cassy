@@ -111,8 +111,9 @@ export interface HubCallbacks {
   /** A system notice delivered earlier is over (cas-e829): retire its attention item. */
   onOperatorNoticeResolved?(session: string, resolved: OperatorNoticeResolved): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage, fence?: CredentialFence): void;
-  /** The first history page was requested on attach; its answer is onConversationHistory. */
-  onConversationHistoryRequested?(session: string): void;
+  /** A history page is on its way; its answer is onConversationHistory. */
+  onConversationHistoryRequested?(session: string, before: number | undefined, requestId: string): void;
+  onConversationHistoryFailed?(session: string, detail: string, before: number | undefined, requestId: string): void;
   /** The session attached without durable history: no first page will come (cas-010f). */
   onConversationHistoryUnavailable?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
@@ -303,6 +304,7 @@ export class HubConnectionSupervisor {
   private readonly workEventSupport = new Map<string, WorkEventSupport>();
   /** Work-event request ids in flight, so their refusals are not read as sends. */
   private readonly workEventRequests = new Set<string>();
+  private readonly historyRequests = new Map<string, { session: string; timer: number; before?: number }>();
   private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
   /**
@@ -375,6 +377,8 @@ export class HubConnectionSupervisor {
 
   stop(): void {
     this.desired = false;
+    for (const request of this.historyRequests.values()) window.clearTimeout(request.timer);
+    this.historyRequests.clear();
     this.removeNetworkListeners?.();
     this.removeNetworkListeners = undefined;
     if (this.probeTimer !== undefined) window.clearTimeout(this.probeTimer);
@@ -2049,16 +2053,46 @@ export class HubConnectionSupervisor {
 
   /** Request a private, device-scoped page of durable Commander turns. */
   requestConversationHistory(session: string, before?: number, limit = 50): boolean {
-    return this.send(session, {
+    const request_id = crypto.randomUUID();
+    const sent = this.send(session, {
       ConversationHistoryRequest: {
-        request_id: crypto.randomUUID(),
+        request_id,
         ...(before === undefined ? {} : { before }),
         limit: Math.min(50, Math.max(1, limit)),
-        // The hub overwrites this from the authenticated credential. Including
-        // it here keeps direct daemon fixtures and the wire shape explicit.
+        // The hub overwrites this from the authenticated credential.
         device_id: this.machine.deviceId,
       },
     });
+    if (!sent) {
+      this.callbacks.onConversationHistoryFailed?.(session, "Conversation history could not be requested. Retry when the session is live.", before, request_id);
+      return false;
+    }
+    // Supersede only an equivalent read: different cursors retain their own
+    // deadlines, even when another page arrives late on the same session.
+    for (const [id, request] of this.historyRequests) {
+      if (request.session === session && request.before === before) this.settleHistoryRequest(session, id);
+    }
+    const timer = window.setTimeout(() => {
+      this.failHistoryRequest(session, request_id, "Conversation history did not arrive. Some answers may be missing.");
+    }, 15_000);
+    this.historyRequests.set(request_id, { session, timer, before });
+    this.callbacks.onConversationHistoryRequested?.(session, before, request_id);
+    return true;
+  }
+
+  private settleHistoryRequest(session: string, requestId: string): { before?: number } | undefined {
+    const request = this.historyRequests.get(requestId);
+    if (!request || request.session !== session) return undefined;
+    window.clearTimeout(request.timer);
+    this.historyRequests.delete(requestId);
+    return request;
+  }
+
+  private failHistoryRequest(session: string, requestId: string, detail: string): boolean {
+    const request = this.settleHistoryRequest(session, requestId);
+    if (!request) return false;
+    this.callbacks.onConversationHistoryFailed?.(session, detail, request.before, requestId);
+    return true;
   }
 
   private async handleMachineMessage(input: string | ArrayBuffer | Blob, frameFence = credentialFence(this.machine)): Promise<void> {
@@ -2132,6 +2166,7 @@ export class HubConnectionSupervisor {
       // stream (`closed` above), which reattaches it; the held send goes out
       // on that live attach (cas-0653), after a backoff (cas-a355).
       if (rejection.retryable) this.noteUpstreamRefusal(session);
+      if (typeof envelope.error.client_ref === "string" && this.failHistoryRequest(session, envelope.error.client_ref, detail)) return;
       if (typeof envelope.error.client_ref === "string") this.callbacks.onMessageRejected?.(session, envelope.error.client_ref, detail, rejection);
       else this.callbacks.onSocketError(session, detail);
       return;
@@ -2224,7 +2259,7 @@ export class HubConnectionSupervisor {
       // conversation disappear on reopen.
       const protocolVersion = Number(welcome.protocol_version ?? 1);
       if (protocolVersion >= 3 || (Array.isArray(welcome.capabilities) && welcome.capabilities.includes("conversation_history"))) {
-        if (this.requestConversationHistory(session)) this.callbacks.onConversationHistoryRequested?.(session);
+        this.requestConversationHistory(session);
       } else {
         this.callbacks.onConversationHistoryUnavailable?.(session);
       }
@@ -2261,6 +2296,7 @@ export class HubConnectionSupervisor {
     } else if (message.OperatorMessage) {
       this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {
+      this.settleHistoryRequest(session, message.ConversationHistory.request_id);
       this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage, frameFence);
     } else if (message.WorkEvents) {
       const page = workEventsPage(message.WorkEvents);
@@ -2283,6 +2319,7 @@ export class HubConnectionSupervisor {
       const rejection = messageRejection(message.error, message);
       // The hub closes the legacy socket after a retryable refusal, and its
       // close handler reattaches (cas-0653).
+      if (typeof clientRef === "string" && this.failHistoryRequest(session, clientRef, detail)) return;
       if (typeof clientRef === "string") {
         if (rejection.retryable) this.noteUpstreamRefusal(session);
         this.callbacks.onMessageRejected?.(session, clientRef, detail, rejection);
@@ -2294,6 +2331,7 @@ export class HubConnectionSupervisor {
         if (rejection.retryable) for (const later of this.unansweredAfter(session, clientRef)) this.callbacks.onMessageRejected?.(session, later, detail, rejection);
       } else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
+      if (typeof message.Error.client_ref === "string" && this.failHistoryRequest(session, message.Error.client_ref, String(message.Error.message))) return;
       if (typeof message.Error.client_ref === "string" && this.workEventRequests.delete(message.Error.client_ref)) this.callbacks.onWorkEventsFailed?.(session, message.Error.client_ref, String(message.Error.message ?? "Work events failed"));
       else if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
       else this.callbacks.onSocketError(session, message.Error.message);

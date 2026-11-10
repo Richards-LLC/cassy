@@ -926,6 +926,54 @@ export function supervisorWorking(
 /** The thread's paging state: how far back it has loaded, and whether more is offered. */
 export interface HistoryCursor { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }
 
+/** Request state shared by the connection callbacks and the history controls. */
+export class HistoryPageState implements HistoryCursor {
+  hasEarlier = false;
+  nextBefore?: number;
+  loading = false;
+  loaded = false;
+  requested = false;
+  unavailable = false;
+  private readonly requests = new Map<string, { before?: number; detail?: string }>();
+
+  get failure(): { detail: string; before?: number } | undefined {
+    let failure: { detail: string; before?: number } | undefined;
+    for (const request of this.requests.values()) {
+      if (request.detail !== undefined) failure = { detail: request.detail, before: request.before };
+    }
+    return failure;
+  }
+
+  request(requestId: string, before?: number): void {
+    // Only an equivalent read replaces a deadline/error. A newest-page read
+    // and Load earlier can be in flight independently on the same session.
+    for (const [id, request] of this.requests) {
+      if (request.before === before) this.requests.delete(id);
+    }
+    this.requests.set(requestId, { before });
+    this.syncRequests();
+  }
+
+  fail(requestId: string, detail: string, before?: number): void {
+    this.requests.set(requestId, { before, detail });
+    this.syncRequests();
+  }
+
+  receive(page: { request_id: string; has_earlier: boolean; next_before?: number }): boolean {
+    const older = this.requests.get(page.request_id)?.before !== undefined;
+    this.requests.delete(page.request_id);
+    applyHistoryCursor(this, page);
+    this.syncRequests();
+    return older;
+  }
+
+  private syncRequests(): void {
+    const pending = [...this.requests.values()].filter(request => request.detail === undefined);
+    this.loading = pending.some(request => request.before !== undefined);
+    this.requested = pending.length > 0;
+  }
+}
+
 /**
  * Fold one history page into the thread's cursor (cas-2093). Every attach
  * asks again for the newest page, and a reconnect lands that page on a thread

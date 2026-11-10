@@ -513,6 +513,10 @@ invariants:
     statement: A harness exit without a verdict returns its exact dispatch to a retryable audited state; one replacement owns the retry, stale children cannot publish, and the stderr reason remains readable after success.
     check: Run automatic_verifier_records_exact_dispatch_without_hand_launch_cas_381f through the real merge preparation and automatic handoff, plus failed_verifier_release_fences_claims_and_preserves_audit_cas_4271. Batch QA forces a disposable verifier harness to exit 1, retries the same merge once and checks one replacement, unchanged proof, stale-child refusal, preserved stderr and exact candidate landing.
     bug: {task: cas-4271}
+  FACTORY-VERIFIER-RESPONSE-FRAMING:
+    statement: Complete JSON code fences preserve exact dispatch authority, malformed responses retain stdout without a verdict, and expired supervisor approval is reusable only for unchanged review context.
+    check: Run cas_da35c_fenced_verifier_response_records_exact_dispatch and cas_da35c_expired_supervisor_approval_reuses_only_unchanged_candidate. Batch QA walks Claude fallback review and retries an approved expired dispatch, checking candidate identity and any fresh-review requirement after target changes.
+    bug: {task: cas-da35c}
   FACTORY-CLOSE-PAIR-SCHEMA:
     statement: Close interprets historical image-pair evidence by schema without rewriting it; modern manifests require both image seals and unknown versions refuse explicitly.
     check: Run visual_pairs_validate_sides_hashes_and_status_cas_4f82 through full bundle validation and the cited-pairs close probe, verifying original manifest bytes, historical PNG integrity, schema2 JPG requirements, tampering and unsupported versions. Run deliverable_pairs_excludes_one_sided_and_tampered_captures through the real CLI for modern pair selection.
@@ -1168,7 +1172,7 @@ journeys:
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
   - crates/cas-store/src/verification_store.rs
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-RESPONSE-FRAMING, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE

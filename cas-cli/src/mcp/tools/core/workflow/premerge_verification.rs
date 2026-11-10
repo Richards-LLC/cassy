@@ -949,7 +949,7 @@ impl CasCore {
         let findings = verdict.as_ref().map(|verdict| format!("\n{}\nFindings: {}", verdict.summary,
             serde_json::to_string(&verdict.issues).unwrap_or_default())).unwrap_or_default();
         let action = if status == VerificationStatus::Approved {
-            "The existing task verifier approved the candidate. Retry this delivery's worktree_merge; no worker close retry or second verifier is needed."
+            "The task verifier approved the reviewed candidate. Retry this delivery's worktree_merge; approval is reused while the source, plan, evidence and reviewed merge context still match. Changed candidates require a fresh review. No worker close retry is needed."
         } else {
             "This delivery remains unpublished. Resolve this verdict or return only this delivery for repair; unrelated deliveries may continue."
         };

@@ -301,6 +301,8 @@ fn review(
     .map_err(|e| format!("harness failed or timed out: {e:?}"))?;
     std::fs::write(output.with_file_name("harness.log"), &result.stderr)
         .map_err(|e| e.to_string())?;
+    let capture = output.with_file_name("harness.stdout");
+    std::fs::write(&capture, &result.stdout).map_err(|e| e.to_string())?;
     if !result.status.success() {
         // Keep the full log on disk; notices carry only the final eight lines
         // within a 2 KiB window, so an echoed prompt cannot flood the owner.
@@ -328,8 +330,20 @@ fn review(
     } else {
         result.stdout
     };
+    let invalid = |error| format!(
+        "invalid verifier response: {error}; stdout: {}; stderr: {}",
+        capture.display(), output.with_file_name("harness.log").display(),
+    );
+    let text = std::str::from_utf8(&bytes).map_err(|e| invalid(e.to_string()))?.trim();
+    // Claude print mode may wrap its entire final JSON in a Markdown fence.
+    // Accept only that complete framing, never extract a verdict from prose.
+    let json = text.split_once('\n')
+        .filter(|(opening, _)| matches!(opening.trim_end_matches('\r'), "```json" | "```"))
+        .and_then(|(_, body)| body.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(text);
     let mut arguments: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid verifier response: {e}"))?;
+        serde_json::from_str(json).map_err(|e| invalid(e.to_string()))?;
     arguments.insert("task_id".into(), serde_json::json!(dispatch.task_id));
     arguments.insert("dispatch_id".into(), serde_json::json!(dispatch.id));
     arguments.insert("verifier_capability".into(), serde_json::Value::Null);

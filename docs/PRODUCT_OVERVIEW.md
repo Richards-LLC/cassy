@@ -217,6 +217,10 @@ include the stderr tail and full log path. A crashed automatic verifier releases
 only its own unresolved claim, consumes its old authority and retains an audit
 of the failure. Retrying the same merge starts one replacement on the same
 candidate; stale verdicts are refused and each attempt retains separate logs.
+Claude's complete JSON code fences are accepted as verdict framing; malformed
+or mixed-prose responses retain their raw stdout for diagnosis and cannot approve.
+Supervisor approval after expiry is reusable for the unchanged candidate. Merge
+notices explain that changed review context can require a fresh review.
 
 Native Codex children share their parent's MCP caller. Shared connections refuse
 child registration before changing caller or session state. Initial dispatches

@@ -629,7 +629,13 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
     let parked = close(&f).await;
     assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
-    assert!(parked.deliverables.files_changed.iter().any(|path| path == "child.txt"));
+    let window = resolve_task_commit_receipt_window(
+        parked.created_at,
+        &[],
+        task_commit_identity_in_repo(repo, &parked, None).unwrap(),
+    );
+    let paths = task_attribution::paths(repo, "main", &window, Some(&f.final_tip)).unwrap();
+    assert!(paths.iter().any(|path| path == "child.txt"));
 }
 
 /// GH #1558: an ordinary close after pushing a target merge must bind the

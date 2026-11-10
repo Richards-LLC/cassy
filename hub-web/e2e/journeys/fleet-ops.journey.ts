@@ -176,10 +176,20 @@ for (const colorScheme of ["light", "dark"] as const) {
       world.epics = catalog;
       const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
       const sheet = page.locator("dialog.fleet-action-sheet");
-      await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
+      const namedWorkers = async () => {
+        const rail = page.locator("#status-view");
+        await expect(rail.locator(".status-agent")).toHaveCount(world.agents.length);
+        for (const agent of world.agents) {
+          await expect(rail.locator(".status-agent", { hasText: agent.name }).locator(".status-line").getByText(agent.name, { exact: true })).toBeVisible();
+        }
+      };
+      await journey.stage("cas-e466c: read every worker header on phone without opening Team", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        await namedWorkers();
+      });
+      await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
         await expect(sheet.getByRole("heading", { name: "Assign cas-2001 to", exact: true })).toBeVisible();
@@ -200,11 +210,14 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(items.nth(0)).toContainText(world.epics.find(epic => epic.id === "train")!.title!);
         await expect(items.nth(1)).toContainText(world.epics[1]!.title!);
       });
-      await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
+      await journey.stage("cas-e466c: read every worker header on desktop without opening Team", async () => {
         await page.keyboard.press("Escape");
         await expect(page.locator("#status-view").getByRole("button", { name: "Focus epic…" })).toBeFocused();
         await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
         await page.setViewportSize({ width: 1280, height: 800 });
+        await namedWorkers();
+      });
+      await journey.stage("cas-b200: desktop offers the same named live choices", async () => {
         const rail = page.locator("#status-view");
         await rail.getByRole("button", { name: "Focus epic…", exact: true }).click();
         const menu = rail.locator(".fleet-ops-epics");

@@ -66,20 +66,28 @@ pub(super) fn enqueue_and_send(
     message: PeerSend,
     recipient: &str,
 ) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, false)
+    enqueue_with_recovery(root, message, recipient, false, false)
+}
+
+/// Scheduler feedback uses the existing retry duty without network I/O on the
+/// queue-selection lane. Persist even if credentials need to recover first.
+pub(crate) fn enqueue_feedback(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
+    enqueue_with_recovery(root, message, recipient, false, true)
 }
 
 /// Publication may re-attempt an abandoned receipt after the peer recovers.
 /// Keep the original logical send key; ordinary messages retain their policy.
 pub(super) fn enqueue_premerge_receipt(root: &Path, message: PeerSend, recipient: &str) -> Result<SendReceipt, PeerSendError> {
-    enqueue_with_recovery(root, message, recipient, true)
+    enqueue_with_recovery(root, message, recipient, true, false)
 }
 
 fn enqueue_with_recovery(
-    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool,
+    root: &Path, mut message: PeerSend, recipient: &str, recover_abandoned: bool, defer_send: bool,
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
-    http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
+    if !defer_send {
+        http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
+    }
     let sender = crate::store::open_agent_store(root)
         .and_then(|agents| {
             agents
@@ -144,6 +152,9 @@ fn enqueue_with_recovery(
     })?;
     if let Some(id) = sent {
         return Ok(SendReceipt { id, status: "duplicate".into() });
+    }
+    if defer_send {
+        return Ok(SendReceipt { id: format!("peer-outbox:{id}"), status: "queued".into() });
     }
     retry_peer_send(root, id)
 }

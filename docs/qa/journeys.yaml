@@ -23,9 +23,9 @@ bug_families:
     journeys: [HUB-J17]
   published-peer-landing-wake:
     title: Published landing approvals wake idle supervisors while explicit receipt and quiet intent stay quiet
-    tasks: [cas-35563]
+    tasks: [cas-35563, cas-10d6]
     invariants: [HUB-J5-NO-ACTION-WAKES]
-    journeys: [HUB-J5]
+    journeys: [HUB-J5, FACTORY-CLOSE]
   released-delivery-metadata-supersession:
     title: Released fragments and generated codemaps do not block close; missing source and unpromoted entries still refuse
     tasks: [cas-2fe8]

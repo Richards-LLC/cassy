@@ -1188,7 +1188,9 @@ async fn peer_premerge_case(case: PeerReceiptCase) {
     let queue = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap();
     for row in queue.peek_all(100).unwrap() {
         if let Some(envelope) = crate::cloud::peer_mailbox::parse_envelope(&row.prompt) {
-            assert!(!envelope.wakes_idle(), "machine receipts must not wake a supervisor model");
+            // cas-10d6: published landings wake the supervisor (cas-35563).
+            // Acknowledging that wake cannot erase the admitted close authority.
+            assert!(envelope.wakes_idle());
         }
         queue.ack(row.id).unwrap();
     }

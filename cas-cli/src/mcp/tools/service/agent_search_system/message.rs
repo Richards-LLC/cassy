@@ -2326,7 +2326,7 @@ impl CasService {
         // references to the worker's own earlier messages grant no exemption.
         let worker_waking_kind = match req.kind.as_deref() {
             Some(kind @ ("ask" | "answer")) => Some(kind),
-            _ if worker_to_own_supervisor && explicit_reply_settles => Some("answer"),
+            _ if !quiet_message && worker_to_own_supervisor && explicit_reply_settles => Some("answer"),
             _ => None,
         };
         if role == "worker"

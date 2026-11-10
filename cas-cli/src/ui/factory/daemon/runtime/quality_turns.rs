@@ -820,7 +820,7 @@ fn auto_clear(root: &Path, session: &str, queue: &dyn PromptQueueStore, agent: &
         tracing::warn!(%error, "automatic supervisor clear confirmation deferred");
     }
     let recorded = std::mem::take(&mut cursor.recorded);
-    let Some(at) = recorded.iter().map(|(_, at)| *at).max() else { return };
+    let Some((wake_input_tokens, at)) = recorded.into_iter().max_by_key(|(_, at)| *at) else { return };
     let turn = auto::TurnEnd {
         agent,
         cli: cursor.source.cli,
@@ -828,6 +828,7 @@ fn auto_clear(root: &Path, session: &str, queue: &dyn PromptQueueStore, agent: &
         harness_session: &cursor.source.harness_session,
         transcript: &cursor.path,
         at,
+        wake_input_tokens,
         mid_turn: cursor.pending.is_some(),
     };
     if let Err(error) = auto::on_turn_end(root, queue, &turn) {

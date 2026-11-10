@@ -16456,6 +16456,16 @@ mod tests {
              FROM operator_delivery_outbox WHERE prompt_id = ?", params![snapshot, mirrors[0]], |row| row.get(0),
         ).unwrap();
         assert!(outbox_pending, "the independent durable delivery snapshot still retries");
+        // cas-1a73: an automatic status mirror can carry an operator decision.
+        // Queue expiry must notify the current supervisor even after the
+        // original session ends, without claiming the outbox stopped retrying.
+        let notice: (String, Option<String>) = conn.query_row(
+            "SELECT target, factory_session FROM prompt_queue
+             WHERE source = 'delivery-watchdog' AND dedupe_key = ?",
+            [format!("operator-mirror-undelivered:{}", mirrors[0])],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(notice, ("supervisor".into(), None));
         drop(conn);
 
         for id in [operator, commander] {

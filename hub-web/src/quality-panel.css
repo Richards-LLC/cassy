@@ -70,6 +70,9 @@
 @media (max-width: 760px) {
   .quality-hero { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); padding: var(--space-4); }
   .quality-verdict { font-size: 1.6rem; }
+  /* The hero chart scales its viewBox to about half; keep its labels readable. */
+  .quality-chart:not(.quality-spark) .quality-value, .quality-chart:not(.quality-spark) .quality-tick { font-size: 20px; }
+  .quality-chart:not(.quality-spark) .quality-value-lead { font-size: 22px; }
   .quality-rubric { grid-template-columns: 6ch minmax(0, 1fr) 5.25rem; }
   .quality-pending { grid-template-columns: 6ch minmax(0, 1fr); grid-template-areas: "now name" "now source"; }
   .quality-source { justify-self: start; margin-top: var(--space-1); white-space: normal; }

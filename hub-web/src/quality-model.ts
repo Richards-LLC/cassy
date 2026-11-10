@@ -40,7 +40,7 @@ const share = (part: number, whole: number) => whole > 0 ? 100 * part / whole : 
 const failShare = (row?: CheckRow) => share(row?.fail ?? 0, (row?.pass ?? 0) + (row?.fail ?? 0));
 const percent = (value: number) => `${value.toFixed(0)}%`;
 const millions = (value: number) => `${value.toFixed(value >= 10 ? 0 : 1)}M`;
-const decimal = (value: number) => value.toFixed(value >= 10 ? 0 : 1);
+const decimal = (value: number) => value.toFixed(value >= 10 ? 0 : value >= 0.1 || value === 0 ? 1 : 2);
 
 export const RUBRICS: readonly Rubric[] = [
   { actor: "workers", name: "Claims the verifier refused", unit: "% of closes", read: r => failShare(r.checks.verifier), format: percent },

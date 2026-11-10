@@ -415,7 +415,11 @@ impl SqliteRequestJournal {
     /// later observed owner, including a peer's takeover, but never grant a
     /// reply intent or a message post from this historical evidence.
     pub(crate) fn source_status_owner(&self, source: &str, project: &str) -> Result<Option<String>, JournalError> {
-        let receipts = self.source_receipts(source, project)?;
+        let mut receipts = self.source_receipts(source, project)?;
+        // A delayed response from an older claim must never undo an observed
+        // takeover. Stable sorting retains observation order within one CAS
+        // generation, including released receipts without a visible owner.
+        receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt["generation"].as_u64().unwrap_or(0)));
         Ok(receipts.iter().find_map(|receipt| {
             receipt["visible_owner"]["registration_id"].as_str()
                 .filter(|owner| !owner.is_empty()).map(str::to_string)

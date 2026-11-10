@@ -413,7 +413,7 @@ bug_families:
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-CAP-FEEDBACK]
   requested-worker-reply-wake:
-    title: A linked worker answer wakes its supervisor over the cap while unsolicited status stays held
+    title: The first worker answer to an explicit supervisor ask wakes over the cap while instruction replies and repeated answers stay held
     tasks: [cas-6c32]
     journeys: [FACTORY-SUPERVISE]
   managed-thread-verified-file-replies:

@@ -135,6 +135,10 @@ pub(crate) fn attach_waking_kind(message: &str, kind: &str) -> String {
     format!("{message}\n{WAKING_KIND_TAG}{kind}\"/>")
 }
 
+pub(crate) fn is_ask(prompt: &str) -> bool {
+    prompt.contains(&format!("{WAKING_KIND_TAG}ask\"/>"))
+}
+
 /// cas-73f7: asks, answers and blockers are the conversation itself, so the
 /// sender-pair cap never holds them. It bounds status chatter only.
 /// cas-922d: nor does the burst debounce delay them, and a local worker's

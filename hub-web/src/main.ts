@@ -4630,6 +4630,8 @@ function render(captureDraft = true, stoppedSelection = false): void {
   const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
   preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#conversation-stage");
+  const keepHeaderMenu = Boolean(selectedThreadKey && currentGrid?.dataset.sessionKey === selectedThreadKey
+    && document.querySelector<HTMLElement>("#conversation-more-menu")?.matches(":popover-open"));
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();
@@ -4712,6 +4714,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
     if (pairingFeedbackWasFocused) focusPairingFeedback(dialog);
   }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
+  if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
+    document.querySelector<HTMLElement>("#conversation-more-menu")?.showPopover({ source: document.getElementById("conversation-more")! });
+  }
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell
   // markup until its region shows it (the phone Attention badge, cas-a5c6),

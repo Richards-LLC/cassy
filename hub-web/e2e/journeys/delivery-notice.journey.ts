@@ -89,7 +89,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     const badge = page.locator("#conversation-attention");
     await openConversationActions(page);
     await expect(badge).toBeVisible();
-    await expect(badge).toHaveText("1");
+    await expect(badge.locator(".conversation-attention-count")).toHaveText("1");
     // cas-a929: a visible warning must not push any header control off-screen.
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
@@ -236,7 +236,12 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("A sheet left open on a phone is a plain rail on a desktop", async () => {
     const badge = page.locator("#conversation-attention");
-    await openConversationActions(page); await badge.click();
+    await openConversationActions(page);
+    hub.machine("atlas").sessions[0]!.project_dir = "/projects/Accounting-refreshed";
+    await hub.announceCatalog("atlas");
+    await expect(page.locator(".conversation-identity h1 b")).toHaveText("Accounting-refreshed");
+    await expect(page.locator("#conversation-more-menu")).toBeVisible();
+    await badge.click();
     await expect(page.getByRole("dialog", { name: "Attention for this session" })).toBeVisible();
     // cas-a5c6: the phone turns into a desktop (rotation, or a window resize).
     await page.setViewportSize(desktop);

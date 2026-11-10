@@ -124,7 +124,7 @@ export function hostMarkup(host: string): string {
  * delivery problem had no sign there. Hidden until the session has an open
  * item; main.ts fills the count and opens the rail as a sheet.
  */
-const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="conversation-attention-count"></span></button>`;
+const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="action-label">Attention</span><span class="conversation-attention-count"></span></button>`;
 
 /** Badge text and accessible name for the session's open attention items. */
 export function conversationAttentionBadge(count: number): { hidden: boolean; text: string; label: string } {

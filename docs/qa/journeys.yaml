@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  worker-queue-supervisor-corrections:
+    title: Supervisor unassignment removes queue entries and open unleased cursors can be reordered while hard start prerequisites remain enforced
+    tasks: [cas-6184]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   task-start-preserves-supervisor-notes:
     title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
     tasks: [cas-3045]

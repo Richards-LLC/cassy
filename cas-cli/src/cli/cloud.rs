@@ -396,6 +396,7 @@ fn clear_foreign_identity_metadata(
 
 #[derive(Parser)]
 #[command(group(clap::ArgGroup::new("purge").args(["purge_team_owned", "purge_pull_echoes"])))]
+#[command(group(clap::ArgGroup::new("selected_action").args(["purge_team_owned", "purge_pull_echoes", "retry"])))]
 pub struct CloudQueueArgs {
     #[command(subcommand)]
     pub command: Option<CloudQueueCommand>,
@@ -410,8 +411,8 @@ pub struct CloudQueueArgs {
     /// Preview IDs and eligibility without deleting queue rows.
     #[arg(long, requires = "purge")]
     pub dry_run: bool,
-    /// Exact personal queue IDs to inspect or clean up (comma-separated).
-    #[arg(long, value_delimiter = ',', requires = "purge")]
+    /// Exact queue IDs to retry, or personal queue IDs to inspect or clean up.
+    #[arg(long, value_delimiter = ',', requires = "selected_action")]
     pub ids: Vec<i64>,
     /// Show detailed list of queued items
     #[arg(long, short)]
@@ -426,8 +427,8 @@ pub struct CloudQueueArgs {
     pub prune: Option<i64>,
 
     /// Requeue all terminally failed items, preserving their last error.
-    /// Combine with --retry-reason to target only diagnostics containing a
-    /// repaired server reason.
+    /// Combine with --ids to select items and --retry-reason to restrict
+    /// diagnostics to a repaired server reason.
     #[arg(long, conflicts_with_all = ["prune", "clear"])]
     pub retry: bool,
 
@@ -2966,9 +2967,13 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
     // gets another chance to accept them.
     if args.retry {
         let max_retries = 5;
-        let retried = match args.retry_reason.as_deref() {
-            Some(reason) => queue.retry_failed_for_reason(reason, max_retries)?,
-            None => queue.retry_failed(max_retries)?,
+        let retried = if !args.ids.is_empty() {
+            queue.retry_failed_items(&args.ids, args.retry_reason.as_deref(), max_retries)?
+        } else {
+            match args.retry_reason.as_deref() {
+                Some(reason) => queue.retry_failed_for_reason(reason, max_retries)?,
+                None => queue.retry_failed(max_retries)?,
+            }
         };
         if cli.json {
             let mut output = serde_json::json!({
@@ -2977,6 +2982,9 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
             });
             if let Some(reason) = &args.retry_reason {
                 output["reason"] = serde_json::Value::String(reason.clone());
+            }
+            if !args.ids.is_empty() {
+                output["ids"] = serde_json::json!(args.ids);
             }
             println!("{output}");
         } else {
@@ -3080,10 +3088,13 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                         fmt.write_muted(if unicode { "\u{25CB}" } else { "-" })?;
                     }
                     fmt.write_raw(&format!(
-                        " {} {} ({})",
+                        " #{} {} {} ({}) team={} project={}",
+                        item.id,
                         item.operation.as_str(),
                         item.entity_id,
-                        item.entity_type.as_str()
+                        item.entity_type.as_str(),
+                        item.team_id.as_deref().filter(|team| !team.is_empty()).unwrap_or("personal"),
+                        item.project_id.as_deref().unwrap_or("current")
                     ))?;
                     fmt.newline()?;
 
@@ -3098,12 +3109,16 @@ fn execute_queue(args: &CloudQueueArgs, cli: &Cli, cas_root: &Path) -> anyhow::R
                         fmt.write_raw(item.last_reason.as_deref().unwrap_or("unspecified"))?;
                         fmt.newline()?;
                     }
-                    if item.last_outcome.as_deref() != Some("parked") {
-                        if let Some(err) = &item.last_error {
-                            fmt.write_muted("      ")?;
-                            fmt.write_raw(&format!(" error: {}", err))?;
-                            fmt.newline()?;
+                    if let Some(err) = &item.last_error {
+                        fmt.write_muted("      ")?;
+                        fmt.write_raw(&format!(" error: {}", err))?;
+                        fmt.newline()?;
+                    }
+                    if item.retry_count >= max_retries {
+                        if let Some(reason) = &item.last_reason {
+                            fmt.write_raw(&format!("      {}\n", crate::cloud::syncer::push_reason_hint(reason)))?;
                         }
+                        fmt.write_raw(&format!("      After repair: cas cloud queue --retry --ids {}; cas cloud pull; cas cloud push\n", item.id))?;
                     }
                 }
             }
@@ -7914,6 +7929,53 @@ mod team_cmd_tests {
                 .starts_with(&format!("/api/teams/{team}/"))
         }));
         server.verify().await;
+    }
+
+    #[test]
+    fn cas_cb74_retry_queue_ids_preserves_neighbors_and_diagnostics() {
+        use clap::Parser;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in ["a:b:blocks", "a:c:blocks", "a:d:blocks"] {
+            queue.enqueue_for_team(crate::cloud::EntityType::TaskDependency, id,
+                crate::cloud::SyncOperation::Upsert, Some("{}"), "cb74-team").unwrap();
+        }
+        let rows = queue.list_all(10).unwrap();
+        let selected = rows.iter().find(|row| row.entity_id == "a:b:blocks").unwrap();
+        for row in &rows {
+            if row.entity_id == "a:d:blocks" {
+                queue.mark_failed(row.id, "Network error: timeout").unwrap();
+            } else {
+                queue.park_intentionally(row.id, "dependency_endpoint_foreign", 5).unwrap();
+            }
+        }
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "--json", "cloud", "queue"]).unwrap();
+        let id = selected.id.to_string();
+        let wrong_reason = CloudQueueArgs::try_parse_from([
+            "queue", "--retry", "--ids", &id, "--retry-reason", "dependency_endpoint_deleted"
+        ]).unwrap();
+        execute_queue(&wrong_reason, &cli, &root).unwrap();
+        assert_eq!(queue.pending_for_team("cb74-team", 10, 5).unwrap().len(), 1);
+        let args = CloudQueueArgs::try_parse_from(["queue", "--retry", "--ids", &id]).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        let after = queue.list_all(10).unwrap();
+        assert_eq!(after.len(), 3);
+        for row in after {
+            match row.entity_id.as_str() {
+                "a:b:blocks" => {
+                    assert_eq!(row.retry_count, 0);
+                    assert_eq!(row.last_reason.as_deref(), Some("dependency_endpoint_foreign"));
+                    assert_eq!(row.last_error.as_deref(), Some("dependency_endpoint_foreign"));
+                    assert_eq!(row.payload, selected.payload);
+                }
+                "a:c:blocks" => assert_eq!(row.retry_count, 5),
+                "a:d:blocks" => assert_eq!(row.retry_count, 1),
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]

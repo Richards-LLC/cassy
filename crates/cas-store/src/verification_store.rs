@@ -590,7 +590,8 @@ pub fn add_system_verification(cas_dir: &Path, verification: &Verification) -> R
 
 /// Atomically admit daemon-validated peer authority into the existing proof
 /// records. Generic store writes cannot mint this provenance. A replay never
-/// updates a verdict or replaces a newer local verification cycle.
+/// updates a verdict or replaces a local verification cycle. A newer source
+/// review may supersede its stale admitted peer approval, retaining both rows.
 pub fn import_peer_premerge_verification(
     cas_dir: &Path,
     expected_task: &Task,
@@ -621,6 +622,7 @@ pub fn import_peer_premerge_verification(
     if DateTime::parse_from_rfc3339(&updated).map_err(|_| fail())?.with_timezone(&Utc) != expected_task.updated_at {
         return Err(fail());
     }
+    let mut superseded = None;
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&tx, &expected_task.id)? {
         if existing == *dispatch {
             // The exact imported row is immutable, including transport identity.
@@ -630,11 +632,37 @@ pub fn import_peer_premerge_verification(
             ).optional()?;
             if existing_verdict.as_deref() == Some(verification.id.as_str()) { return Ok(false); }
         }
-        return Err(fail());
+        let prior = existing.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref());
+        let old_verdict: Option<(String, String, String, Option<String>)> = tx.query_row(
+            "SELECT id,provenance,status,issuer_agent_id FROM verifications WHERE dispatch_id=?1
+             ORDER BY created_at DESC,id DESC LIMIT 1",
+            [&existing.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).optional()?;
+        let replaceable = matches!(existing.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+            && existing.id != dispatch.id && dispatch.requested_at > existing.requested_at
+            && prior.is_some_and(|prior| {
+                prior.receipt.status == VerificationStatus::Approved
+                    && prior.receipt.dispatch_id == existing.id
+                    && prior.receipt.verdict_id != receipt.verdict_id
+                    && prior.receipt.source_sha != receipt.source_sha
+                    && prior.receipt.project_id == receipt.project_id
+                    && prior.receipt.target_branch == receipt.target_branch
+                    && prior.receipt.supervisor_id == receipt.supervisor_id
+                    && prior.sender_machine_id == attestation.sender_machine_id
+                    && old_verdict.as_ref().is_some_and(|(id, provenance, status, issuer)| {
+                        id == &prior.receipt.verdict_id && provenance == "peer_attested" && status == "approved"
+                            && issuer.as_deref() == Some(receipt.supervisor_id.as_str())
+                    })
+            });
+        if !replaceable {
+            return Err(StoreError::VerificationDispatchConflict { dispatch: Box::new(existing) });
+        }
+        tx.execute("UPDATE verification_dispatches SET state='invalidated' WHERE id=?1", [&existing.id])?;
+        superseded = Some(existing);
     }
     // Legacy local verdicts also represent an existing proof cycle.
     let has_verdict: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM verifications WHERE task_id=?1)", [&expected_task.id], |row| row.get(0))?;
-    if has_verdict { return Err(fail()); }
+    if has_verdict && superseded.is_none() { return Err(fail()); }
     tx.execute(
         "INSERT INTO verification_dispatches
          (id,task_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
@@ -646,6 +674,20 @@ pub fn import_peer_premerge_verification(
             dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string()],
     )?;
     insert_verification_with_conn(&tx, verification)?;
+    if let Some(prior) = superseded {
+        let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id,
+            "Peer approval replaced after source review of repaired delivery")
+            .with_metadata(serde_json::json!({
+                "code": "peer_premerge_approval_replaced",
+                "old_dispatch_id": prior.id, "new_dispatch_id": dispatch.id,
+                "old_source_sha": prior.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref())
+                    .map(|peer| peer.receipt.source_sha.as_str()),
+                "new_source_sha": receipt.source_sha, "verdict_id": verification.id,
+                "message_id": attestation.message_id, "sender_machine_id": attestation.sender_machine_id,
+                "supervisor_id": receipt.supervisor_id,
+            }));
+        record_event_with_conn(&tx, &event)?;
+    }
     tx.commit()?;
     Ok(true)
 }

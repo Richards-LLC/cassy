@@ -494,6 +494,32 @@ bug_families:
     title: Same-pane live supervisors retain one identity on register and session_start; delayed registration writes report their final outcome to the caller
     tasks: [cas-1550]
     journeys: [FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-QA-RECEIPT]
+  fleet-sheets-titled-labelled:
+    title: Add worker is a titled panel with labelled fields inside the rail, and a phone action sheet names the worker or task it acts on
+    tasks: [cas-5d53]
+    journeys: [HUB-J17]
+  accounts-default-and-stale-reset:
+    title: The default account card shows its badge without Set default, and a reset already past is never shown as a time
+    tasks: [cas-eae3]
+    journeys: [HUB-J13]
+  retained-dependency-sync-recovery:
+    title: Repaired endpoint ownership releases one retained dependency without crossing foreign boundaries or multiplying conflict snapshots
+    tasks: [cas-cb74]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  installation-inventory-failure-retry:
+    title: A failed browser installations list names the machine and list in a capitalised sentence and offers Retry, which reloads it
+    tasks: [cas-0dcf]
+    journeys: [HUB-J2]
+  missing-release-evidence:
+    title: Missing release trains and unavailable merge counts render as quiet evidence rather than headline or bold count text
+    tasks: [cas-504e9]
+    journeys: [HUB-J17, HUB-J26]
+    invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE]
+  empty-conversation-harness-mark:
+    title: An empty conversation's card wears the same provider mark as its header and list row when the session reports a harness
+    tasks: [cas-36cb]
+    journeys: [HUB-J3]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -536,6 +562,10 @@ invariants:
     statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.
     check: Run work-picture.test.ts through the name opener and timeline renderer for active, executing, blocked, parked and offline data. In batch QA open and close timelines from desktop/phone cards and Team, compare state words and inspect long-title wrapping and keyboard focus.
     bug: {task: cas-0d5e}
+  HUB-RELEASE-UNKNOWN-EVIDENCE:
+    statement: Without a reported release train, the shared rail and Team release renderer emits one evidence paragraph with no heading or emphasized count; known releases retain their titles while unavailable counts stay evidence.
+    check: Run fleet-ops.test.ts through releaseHeader with absent and partial release data. In batch QA inspect the empty rail and Team at phone and desktop widths in light and dark, using the regular ink-mid meta style.
+    bug: {task: cas-504e9}
   HUB-TASK-TITLE-FIRST:
     statement: Worker card task text, Show work task chips, worker timeline subjects and write-access options lead with the reported task title; task IDs remain secondary metadata and option values retain exact routing IDs.
     check: Run work-picture.test.ts and write-grant.test.ts through the real DOM renderers. In batch QA inspect the four surfaces on desktop and phone with long titles and unavailable titles; preserve state badges, escaped text, event detail and write-access routing.
@@ -2734,6 +2764,7 @@ journeys:
   invariants:
   - HUB-J17-GOAL
   - HUB-WORKER-TIMELINE-HEADER
+  - HUB-RELEASE-UNKNOWN-EVIDENCE
   - HUB-TASK-TITLE-FIRST
   - HUB-J17-WORKER-NAME
   - HUB-J17-FOCUS-CHOICES
@@ -3230,7 +3261,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-WORKER-TIMELINE-HEADER, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
+  invariants: [HUB-WORKER-TIMELINE-HEADER, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE, HUB-RELEASE-UNKNOWN-EVIDENCE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

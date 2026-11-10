@@ -482,8 +482,8 @@ bug_families:
     journeys: [HUB-J17, HUB-J20, HUB-J25]
     invariants: [HUB-TASK-TITLE-FIRST]
   violet-transport-request-recovery:
-    title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
-    tasks: [cas-a0c5]
+    title: Violet post permission includes same-caller outcome lookup; reconnects reconcile the original request ID, while definitive rejections and unsubmitted posts retain their failures
+    tasks: [cas-a0c5, cas-c802]
     journeys: [FACTORY-SUPERVISE]
   supervisor-registration-rebind-and-late-commit:
     title: Same-pane live supervisors retain one identity on register and session_start; delayed registration writes report their final outcome to the caller

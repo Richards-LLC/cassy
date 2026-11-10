@@ -290,6 +290,16 @@ fn route_set_matches(routes: &BTreeSet<ExternalToolRoute>, server: &str, tool: &
         || routes.contains(&ExternalToolRoute::new("*", tool))
 }
 
+/// Posting grants its caller-scoped outcome lookup, with the same role and
+/// delegation restrictions. No read or other upstream route is implied.
+fn with_violet_recovery(routes: impl IntoIterator<Item = ExternalToolRoute>) -> BTreeSet<ExternalToolRoute> {
+    let mut routes: BTreeSet<_> = routes.into_iter().collect();
+    if route_set_matches(&routes, config::VIOLET_SERVER, "violet_post") {
+        routes.insert(ExternalToolRoute::new(config::VIOLET_SERVER, "violet_reconcile_reply"));
+    }
+    routes
+}
+
 /// Roles a `supervisor:` allowlist entry admits (GH #988): the factory
 /// supervisor, and a plain non-factory session, which is the operator's own.
 /// Factory workers and the director are refused.
@@ -301,10 +311,10 @@ fn role_may_call_supervisor_routes(role: cas_types::AgentRole) -> bool {
 }
 
 impl ExternalToolAllowlistPolicy {
-    /// Create a policy allowing exactly the supplied external routes.
+    /// Allow the supplied routes and the scoped outcome lookup for Violet posts.
     pub fn new(routes: impl IntoIterator<Item = ExternalToolRoute>) -> Self {
         Self {
-            allowed_routes: routes.into_iter().collect(),
+            allowed_routes: with_violet_recovery(routes),
             supervisor_delegation_routes: BTreeSet::new(),
             supervisor_routes: BTreeSet::new(),
             worker_read_only_servers: BTreeSet::new(),
@@ -334,7 +344,7 @@ impl ExternalToolAllowlistPolicy {
         mut self,
         routes: impl IntoIterator<Item = ExternalToolRoute>,
     ) -> Self {
-        self.supervisor_routes = routes.into_iter().collect();
+        self.supervisor_routes = with_violet_recovery(routes);
         self
     }
 
@@ -344,7 +354,7 @@ impl ExternalToolAllowlistPolicy {
         mut self,
         routes: impl IntoIterator<Item = ExternalToolRoute>,
     ) -> Self {
-        self.supervisor_delegation_routes = routes.into_iter().collect();
+        self.supervisor_delegation_routes = with_violet_recovery(routes);
         self
     }
 
@@ -1456,12 +1466,15 @@ impl ProxyEngine {
             if !self.servers.read().await.contains_key(server_name) {
                 self.reconnect_if_due(server_name).await;
             }
-            let supported = self.violet_request_ids_supported().await;
+            let request_id = arguments.as_ref().and_then(|args| args.get("request_id"))
+                .and_then(Value::as_str).map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let supported = self.violet_request_ids_supported(caller, dispatch_kind, &request_id).await;
             if violet_request_lookup && !supported {
-                anyhow::bail!("Violet does not advertise standalone request-ID reconciliation");
+                anyhow::bail!("Violet request-ID reconciliation is unavailable in the live schema or caller policy");
             }
             if violet_message && supported && let Some(args) = arguments.as_mut() {
-                args.entry("request_id").or_insert_with(|| Value::String(uuid::Uuid::new_v4().to_string()));
+                args.entry("request_id").or_insert_with(|| Value::String(request_id));
             }
         }
 
@@ -1555,16 +1568,24 @@ impl ProxyEngine {
 
     /// Older hubs expose post.request_id only for managed replies. Standalone
     /// messages are safe only when the companion lookup accepts that ID alone.
-    async fn violet_request_ids_supported(&self) -> bool {
+    async fn violet_request_ids_supported(&self, caller: &ProxyCaller, dispatch_kind: ProxyDispatchKind, request_id: &str) -> bool {
         let catalog = self.catalog.read().await;
         let Some(tools) = catalog.get(config::VIOLET_SERVER) else { return false };
         let advertises_id = |tool: &Tool| tool.input_schema.get("properties")
             .and_then(|properties| properties.get("request_id")).is_some_and(Value::is_object);
-        tools.iter().find(|tool| tool.name == "violet_post").is_some_and(|tool| advertises_id(tool))
+        let supported = tools.iter().find(|tool| tool.name == "violet_post").is_some_and(|tool| advertises_id(tool))
             && tools.iter().find(|tool| tool.name == "violet_reconcile_reply").is_some_and(|tool| {
                 advertises_id(tool) && tool.input_schema.get("required").and_then(Value::as_array)
                     .is_none_or(|required| required.iter().all(|field| field.as_str() == Some("request_id")))
-            })
+            });
+        drop(catalog);
+        let arguments = Some(serde_json::Map::from_iter([("request_id".into(), Value::String(request_id.into()))]));
+        if !supported { return false; }
+        let read_only_hint = self.tool_read_only_hint(config::VIOLET_SERVER, "violet_reconcile_reply").await;
+        self.policy.read().await.decide(&ProxyPolicyRequest {
+            caller, server: config::VIOLET_SERVER, tool: "violet_reconcile_reply", arguments: &arguments,
+            dispatch_kind, read_only_hint,
+        }) == ProxyPolicyDecision::Allow
     }
 
     /// A lost response is never permission to repeat a write. Reconcile only
@@ -1579,7 +1600,11 @@ impl ProxyEngine {
         let prior = original.as_ref().ok().and_then(violet_payload);
         let uncertain = match &original {
             Ok(_) => prior.as_ref().is_some_and(|body| body.pointer("/error/code").and_then(Value::as_str) == Some("outcome_unknown")),
-            Err(error) => upstream_call_is_reconnectable(error),
+            // Only a dispatched call can have an unknown outcome. An absent
+            // upstream in backoff is reconnectable, but never accepted this post.
+            Err(error) => error.chain()
+                .filter_map(|cause| cause.downcast_ref::<rmcp::service::ServiceError>())
+                .any(|cause| classify_live_failure(cause).is_some()),
         };
         if !uncertain {
             return original;
@@ -1621,10 +1646,8 @@ impl ProxyEngine {
         }
         body["error"]["code"] = Value::String("outcome_unknown".into());
         body["error"]["retryable"] = Value::Bool(false);
-        if let Some(error) = body["error"].as_object_mut() {
-            error.entry("message").or_insert_with(|| Value::String(
-                "Violet may have posted; reconcile this request ID before another write.".into()));
-        }
+        body["error"]["message"] = Value::String(
+            "Violet may have posted; reconcile this request ID. If lookup is unavailable, retry violet_post with the same request_id and unchanged arguments (idempotent); never use a new ID.".into());
         Ok(violet_result(body))
     }
 
@@ -3085,7 +3108,8 @@ mod tests {
         let policy =
             ExternalToolAllowlistPolicy::new([ExternalToolRoute::new("viktor", "ask_viktor")])
                 .with_supervisor_routes([
-                    ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap()
+                    ExternalToolRoute::parse_allowlist_entry("neon.*").unwrap(),
+                    ExternalToolRoute::new("violet", "violet_post"),
                 ]);
         let arguments = None;
         let decide = |role, server, tool| {
@@ -3104,6 +3128,14 @@ mod tests {
         for role in [Supervisor, Standard] {
             assert_eq!(decide(role, "neon", "run_sql"), ProxyPolicyDecision::Allow);
         }
+        for role in [Supervisor, Standard, Worker, Director] {
+            for tool in ["violet_post", "violet_reconcile_reply"] {
+                assert_eq!(decide(role, "violet", tool) == ProxyPolicyDecision::Allow,
+                    matches!(role, Supervisor | Standard));
+            }
+            assert_ne!(decide(role, "violet", "violet_read"), ProxyPolicyDecision::Allow);
+        }
+        assert_eq!(policy.catalog_access("violet", "violet_reconcile_reply"), CatalogAccess::SupervisorOnly);
         for role in [Worker, Director] {
             assert_eq!(
                 decide(role, "neon", "run_sql"),
@@ -3349,8 +3381,12 @@ mod tests {
         let policy = ExternalToolAllowlistPolicy::new([
             ExternalToolRoute::new("viktor", "ask_viktor"),
             ExternalToolRoute::new("github", "list_issues"),
+            ExternalToolRoute::new("violet", "violet_post"),
         ])
-        .with_supervisor_delegation_routes([ExternalToolRoute::new("viktor", "ask_viktor")]);
+        .with_supervisor_delegation_routes([
+            ExternalToolRoute::new("viktor", "ask_viktor"),
+            ExternalToolRoute::new("violet", "violet_post"),
+        ]);
         let arguments = None;
         let mut caller = registered_worker_caller();
         let decide = |caller: &ProxyCaller, dispatch_kind, server, tool| {
@@ -3371,6 +3407,16 @@ mod tests {
                     .to_string()
             }
         );
+        for role in [cas_types::AgentRole::Supervisor, cas_types::AgentRole::Standard,
+            cas_types::AgentRole::Worker, cas_types::AgentRole::Director] {
+            caller.role = role;
+            for dispatch in [ProxyDispatchKind::Direct, ProxyDispatchKind::ExternalProductionVerification] {
+                for tool in ["violet_post", "violet_reconcile_reply"] {
+                    assert_eq!(decide(&caller, dispatch, "violet", tool) == ProxyPolicyDecision::Allow,
+                        role == cas_types::AgentRole::Supervisor && dispatch == ProxyDispatchKind::ExternalProductionVerification);
+                }
+            }
+        }
         caller.role = cas_types::AgentRole::Supervisor;
         assert_eq!(
             decide(

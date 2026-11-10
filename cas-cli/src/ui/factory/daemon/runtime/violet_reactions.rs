@@ -11,11 +11,11 @@ pub(crate) fn reconcile(root: &std::path::Path, registration: &str, session: &st
         return;
     };
     let mut connection = None;
-    let result = crate::coordination::source_reactions::reconcile(
+    let result = crate::coordination::source_reactions::reconcile_with_clock(
         root,
         registration,
         session,
-        chrono::Utc::now(),
+        &chrono::Utc::now,
         &mut |tool, args| {
             runtime.block_on(async {
                 let unavailable = || {

@@ -2,6 +2,17 @@ use super::*;
 use cas_types::{Agent, AgentRole, Task, TaskStatus};
 use serde_json::json;
 
+// Production uses a live clock; fixtures hold each turn at its named instant.
+fn reconcile(
+    root: &Path,
+    registration: &str,
+    session: &str,
+    now: DateTime<Utc>,
+    call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
+) -> anyhow::Result<()> {
+    reconcile_with_clock(root, registration, session, &|| now, call)
+}
+
 const SOURCE: &str = "https://example.slack.com/archives/C123/p1710000000000001";
 
 struct World {
@@ -175,6 +186,16 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
                 world.now - chrono::Duration::minutes(1),
             );
         }
+        if step == 4 {
+            let authority =
+                super::super::external_work::SqliteRequestJournal::open(&world.root).unwrap();
+            assert!(
+                authority
+                    .task_source_receipt(SOURCE, "fixture")
+                    .unwrap()
+                    .is_none()
+            );
+        }
         if step == 5 {
             let mut related = Task::new("cas-related".into(), "related work".into());
             related.external_ref = Some(format!("{SOURCE}?thread_ts=1710000000.000001"));
@@ -235,7 +256,10 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         &mut |_, _| panic!("former source owner called Violet after observed takeover"),
     )
     .unwrap();
-    let status = audit(&world.root, false).unwrap().pop().unwrap();
+    let status = audit_at(&world.root, false, world.now)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(status.owner.as_deref(), Some("peer"));
     assert!(status.pending);
 }
@@ -247,11 +271,12 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
     world.status(TaskStatus::InProgress);
     let limited = json!({"ok":false,"error":{"code":"rate_limited","retryable":true,"retry_after_seconds":120}});
     let mut operations = Vec::new();
-    reconcile(
+    let clock = std::cell::Cell::new(world.now);
+    reconcile_with_clock(
         &world.root,
         "sup",
         "session",
-        world.now,
+        &|| clock.get(),
         &mut |tool, args| {
             if tool == "violet_read" {
                 return Ok(read(&["eyes", "white_check_mark"]));
@@ -260,6 +285,9 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
             if args["reaction"] == "eyes" {
                 Ok(posted(&args))
             } else {
+                // Retry-After starts when the failed response arrives,
+                // even when earlier calls consumed part of this turn.
+                clock.set(world.now + chrono::Duration::seconds(30));
                 Ok(limited.clone())
             }
         },
@@ -272,12 +300,15 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
             (json!("remove"), json!("white_check_mark"))
         ]
     );
-    let status = audit(&world.root, false).unwrap().pop().unwrap();
+    let status = audit_at(&world.root, false, world.now)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert!(status.pending);
     assert_eq!(status.error.as_ref().unwrap(), &limited);
     assert_eq!(
         status.next_attempt,
-        Some(world.now + chrono::Duration::seconds(120))
+        Some(world.now + chrono::Duration::seconds(150))
     );
     let db = Connection::open(world.root.join("cas.db")).unwrap();
     assert_eq!(
@@ -290,7 +321,7 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
     // A new process and a reverse transition retain Retry-After, including
     // when an operator rearms permanent failures via the audit command.
     world.status(TaskStatus::Open);
-    audit(&world.root, true).unwrap();
+    audit_at(&world.root, true, world.now).unwrap();
     reconcile(
         &world.root,
         "sup",
@@ -304,7 +335,7 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::seconds(120),
+        world.now + chrono::Duration::seconds(150),
         &mut |tool, args| {
             if tool == "violet_read" {
                 return Ok(read(&["white_check_mark"]));
@@ -321,14 +352,14 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
             (json!("add"), json!("eyes"))
         ]
     );
-    assert!(!audit(&world.root, false).unwrap()[0].pending);
+    assert!(!audit_at(&world.root, false, world.now).unwrap()[0].pending);
     // A failure on the next read leaves a durable permanent refusal. It is
     // visible to audit and requires explicit rearming, not an endless retry.
     reconcile(
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::seconds(180),
+        world.now + chrono::Duration::seconds(210),
         &mut |_, _| Ok(json!({"ok":false,"error":{"code":"denied_by_policy","retryable":false}})),
     )
     .unwrap();
@@ -340,7 +371,7 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
         &mut |_, _| panic!("retried permanent refusal"),
     )
     .unwrap();
-    audit(&world.root, true).unwrap();
+    audit_at(&world.root, true, world.now).unwrap();
     reconcile(
         &world.root,
         "sup",
@@ -352,7 +383,16 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
         },
     )
     .unwrap();
-    assert!(!audit(&world.root, false).unwrap()[0].pending);
+    assert!(!audit_at(&world.root, false, world.now).unwrap()[0].pending);
+    assert!(
+        audit_at(
+            &world.root,
+            false,
+            world.now + chrono::Duration::seconds(422)
+        )
+        .unwrap()[0]
+            .pending
+    );
     // Removing the bot's own reaction cannot erase a human's same-name
     // reaction. Audit must continue to expose that visible disagreement.
     world.status(TaskStatus::InProgress);
@@ -372,7 +412,10 @@ fn source_reaction_retry_preserves_partial_receipts_and_reloads_state() {
         },
     )
     .unwrap();
-    let status = audit(&world.root, false).unwrap().pop().unwrap();
+    let status = audit_at(&world.root, false, world.now)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert!(status.pending);
     assert!(status.observed.iter().any(|mark| mark == "eyes"));
 }
@@ -386,27 +429,55 @@ fn source_reaction_authority_and_identity_fences() {
     for (step, role, status, session, allowed) in [
         (
             0,
-            AgentRole::Worker,
+            AgentRole::Standard,
             cas_types::AgentStatus::Active,
             "session",
             false,
         ),
         (
             1,
+            AgentRole::Director,
+            cas_types::AgentStatus::Active,
+            "session",
+            false,
+        ),
+        (
+            2,
+            AgentRole::Worker,
+            cas_types::AgentStatus::Active,
+            "session",
+            false,
+        ),
+        (
+            3,
             AgentRole::Supervisor,
             cas_types::AgentStatus::Shutdown,
             "session",
             false,
         ),
         (
-            2,
+            4,
+            AgentRole::Supervisor,
+            cas_types::AgentStatus::Stale,
+            "session",
+            false,
+        ),
+        (
+            5,
             AgentRole::Supervisor,
             cas_types::AgentStatus::Active,
             "other-session",
             false,
         ),
         (
-            3,
+            6,
+            AgentRole::Supervisor,
+            cas_types::AgentStatus::Idle,
+            "session",
+            true,
+        ),
+        (
+            7,
             AgentRole::Supervisor,
             cas_types::AgentStatus::Active,
             "session",
@@ -416,7 +487,8 @@ fn source_reaction_authority_and_identity_fences() {
         agent.role = role;
         agent.status = status;
         agent.factory_session = Some(session.into());
-        agents.register(&agent).unwrap();
+        agents.update(&agent).unwrap();
+        audit_at(&world.root, true, world.now).unwrap();
         let mut calls = 0;
         reconcile(
             &world.root,
@@ -444,19 +516,19 @@ fn source_reaction_authority_and_identity_fences() {
         assert_eq!(calls, usize::from(allowed));
     }
     assert_eq!(
-        audit(&world.root, false).unwrap()[0]
+        audit_at(&world.root, false, world.now).unwrap()[0]
             .error
             .as_ref()
             .unwrap()["error"]["code"],
         "identity_mismatch"
     );
-    audit(&world.root, true).unwrap();
+    audit_at(&world.root, true, world.now).unwrap();
     // Observe takeover during the read itself: no stale reaction may follow.
     reconcile(
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::minutes(4),
+        world.now + chrono::Duration::minutes(9),
         &mut |tool, _| {
             assert_eq!(tool, "violet_read");
             world.owner(
@@ -470,7 +542,9 @@ fn source_reaction_authority_and_identity_fences() {
     )
     .unwrap();
     assert_eq!(
-        audit(&world.root, false).unwrap()[0].owner.as_deref(),
+        audit_at(&world.root, false, world.now).unwrap()[0]
+            .owner
+            .as_deref(),
         Some("peer")
     );
 }

@@ -226,6 +226,10 @@ fn current_status(
 /// Local audit: expected state is recomputed now, observed state is explicitly
 /// timestamped. Never infer a Slack read or successful update from a task close.
 pub fn audit(root: &Path, retry: bool) -> anyhow::Result<Vec<SourceStatus>> {
+    audit_at(root, retry, Utc::now())
+}
+
+fn audit_at(root: &Path, retry: bool, now: DateTime<Utc>) -> anyhow::Result<Vec<SourceStatus>> {
     let state = Journal::open(root)?;
     if retry {
         state
@@ -249,7 +253,12 @@ pub fn audit(root: &Path, retry: bool) -> anyhow::Result<Vec<SourceStatus>> {
                     || current.tasks != previous.tasks;
                 current.observed = previous.observed.clone();
                 current.observed_at = previous.observed_at;
-                current.pending = previous.pending || changed;
+                current.pending = previous.pending
+                    || changed
+                    || previous.observed_at.is_none_or(|at| {
+                        now.signed_duration_since(at)
+                            > chrono::Duration::seconds(REFRESH_SECONDS * 2)
+                    });
                 current.error = previous.error.clone();
                 current.next_attempt = previous.next_attempt;
             }
@@ -258,13 +267,14 @@ pub fn audit(root: &Path, retry: bool) -> anyhow::Result<Vec<SourceStatus>> {
         .collect()
 }
 
-pub(crate) fn reconcile(
+pub(crate) fn reconcile_with_clock(
     root: &Path,
     registration: &str,
     session: &str,
-    now: DateTime<Utc>,
+    clock: &dyn Fn() -> DateTime<Utc>,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
 ) -> anyhow::Result<()> {
+    let now = clock();
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(registration)?;
     if agent.role != AgentRole::Supervisor
@@ -312,6 +322,7 @@ pub(crate) fn reconcile(
     }
     due.sort_by_key(|(next, _, _, _)| *next);
     for (_, target, tasks, mut status) in due.into_iter().take(2) {
+        let now = clock();
         let acquired = state.conn.lock().map_err(|_| anyhow::anyhow!("source status database poisoned"))?.execute(
             "UPDATE source_reactions SET lease_until=?3 WHERE source=?1 AND permanent=0 AND next_attempt<=?2 AND lease_until<=?2",
             params![target.source, now.timestamp_millis(), now.timestamp_millis()+LEASE_SECONDS * 1000],
@@ -331,11 +342,11 @@ pub(crate) fn reconcile(
             &target,
             &tasks,
             registration,
-            now,
+            clock,
             &mut status,
             call,
         );
-        status.next_attempt = Some(now + chrono::Duration::seconds(REFRESH_SECONDS));
+        status.next_attempt = Some(clock() + chrono::Duration::seconds(REFRESH_SECONDS));
         let mut permanent = false;
         match result {
             Ok(()) => {
@@ -363,7 +374,7 @@ pub(crate) fn reconcile(
                 .max(1);
                 status.next_attempt = Some(
                     chrono::Duration::try_seconds(retry)
-                        .and_then(|delay| now.checked_add_signed(delay))
+                        .and_then(|delay| clock().checked_add_signed(delay))
                         .unwrap_or(DateTime::<Utc>::MAX_UTC),
                 );
                 permanent = !error.retryable
@@ -392,7 +403,7 @@ fn reconcile_one(
     target: &Target,
     tasks: &[Task],
     registration: &str,
-    now: DateTime<Utc>,
+    clock: &dyn Fn() -> DateTime<Utc>,
     status: &mut SourceStatus,
     call: &mut dyn FnMut(&str, Value) -> Result<Value, VioletError>,
 ) -> Result<(), VioletError> {
@@ -435,7 +446,7 @@ fn reconcile_one(
         .collect();
     status.observed.sort();
     status.observed.dedup();
-    status.observed_at = Some(now);
+    status.observed_at = Some(clock());
     let mut operations: Vec<(&str, String)> = status
         .observed
         .iter()
@@ -449,6 +460,7 @@ fn reconcile_one(
     {
         operations.push(("add", mark.clone()));
     }
+    let mut foreign_marks = false;
     for (action, mark) in operations {
         // Observe takeover and reverse transitions again before every write,
         // particularly before publishing check after a slow read/removal.
@@ -480,7 +492,7 @@ fn reconcile_one(
             Ok(receipt) => receipt,
             Err(error) => {
                 state
-                    .receipt(&target.source, now, &request, &error.to_json())
+                    .receipt(&target.source, clock(), &request, &error.to_json())
                     .map_err(|_| {
                         VioletError::local(
                             "receipt_write_failed",
@@ -491,7 +503,7 @@ fn reconcile_one(
             }
         };
         state
-            .receipt(&target.source, now, &request, &receipt)
+            .receipt(&target.source, clock(), &request, &receipt)
             .map_err(|_| {
                 VioletError::local(
                     "receipt_write_failed",
@@ -513,10 +525,29 @@ fn reconcile_one(
         // This projection is backed by Violet receipts, not a second cached
         // message body. Keep only status names; audit exposes its timestamp.
         if action == "remove" {
-            status.observed.retain(|name| name != &mark);
+            let count = selected["reactions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|reaction| reaction["name"] == mark)
+                .and_then(|reaction| reaction["count"].as_u64())
+                .unwrap_or(1);
+            if count > 1 || receipt["reaction"]["changed"] != true {
+                // Violet removes only its own mark; a human's same-name
+                // reaction survives. Do not project the whole name away.
+                foreign_marks = true;
+            } else {
+                status.observed.retain(|name| name != &mark);
+            }
         } else {
             status.observed.push(mark);
         }
+    }
+    if foreign_marks {
+        return Err(VioletError::local(
+            "foreign_reaction_remains",
+            "Other users may retain an obsolete status reaction; inspect the source post",
+        ));
     }
     Ok(())
 }

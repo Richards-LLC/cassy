@@ -5,7 +5,7 @@ pub mod binding_intake;
 pub mod binding_repair;
 mod binding_runtime;
 pub mod external_work;
-pub mod source_reactions;
+pub(crate) mod source_reactions;
 #[cfg(feature = "mcp-proxy")]
 pub mod stakeholder_contacts;
 

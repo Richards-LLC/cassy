@@ -1,8 +1,6 @@
 # Contributing to Cassy
 
-## Managed Slack file replies
-
-### Source status reactions
+## Source status reactions
 
 The factory's Slack tick reconciles tasks' source posts through authenticated
 Violet. An accepted source claim durably records the status owner in the
@@ -25,6 +23,8 @@ Retryable errors and rate limits wait for their recorded retry time; permanent
 refusals stay pending until repaired and rearmed with `cas violet reactions
 --retry`. Rearming never shortens a rate-limit wait. Violet removes only its
 own reactions; a foreign reaction refusal remains visible for manual review.
+
+## Managed Slack file replies
 
 `artifact action=post reply_to=...` and `cas violet post --reply-to ... --file ...`
 resolve the caller's live reply intent from the project's coordination journal.

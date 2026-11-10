@@ -369,8 +369,8 @@ bug_families:
     tasks: [cas-aa18]
     journeys: [HUB-J11]
   release-report-message-permalink:
-    title: Report receipts preserve distinct provider-returned upload-message and file permalinks, including thread context
-    tasks: [cas-bbf4]
+    title: Report receipts retain the upload message ID when its link is unavailable and require a distinct file link; malformed non-null message links still fail
+    tasks: [cas-bbf4, cas-0c77]
     journeys: [CLI-RELEASE]
   worker-respawn-handoff-isolation:
     title: Recycling keeps task handoffs in artifacts and parking refuses new or retained repo-root handoffs from the delivered commit

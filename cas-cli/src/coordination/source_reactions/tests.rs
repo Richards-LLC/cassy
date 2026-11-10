@@ -604,7 +604,7 @@ fn source_reaction_authority_and_identity_fences() {
 
 #[test]
 fn source_reaction_deadline_defers_remaining_calls() {
-    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let world = World::new();
     world.status(TaskStatus::InProgress);
     let clock = std::cell::Cell::new(world.now);
@@ -643,4 +643,66 @@ fn source_reaction_deadline_defers_remaining_calls() {
     )
     .unwrap();
     assert!(!audit_at(&world.root, false, world.now).unwrap()[0].pending);
+
+    #[cfg(unix)]
+    {
+        use crate::bounded_process::Deadline;
+        use cas_store::KnownRepoStore;
+        use std::time::{Duration, Instant};
+        let slow = World::new();
+        let sha = slow.delivery();
+        slow.status(TaskStatus::Closed);
+        slow.git(&["update-ref", "refs/remotes/origin/staging", &sha]);
+        let repo = slow.root.parent().unwrap().canonicalize().unwrap();
+        crate::store::known_repos::open_host_known_repo_store()
+            .unwrap()
+            .bind("project:fixture", &repo, &repo.join(".git"))
+            .unwrap();
+        let bin = slow.root.join("slow-bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = bin.join("resolution-called");
+        crate::test_paths::warm_stub(
+            &bin.join("git"),
+            &format!(
+                "#!/bin/sh\nprintf x >> '{}'\nsleep 2\nexit 1\n",
+                marker.display()
+            ),
+        );
+        let old_path = std::env::var_os("PATH").unwrap();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&old_path));
+        env.set("PATH", std::env::join_paths(paths).unwrap());
+        let started = Instant::now();
+        reconcile_until(
+            &slow.root,
+            "sup",
+            "session",
+            &|| slow.now,
+            Deadline::after(Duration::from_millis(250)),
+            &mut |_, _| panic!("Violet called after repository resolution used the pass budget"),
+        )
+        .unwrap();
+        assert!(marker.exists());
+        assert!(started.elapsed() < Duration::from_millis(1500));
+        env.set("PATH", old_path);
+        assert!(audit_at(&slow.root, false, slow.now).unwrap()[0].pending);
+        // The deferred source remains eligible with the normal resolver.
+        let mut reads = 0;
+        reconcile(
+            &slow.root,
+            "sup",
+            "session",
+            slow.now + chrono::Duration::seconds(60),
+            &mut |tool, args| {
+                if tool == "violet_read" {
+                    reads += 1;
+                    Ok(read(&["white_check_mark"]))
+                } else {
+                    Ok(posted(&args))
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(reads, 1);
+    }
 }

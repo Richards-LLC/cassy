@@ -44,6 +44,7 @@ A new Claude supervisor confirms its startup only after the native transcript re
 - **Parallel QA registry updates** - Factory merges retain independent inline bug families and the newest registry date. Competing edits to a family or registry policy still require conflict resolution.
 - **Final delivery proof** - a worker's first park checks the pushed source tip identified by its recorded task start. An earlier red-test commit does not select the changelog or test receipt; existing parked deliveries retain their ownership and anchor protections.
 - **Blocked worker resume** - Unnamed WIP on a task's recorded branch survives a blocked/open transition in linked checkouts that inherit their project identity from the primary repository. The recorded assignee and target must still match, and foreign task commits refuse the start.
+- **Worker respawn notes** - Keep `HANDOFF.md` in the task's artifacts directory. Recycling preserves an authored checkpoint or writes the held task's current notes there; the resume brief names that path. Parking refuses a delivery containing a repo-root `HANDOFF.md`, including one retained from an earlier push.
 - **Empty checkpoint ownership** - Inherited project identity alone does not attribute an unnamed empty checkpoint. A checkpoint without file changes still needs its own task reference or recorded commit receipt before the worker can resume it.
 - **Close proof claims** - External completion assertions and promises of future proof require a nearby receipt. Local summaries may name files and identifiers or describe complete documentation blocks; refusals name the offending clause and classification.
 - **Worker boot diagnostics** - a missing Claude SessionStart canary retains bounded, redacted startup output in its failed spawn record. Debug and liveness inspection accept the worker or spawn request even without registration; liveness stays unverified, and only completed teardown releases the matching task binding.
@@ -169,6 +170,9 @@ seeing parked deliveries under a hold. READY TO MERGE generation pauses before
 queueing, so lifting the hold releases no stale READY backlog.
 `cas --json factory hold status` shows the full audit.
 
+   Measured CPU or output writes from owned children keep quiet workers executing
+   and reset factory progress; sleeping or exited children do not. Worker/session
+   and process-start identities fence this evidence.
    The progress watchdog wakes the supervisor after 45 quiet minutes of local work
    and pages the operator after 90. Parked delivery anchors already contained in
    their recorded local or origin target, and work or target epics assigned to a

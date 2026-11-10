@@ -343,6 +343,21 @@ fn factory_write_under_harness_session_scratchpad_is_allowed() {
         allow_reason(&out).is_some(),
         "the harness-advertised per-session scratchpad must be sanctioned"
     );
+
+    // GH #1780 part 2: Bash stages notes by ensuring the scratchpad exists
+    // before redirecting into it. Judge the directory and its files alike.
+    set_role_env(&mut env, Some("supervisor"));
+    let scratchpad = std::path::Path::new(path).parent().unwrap().display();
+    for command in [
+        format!("cat > {path} <<'EOF'\nx\nEOF"),
+        format!("printf x | tee {path}"),
+        format!("mkdir -p {scratchpad} && echo x > {path}"),
+    ] {
+        let mut input = bash_input(&command);
+        input.session_id = "f54c4e08-831c-4cb6-ae05-5bd663ec1fed".into();
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+        assert!(allow_reason(&out).is_some(), "{command}: {out:?}");
+    }
 }
 
 #[test]

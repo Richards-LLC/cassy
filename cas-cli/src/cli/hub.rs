@@ -1269,6 +1269,10 @@ fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
         HubCommands::Status => status(cli),
         HubCommands::Stop(stop_args) => stop(cli, stop_args.force),
         HubCommands::Restart(serve) => {
+            validate_control_bind(
+                SocketAddr::new(serve.bind, serve.port),
+                TransportSecurity::Plaintext,
+            )?;
             let paths = HubRuntimePaths::default_for_user()?;
             let (tailscale_serve, tailscale_port) =
                 resolve_lifecycle_tailscale_request(requested, args.tailscale_serve_port, &paths)?;

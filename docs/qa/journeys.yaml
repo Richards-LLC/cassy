@@ -364,6 +364,10 @@ bug_families:
     tasks: [cas-225b]
     journeys: [FACTORY-MERGE]
     invariants: [FACTORY-CANDIDATE-CONFLICT-RETURN]
+  restart-bind-preflight:
+    title: A refused restart bind preserves the running hub's PID and serving health before either service or detached lifecycle mutation
+    tasks: [cas-aa18]
+    journeys: [HUB-J11]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

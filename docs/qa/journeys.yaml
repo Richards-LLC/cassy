@@ -384,6 +384,11 @@ bug_families:
     title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
     tasks: [cas-8a87]
     journeys: [HUB-J26, FACTORY-SUPERVISE]
+  narrow-refspec-spawn-freshness:
+    title: Branch fetches refresh the requested origin tracking ref under a main-only fetch mapping before worker checkout
+    tasks: [cas-307e]
+    journeys: [FACTORY-SPAWN]
+    invariants: [FACTORY-SPAWN-FETCH-TRACKING]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -476,6 +481,10 @@ invariants:
     statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
     check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
     bug: {task: cas-ef5e8}
+  FACTORY-SPAWN-FETCH-TRACKING:
+    statement: Successful spawn fetches refresh the requested origin tracking ref even outside the configured fetch mapping, so workers contain the fetched commit.
+    check: Run work_target_checkout_uses_fetched_origin_tip_when_local_branch_is_stale_cas_7a87 with matching stale local and tracking staging refs, a main-only remote refspec and a newer remote staging commit. Verify FETCH_HEAD, origin/staging and the actual worker checkout use the new commit; retain configured-origin failure refusal and managed/local-only epic behavior.
+    bug: {task: cas-307e}
   FACTORY-SPAWN-ACCOUNT-PREFERENCE:
     statement: Codex workers use factory.codex_home when config_dir is omitted; explicit account overrides win and spawn receipts identify the configured source.
     check: Run configured_worker_account_overrides_recommendation_cas_8c58 for local config persistence, direct and lane spawns, inherited and explicit accounts, other harnesses and cleared preferences; run recommended_spawn_accounts_preserve_explicit_and_override_inherited for unconfigured recommendation behavior. Walk actual worker startup on the batch candidate.
@@ -1132,8 +1141,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS]
+  owners: [cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT

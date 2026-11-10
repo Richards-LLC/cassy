@@ -7,6 +7,8 @@ mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
 mod gate_preflight;
+pub(crate) use gate_preflight::is_merge_handoff;
+use crate::mcp::tools::core::task::close_refusal;
 #[cfg(test)]
 mod loaded_proof_tests;
 pub(crate) mod task_attribution;
@@ -7689,6 +7691,9 @@ impl CasCore {
                 inline_external_ref, inline_execution_note)
         })
         .await;
+        if let Err(error) = crate::mcp::tools::core::task::close_refusal::record(&self.cas_root, &id, &result) {
+            tracing::warn!(task_id = %id, %error, "could not record latest close outcome for progress watchdog");
+        }
         #[cfg(test)]
         lifecycle_race_hook::fire_before_handoff(&id);
         let note = self.advance_queue_after_delivery(&id).await;
@@ -7736,7 +7741,7 @@ impl CasCore {
         if !task.is_terminal()
             && let Err(message) = crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id, true)
         {
-            return Ok(Self::tool_error(message));
+            return Ok(close_refusal::gate("phase_outcome_gate", "provide_outcome_receipt", message));
         }
         if task.task_type == TaskType::Epic && !task.is_terminal() {
             if let Ok(actor) = self.get_agent_id() {
@@ -7745,7 +7750,7 @@ impl CasCore {
                 }
             }
             if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
-                return Ok(Self::tool_error(reason));
+                return Ok(close_refusal::gate("post_release_gate", "complete_post_release_check", reason));
             }
             // An override use appends an audit note; do not overwrite it later.
             task = task_store.get(&req.id).map_err(|e|Self::error(ErrorCode::INTERNAL_ERROR,e.to_string()))?;
@@ -8312,7 +8317,8 @@ impl CasCore {
                     target,
                 ) {
                     Ok(context) => Some(context),
-                    Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
+                    Err(message) => return Ok(close_refusal::gate("work_target_gate", "resolve_work_target",
+                        gate_preflight::refusal_reply(gate_refusals, message))),
                 }
             }
             None => None,
@@ -8673,7 +8679,8 @@ impl CasCore {
                     // supervisor-only, and audited, and it only exists once the
                     // gate has actually blocked.
                     let Some(reason) = req.stranded_branch_override.as_deref() else {
-                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, msg)));
+                        return Ok(close_refusal::gate("epic_close_merge_gate", "reconcile_child_deliveries",
+                            gate_preflight::refusal_reply(gate_refusals, msg)));
                     };
                     let narrative = match validate_stranded_branch_override_reason(reason) {
                         Ok(narrative) => narrative,

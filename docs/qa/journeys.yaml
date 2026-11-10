@@ -446,6 +446,10 @@ bug_families:
     title: New session's project tabs and its Cancel and Start actions are 44px touch targets on a phone
     tasks: [cas-59e5]
     journeys: [HUB-J13]
+  paired-machines-chips-close-installations:
+    title: Paired machines keeps its filter chips clear of the description, closes from a 40px circle and offers installations as an action pill
+    tasks: [cas-5e8b]
+    journeys: [HUB-J3]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

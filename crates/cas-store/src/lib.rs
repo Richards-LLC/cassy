@@ -152,7 +152,7 @@ pub use delivery_store::{
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
-    list_worker_delivery_events, observed_delivery_merges_into, record_observed_delivery_merge,
+    list_worker_delivery_events, observed_delivery_merges, observed_delivery_merges_into, record_observed_delivery_merge,
     ObservedDeliveryMerge,
     record_pending_observed_delivery_merge, transition_worker_delivery,
     transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,

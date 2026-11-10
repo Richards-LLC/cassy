@@ -217,6 +217,26 @@ pub fn observed_delivery_merges_into(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
+/// Every observed merge into any target, oldest first: the ledger's record of
+/// which deliveries actually landed and when (cas-3dd7).
+pub fn observed_delivery_merges(root: &Path) -> Result<Vec<ObservedDeliveryMerge>> {
+    let conn = open(root)?;
+    let mut statement = conn.prepare(
+        "SELECT task_id, source_branch, source_commit_sha, merge_commit_sha, created_at
+         FROM observed_delivery_merges ORDER BY created_at, rowid",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(ObservedDeliveryMerge {
+            task_id: row.get(0)?,
+            source_branch: row.get(1)?,
+            source_commit_sha: row.get(2)?,
+            merge_commit_sha: row.get(3)?,
+            created_at: parse_time(row.get(4)?)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
 /// Persist the recovery intent before a nontransactional Git merge starts.
 /// If the later observation write fails after publication, worktree_merge can
 /// distinguish its retry from an ordinary already-contained no-op.

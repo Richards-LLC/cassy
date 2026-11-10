@@ -478,3 +478,111 @@ pub(super) fn verify_peer_promotion(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repaired_delivery_replaces_only_superseded_source_peer_approval_cas_d7f9() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        const PROJECT: &str = "peer-repair-fixture";
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/api/agents"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"agents":[{
+                "id":"source-supervisor", "name":"source", "agent_type":"primary", "status":"active",
+                "machine_id":"source-machine", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0,
+                "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"source-session"}
+            }]}))).mount(&server).await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            let _env = crate::test_support::TestEnvGuard::temp_home();
+            let home = _env.home();
+            let origin = home.join("origin.git");
+            let source = home.join("source");
+            let receiver = home.join("receiver");
+            git(home, &["init", "--bare", "-b", "main", origin.to_str().unwrap()]).unwrap();
+            git(home, &["init", "-b", "main", source.to_str().unwrap()]).unwrap();
+            git(&source, &["config", "user.name", "Review fixture"]).unwrap();
+            git(&source, &["config", "user.email", "review@example.test"]).unwrap();
+            git(&source, &["remote", "add", "origin", origin.to_str().unwrap()]).unwrap();
+            std::fs::write(source.join(".gitignore"), ".cas/\n").unwrap();
+            git(&source, &["add", "."]).unwrap();
+            git(&source, &["commit", "-qm", "base"]).unwrap();
+            let base = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["switch", "-c", "factory/peer"]).unwrap();
+            std::fs::write(source.join("delivery"), "old\n").unwrap();
+            git(&source, &["add", "."]).unwrap();
+            git(&source, &["commit", "-qm", "delivery"]).unwrap();
+            let old_sha = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["push", "origin", "HEAD:main"]).unwrap();
+            git(home, &["clone", "--branch", "main", origin.to_str().unwrap(), receiver.to_str().unwrap()]).unwrap();
+            let root = crate::store::init_cas_dir(&receiver).unwrap();
+            crate::cloud::set_canonical_id_in_config_toml(&root, PROJECT).unwrap();
+            crate::cloud::CloudConfig { endpoint, token: Some("fixture-token".into()), ..Default::default() }
+                .save_to_cas_dir(&root).unwrap();
+            let recipient = Agent::new_with_role("receiver-supervisor".into(), "receiver".into(), AgentRole::Supervisor);
+            crate::store::open_agent_store(&root).unwrap().register(&recipient).unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            let mut task = Task::new("cas-d7f9-repair".into(), "Reviewed repair".into());
+            task.status = cas_types::TaskStatus::AwaitingMerge;
+            task.deliverables.parked_branch = Some("factory/peer".into());
+            task.deliverables.factory_branch_anchor = Some(old_sha.clone());
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: format!("project:{PROJECT}"), target_branch: "main".into(),
+            });
+            tasks.add(&task).unwrap();
+            let receipt = |task: &Task, sha: &str, target: &str, cycle: &str| PeerPremergeReceipt {
+                status: VerificationStatus::Approved, project_id: PROJECT.into(),
+                supervisor_id: "source-supervisor".into(), task_id: task.id.clone(),
+                source_branch: "factory/peer".into(), source_sha: sha.into(), target_branch: "main".into(),
+                target_sha: target.into(), candidate_tree: git(&source, &["rev-parse", &format!("{sha}^{{tree}}")]).unwrap(),
+                landed_sha: sha.into(), dispatch_id: format!("dispatch-{cycle}"), verdict_id: format!("ver-{cycle}"),
+                plan_digest: portable_plan_digest(&root, task).unwrap(),
+            };
+            let message = |receipt: &PeerPremergeReceipt, age: i64| ClaimedPeerMessage {
+                id: format!("message-{}", receipt.dispatch_id), project_id: PROJECT.into(),
+                recipient_agent_id: recipient.id.clone(), sender_agent_id: "source-supervisor".into(),
+                sender_name: "source".into(), sender_machine_id: Some("source-machine".into()),
+                sender_session: Some("source-session".into()), sender_label: None,
+                body: format!("{TAG}{}", serde_json::to_string(receipt).unwrap()), summary: None, in_reply_to: None,
+                created_at: (chrono::Utc::now() - chrono::Duration::minutes(age)).to_rfc3339(),
+                attempts: 1, scope: PeerScope::Project,
+            };
+            let old = receipt(&task, &old_sha, &base, "old");
+            let old_message = message(&old, 2);
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Imported));
+            let old_dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).unwrap());
+
+            std::fs::write(source.join("delivery"), "repaired\n").unwrap();
+            git(&source, &["commit", "-qam", "reviewed repair"]).unwrap();
+            let repaired = git(&source, &["rev-parse", "HEAD"]).unwrap();
+            git(&source, &["push", "origin", "HEAD:main"]).unwrap();
+            task.deliverables.factory_branch_anchor = Some(repaired.clone());
+            tasks.update(&task).unwrap();
+            assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).is_err());
+            let fresh = receipt(&task, &repaired, &old_sha, "repair");
+            let fresh_message = message(&fresh, 1);
+            // A source approval is required; an authenticated rejected verdict
+            // and an envelope whose sender identity changed grant no recovery.
+            let mut rejected = fresh.clone();
+            rejected.status = VerificationStatus::Rejected;
+            let mut foreign = fresh_message.clone();
+            foreign.sender_machine_id = Some("foreign-machine".into());
+            for invalid in [message(&rejected, 1), foreign, old_message.clone()] {
+                assert!(matches!(ingest_peer_receipt(&root, &recipient, &invalid).unwrap(), PeerReceiptIngested::Rejected(_)));
+                assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, old.dispatch_id);
+            }
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
+            let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            assert_eq!(current.id, fresh.dispatch_id);
+            assert!(verify_peer_promotion(&root, &task, &current, &fresh.verdict_id).unwrap());
+            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap().state, VerificationDispatchState::Invalidated);
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
+            assert_eq!(cas_store::get_verification_for_dispatch(&root, &old.dispatch_id).unwrap().unwrap().id, old.verdict_id);
+        }).await.unwrap();
+    }
+}

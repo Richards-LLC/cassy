@@ -23,6 +23,7 @@ mod receipt_scope;
 mod merge_queue_proof;
 mod verified_delivery;
 mod epic_autoclose;
+mod release_parent;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
 use crate::git_evidence::measurement as epic_measurement;
@@ -8019,6 +8020,7 @@ impl CasCore {
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
             && superseding_release_verdict.is_none()
+            && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
@@ -8239,7 +8241,15 @@ impl CasCore {
         let mut deferred_epic_override_note = None;
         let mut epic_issue_warning = String::new();
         if task.task_type == TaskType::Epic {
-            if let Some(owner) = task.epic_verification_owner.clone() {
+            if let Some(authority) = crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id) {
+                if let Some(owner) = task.epic_verification_owner.clone()
+                    && let Ok(agents) = self.open_agent_store().and_then(|s| s.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string())))
+                    && let Some(evidence) = epic_autoclose::dead_owner_adoption(&owner, &agents, chrono::Utc::now(), epic_autoclose::owner_process)
+                {
+                    task.epic_verification_owner = Some(authority.clone());
+                    close_notes.record(&mut task, &format!("Release authority {authority} adopted orphaned epic ownership from {owner}: {evidence}. Review author identity is unchanged."));
+                }
+            } else if let Some(owner) = task.epic_verification_owner.clone() {
                 let caller_id = self.get_agent_id().ok();
                 let caller_name = std::env::var("CAS_AGENT_NAME").ok();
                 let caller_session = std::env::var("CAS_SESSION_ID").ok();
@@ -8592,6 +8602,8 @@ impl CasCore {
                 Some(default) => (default, Some(target_branch)),
                 None => (target_branch, None),
             };
+            let target_branch = crate::qa_batch::release_close::target(&self.cas_root, &task.id)
+                .unwrap_or(target_branch);
             let unmerged =
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
             if !unmerged.is_empty() {
@@ -8640,6 +8652,12 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            let subtasks = if crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id).is_some() {
+                subtasks.into_iter().map(|mut child| {
+                    if let Some(target) = child.deliverables.work_target.as_mut() { target.target_branch = target_branch.clone(); }
+                    child
+                }).collect()
+            } else { subtasks };
             let subtasks = match gone_epic_branch.as_deref() {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
                 None => subtasks,
@@ -9814,11 +9832,12 @@ impl CasCore {
         // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
         // one verdict of the assembled tip names it. A dispatch or verdict already on
         // record keeps its authority below, and Tier 2 never takes this path.
-        let release_verdict_covers = !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
+        let parent_release_review = crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id);
+        let release_verdict_covers = parent_release_review.is_some() || !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
             && no_verification_on_record
             && verification_tier.is_some()
             && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
-        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
+        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers && parent_release_review.is_none()) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,
                 &task,
@@ -10053,6 +10072,9 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
+                        if crate::release_reconcile::active() && task.task_type != TaskType::Epic {
+                            return Ok(Self::tool_error("RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch."));
+                        }
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
@@ -11253,7 +11275,9 @@ impl CasCore {
                 Ok(tip) => tip,
                 Err(message) => return Ok(Self::tool_error(message)),
             };
-            let epic_assembly_basis = if task.task_type == TaskType::Epic {
+            let epic_assembly_basis = if let Some(proof) = crate::qa_batch::release_close::parent_integration(&self.cas_root, &task.id) {
+                Some(proof)
+            } else if task.task_type == TaskType::Epic {
                 match epic_build_proof_basis(&task, delivered_tip.as_deref(), proof_repo) {
                     Ok(basis) => basis,
                     Err(message) if supervisor_override => {
@@ -11726,6 +11750,7 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
+        if crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() { task.pending_verification = false; }
         task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
@@ -11988,6 +12013,9 @@ impl CasCore {
         // writes, relays and notifies nothing.
         #[cfg(test)]
         lifecycle_race_hook::fire(&req.id);
+        if let Err(message) = crate::qa_batch::release_close::revalidate_parent_children(&self.cas_root, &task.id) {
+            return Ok(Self::tool_error(message));
+        }
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
         let close_refused = |change: &str| {
             let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -12446,7 +12474,7 @@ impl CasCore {
                                 .map(|r| r.to_lowercase() == "worker")
                                 .unwrap_or(false);
 
-                            if is_factory_worker {
+                            if is_factory_worker && !crate::release_reconcile::active() {
                                 // Send real notification to supervisor via daemon event
                                 if let Ok(agent_id) = self.get_agent_id() {
                                     let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
@@ -29916,7 +29944,10 @@ mod merge_state_gate_tests {
                     let later = crate::qa_batch::release_close::ReleaseClose::for_receipt(&root, p, &snapshot, &later_receipt);
                     let loss = later.scope(async { delivery_content_presence_on_target_for_task(p, &source, &head_sha(p), &task.id) }).await;
                     assert!(matches!(loss, DeliveryContentPresence::Dropped { ref paths } if paths.contains(&"early.rs".into())));
-                    core.close_release_inventory_outcomes(&inventory).await.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")
+                    let outcomes = core.close_release_inventory_outcomes(&inventory).await;
+                    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+                    super::release_parent::probe_deleted_parent_and_single_pending_cycle(&core, &root, p, &scope, &task.id).await;
+                    outcomes.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")
                 } else { core.close_release_covered_deliveries(&receipt).await };
                 assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{row}: {report}");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);

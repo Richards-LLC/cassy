@@ -9,14 +9,15 @@ use super::release_automation::{
     tracked_context,
 };
 use crate::qa_batch::release_close::{ReleasePathTransformation, ReleaseTransformations};
-use crate::issue_reconcile::{IssueAction, IssueOutcome};
-use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+use crate::issue_reconcile::IssueAction;
+use crate::release_reconcile::{self, ParentOutcome, ReconcileTrigger, ReleaseReconcileReceipt};
+use cas_store::release_reconcile_store::ReleaseOperationKey;
 use crate::qa_batch::{
-    ReleaseInventory, ReleaseInventoryException, ReleaseProofKind, ReleaseProofRef, ReleaseScope,
+    ReleaseInventory, ReleaseProofKind, ReleaseProofRef, ReleaseScope,
 };
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -24,87 +25,9 @@ use std::{
     process::Command,
 };
 
-// ---- Seam to close-at-release #3. ----
+// ---- The one release reconciliation (close-at-release #3). ----
 
-/// Stand-in for `crate::release_reconcile` (#3), with its exact names and
-/// signatures. Swap: delete this module, `use crate::release_reconcile;` and
-/// take `ReleaseOperationKey` from `cas_store::release_reconcile_store`.
-pub(crate) mod release_reconcile {
-    use super::*;
-
-    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-    #[serde(tag = "kind", rename_all = "snake_case")]
-    pub(crate) enum ReconcileTrigger {
-        Publish { tag: String },
-        Promotion { pr: u64, merge_sha: String },
-        Installed,
-        Backfill,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct ReleaseOperationKey {
-        pub project_id: String,
-        pub release_id: String,
-        pub final_release_sha: String,
-    }
-
-    #[derive(Default)]
-    pub(crate) struct ReleaseReconcileReceipt {
-        pub members: BTreeMap<String, CassyMergeClose>,
-        pub issue_outcomes: Vec<IssueOutcome>,
-        pub parents: BTreeMap<String, ParentOutcome>,
-        pub exceptions: Vec<ReleaseInventoryException>,
-        /// Every task or epic left non-terminal, with its owner and next action.
-        pub residuals: Vec<ReleaseResidual>,
-        pub notice_intent: Option<ReleaseNoticeIntent>,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct ReleaseResidual {
-        pub task_id: String,
-        pub gate: String,
-        pub owner: String,
-        pub next_action: String,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) enum ParentOutcome {
-        Closed,
-        Pending { dispatch_id: String, owner: String },
-        Held { gate: String, owner: String, next_action: String },
-    }
-
-    /// #3 persists this and never enqueues; `key` is the notice's dedupe identity.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct ReleaseNoticeIntent {
-        pub key: String,
-        pub recipient: String,
-        pub fingerprint: String,
-    }
-
-    pub(crate) async fn reconcile_release(
-        _root: &Path,
-        _scope: &ReleaseScope,
-        _inventory: &ReleaseInventory,
-        _trigger: ReconcileTrigger,
-    ) -> Result<ReleaseReconcileReceipt, String> {
-        Err("RELEASE_RECONCILER_PENDING: release reconciliation is not available in this build".into())
-    }
-
-    /// None for an absent, partial or held operation.
-    pub(crate) fn completed_operation(
-        _root: &Path,
-        _key: &ReleaseOperationKey,
-    ) -> Result<Option<ReleaseReconcileReceipt>, String> {
-        Ok(None)
-    }
-}
-
-use release_reconcile::{
-    ParentOutcome, ReconcileTrigger, ReleaseOperationKey, ReleaseReconcileReceipt,
-};
-
-/// The two #3 calls the adapters make; tests substitute a recording double.
+/// The two release-operation calls the adapters make; tests use a recording double.
 pub(crate) trait Reconciler {
     fn completed(&self, root: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>>;
     fn reconcile(
@@ -214,9 +137,10 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
             ParentOutcome::Pending { dispatch_id, owner } => detail.push_str(&format!(
                 "\n- {id}: epic verification pending ({dispatch_id}); owner {owner}; next: run that verification"
             )),
-            ParentOutcome::Held { gate, owner, next_action } => {
-                detail.push_str(&format!("\n- {id}: {gate}; owner {owner}; next: {next_action}"))
-            }
+            ParentOutcome::Held { gate, owner, next_action } => detail.push_str(&format!(
+                "\n- {id}: {gate}; owner {}; next: {next_action}",
+                owner.as_deref().unwrap_or("unassigned")
+            )),
         }
     }
     for e in &receipt.exceptions {
@@ -594,6 +518,7 @@ fn render_review_blocks(root: &Path, repo: &Path, inventory: &ReleaseInventory) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
     use release_reconcile::{ReleaseNoticeIntent, ReleaseResidual};
     use std::cell::RefCell;
 
@@ -601,38 +526,49 @@ mod tests {
     struct Recording {
         recipient: String,
         calls: RefCell<Vec<ReconcileTrigger>>,
-        done: RefCell<Vec<ReleaseOperationKey>>,
+        done: RefCell<Vec<ReleaseReconcileReceipt>>,
     }
 
     impl Recording {
-        fn receipt(&self, key: &ReleaseOperationKey) -> ReleaseReconcileReceipt {
+        fn receipt(&self, key: ReleaseOperationKey, scope: &ReleaseScope, trigger: ReconcileTrigger) -> ReleaseReconcileReceipt {
             ReleaseReconcileReceipt {
+                notice_intent: Some(ReleaseNoticeIntent {
+                    key: format!("{}:{}", key.release_id, key.final_release_sha),
+                    recipient: self.recipient.clone(),
+                    fingerprint: "fixture".into(),
+                }),
+                key,
+                scope: scope.clone(),
+                triggers: vec![trigger],
                 members: BTreeMap::from([("cas-0001".into(), CassyMergeClose::AlreadyClosed)]),
+                close_intents: BTreeMap::new(),
+                issue_outcomes: Vec::new(),
+                parents: BTreeMap::new(),
+                exceptions: Vec::new(),
+                started_at: String::new(),
+                updated_at: String::new(),
+                complete: true,
+                sync_pending: Vec::new(),
                 residuals: vec![ReleaseResidual {
                     task_id: "cas-0002".into(),
                     gate: "QA_MISSING".into(),
                     owner: "owner".into(),
                     next_action: "record the batch QA receipt".into(),
                 }],
-                notice_intent: Some(ReleaseNoticeIntent {
-                    key: format!("{}:{}", key.release_id, key.final_release_sha),
-                    recipient: self.recipient.clone(),
-                    fingerprint: "fixture".into(),
-                }),
-                ..Default::default()
             }
         }
     }
 
     impl Reconciler for Recording {
         fn completed(&self, _: &Path, key: &ReleaseOperationKey) -> Result<Option<ReleaseReconcileReceipt>> {
-            Ok(self.done.borrow().contains(key).then(|| self.receipt(key)))
+            Ok(self.done.borrow().iter().find(|r| &r.key == key).cloned())
         }
         fn reconcile(&self, _: &Path, scope: &ReleaseScope, _: &ReleaseInventory, trigger: ReconcileTrigger) -> Result<ReleaseReconcileReceipt> {
             let key = operation_key(&scope.project_id, &scope.release_id, &scope.final_release_sha);
-            self.calls.borrow_mut().push(trigger);
-            self.done.borrow_mut().push(key.clone());
-            Ok(self.receipt(&key))
+            self.calls.borrow_mut().push(trigger.clone());
+            let receipt = self.receipt(key, scope, trigger);
+            self.done.borrow_mut().push(receipt.clone());
+            Ok(receipt)
         }
     }
 

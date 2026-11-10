@@ -158,6 +158,66 @@ includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
 exists for historical releases that have no tracked cut receipt. Publication
 verification precedes this stage; the issue helper never publishes a release.
 
+## Durable reconciliation and parent acceptance
+
+`release_reconcile::reconcile_release(root, &scope, &inventory, trigger)` is the
+shared async entry point. Triggers are `publish {tag}`, `promotion {pr,
+merge_sha}`, `installed`, and `backfill`. Publication authenticity belongs to
+the trusted adapter; the existing immutable close validator owns proof authority.
+Historical as-of-approval gate evaluation remains a separate backfill extension.
+
+`ReleaseOperationKey {project_id, release_id, final_release_sha}` identifies one
+operation. Its sole authoritative checkpoint is the SQLite
+`release_reconcile_operations` row. An OS lock serializes effects for that key;
+each result is committed before another member proceeds. A crash after an
+ordinary close but before its checkpoint reuses that exact committed close on
+replay. Close intent retains the original anchor, start boundary, assignee,
+work target, park reason, and delivery transaction identity. Changed cycles are
+held instead of rebound. JSON exports are derived, never another checkpoint.
+
+`release_reconcile::completed_operation(root, &key)` returns the completed
+`ReleaseReconcileReceipt`, or `None` for absent/held operations. The receipt
+contains `members`, `issue_outcomes`, `parents`, inventory `exceptions` (including
+`quarantined`), `residuals {task_id, gate, owner, next_action}`, `sync_pending`, and
+stage timestamps. Completion never asserts peer synchronization. Every live
+member or parent has a named residual; independent exceptions remain visible.
+
+The operation persists `notice_intent {key, recipient, fingerprint}` and sends
+no notice. The publication/promotion adapter alone enqueues that intent using
+its stable key and bound recipient. Retry and supervisor turnover reuse the
+same intent rather than double-send. A completed lookup is the adapter's no-op
+check; partial operations remain resumable.
+
+An independently authored, published release review may additionally carry
+exactly one fenced `cassy-release-epics` JSON block:
+
+```json
+{
+  "project_id": "canonical-project",
+  "release_id": "v9.99.0",
+  "reviewed_sha": "<full candidate SHA>",
+  "final_release_sha": "<full shipped SHA>",
+  "epics": [{
+    "task_id": "cas-example-epic",
+    "generation": "<Task.updated_at RFC3339 snapshot>",
+    "child_ids": ["cas-example-delivery"],
+    "acceptance": "pass"
+  }]
+}
+```
+
+The actual fence label is `cassy-release-epics`, beside the existing
+`cassy-release-transformations` block in the same bound review bytes. Each
+parent requires its exact generation and complete child set returned by `TaskStore::get_subtasks` (including nested descendants), and the
+reviewer must be independent of the parent and every descendant. The validator
+reuses the existing artifact binding, candidate mapping and author checks.
+Missing or stale acceptance queues one existing epic proof cycle and records
+`pending`; prose and tag existence grant no epic acceptance. Empty legacy
+containers remain held for an evidenced operator disposition. Accepted parents
+close bottom-up through the ordinary lifecycle gate at the immutable release
+SHA, including epics whose old branch is gone. Release authority can adopt
+positively dead ownership without impersonating the review author.
+
 ## Publish and promotion adapters
 
 Every trigger calls the one release reconciliation,

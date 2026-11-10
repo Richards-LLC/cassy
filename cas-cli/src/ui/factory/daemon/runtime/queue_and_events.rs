@@ -22089,6 +22089,10 @@ mod gh_1153_idle_pty_delivery_tests {
     /// open the watchdog probe exactly as the delivery arm does, aged so its
     /// first observe window has elapsed.
     async fn deliver_to_idle_worker() -> Fixture {
+        deliver_to_idle_worker_from("supervisor", None).await
+    }
+
+    async fn deliver_to_idle_worker_from(source: &str, origin: Option<&cas_store::QueueOrigin>) -> Fixture {
         let tmp = tempfile::tempdir().unwrap();
         let cas_dir = tmp.path().join(".cas");
         std::fs::create_dir_all(&cas_dir).unwrap();
@@ -22109,9 +22113,11 @@ mod gh_1153_idle_pty_delivery_tests {
 
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let prompt = "You have been assigned a new task: cas-1153. Start it now.";
-        let row = queue
-            .enqueue_with_session("supervisor", WORKER, prompt, "provision-test")
-            .unwrap();
+        let row = match queue.enqueue_idempotent(source, WORKER, prompt, Some("provision-test"),
+            None, None, "watchdog-fixture", origin).unwrap() {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            _ => unreachable!(),
+        };
         let delivered_at_utc = chrono::Utc::now();
         let bytes_at_delivery = daemon.app.mux.pane_bytes_received(WORKER).unwrap();
         let outcome = daemon.app.mux.inject(WORKER, prompt).await.unwrap();
@@ -22149,6 +22155,39 @@ mod gh_1153_idle_pty_delivery_tests {
             queue,
             rollout,
             row,
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_47cb_completion_watchdog_keeps_sender_and_delivery_facts() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (source, origin) in [
+            ("worker-check", Some(cas_store::QueueOrigin::Daemon)),
+            ("worker-check", None),
+            ("peer-1782", None),
+        ] {
+            let Fixture { _tmp, mut daemon, queue, row, .. } =
+                deliver_to_idle_worker_from(source, origin.as_ref()).await;
+            let before = queue.message_delivery_report(row).unwrap().unwrap();
+            daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
+            if origin == Some(cas_store::QueueOrigin::Daemon) {
+                assert!(!daemon.normal_delivery_probes.contains_key(&row));
+                let after = queue.message_delivery_report(row).unwrap().unwrap();
+                assert_eq!(after.wake_attempt, before.wake_attempt);
+                assert_eq!(after.delivered_at, before.delivered_at);
+                assert!(queue.queued_prompt(row).unwrap().unwrap().acked_at.is_none());
+            } else {
+                assert_eq!(daemon.normal_delivery_probes[&row].nudges, 1);
+                // Sender IDs are machine identities, not a pin on human wording.
+                let deadline = Instant::now() + Duration::from_secs(3);
+                loop {
+                    daemon.app.mux.poll_batch().unwrap();
+                    let screen = daemon.app.mux.get(WORKER).unwrap().dump_viewport().unwrap();
+                    if screen.contains(source) { break; }
+                    assert!(Instant::now() < deadline, "missing sender ID {source} in PTY delivery");
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
         }
     }
 

@@ -2024,6 +2024,9 @@ async fn cas_cb74_repaired_dependency_identity_drains_after_restart() {
     // Simulate an explicit, verified ownership repair; sync must revalidate it.
     to.origin_project = Some(project.into());
     tasks.update(&to).unwrap();
+    // Request revalidation now rather than wait for the normal inventory
+    // interval after the preceding refused attempt.
+    assert_eq!(reopened.retry_failed_items(&[original.id], None, 5).unwrap(), 1);
     let tasks = open_task_store_local(temp.path()).unwrap();
     let repaired = syncer.pull_team(team, project, store.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
     assert_eq!(repaired.healed_task_dependencies_to_cloud, 1);

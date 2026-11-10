@@ -14,6 +14,8 @@ export interface ConversationShellModel {
   /** The supervisor's model and effort (cas-2dcc), when the hub reports them. */
   model?: string;
   effort?: string;
+  /** Observed connection state, when the caller has one. */
+  connectionLabel?: string;
   /** Selected machine; its accent class goes on the shell root so the thread inherits it. */
   machineId?: string;
   selected: boolean;
@@ -99,21 +101,10 @@ export function conversationNoMatchText(query: string): string {
 export const composeFabMarkup = '<button id="compose-fab" class="compose-fab" type="button" aria-label="Write to a supervisor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M12 5v14M5 12h14"/></svg><span class="compose-fab-label">Write to a supervisor</span></button>';
 
 /**
- * The one header above the thread (cas-5b2d): the Pebble thead — machine
- * monogram in the accent, the project bold as the title (once: journey F7),
- * machine · supervisor codename · connection in mono beneath (same order as a
- * list row) — with the cas-11b01 back link and the conversation's actions
- * (Raw output, Interrupt: cas-0546) on the row above it. Elevated with
- * --lift-head; the thread view itself renders no header inside this shell.
- *
- * On phone the two rows fold into one (cas-1776): the back link shows only its
- * "‹" glyph and Raw output only its icon; each button's aria-label keeps its
- * accessible name ("‹ Conversations", "Raw output") the same at every width,
- * and Interrupt keeps its word. The project ellipsises (its title carries it
- * whole) and the host line ellipsises its machine · codename part while the
- * connection state after it stays visible. The machine name has priority over
- * the generated codename (cas-766c): its OS word goes first, then the codename
- * ellipsises and, with no room left, steps aside (fitMachineLine).
+ * One identity/action row above the thread. The project and observed state
+ * share line 1; model, machine and session form the supporting line. Phone
+ * keeps Raw output and Interrupt direct and groups secondary actions in a
+ * native popover. All controls retain their accessible names and IDs.
  */
 /** A machine label's trailing operating-system word, as in "Studio Mac · macOS". */
 const HOST_OS = /^(.*\S)(\s·\s(?:macOS|Linux|Windows|FreeBSD|OpenBSD|NetBSD|ChromeOS|iPadOS|iOS|Android|Ubuntu|Debian|Fedora|WSL))$/i;
@@ -133,7 +124,7 @@ export function hostMarkup(host: string): string {
  * delivery problem had no sign there. Hidden until the session has an open
  * item; main.ts fills the count and opens the rail as a sheet.
  */
-const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="conversation-attention-count"></span></button>`;
+const CONVERSATION_ATTENTION_BUTTON = `<button id="conversation-attention" class="conversation-attention" type="button" aria-haspopup="dialog" hidden><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M10 3.2 18 17H2z"/><path d="M10 8.5v3.6"/><path d="M10 14.6v.1"/></svg><span class="action-label">Attention</span><span class="conversation-attention-count"></span></button>`;
 
 /** Badge text and accessible name for the session's open attention items. */
 export function conversationAttentionBadge(count: number): { hidden: boolean; text: string; label: string } {
@@ -157,7 +148,7 @@ export function interruptLabel(project: string | undefined): string {
  * description beside it (applyActionAvailability), instead of disappearing.
  */
 export function conversationActionsMarkup(project: string | undefined): string {
-  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><button id="conversation-commands" class="conversation-action" type="button" aria-label="Supervisor commands" aria-controls="supervisor-command-palette"><span aria-hidden="true">/</span><span class="action-label">Commands</span></button><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false" aria-label="Show work">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
+  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><button id="conversation-more" class="conversation-action conversation-more-toggle" type="button" popovertarget="conversation-more-menu" aria-label="More conversation actions">⋯<span class="conversation-more-count" hidden></span></button><span id="conversation-more-menu" class="conversation-more-menu" popover="auto" role="group" aria-label="Conversation actions"><button id="conversation-commands" class="conversation-action" type="button" aria-label="Supervisor commands" aria-controls="supervisor-command-palette"><svg class="action-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="4" width="16" height="12" rx="2"/><path d="M5 8h1m3 0h1m3 0h1M5 11h1m3 0h1m3 0h1M6 14h8"/></svg><span class="action-label">Commands</span></button><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false" aria-label="Show work">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button>${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">Tasks &amp; progress</button></span><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
 }
 
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
@@ -166,7 +157,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity">${providerAvatarMarkup({ harness: model.harness, fallback: machineMonogram(host || model.supervisor || "?"), className: "conversation-avatar" })}<div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host">${modelLabel(model.harness, model.model, model.effort) ? `<span class="conversation-model">${escapeHtml(modelLabel(model.harness, model.model, model.effort)!)}</span>` : ""}<span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status">${model.ended ? " · Ended" : ""}</span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}<div class="conversation-identity">${providerAvatarMarkup({ harness: model.harness, fallback: machineMonogram(host || model.supervisor || "?"), className: "conversation-avatar" })}<div class="id"><div class="conversation-title-line"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span id="conversation-connection" class="conversation-state status-chip" role="status"${model.ended || model.connectionLabel ? "" : " hidden"}>${escapeHtml(model.ended ? "Ended" : model.connectionLabel ?? "")}</span></div><span class="conversation-host">${modelLabel(model.harness, model.model, model.effort) ? `<span class="conversation-model">${escapeHtml(modelLabel(model.harness, model.model, model.effort)!)}</span>` : ""}<span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span></span></div></div>${conversationActionsMarkup(project)}</div></header>`;
 }
 
 /** Attachments use the authenticated hub upload API before the durable message send. */
@@ -437,7 +428,7 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
   if (machine.scrollWidth + gap + codenameNeeds > available - 2) line.classList.add("codename-squeezed");
 }
 
-/** The conversation header's host line, fitted to the room beside its connection state. */
+/** Fit the supporting host line to the identity's available width. */
 export function fitConversationHost(root: ParentNode): void {
   const identity = root.querySelector<HTMLElement>(".conversation-identity");
   const host = identity?.querySelector<HTMLElement>(".conversation-host");
@@ -449,7 +440,6 @@ export function fitConversationHost(root: ParentNode): void {
   const style = getComputedStyle(identity);
   const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
     - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
-  const connection = host.querySelector<HTMLElement>("#conversation-connection");
   // cas-d043 G02: the device in control, when another one is, keeps its place too.
   const control = host.querySelector<HTMLElement>("#conversation-control");
   // The harness name leads the host line (DESIGN.md Conversation header).
@@ -457,7 +447,7 @@ export function fitConversationHost(root: ParentNode): void {
   // cas-d043 QA round 1: on a phone the header's codename shows whole or
   // steps aside, never as a cut slot beside the machine.
   const phoneHeader = identity.ownerDocument.defaultView?.matchMedia?.("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)").matches === true;
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
 }
 
 /**
@@ -625,4 +615,12 @@ export function syncEndedComposer(root: ParentNode, ended: SessionEndOutcome | u
     status.textContent = "";
     status.hidden = true;
   }
+}
+
+/** A phone overflow action returns to its visible invoker after a sheet closes. */
+export function focusConversationAction(document: Document, id: string): void {
+  const button = document.getElementById(id);
+  const more = document.getElementById("conversation-more");
+  if (button?.closest(".conversation-more-menu") && more?.getClientRects().length && !button.getClientRects().length) more.focus();
+  else button?.focus();
 }

@@ -277,6 +277,12 @@ pub async fn post_verified(
         }
     }
 
+    if let Some(claim) = &options.reply_claim {
+        metadata["coordination_operation_id"] = claim["coordination_operation_id"].clone();
+        metadata["expected_generation"] = claim["expected_generation"].clone();
+        metadata["request_id"] = json!(uuid::Uuid::new_v4().to_string());
+    }
+
     let begin = envelope(violet.violet_post(metadata.clone()).await?)?;
     let file_id = field(&begin, "/file_id")?;
     let upload_url = field(&begin, "/upload_url")?;

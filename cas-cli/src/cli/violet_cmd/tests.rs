@@ -143,7 +143,7 @@ fn run_cli_at(
         shared.0.borrow_mut().connects += 1;
         Ok(Box::new(shared.clone()))
     };
-    let reply_claim = |reply_to: &str| claim.clone().filter(|block| block["reply_to"] == reply_to);
+    let reply_claim = |reply_to: &str| Ok(claim.clone().filter(|block| block["reply_to"] == reply_to));
     let mut context = RunContext {
         cas_root,
         json,
@@ -1316,8 +1316,8 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     let hub = ScriptedHub::with(vec![refusal]);
     let (_, result) = run_cli_claimed(&with_id, &hub, false, &no_gate, None);
     assert_eq!(result.unwrap_err().code, "managed_reply_required");
-    let args = &hub.calls()[0].1;
-    assert!(args.get("coordination_operation_id").is_none() && args.get("request_id").is_none(), "{args}");
+    assert_eq!(hub.connects(), 0);
+    assert!(hub.calls().is_empty());
 }
 
 

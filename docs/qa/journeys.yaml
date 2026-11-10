@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  managed-thread-verified-file-replies:
+    title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
+    tasks: [cas-4deb]
+    journeys: [FACTORY-SUPERVISE]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

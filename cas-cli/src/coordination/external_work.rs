@@ -83,11 +83,14 @@ pub enum JournalError {
     Storage(String),
     IdempotencyConflict { request_id: String },
     Missing(String),
+    ReplyAuthorityRequired,
 }
 
 impl std::fmt::Display for JournalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ReplyAuthorityRequired => write!(f,
+                "this managed thread has no current reply intent for this session; check claim_status and register a reply intent before posting"),
             Self::Storage(message) => write!(f, "external-work journal failed: {message}"),
             Self::IdempotencyConflict { request_id } => write!(
                 f,
@@ -438,7 +441,8 @@ impl SqliteRequestJournal {
     /// operations count, in the order they were made. A reply intent stays
     /// current until a later release, transfer, or a claim or accept at
     /// another generation retires it; a renewal extends its claim's expiry.
-    /// An expired claim, another session's intent, or none yields `None`.
+    /// A known managed thread without a live caller intent is refused; only
+    /// an unknown thread yields `None` for ordinary Violet posting.
     pub fn current_reply_post(
         &self,
         registration_id: &str,
@@ -465,6 +469,7 @@ impl SqliteRequestJournal {
         // resource id -> (violet_post block, claim generation, claim expiry)
         let mut current: std::collections::HashMap<String, (Value, u64, Option<DateTime<Utc>>)> =
             std::collections::HashMap::new();
+        let mut managed_thread = false;
         let expiry = |receipt: &Value| {
             receipt["expires_at"]
                 .as_str()
@@ -477,15 +482,27 @@ impl SqliteRequestJournal {
             else {
                 continue;
             };
-            if input["actor"]["registration_id"] != registration_id || response["code"] != "completed" {
-                continue;
-            }
             let receipt = &response["receipt"];
+            managed_thread |= receipt["resource"]["kind"] == "slack_thread"
+                && receipt["resource"]["external_ref"]["root_ts"] == reply_to;
             let Some(resource) = input["resource_id"].as_str().or(receipt["resource"]["id"].as_str()) else {
                 continue;
             };
             let resource = resource.to_string();
             let generation = receipt["generation"].as_u64();
+            // A newer claim or a peer's release can supersede our cached
+            // intent. Its receipt remains authoritative even when this actor
+            // did not perform the mutation or the result is `acquired`.
+            if current.get(&resource).is_some_and(|entry| {
+                generation.is_some_and(|generation| generation != entry.1)
+                    || receipt["resource"]["state"].as_str().is_some_and(|state| state != "claimed")
+                    || receipt["visible_owner"]["registration_id"].as_str().is_some_and(|owner| owner != registration_id)
+            }) {
+                current.remove(&resource);
+            }
+            if input["actor"]["registration_id"] != registration_id || response["code"] != "completed" {
+                continue;
+            }
             match kind.as_str() {
                 "reply_intent" => {
                     let Some(expected) = input["expected_generation"].as_u64() else { continue };
@@ -517,12 +534,28 @@ impl SqliteRequestJournal {
                 }
             }
         }
-        Ok(current
+        let intent = current
             .into_values()
             .filter(|(block, _, expires)| block["reply_to"] == reply_to && expires.is_some_and(|at| at > now))
             .map(|(block, _, _)| block)
-            .next())
+            .next();
+        if managed_thread && intent.is_none() {
+            return Err(JournalError::ReplyAuthorityRequired);
+        }
+        Ok(intent)
     }
+}
+
+/// Resolve file-reply authority for either supported client before allocating
+/// an upload. The registration comes from the authenticated caller, never args.
+pub(crate) fn reply_post(
+    cas_root: &Path,
+    registration_id: &str,
+    reply_to: &str,
+) -> Result<Option<Value>, ExternalWorkError> {
+    SqliteRequestJournal::open(cas_root)
+        .and_then(|journal| journal.current_reply_post(registration_id, reply_to, Utc::now()))
+        .map_err(journal_error)
 }
 
 fn load_operation(
@@ -1747,6 +1780,7 @@ fn failure_response(
 
 fn journal_error(journal_error: JournalError) -> ExternalWorkError {
     match journal_error {
+        JournalError::ReplyAuthorityRequired => error("managed_reply_required", journal_error.to_string()),
         JournalError::IdempotencyConflict { request_id } => error(
             "idempotency_conflict",
             format!("request_id {request_id} was used with different input"),
@@ -2551,37 +2585,49 @@ mod tests {
 
     /// cas-8239 (GH #1300): `cas violet post` takes a managed reply's claim
     /// fields from the caller's own live reply intent in the journal. Another
-    /// session's intent, another thread, a lapsed claim or a released claim
-    /// yields none, so the hub still refuses the reply.
+    /// session's intent, a lapsed claim or a released claim is refused locally;
+    /// unknown threads retain ordinary Violet posting.
     #[test]
     fn current_reply_post_is_only_the_callers_live_intent_cas_8239() {
         let case = &fixture("reply_intents")["cases"][0];
         let journal = journal();
         let cloud = Arc::new(FakeCloud::new(journal.clone()));
-        *cloud.post_result.lock().unwrap() = Ok(case["response"]["payload"].clone());
         let mut service = service(cloud.clone(), Arc::new(FakeViolet::ok()), journal.clone());
         service.now = before_expiry;
+        let (me, root) = ("reg-supervisor-alpha-01", "1760616000.123456");
+        *cloud.post_result.lock().unwrap() = Ok(fixture("claim")["cases"][0]["response"]["payload"].clone());
+        service.execute(claim(REQUEST_ID, "https://example.slack.com/archives/C08COORD01/p1760616000123456")).unwrap();
+        assert_eq!(journal.current_reply_post(me, root, before_expiry()).unwrap_err(), JournalError::ReplyAuthorityRequired);
+        *cloud.post_result.lock().unwrap() = Ok(case["response"]["payload"].clone());
         let request_id = case["request"]["payload"]["request_id"].as_str().unwrap();
         service.execute(reply_intent(request_id, Some("00000cc2-1111-4111-8111-000000000cc2"))).unwrap();
-        let (me, root) = ("reg-supervisor-alpha-01", "1760616000.123456");
 
         let post = journal.current_reply_post(me, root, before_expiry()).unwrap().expect("the live intent");
         assert_eq!(post["coordination_operation_id"], "00007e91-1111-4111-8111-000000007e91");
         assert_eq!(post["expected_generation"], 1);
-        assert!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).is_err());
+        assert_eq!(journal.current_reply_post("reg-supervisor-beta-07", root, before_expiry()).unwrap_err(), JournalError::ReplyAuthorityRequired);
         assert!(journal.current_reply_post(me, "1760616999.000001", before_expiry()).unwrap().is_none());
-        assert!(journal.current_reply_post(me, root, at_expiry()).is_err(), "lapsed claim");
+        assert_eq!(journal.current_reply_post(me, root, at_expiry()).unwrap_err(), JournalError::ReplyAuthorityRequired);
+
+        let mut newer_claim = fixture("claim")["cases"][0]["response"]["payload"].clone();
+        newer_claim["receipt"]["generation"] = json!(2);
+        newer_claim["receipt"]["request_id"] = json!("00000002-2222-4222-8222-000000000002");
+        *cloud.post_result.lock().unwrap() = Ok(newer_claim);
+        service.execute(claim("00000002-2222-4222-8222-000000000002", "https://example.slack.com/archives/C08COORD01/p1760616000123456")).unwrap();
+        assert_eq!(journal.current_reply_post(me, root, before_expiry()).unwrap_err(), JournalError::ReplyAuthorityRequired);
 
         let release = &fixture("release")["cases"][0];
-        *cloud.post_result.lock().unwrap() = Ok(release["response"]["payload"].clone());
+        let mut released = release["response"]["payload"].clone();
+        released["receipt"]["generation"] = json!(2);
+        *cloud.post_result.lock().unwrap() = Ok(released);
         service
             .execute(ExternalWorkCommand::ReleaseClaim {
                 resource_id: RESOURCE_ID.into(),
-                expected_generation: 1,
+                expected_generation: 2,
                 request_id: Some(release["request"]["payload"]["request_id"].as_str().unwrap().into()),
             })
             .unwrap();
-        assert!(journal.current_reply_post(me, root, before_expiry()).is_err(), "released claim");
+        assert_eq!(journal.current_reply_post(me, root, before_expiry()).unwrap_err(), JournalError::ReplyAuthorityRequired);
     }
 
     /// cas-f869: Cloud's refusals pass through with their next step and no

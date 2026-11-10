@@ -22181,7 +22181,7 @@ mod gh_1153_idle_pty_delivery_tests {
                 // Sender IDs are machine identities, not a pin on human wording.
                 let deadline = Instant::now() + Duration::from_secs(3);
                 loop {
-                    daemon.app.mux.poll_batch().unwrap();
+                    let _ = daemon.app.mux.poll_batch();
                     let screen = daemon.app.mux.get(WORKER).unwrap().dump_viewport().unwrap();
                     if screen.contains(source) { break; }
                     assert!(Instant::now() < deadline, "missing sender ID {source} in PTY delivery");

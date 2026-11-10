@@ -429,6 +429,10 @@ bug_families:
     tasks: [cas-84ea]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-COMMIT-DIRECTORY]
+  published-release-staffing-gap:
+    title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
+    tasks: [cas-a3c3]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

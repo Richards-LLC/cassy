@@ -97,6 +97,17 @@ stays quiet. Replies bind to a peer message delivered to that worker and recheck
 the current scope. This uses the existing MCP coordination dispatch; the factory
 message CLI retains its local queue behavior.
 
+## Repaired peer approvals
+
+The authenticated peer receipt path can supersede a stale admitted peer approval
+when the same source supervisor and machine supplies a later, independently
+approved dispatch for the current repaired delivery. Admission rechecks project,
+plan, candidate tree and published Git identity. One store transaction invalidates
+only the stale peer dispatch, inserts the new approval and records
+`peer_premerge_approval_replaced`; both verdicts and the old proof remain readable.
+Local verification cycles cannot be replaced by peer mail. Replaying old approval
+with a changed source SHA does not grant authority.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history
@@ -864,6 +875,34 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 `cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
+
+### Retained dependency failures
+
+Use `cas cloud queue --verbose` (or `--json --verbose`) to inspect the item ID,
+team, route, endpoint payload and `last_reason`. A
+`dependency_endpoint_foreign`, `dependency_endpoint_moved`,
+`dependency_endpoint_deleted` or `dependency_endpoint_unavailable` park retains
+the local dependency; a low pending count does not mean that graph was delivered.
+Compare endpoint `origin_project` and scope with the project's canonical ID and
+registered aliases. Never relabel a genuinely foreign task to make sync pass.
+Repair provenance only when ownership is established; restore a missing endpoint
+only when it is valid to do so. Scoped pulls revalidate these parks against a
+complete task and dependency inventory on the normal reconciliation interval.
+To request another inventory immediately after a repair, use
+`cas cloud queue --retry --ids <item-id>`, then `cas cloud pull` and
+`cas cloud push`.
+`--retry-reason <code>` can additionally restrict those selected items. Retrying
+preserves the payload and last diagnostic and does not reset neighboring items.
+Pending local task edits, deletes, moves, quarantines and remote tombstones
+continue to prevent unsafe repair.
+
+Conflict retention deduplicates an exact entity/state/verdict/revision replay
+atomically across restarts and connections, keeping its original observation
+time. Distinct discarded states and revisions remain available for review;
+existing history is not purged by sync. Lifecycle guards retain each change of
+state so latest-guard consumers keep the current decision, while consecutive
+identical guard observations deduplicate. Legacy personal rows skipped by a
+team-linked route require separate delivery-backed recovery, not dependency retry.
 
 ## Cloud cleanup and rate limits
 

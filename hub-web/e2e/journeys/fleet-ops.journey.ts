@@ -295,6 +295,21 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "assign_task", task_id: "cas-2001", assignee: "quiet-owl-7" }, expected: { assignee: null, updated_at: "2026-10-03T11:20:00Z" } });
   });
 
+  await journey.stage("Add worker… opens a titled panel whose labelled fields stay inside the rail", async () => {
+    // cas-5d53: the panel reads like Write access: a heading, labels, and nothing past the rail's edge.
+    const toggle = rail.getByRole("button", { name: "Add worker…" });
+    await toggle.click();
+    const panel = rail.getByRole("group", { name: "Add workers" });
+    await expect(panel.getByRole("heading", { name: "Add workers" })).toBeVisible();
+    const edge = (await rail.boundingBox())!;
+    for (const field of [panel.getByLabel("How many"), panel.getByLabel("Start on")]) {
+      const box = (await field.boundingBox())!;
+      expect(box.x + box.width).toBeLessThanOrEqual(edge.x + edge.width);
+    }
+    await toggle.click();
+    await expect(panel).toHaveCount(0);
+  });
+
   await journey.stage("Stop another worker after confirming", async () => {
     await row("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
     await row("brisk-wren-9").getByRole("menuitem", { name: "Stop…" }).click();
@@ -441,6 +456,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await journey.stage("Add a worker on the first machine", async () => {
         await rail.getByRole("button", { name: "Add worker…" }).click();
         await expect(actions()).toBeVisible();
+        await expect(actions().getByRole("heading", { name: "Add workers" })).toBeVisible();
+        await expect(actions().getByLabel("How many")).toBeVisible();
         const add = actions().getByRole("button", { name: "Add", exact: true });
         await target(add); await expect(add).toBeFocused(); await page.keyboard.press("Enter");
         await expect(agent("amber-heron-11")).toBeVisible();
@@ -452,6 +469,8 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click(); await openFleet();
         await expect(page.locator(".context-sheet-where")).toBeVisible();
         await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
+        // cas-5d53: the phone sheet names the worker it acts on.
+        await expect(actions().getByRole("heading", { name: "Actions for brisk-wren-9" })).toBeVisible();
         await actions().getByRole("menuitem", { name: "Stop…" }).click();
         await expect(actions().getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
         await page.keyboard.press("Tab");

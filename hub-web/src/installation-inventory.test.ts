@@ -104,4 +104,18 @@ describe("recognizable browser installations (cas-2e77)", () => {
     expect(request).toHaveBeenLastCalledWith("POST", "/v1/auth/devices/own-id/revoke");
     expect(document.querySelector(".installation-inventory")).toBeNull();
   });
+
+  it("offers Retry when the machine refuses the list, and Retry loads it (cas-0dcf)", async () => {
+    const request = vi.fn().mockRejectedValueOnce(new Error("the machine refused this pairing without a reason")).mockResolvedValueOnce([own]);
+    const client = { request: async <T>(method: string, path: string): Promise<T> => await request(method, path) as T };
+    await openInstallationInventory(document, machine, client, vi.fn(async () => {}));
+    const dialog = document.querySelector<HTMLDialogElement>(".installation-inventory")!;
+    const retry = [...dialog.querySelectorAll("button")].find(button => button.textContent === "Retry");
+    expect(retry).toBeDefined();
+    expect(dialog.querySelectorAll(".installation-inventory-row")).toHaveLength(0);
+    retry!.click();
+    await vi.waitFor(() => expect(dialog.querySelectorAll(".installation-inventory-row")).toHaveLength(1));
+    expect(request).toHaveBeenNthCalledWith(2, "GET", "/v1/auth/devices");
+    expect(retry!.isConnected).toBe(false);
+  });
 });

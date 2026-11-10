@@ -203,8 +203,11 @@ Violet's next call reconnects immediately after a live transport closes;
 failed connection attempts keep the normal backoff. The same proxy session
 and caller policy remain in force.
 
-Every Violet `kind: "message"` post receives a UUID `request_id` unless the
-caller supplied one. A lost response or `outcome_unknown` result triggers a
+When the live catalog advertises `request_id` on `violet_post` and
+`violet_reconcile_reply` accepts that ID alone, a `kind: "message"` post
+receives a UUID `request_id` unless the caller supplied one. Older hubs keep
+the original message arguments and outcome; no request-ID lookup is sent.
+Reconnect refreshes the catalog before deciding which contract to use. A lost response or `outcome_unknown` result triggers a
 read-only `violet_reconcile_reply` lookup using that same ID. A confirmed
 posted receipt is returned to the caller; a definite `not_posted` result or
 an unresolved outcome remains a failure with its request ID. The proxy never

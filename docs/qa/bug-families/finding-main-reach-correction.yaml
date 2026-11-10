@@ -1,0 +1,4 @@
+title: Main-reach corrections require a declared journey, preserve stored runtime evidence and report resulting priority
+tasks: [cas-2c35]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-SUPERVISE, FACTORY-MERGE]

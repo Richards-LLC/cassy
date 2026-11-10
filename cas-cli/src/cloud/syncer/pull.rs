@@ -579,7 +579,9 @@ impl CloudSyncer {
             match self.due_dependency_reconcile(team_id, current_project_id)?
                 || pending_operations
                     .values()
-                    .any(|row| row.last_reason.as_deref() == Some("orphan_dependency"))
+                    .any(|row| row.last_reason.as_deref() == Some("orphan_dependency")
+                        || (row.retry_count < self.config.max_retries
+                            && row.last_reason.as_deref().is_some_and(crate::cloud::sync_queue::dependency_repair_reason)))
             {
                 false => None,
                 true => match self.fetch_dependency_snapshot(team_id, current_project_id) {
@@ -636,21 +638,25 @@ impl CloudSyncer {
         let mut skipped_by_tombstone = 0;
         for (entity_id, dependency) in local_after {
             let prior = pending_operations.get(&entity_id);
-            let orphan = prior.is_some_and(|row| {
+            let repairable = prior.is_some_and(|row| {
                 row.operation == SyncOperation::Upsert
-                    && row.last_reason.as_deref() == Some("orphan_dependency")
-                    && row
-                        .last_error
-                        .as_deref()
-                        .is_some_and(|error| error.contains("orphan_dependency"))
+                    && row.last_reason.as_deref().is_some_and(|reason| {
+                        crate::cloud::sync_queue::dependency_repair_reason(reason)
+                            && row.last_error.as_deref().is_some_and(|error| error.contains(reason))
+                    })
             });
             if snapshot.live.contains_key(&entity_id) {
-                if orphan {
+                if repairable && prior.unwrap().last_reason.as_deref() == Some("orphan_dependency") {
                     self.queue.mark_synced(prior.unwrap().id)?;
+                    continue;
                 }
-                continue;
+                // A parked ownership failure still needs fresh endpoint
+                // validation, even if the remote edge already exists.
+                if !repairable {
+                    continue;
+                }
             }
-            if prior.is_some() && !orphan {
+            if prior.is_some() && !repairable {
                 continue;
             }
 

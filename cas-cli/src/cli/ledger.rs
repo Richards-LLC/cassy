@@ -999,12 +999,23 @@ fn gate_changes(repo: &Path, from: &str, to: &str) -> Measure<Vec<String>> {
 /// Local SQLite and git only; the CLI's Cloud pull is not the hub's job.
 pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde_json::Value> {
     let repo = cas_root.parent().unwrap_or(cas_root);
-    let mut releases: Vec<Option<String>> = Vec::new();
-    for version in cas_store::quality_release_events(cas_root)?.into_iter().filter_map(|event| event.release_version) {
-        if releases.len() < published && !releases.contains(&Some(version.clone())) {
-            releases.push(Some(version));
+    // Published releases are the tags, plus any release event without one; a
+    // tag with no event still has a window (release_window falls back to tag time).
+    let mut versions: Vec<String> = git_output(repo, &["tag", "--list", "v*.*.0"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for event in cas_store::quality_release_events(cas_root)? {
+        if let Some(version) = event.release_version.filter(|version| !versions.contains(version)) {
+            versions.push(version);
         }
     }
+    let order = |version: &str| -> Vec<u64> {
+        version.trim_start_matches('v').split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    versions.sort_by_key(|version| std::cmp::Reverse(order(version)));
+    let mut releases: Vec<Option<String>> = versions.into_iter().take(published).map(Some).collect();
     releases.reverse();
     releases.push(None);
     // Each report shells out to git; build them side by side.
@@ -1657,7 +1668,8 @@ mod tests {
         assert_eq!(json["changes"], serde_json::json!(["rule rule-176", "skill cas-worker"]));
         let quality = quality_reports(&cas_root, 5).unwrap();
         let shown: Vec<_> = quality["releases"].as_array().unwrap().iter().map(|r| r["release"].clone()).collect();
-        assert_eq!(shown, ["v1.1.0", "unreleased"], "oldest release first, work in progress last");
+        // v1.0.0 is tagged but has no release event: it still appears, in order.
+        assert_eq!(shown, ["v1.0.0", "v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",

@@ -2373,7 +2373,7 @@ pub(crate) fn unlinked_personal_backlog(cas_root: &Path) -> Option<UnlinkedPerso
         cas_root.join("cas.db"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     ).ok()?;
-    let (count, oldest_created_at): (usize, Option<String>) = conn.query_row(
+    let (count, oldest_created_at): (i64, Option<String>) = conn.query_row(
         "SELECT COUNT(*), MIN(created_at) FROM sync_queue WHERE team_id = ''",
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -2383,9 +2383,9 @@ pub(crate) fn unlinked_personal_backlog(cas_root: &Path) -> Option<UnlinkedPerso
     }
     let oldest_age_secs = oldest_created_at.as_deref()
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-        .map(|created| (chrono::Utc::now() - created).num_seconds().max(0));
+        .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds().max(0));
     Some(UnlinkedPersonalBacklog {
-        count,
+        count: count as usize,
         oldest_created_at,
         oldest_age_secs,
         next_step: "For team delivery, run `cas cloud team set <team>`, then review `cas cloud queue migrate-to-team`. Apply only after explicitly declaring the project team-only with `cas config set cloud.team_only true`: `cas cloud queue migrate-to-team --apply`, then `cas cloud sync`.",

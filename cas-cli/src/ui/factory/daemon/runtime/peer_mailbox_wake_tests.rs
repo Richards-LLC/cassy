@@ -207,13 +207,33 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
     use crate::cloud::peer_mailbox::{PeerScope, attach_message_intent};
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let stamp = |body: &str| attach_message_intent(body, None, false).unwrap();
+    // cas-35563: rows 4234550/551 carried a confirmed published landing,
+    // but the renderer silently converted their untyped protocol to receipt.
+    let landing = format!("CAS_PEER_PREMERGE_V1 {}", serde_json::to_string(&cas_types::PeerPremergeReceipt {
+        status: cas_types::VerificationStatus::Approved,
+        project_id: "github.com/acme/widgets".into(),
+        supervisor_id: "remote-sup".into(),
+        task_id: "cas-30b0".into(),
+        source_branch: "factory/peer".into(),
+        source_sha: "a".repeat(40),
+        target_branch: "epic/release".into(),
+        target_sha: "b".repeat(40),
+        candidate_tree: "c".repeat(40),
+        landed_sha: "d".repeat(40),
+        dispatch_id: "dispatch-landing".into(),
+        verdict_id: "ver-landing".into(),
+        plan_digest: "e".repeat(64),
+    }).unwrap());
     let cases = [
-        ("pm-9b7b9e0b", PeerScope::Project, "other-box", stamp("Release frozen and green. Please start the review now.")),
-        ("pm-8e716afb", PeerScope::User, "other-box", stamp("What's its ETA?")),
-        ("pm-9c915946", PeerScope::User, "this-box", stamp("Reply right away: the release is waiting on you.")),
-        ("pm-legacy", PeerScope::Project, "other-box", "Substantive field report".to_string()),
+        ("pm-9b7b9e0b", PeerScope::Project, "other-box", stamp("Release frozen and green. Please start the review now."), true),
+        ("pm-8e716afb", PeerScope::User, "other-box", stamp("What's its ETA?"), true),
+        ("pm-9c915946", PeerScope::User, "this-box", stamp("Reply right away: the release is waiting on you."), true),
+        ("pm-legacy", PeerScope::Project, "other-box", "Substantive field report".to_string(), true),
+        ("pm-landing-4234550", PeerScope::Project, "other-box", landing.clone(), true),
+        ("pm-explicit-receipt", PeerScope::Project, "other-box", attach_message_intent(&landing, Some("receipt"), false).unwrap(), false),
+        ("pm-explicit-quiet", PeerScope::Project, "other-box", format!("<cas-message-quiet/>\n{landing}"), false),
     ];
-    for (id, scope, machine, body) in cases {
+    for (id, scope, machine, body, wakes) in cases {
         let (_root, mut daemon) = peer_fixture().await;
         let mut message = peer_message(id, false);
         (message.scope, message.body) = (scope, body);
@@ -232,9 +252,9 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
             .unwrap()
             .unwrap();
         assert_eq!(
-            report.wake_attempt,
-            cas_store::WakeAttempt::Fired,
-            "{id}: an untyped peer message wakes an idle supervisor: {report:?}"
+            report.wake_attempt == cas_store::WakeAttempt::Fired,
+            wakes,
+            "{id}: only substantive mail without explicit quiet intent wakes: {report:?}"
         );
     }
 }

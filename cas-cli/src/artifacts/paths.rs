@@ -37,15 +37,39 @@ impl PublishRoots {
                 .unwrap_or_else(|| cas_root.to_path_buf()),
         }
     }
+}
 
-    /// Directories inside the project that hold credentials or history and are
-    /// never publishable, however the caller reached them.
-    fn forbidden_subdirectories(&self) -> [PathBuf; 2] {
-        [
-            self.project_root.join(".cas"),
-            self.project_root.join(".git"),
-        ]
-    }
+/// A nested checkout is an exception to its parent's `.cas` ban only when Git
+/// registers it in this repository and the candidate actually resolves there.
+/// The toplevel check prevents a stale registration redirected by a symlink
+/// from treating repository internals as checkout content.
+fn registered_checkout_root(candidate: &Path, project_root: &Path) -> Option<PathBuf> {
+    let git = |directory: &Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(directory)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .ok()?;
+        output.status.success().then_some(output.stdout)
+    };
+    let registrations = git(project_root, &["worktree", "list", "--porcelain", "-z"])?;
+    let checkout = registrations
+        .split(|byte| *byte == 0)
+        .filter_map(|line| line.strip_prefix(b"worktree "))
+        .filter_map(|path| std::str::from_utf8(path).ok())
+        .filter_map(|path| Path::new(path).canonicalize().ok())
+        .filter(|path| candidate.starts_with(path))
+        .max_by_key(|path| path.components().count())?;
+    let toplevel = git(candidate.parent()?, &["rev-parse", "--show-toplevel"])?;
+    let toplevel = Path::new(std::str::from_utf8(&toplevel).ok()?.trim())
+        .canonicalize()
+        .ok()?;
+    (toplevel == checkout).then_some(checkout)
 }
 
 /// Why a path may not be published. Each variant names what the operator can
@@ -146,9 +170,21 @@ pub fn resolve_publishable_path(
     // `.cas` holds `cloud.json` (a bearer token) and `.git` holds remote URLs
     // that can embed credentials.
     if inside_project && !inside_task_dir {
-        for forbidden in roots.forbidden_subdirectories() {
+        // Factory checkouts live below the primary project's `.cas`. Resolve
+        // their registered root before interpreting `.cas` and `.git` as secrets.
+        let checkout_root = if resolved.starts_with(project_root.join(".cas")) {
+            registered_checkout_root(&resolved, &project_root)
+                .unwrap_or_else(|| project_root.clone())
+        } else {
+            project_root.clone()
+        };
+        for forbidden in [checkout_root.join(".cas"), checkout_root.join(".git")] {
             let forbidden = canonical(&forbidden);
-            if resolved.starts_with(&forbidden) {
+            // A checkout's .cas may alias the shared parent store. Its ancestor
+            // is already checked using the candidate's actual checkout above.
+            let shared_ancestor =
+                checkout_root != project_root && checkout_root.starts_with(&forbidden);
+            if !shared_ancestor && resolved.starts_with(&forbidden) {
                 return Err(PathRefusal::SensitiveDirectory {
                     resolved: resolved.display().to_string(),
                     directory: forbidden.display().to_string(),
@@ -205,6 +241,51 @@ mod tests {
         }
         fs::write(path, body).unwrap();
         path.to_path_buf()
+    }
+
+    fn nested_worktree(f: &Fixture) -> PathBuf {
+        let git = |args: &[&std::ffi::OsStr]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&f.project_root)
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.test",
+                ])
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init".as_ref()]);
+        git(&[
+            "commit".as_ref(),
+            "--allow-empty".as_ref(),
+            "-m".as_ref(),
+            "fixture".as_ref(),
+        ]);
+        let checkout = f.project_root.join(".cas/worktrees/worker");
+        git(&[
+            "worktree".as_ref(),
+            "add".as_ref(),
+            "--detach".as_ref(),
+            checkout.as_os_str(),
+        ]);
+        checkout
     }
 
     #[test]
@@ -279,6 +360,22 @@ mod tests {
     }
 
     #[test]
+    fn registered_nested_worktree_report_is_publishable_cas_9615() {
+        let f = fixture();
+        let checkout = nested_worktree(&f);
+        let report = write(
+            &checkout.join("docs/release-reports/v9.99.0.html"),
+            "report",
+        );
+        assert_eq!(resolve_publishable_path(&report, &f.roots).unwrap(), report);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(f.project_root.join(".cas"), checkout.join(".cas")).unwrap();
+            assert_eq!(resolve_publishable_path(&report, &f.roots).unwrap(), report);
+        }
+    }
+
+    #[test]
     fn a_file_outside_both_roots_is_refused_and_the_message_names_both() {
         let f = fixture();
         let file = write(&f.outside.join("secrets.txt"), "nope");
@@ -347,6 +444,7 @@ mod tests {
     #[test]
     fn the_credential_and_git_directories_are_never_publishable() {
         let f = fixture();
+        let checkout = nested_worktree(&f);
         let cloud = write(
             &f.project_root.join(".cas").join("cloud.json"),
             "{\"token\":\"x\"}",
@@ -362,6 +460,45 @@ mod tests {
             resolve_publishable_path(&git_config, &f.roots).unwrap_err(),
             PathRefusal::SensitiveDirectory { .. }
         ));
+
+        for path in [
+            checkout.join(".cas/cloud.json"),
+            checkout.join(".cas/cas.db"),
+            checkout.join(".cas/keys/private.pem"),
+            checkout.join(".git"),
+            f.project_root
+                .join(".cas/worktrees/unregistered/docs/report.html"),
+        ] {
+            if !path.exists() {
+                write(&path, "protected");
+            }
+            assert!(
+                matches!(
+                    resolve_publishable_path(&path, &f.roots),
+                    Err(PathRefusal::SensitiveDirectory { .. })
+                ),
+                "{}",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
+        {
+            let alias = checkout.join("docs/credentials.json");
+            fs::create_dir_all(alias.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&cloud, &alias).unwrap();
+            assert!(matches!(
+                resolve_publishable_path(&alias, &f.roots),
+                Err(PathRefusal::SensitiveDirectory { .. })
+            ));
+
+            // A stale worktree registration must not authorize its new target.
+            fs::rename(&checkout, f.project_root.join("moved-checkout")).unwrap();
+            std::os::unix::fs::symlink(f.project_root.join(".cas"), &checkout).unwrap();
+            assert!(matches!(
+                resolve_publishable_path(&checkout.join("cloud.json"), &f.roots),
+                Err(PathRefusal::SensitiveDirectory { .. })
+            ));
+        }
     }
 
     #[test]

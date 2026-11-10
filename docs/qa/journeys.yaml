@@ -16,6 +16,11 @@ bug_families:
     title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
     tasks: [cas-1a73]
     journeys: [HUB-J5]
+  published-peer-landing-wake:
+    title: Published landing approvals wake idle supervisors while explicit receipt and quiet intent stay quiet
+    tasks: [cas-35563]
+    invariants: [HUB-J5-NO-ACTION-WAKES]
+    journeys: [HUB-J5]
   released-delivery-metadata-supersession:
     title: Released fragments and generated codemaps do not block close; missing source and unpromoted entries still refuse
     tasks: [cas-2fe8]

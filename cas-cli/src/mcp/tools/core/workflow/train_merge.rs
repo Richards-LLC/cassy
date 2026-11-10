@@ -665,8 +665,11 @@ mod tests {
 
         let returned = tasks.get(&task.id).unwrap();
         assert_eq!(returned.status, TaskStatus::Open, "{error}");
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
         assert_eq!(returned.assignee, task.assignee);
         assert!(returned.deliverables.factory_branch_anchor.is_none());
+        assert_eq!(cas_store::get_latest_verification_dispatch(&fixture.root, &task.id)
+            .unwrap().unwrap().state, VerificationDispatchState::Invalidated);
         assert!(returned.notes.contains("shared.md"), "{}", returned.notes);
         assert!(error.message.contains("shared.md"), "{error}");
         assert_eq!(GitOperations::new(fixture._repo.path().to_path_buf())

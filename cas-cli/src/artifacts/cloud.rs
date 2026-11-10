@@ -526,14 +526,11 @@ impl ArtifactUploadClient {
         }
     }
 
-    /// The team and project `begin` names when the request leaves them unset.
-    /// The project is only sent alongside a team, which is how Cloud accepts
-    /// it.
+    /// Retain the project for scoped reads in personal and team accounts.
+    /// Upload defaults send it only alongside a team, as Cloud requires.
     pub fn with_scope(mut self, team_id: Option<String>, project_id: Option<String>) -> Self {
         let team_id = team_id.filter(|id| !id.trim().is_empty());
-        self.project_id = project_id
-            .filter(|id| !id.trim().is_empty())
-            .filter(|_| team_id.is_some());
+        self.project_id = project_id.filter(|id| !id.trim().is_empty());
         self.team_id = team_id;
         self
     }
@@ -552,7 +549,9 @@ impl ArtifactUploadClient {
         body.mime = mime;
         if body.team_id.is_none() {
             body.team_id = self.team_id.clone();
-            body.project_id = body.project_id.or_else(|| self.project_id.clone());
+            if body.team_id.is_some() {
+                body.project_id = body.project_id.or_else(|| self.project_id.clone());
+            }
         }
         let response = ureq::post(&url)
             .set("Authorization", &format!("Bearer {}", self.token))
@@ -1362,25 +1361,27 @@ mod view_url_tests {
         assert_eq!(begun.artifact_id, "cloud-45");
     }
 
-    #[test]
-    fn a_project_is_only_sent_with_a_team() {
-        let client = ArtifactUploadClient::new("https://cloud.example", "t")
-            .with_scope(None, Some("github.com/richards-llc/cassy".to_string()));
-        assert_eq!(client.team_id, None);
-        assert_eq!(client.project_id, None);
-        let body = serde_json::to_string(&BeginRequest {
-            task_id: "cas-1".to_string(),
-            name: "a.txt".to_string(),
-            mime: "text/plain".to_string(),
-            size_bytes: 1,
-            sha256: "c".repeat(64),
-            team_id: None,
-            project_id: None,
-        })
-        .unwrap();
-        assert!(
-            !body.contains("team_id") && !body.contains("project_id"),
-            "{body}"
-        );
+    #[tokio::test]
+    async fn a_project_is_only_sent_with_a_team() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/artifacts/begin"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-personal", "upload_url": format!("{}/put", server.uri()),
+            })))
+            .expect(1).mount(&server).await;
+        let endpoint = server.uri();
+        tokio::task::spawn_blocking(move || {
+            ArtifactUploadClient::new(&endpoint, "t")
+                .with_scope(None, Some("github.com/richards-llc/cassy".into()))
+                .begin(&BeginRequest {
+                    task_id: "cas-1".into(), name: "a.txt".into(), mime: "text/plain".into(),
+                    size_bytes: 1, sha256: "c".repeat(64), team_id: None, project_id: None,
+                })
+        }).await.unwrap().unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(body.get("team_id").is_none());
+        assert!(body.get("project_id").is_none());
     }
 }

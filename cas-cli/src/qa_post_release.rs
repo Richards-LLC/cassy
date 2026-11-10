@@ -402,7 +402,6 @@ mod tests {
         // The notice is obsolete once QA is covered, even though a different
         // close gate still holds this shipped task open.
         assert!(!batch_notice_deliverable(&cas, queue.as_ref(), &transferred[0]).unwrap());
-        fs::remove_dir_all(cas.join("post-release/batch-offers")).unwrap();
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 1, "only the uncovered late delivery needs a receipt");
         let rows = crate::store::open_supervisor_queue_store(&cas).unwrap().list_pending(&unrelated.id).unwrap();
         let latest = rows.iter().filter(|row| row.payload.contains("batch_receipt_offer"))
@@ -1209,16 +1208,31 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         };
         live.entry((target, tip, recipient.id, recipient.name, recipient.session)).or_default().push(id);
     }
-    let offered = cas_root.join("post-release").join("batch-offers");
+    let notices = crate::store::open_supervisor_queue_store(cas_root)?;
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
     let mut sent = 0;
-    for ((target, tip, id, name, session), mut ids) in live {
+    'offers: for ((target, tip, id, name, session), mut ids) in live {
         ids.sort_unstable();
         ids.dedup();
         // cas-8863: the target tip is payload evidence, not offer identity.
-        let occurrence = format!("{:x}", Sha256::digest(serde_json::to_vec(&("owner-v1", &target, &id, &name, &session, &ids))?));
-        let marker = offered.join(&occurrence);
-        if marker.is_file() {
-            continue;
+        let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&("owner-v1", &target, &id, &name, &session, &ids))?));
+        let mut occurrence = identity.clone();
+        loop {
+            let key = format!("supervisor-notice:batch_receipt_offer:{occurrence}:{id}");
+            let Some(notice) = notices.get_by_transition_key(&key)? else { break; };
+            let source = format!("supervisor-notice:{}", notice.id);
+            let Some(row) = queue.latest_from_source_to_targets(&source, &[&name], session.as_deref())? else {
+                if notice.prompt_delivered_at.is_some() { continue 'offers; }
+                break; // Repair a committed outbox row's missing prompt with the same key.
+            };
+            if !queue.message_status(row.id)?.is_some_and(|status| {
+                status.pending_reason == Some(cas_store::PendingReason::SupersededStale)
+            }) {
+                continue 'offers;
+            }
+            // cas-b26e: a retired notice starts a new ownership episode. Its
+            // durable ID keeps concurrent producers and crash retries idempotent.
+            occurrence = format!("{identity}:after:{}", notice.id);
         }
         let detail = format!(
             "{} parked deliver{} already live on origin/{target} at {tip}: {}. {batch_close} \
@@ -1233,8 +1247,6 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
         );
         let recipient = crate::supervisor_notices::Recipient { id, name, session };
         crate::supervisor_notices::enqueue_with_context(cas_root, &recipient, "batch_receipt_offer", &detail, &occurrence, Some(serde_json::json!({"task_ids": ids})))?;
-        fs::create_dir_all(&offered)?;
-        fs::write(&marker, format!("{}\n", ids.join("\n")))?;
         sent += 1;
     }
     Ok(sent)

@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  returning-batch-qa-owner:
+    title: Superseded batch QA offers return once per ownership episode when the same supervisor session regains the outstanding set
+    tasks: [cas-b26e]
+    journeys: [FACTORY-QA-RECEIPT]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

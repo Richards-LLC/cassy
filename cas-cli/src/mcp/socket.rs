@@ -5,7 +5,7 @@
 //! # Protocol
 //!
 //! Events are sent as newline-delimited JSON over Unix socket.
-//! The daemon listens at `.cas/daemon.sock`.
+//! The daemon uses `.cas/daemon.sock`, or a private bounded runtime path for long roots.
 
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -78,7 +78,41 @@ pub enum DaemonResponse {
 
 /// Get the socket path for a Cassy root
 pub fn socket_path(cas_root: &Path) -> PathBuf {
-    cas_root.join("daemon.sock")
+    use sha2::Digest as _;
+
+    let root = cas_root.canonicalize().unwrap_or_else(|_| cas_root.to_path_buf());
+    let path = root.join("daemon.sock");
+    // Leave room for the terminating NUL on both Darwin and Linux.
+    if path.as_os_str().len() <= 100 {
+        return path;
+    }
+    let hash = format!("{:x}", sha2::Sha256::digest(root.as_os_str().as_encoded_bytes()));
+    // A fixed short root is intentional: HOME, TMPDIR and store roots can all
+    // exceed the Unix socket ABI. The directory is validated before binding.
+    let uid = unsafe { libc::geteuid() };
+    PathBuf::from(format!("/tmp/cas-mcp-{uid}"))
+        .join(format!("daemon-{}.sock", &hash[..32]))
+}
+
+fn ensure_private_runtime_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.uid() != unsafe { libc::geteuid() }
+        || metadata.mode() & 0o777 != 0o700
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "daemon runtime directory must be an owner-only directory owned by the current user",
+        ));
+    }
+    Ok(())
 }
 
 /// The advisory lock which serializes all daemon-socket ownership changes.
@@ -102,7 +136,7 @@ fn socket_lock_path(cas_root: &Path) -> PathBuf {
 struct SocketLease {
     listener: UnixListener,
     lock: File,
-    cas_root: PathBuf,
+    path: PathBuf,
 }
 
 impl SocketLease {
@@ -112,7 +146,7 @@ impl SocketLease {
     /// first acquire `lock`.  The listener is dropped immediately afterwards,
     /// so there is no interval where a live daemon is unreachable.
     fn cleanup(&self) {
-        let _ = std::fs::remove_file(socket_path(&self.cas_root));
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -131,6 +165,7 @@ impl Drop for SocketLease {
 /// lifetime.  This serializes stale-socket recovery with bind and cleanup, so
 /// no contender can unlink a pathname another contender has just bound.
 fn create_listener(cas_root: &Path) -> std::io::Result<SocketLease> {
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream as StdUnixStream;
 
     let path = socket_path(cas_root);
@@ -155,6 +190,11 @@ fn create_listener(cas_root: &Path) -> std::io::Result<SocketLease> {
             ));
         }
         Err(e) => return Err(e),
+    }
+
+    let bounded = path.file_name() != Some(std::ffi::OsStr::new("daemon.sock"));
+    if bounded {
+        ensure_private_runtime_dir(path.parent().expect("socket has a runtime directory"))?;
     }
 
     // Check if socket exists and has an active listener
@@ -184,10 +224,13 @@ fn create_listener(cas_root: &Path) -> std::io::Result<SocketLease> {
     }
 
     let listener = UnixListener::bind(&path)?;
+    if bounded {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(SocketLease {
         listener,
         lock,
-        cas_root: cas_root.to_path_buf(),
+        path,
     })
 }
 
@@ -605,11 +648,47 @@ mod tests {
 
     #[tokio::test]
     async fn create_listener_refuses_a_live_socket() {
-        let dir = crate::test_paths::short_socket_tempdir();
-        let _owner = create_listener(dir.path()).expect("first bind wins");
+        use std::os::unix::fs::MetadataExt;
 
-        let err = create_listener(dir.path()).expect_err("second bind must be refused");
-        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        let dir = crate::test_paths::short_socket_tempdir();
+        for (index, (name, bounded)) in [("short".to_string(), false), ("long-root-".repeat(20), true)].iter().enumerate() {
+            let root = dir.path().join(name);
+            std::fs::create_dir(&root).unwrap();
+            let owner = create_listener(&root).expect("first bind wins");
+            let alias = dir.path().join(format!("alias-{index}"));
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            assert_eq!(socket_path(&root), socket_path(&alias));
+            assert!(socket_path(&root).as_os_str().len() <= 100);
+            if *bounded {
+                let path = socket_path(&root);
+                assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+                assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
+                let other = root.join("other-store");
+                std::fs::create_dir(&other).unwrap();
+                assert_ne!(socket_path(&root), socket_path(&other));
+            }
+            let err = create_listener(&alias).expect_err("second bind must be refused");
+            assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+            owner.cleanup();
+        }
+    }
+
+    #[test]
+    fn runtime_directory_refuses_public_permissions_and_symlinks() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("runtime");
+        ensure_private_runtime_dir(&path).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(ensure_private_runtime_dir(&path).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+        assert_eq!(ensure_private_runtime_dir(&alias).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[tokio::test]

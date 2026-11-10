@@ -807,14 +807,12 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
         ids.sort();
         ids
     };
-    // A pin is an assignment boundary, including when it has no ready work
-    // or no longer resolves. Only an explicit no-focus state offers the
-    // existing project-wide ready queue (cas-0c98 / GH #1302).
+    // Focus is the assignment boundary. An idle worker does not authorize
+    // the historical project backlog; explicit worker queues advance separately.
     let task_ids = match focused_epic_id {
         Some(epic_id) if focused_open_epic == Some(epic_id) =>
             ready_ids(&|task| task.epic.as_deref() == Some(epic_id)),
-        Some(_) => Vec::new(),
-        None => ready_ids(&|_| true),
+        _ => Vec::new(),
     };
     if task_ids.is_empty() {
         return None;
@@ -1564,10 +1562,14 @@ pub(crate) fn run_worker_health_probe(
     let Some(path) = resolved.transcript_path.as_deref() else {
         return WorkerHealthReport::verdict(request, false);
     };
-    let background_active = wedged::find_worker_pid(&wedged::RealProcessTable, &resolved.name)
-        .or(resolved.pid)
-        .map(wedged::background_processes_for)
-        .is_some_and(|state| state.is_active());
+    // Descendant existence alone can describe a wedged lock waiter forever.
+    // Only measured work from the registered worker's process tree counts.
+    let background_active = crate::store::open_agent_store(cas_root).ok()
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| agents.into_iter().filter(|agent| agent.name == request.worker)
+            .max_by_key(|agent| agent.registered_at))
+        .and_then(|agent| crate::mcp::tools::service::worker_liveness::child_progress(&agent, request.requested_at))
+        .is_some_and(|at| (request.requested_at - at).num_seconds() < request.threshold_secs as i64);
     let age = wedged::transcript_mtime_age(path);
     let window = wedged::activity_fresh_window(resolved.cli)
         .max(Duration::from_secs(request.threshold_secs));

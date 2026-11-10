@@ -135,7 +135,7 @@ pub struct RunContext<'a> {
     /// cas-8239 (GH #1300): the caller's current reply-intent fields
     /// (`coordination_operation_id`, `expected_generation`) for a reply to
     /// this message_id, when it holds the thread's claim.
-    pub reply_claim: &'a dyn Fn(&str) -> Option<Value>,
+    pub reply_claim: &'a dyn Fn(&str) -> Result<Option<Value>, VioletError>,
 }
 
 /// CLI entry point.
@@ -158,7 +158,10 @@ pub fn execute(
         )
     };
     let mut connect = || -> Result<Box<dyn Hub>, VioletError> { connect_live(cas_root) };
-    let reply_claim = |reply_to: &str| cas_root.and_then(|root| current_reply_claim(root, reply_to));
+    let reply_claim = |reply_to: &str| match cas_root {
+        Some(root) => current_reply_claim(root, reply_to),
+        None => Ok(None),
+    };
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut context = RunContext {
@@ -173,18 +176,18 @@ pub fn execute(
 }
 
 /// cas-8239: the reply intent this session registered for the thread, read
-/// from the project's request journal. No session or no intent is `None`.
-fn current_reply_claim(cas_root: &Path, reply_to: &str) -> Option<Value> {
+/// from the project's request journal. Missing authority on a known managed
+/// thread is a local refusal, including when no session is registered.
+fn current_reply_claim(cas_root: &Path, reply_to: &str) -> Result<Option<Value>, VioletError> {
     let session = std::env::var("CAS_SESSION_ID")
         .ok()
         .filter(|id| !id.trim().is_empty())
-        .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok())?;
-    let agent = crate::store::open_agent_store(cas_root).ok()?.get(&session).ok()?;
-    crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
-        .ok()?
-        .current_reply_post(&agent.id, reply_to, chrono::Utc::now())
-        .ok()
-        .flatten()
+        .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok());
+    let registration = session.and_then(|session| {
+        crate::store::open_agent_store(cas_root).ok()?.get(&session).ok()
+    }).map(|agent| agent.id).unwrap_or_default();
+    crate::coordination::external_work::reply_post(cas_root, &registration, reply_to)
+        .map_err(|error| VioletError::local(&error.code, error.message))
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -307,19 +310,14 @@ fn run_post(
     // cas-8239 (GH #1300): a reply into a thread this session claimed and
     // registered a reply intent for carries that intent, so the hub posts it
     // as the managed reply. Without one the fields stay off and a managed
-    // thread refuses the reply, exactly as before.
-    let managed = reply_to.as_deref().and_then(|reply_to| (context.reply_claim)(reply_to));
-    // cas-d626: the hub accepts a managed reply only inline, so files past
-    // the inline limit fail here instead of as a bare hub refusal.
-    if managed.is_some() && route == Route::External {
-        let total: u64 = files.iter().map(|file| file.size_bytes).sum();
+    // thread still enforces its remote authority. Known managed threads fail
+    // locally when the caller has no live intent, before any upload is begun.
+    let managed = reply_to.as_deref().map(|reply_to| (context.reply_claim)(reply_to)).transpose()?.flatten();
+    let request_id = optional(args.request_id.as_ref(), "--request-id")?;
+    if request_id.is_some() && managed.is_none() {
         return Err(VioletError::local(
-            "invalid_input",
-            format!(
-                "a managed thread reply carries files only inline, at most {} bytes (1 MiB) in total; \
-                 these files total {total} bytes. Attach fewer or smaller files",
-                files::INLINE_LIMIT
-            ),
+            "managed_reply_required",
+            "--request-id requires this session's current reply intent; check claim_status and register a reply intent",
         ));
     }
     let epic = args.epic.clone().or_else(|| {
@@ -339,7 +337,6 @@ fn run_post(
     {
         gate_check(context, &post)?;
     }
-    let request_id = optional(args.request_id.as_ref(), "--request-id")?;
     let claim = managed.map(|block| {
         json!({
             "coordination_operation_id": block["coordination_operation_id"],

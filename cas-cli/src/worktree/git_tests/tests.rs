@@ -652,7 +652,8 @@ fn test_commits_behind_counts_one_sided_divergence() {
     advance_origin_main(&temp, &origin_path, 2);
 
     let git = GitOperations::new(local_path);
-    git.fetch_branch("main").unwrap();
+    // Parked-delivery callers supply their own exact tracking destination.
+    git.fetch_branch("+refs/heads/main:refs/remotes/origin/main").unwrap();
 
     assert_eq!(git.commits_behind("main", "origin/main").unwrap(), 2);
     // Local has nothing origin/main lacks — behind count the other way is 0.

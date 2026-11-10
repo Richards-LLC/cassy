@@ -57,10 +57,10 @@ describe("fleet actions send the brief's operations with their preconditions (ca
   });
 
   it("focuses an epic with Undo back to the previous one, and adds 1-4 workers optionally on a ready task", () => {
-    expect(focusEpicAction("cas-f29b", "cas-c4d3").request).toEqual({ op: { kind: "focus_epic", epic_id: "cas-f29b" }, expected: { epic_id: "cas-c4d3" } });
-    expect(focusEpicAction("cas-f29b", "cas-c4d3").inverse!().request.op).toEqual({ kind: "focus_epic", epic_id: "cas-c4d3" });
+    expect(focusEpicAction({ id: "cas-f29b", title: "Current build" }, { id: "cas-c4d3", title: "Previous build" }).request).toEqual({ op: { kind: "focus_epic", epic_id: "cas-f29b" }, expected: { epic_id: "cas-c4d3" } });
+    expect(focusEpicAction({ id: "cas-f29b", title: "Current build" }, { id: "cas-c4d3", title: "Previous build" }).inverse!().request.op).toEqual({ kind: "focus_epic", epic_id: "cas-c4d3" });
     // With no focus before, Undo clears it (focus_epic clear=true, cas-566b).
-    expect(focusEpicAction("cas-f29b", null).inverse!().request).toEqual({ op: { kind: "focus_epic", clear: true }, expected: { epic_id: "cas-f29b" } });
+    expect(focusEpicAction({ id: "cas-f29b", title: "Current build" }, null).inverse!().request).toEqual({ op: { kind: "focus_epic", clear: true }, expected: { epic_id: "cas-f29b" } });
     expect(spawnAction(9, "cas-2001").request.op).toEqual({ kind: "spawn_workers", count: 4, task_id: "cas-2001" });
     expect(spawnAction(1).inverse).toBeUndefined();
   });
@@ -163,10 +163,23 @@ function context(scopes: Scope[], state = new FleetOpsState(), on: Partial<Fleet
     toggleMenu: vi.fn(), choose: vi.fn(), confirm: vi.fn(), cancelConfirm: vi.fn(), openPreview: vi.fn(), sendMerge: vi.fn(),
     closePanels: vi.fn(), toggleAssign: vi.fn(), toggleHeader: vi.fn(), undo: vi.fn(), ...on,
   };
-  return { state, scopes, origin: ORIGIN, now: 0, agents: [lark, owl], tasks: [ready, parked], epics: ["cas-f29b", "cas-c4d3"], currentEpic: "cas-c4d3", asked: new Map(), relative: () => "2m ago", on: handlers };
+  return { state, scopes, origin: ORIGIN, now: 0, agents: [lark, owl], tasks: [ready, parked], epics: [{ id: "cas-f29b", title: "Build work", status: "open", assignee: "lead" }, { id: "cas-c4d3", title: "Current work", status: "open", assignee: "lead" }], supervisors: ["lead"], currentEpic: "cas-c4d3", asked: new Map(), relative: () => "2m ago", on: handlers };
 }
 
 describe("the rail's controls draw that state (cas-a474)", () => {
+  it("keeps unavailable release facts in evidence text instead of headings or count emphasis (cas-504e9)", () => {
+    for (const epic of [undefined, { id: "train", title: "Release with missing counts" }]) {
+      const header = releaseHeader(document, epic);
+      expect(header.querySelector(".release-count, strong, b, .status-chip")).toBeNull();
+      const evidence = header.querySelector("p.release-meta");
+      expect(evidence?.textContent?.trim()).toBeTruthy();
+      expect(header.querySelector("h3")?.textContent).toBe(epic?.title);
+      if (!epic) {
+        expect(header.children).toHaveLength(1);
+        expect(header.querySelector("h1, h2, h3, h4, h5, h6, [role=heading]")).toBeNull();
+      }
+    }
+  });
   it("shows a frozen train's measured ETA and offers the operator one-tap Lift, Freeze otherwise (cas-2f4d)", () => {
     const choose = vi.fn();
     const frozen = { id: "cas-tr", title: "Release train vNEXT", freeze: { frozen_at: "2026-11-07T19:05:00Z", eta: "2026-11-07T19:50:00Z", summary: "Frozen 2:05 PM ET · ETA 2:50 PM ET" } };
@@ -246,8 +259,32 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     state.assignFor = "task:cas-2001";
     const view = taskControls(document, context([...CONTROL, "factory-operate"], state), ready)!;
     expect([...view.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining(owl.name)]);
-    const header = headerControls(document, context([...CONTROL, "factory-operate"]), "focus");
-    expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining("cas-f29b")]);
+    const catalog = [
+      { id: "current", title: "Current work", status: "open", assignee: "lead", priority: 0 },
+      { id: "low", title: "Small fixes", status: "open", epic_verification_owner: "lead-id", priority: 2 },
+      { id: "foreign", title: "Other project", status: "open", assignee: "other", priority: 0 },
+      { id: "closed", title: "Old release", status: "closed", assignee: "lead", priority: 0 },
+      { id: "cancelled", title: "Abandoned", status: "cancelled", assignee: "lead", priority: 0 },
+      { id: "high", title: "Launch repair", status: "in_progress", assignee: "lead", priority: 0 },
+      { id: "train", title: "Release train next", status: "open", assignee: "lead", priority: 1, auto_cut_paused: false },
+    ];
+    const choose = vi.fn();
+    const header = headerControls(document, { ...context([...CONTROL, "factory-operate"], state, { choose }), epics: catalog, currentEpic: "current", supervisors: ["lead", "lead-id"] }, "focus");
+    const items = [...header.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    for (const item of items) item.click();
+    const actions = choose.mock.calls.map(call => call[1]);
+    expect(actions.map(action => action.request.op.epic_id)).toEqual(["train", "high", "low"]);
+    for (const [index, id] of ["train", "high", "low"].entries()) {
+      const title = catalog.find(epic => epic.id === id)!.title;
+      expect(items[index]!.textContent).toContain(title);
+      expect(actions[index].progress).toContain(title);
+      expect(actions[index].done).toContain(title);
+    }
+    expect(actions[0].inverse().request.op.epic_id).toBe("current");
+    expect(actions[0].inverse().done).toContain(catalog[0]!.title);
+    const empty = headerControls(document, { ...context([...CONTROL, "factory-operate"]), epics: catalog.filter(epic => epic.status === "closed") }, "focus");
+    expect(empty.querySelectorAll('[role="menuitem"]')).toHaveLength(0);
+    expect(empty.querySelector('[role="status"]')).not.toBeNull();
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
     expect(readOnly.querySelector(".fleet-ops-add")).toBeNull();
     expect(readOnly.querySelector("summary")?.textContent).toBeTruthy();

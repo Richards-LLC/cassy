@@ -1,5 +1,5 @@
 import type { Page, Request } from "@playwright/test";
-import { test, expect, journeyPart } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { RELAY, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, PELICAN, STUDIO } from "./world";
 
@@ -90,7 +90,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       });
       await journey.stage("Open this project's tasks in Explorer", async () => {
         await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         const link = page.locator("#status-view, .conversation-context").getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
         await expect(link).toBeVisible();
         await followToExplorer(page, link, requests, PROJECT_EXPLORER);

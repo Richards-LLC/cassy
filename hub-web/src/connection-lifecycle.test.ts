@@ -1443,6 +1443,7 @@ describe("Commander live connection lifecycle", () => {
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
     const connection = supervisor(await storedMachine("catalog-removal"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const attached = connection.attach("session-a");
@@ -1470,7 +1471,13 @@ describe("Commander live connection lifecycle", () => {
     expect(subscriptions()).toHaveLength(1);
     listed = true;
     await connection.refreshSessions();
-    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+    // The replacement shares the two-attaches-per-second budget. Advance its
+    // rate slot rather than racing a real one-second timer against waitFor.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
   it("recovers transport after offline even when the catalog fails", async () => {
@@ -1526,6 +1533,36 @@ describe("Commander live connection lifecycle", () => {
       expect(pings, "catalog work must not prevent the socket liveness probe").toBe(beat + 1);
       expect(connection.snapshot()).toMatchObject({ phase: "live", degraded: false, missedHeartbeats: 0 });
     }
+  });
+
+  // cas-327d: a renderer exception while handling one frame is a page bug,
+  // not a transport failure. It used to abandon the healthy machine socket,
+  // and the replayed frame threw again on every reconnect: a loop that showed
+  // every supervisor as "Reconnecting".
+  it("keeps the machine socket when a UI callback throws on a frame (cas-327d)", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const connection = new HubConnectionSupervisor(await storedMachine("throwing-renderer"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSocketError: () => {}, onOutput: () => {},
+      onSessionState: () => { throw new TypeError("renderer failed on this frame"); },
+    });
+    supervisors.push(connection);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] }, protocol_version: 3 } } });
+    await vi.advanceTimersByTimeAsync(STAGE_TIMEOUT_MS.attaching + MACHINE_RETRY_CEILING_MS);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(socket.readyState).toBe(TransportSocket.OPEN);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(connection.snapshot().phase).toBe("live");
   });
 
   it("does not subscribe a session that ends while waiting for its attach rate slot", async () => {

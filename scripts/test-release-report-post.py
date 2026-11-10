@@ -24,6 +24,7 @@ DEV_THREAD = "1710000000.000010"
 OLD_THREAD = "1709999999.999999"
 NEW_REPLY = "1710000000.000002"
 READ_SINCE = "2024-03-09T16:00:00.000001Z"
+PDF_MESSAGE_PERMALINK = "https://example.test/archives/C-report/p1710000000000002?thread_ts=1710000000.000001"
 
 
 class StubState:
@@ -194,8 +195,11 @@ def handler_for(state: StubState):
                     return
                 if arguments["kind"] == "file":
                     assert arguments["reply_to"] == USER_THREAD
-                    assert arguments["file"]["content_encoding"] == "base64"
-                    assert base64.b64decode(arguments["file"]["content"]) == state.pdf
+                    batch = "files" in arguments
+                    uploads = arguments["files"] if batch else [arguments["file"]]
+                    assert len(uploads) == 1
+                    assert uploads[0]["content_encoding"] == "base64"
+                    assert base64.b64decode(uploads[0]["content"]) == state.pdf
                     file_receipt = {
                         "file_id": "F-report",
                         "permalink": "https://example.test/files/report.pdf",
@@ -211,11 +215,16 @@ def handler_for(state: StubState):
                         "message": {
                             "message_id": "file-message",
                             "thread_id": USER_THREAD,
-                            "permalink": "https://example.test/files/report.pdf",
+                            # Violet's single-file path reuses the file URL;
+                            # files[] resolves the uploaded message separately.
+                            "permalink": PDF_MESSAGE_PERMALINK if batch else file_receipt["permalink"],
                         },
                     }
                     if state.include_file_block:
-                        receipt["file"] = file_receipt
+                        if batch:
+                            receipt["files"] = [file_receipt]
+                        else:
+                            receipt["file"] = file_receipt
                     result = {
                         "_id": request_id,
                         "content": [
@@ -798,7 +807,9 @@ def main() -> int:
         assert fields["TAG"] == "v9.99.0"
         assert fields["PDF_FILE_ID"] == "F-report"
         assert fields["PDF_MESSAGE_ID"] == "file-message"
-        assert fields["PDF_MESSAGE_PERMALINK"] == "https://example.test/files/report.pdf"
+        assert fields["PDF_MESSAGE_PERMALINK"] == PDF_MESSAGE_PERMALINK
+        assert fields["PDF_FILE_PERMALINK"] == "https://example.test/files/report.pdf"
+        print("Release receipt links: upload message and PDF file retain their distinct returned permalinks")
         assert fields["HTML_FILE_ID"] == "html-message"
         assert fields["USER_THREAD_TS"] == USER_THREAD
         assert fields["DEV_THREAD_TS"] == DEV_THREAD

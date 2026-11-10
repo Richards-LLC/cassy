@@ -2791,6 +2791,88 @@ async fn supervisor_reorders_clears_and_inspects_pending_queue_cas_8488() {
     assert_eq!(f.task("cas-8488-one").assignee, None);
 }
 
+/// Supervisor unassignment revokes both pending entries and an unleased cursor.
+#[tokio::test]
+async fn unassigned_tasks_leave_worker_queue_cas_6184() {
+    for (id, assignee, leased) in [
+        ("cas-8488-current", WORKER, false),
+        ("cas-8488-current", "nocode-worker-session", true),
+        ("cas-8488-one", WORKER, false),
+        ("cas-8488-one", "nocode-worker-session", true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = queue_control_fixture(&mut env);
+        let _ = queue_control(&f, Some(vec!["cas-8488-one"])).await;
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        if !leased {
+            agents.release_lease("cas-8488-current", "nocode-worker-session").unwrap();
+        }
+        let mut current = f.task("cas-8488-current");
+        current.status = TaskStatus::Open;
+        f.put(&current);
+        let mut task = f.task(id);
+        task.assignee = Some(assignee.into());
+        f.put(&task);
+        let response = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "assignee":"",
+        })).await;
+        let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+        let queue = queues.get("queue-session", WORKER).unwrap();
+        assert_ne!(queue.current_task.as_deref(), Some(id), "{response}");
+        assert!(!queue.pending.iter().any(|pending| pending == id), "{response}");
+        crate::worker_task_queue::reconcile_worker_task_queues(&f.cas_dir(), "queue-session").await.unwrap();
+        assert_eq!((f.task(id).status, f.task(id).assignee), (TaskStatus::Open, None));
+    }
+}
+
+/// An open, unleased cursor is pending work and may appear in a new order.
+#[tokio::test]
+async fn supervisor_reorders_open_unleased_cursor_cas_6184() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = queue_control_fixture(&mut env);
+    let _ = queue_control(&f, Some(vec!["cas-8488-one"])).await;
+    let mut current = f.task("cas-8488-current");
+    current.status = TaskStatus::Open;
+    f.put(&current);
+    let request = serde_json::from_value(serde_json::json!({
+        "action":"worker_queue", "id":WORKER,
+        "task_ids":["cas-8488-two", "cas-8488-current", "cas-8488-one"],
+    })).unwrap();
+    assert!(f.supervisor.factory(Parameters(request)).await.is_err());
+    open_agent_store(&f.cas_dir()).unwrap()
+        .release_lease("cas-8488-current", "nocode-worker-session").unwrap();
+    let _ = queue_control(&f, Some(vec!["cas-8488-two", "cas-8488-current", "cas-8488-one"])).await;
+    let queues = cas_store::worker_task_queue_store::SqliteWorkerTaskQueueStore::open(&f.cas_dir()).unwrap();
+    let queue = queues.get("queue-session", WORKER).unwrap();
+    assert_eq!(queue.current_task.as_deref(), Some("cas-8488-two"));
+    assert_eq!(queue.pending, vec!["cas-8488-current", "cas-8488-one"]);
+    assert_eq!(f.task("cas-8488-two").status, TaskStatus::InProgress);
+}
+
+/// Queue admission uses requires-start; ordinary blocks still permits preparation.
+#[tokio::test]
+async fn queued_start_respects_hard_prerequisites_cas_6184() {
+    for (dependency, expected) in [
+        (DependencyType::RequiresStart, "cas-8488-two"),
+        (DependencyType::Blocks, "cas-8488-one"),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = queue_control_fixture(&mut env);
+        open_task_store(&f.cas_dir()).unwrap().add_dependency(&Dependency::new(
+            "cas-8488-one".into(), "cas-8488-three".into(), dependency,
+        )).unwrap();
+        let _ = queue_control(&f, Some(vec!["cas-8488-one", "cas-8488-two"])).await;
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":"cas-8488-current", "reason":"Portable proof recorded",
+        })).await;
+        assert_eq!(f.task(expected).status, TaskStatus::InProgress, "{response}");
+        if dependency == DependencyType::RequiresStart {
+            assert_eq!(f.task("cas-8488-one").status, TaskStatus::Open);
+            assert!(open_agent_store(&f.cas_dir()).unwrap().get_lease("cas-8488-one").unwrap().is_none());
+        }
+    }
+}
+
 /// cas-526e: a released queue head leaves the queue. Queue repair used to
 /// restart it at once, which blocked the next task's start.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

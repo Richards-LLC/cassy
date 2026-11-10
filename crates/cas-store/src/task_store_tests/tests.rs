@@ -91,8 +91,13 @@ fn test_task_crud() {
 #[test]
 fn task_note_append_preserves_concurrent_appends() {
     let (temp, store) = create_test_store();
-    let task = Task::new("task-note-contention".to_string(), "Task notes".to_string());
+    let mut task = Task::new("task-note-contention".to_string(), "Task notes".to_string());
+    let spawn_note = "[2026-11-10 12:28] 📌 SPAWN BRIEF investigate note loss";
+    task.notes = spawn_note.into();
+    task.assignee = Some("worker".into());
     store.add(&task).unwrap();
+    // Start holds this snapshot while the supervisor appends discovery notes.
+    let mut starting = store.get(&task.id).unwrap();
 
     let stores: Vec<_> = (0..8)
         .map(|_| Arc::new(SqliteTaskStore::open(temp.path()).unwrap()))
@@ -117,7 +122,16 @@ fn task_note_append_preserves_concurrent_appends() {
             .expect("concurrent note append should succeed");
     }
 
+    starting.status = TaskStatus::InProgress;
+    // The real start handler refreshes this clock before its whole-row update.
+    starting.updated_at = Utc::now();
+    let start_note = "[2026-11-10 12:33] START CONTEXT worker instructions";
+    starting.notes.push_str(&format!("\n\n{start_note}"));
+    store.update(&starting).unwrap();
     let persisted = store.get(&task.id).unwrap();
+    assert_eq!(persisted.status, TaskStatus::InProgress);
+    assert_eq!(persisted.notes.matches(spawn_note).count(), 1);
+    assert_eq!(persisted.notes.matches(start_note).count(), 1);
     for index in 0..8 {
         let note = format!("concurrent note {index}");
         assert_eq!(persisted.notes.matches(&note).count(), 1, "{note}");

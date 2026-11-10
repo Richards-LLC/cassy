@@ -1,0 +1,4 @@
+title: The one-row Commander header keeps overflow-menu actions anchored to the visible toggle, its inline menu unclipped, and its journeys asserting stable identifiers rather than retired text
+tasks: [cas-e1db]
+invariants: [HUB-PHONE-OVERFLOW-ANCHOR]
+journeys: [HUB-J4, HUB-J9, HUB-J17, HUB-J18, HUB-J25, HUB-J27]

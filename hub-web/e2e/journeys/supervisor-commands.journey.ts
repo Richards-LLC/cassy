@@ -30,6 +30,12 @@ async function captureReload(page: Page, name: string, width: number): Promise<v
 for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 }]) {
   test.describe(`${viewport.width}`, () => {
     test.use({ viewport, colorScheme: viewport.width === 390 ? "dark" : "light" });
+    // cas-bcf0: a phone header keeps Commands in its overflow menu.
+    const phone = viewport.width === 390;
+    const openCommands = async (page: Page) => {
+      if (phone) await page.getByRole("button", { name: "More conversation actions", exact: true }).click();
+      await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
+    };
     test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {
       const machine = { ...ATLAS, sessions: ATLAS.sessions.map(session => ({ ...session, harness: "claude" as const })) };
       const hub = await journey.hub({ machines: [machine], paired: ["atlas"], commands: [PELICAN],
@@ -121,8 +127,9 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(hub.sends).toHaveLength(0);
       });
       await journey.stage("Open the header dropdown beside its button, then submit typed mcp without chat", async () => {
-        const toggle = page.locator("#conversation-commands");
-        await toggle.click();
+        // On a phone the palette opens under the overflow toggle it was chosen from.
+        const toggle = page.locator(phone ? "#conversation-more" : "#conversation-commands");
+        await openCommands(page);
         const palette = page.locator("#supervisor-command-palette");
         await expect(palette.locator('[data-supervisor-command="mcp"]')).toContainText(/\S/);
         await expect(palette.locator('[data-supervisor-command="mcp"]')).toBeVisible();
@@ -192,7 +199,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await journey.stage("Choose Usage from the slash palette with the keyboard", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await expect(page.getByRole("button", { name: "Supervisor commands", exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: phone ? "More conversation actions" : "Supervisor commands", exact: true })).toBeVisible();
         await input.fill("/us");
         await expect(page.locator("[data-supervisor-command]")).toHaveCount(1);
         await input.press("ArrowDown");
@@ -301,7 +308,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         expect(mutations()).toHaveLength(3);
       });
       await journey.stage("Cancel Clear, then confirm Exit for the named supervisor", async () => {
-        await page.getByRole("button", { name: "Supervisor commands", exact: true }).click();
+        await openCommands(page);
         await page.locator('[data-supervisor-command="clear"]').click();
         const dialog = page.getByRole("alertdialog");
         await expect(dialog).toContainText("cas-src");

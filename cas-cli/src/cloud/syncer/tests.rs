@@ -1972,6 +1972,80 @@ async fn dependency_healer_skips_foreign_endpoint() {
 }
 
 #[tokio::test]
+async fn cas_cb74_repaired_dependency_identity_drains_after_restart() {
+    use crate::cloud::{CloudConfig, CloudSyncerConfig};
+    use crate::store::{open_store_local, open_task_store_local, open_rule_store_local, open_skill_store_local};
+    use crate::types::{Dependency, DependencyType};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let project = "dependency-heal-project";
+    let team = "team-cas-2125";
+    let mut from = Task::new("cb74-owned".into(), "from".into());
+    from.origin_project = Some(project.into());
+    let mut to = Task::new("cb74-foreign".into(), "to".into());
+    to.origin_project = Some("other-project".into());
+    let edge = Dependency::new(from.id.clone(), to.id.clone(), DependencyType::Blocks);
+    let (temp, _, tasks, queue) = pull_team_task_and_dependency_fixtures(
+        project, vec![], vec![from, to.clone()], vec![edge], vec![],
+    ).await;
+    let original = queue.list_all(10).unwrap().remove(0);
+    assert_eq!(original.last_reason.as_deref(), Some("dependency_endpoint_foreign"));
+    let server = MockServer::start().await;
+    Mock::given(method("GET")).and(path(format!("/api/teams/{team}/sync/pull")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"tasks":[], "task_dependencies":[]})))
+        .mount(&server).await;
+    Mock::given(method("POST")).and(path(format!("/api/teams/{team}/sync/push")))
+        .respond_with(|request: &wiremock::Request| {
+            let body = decode_push_body(request);
+            let key = if body.get("tasks").is_some() { "tasks" } else { "task_dependencies" };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"synced":{key:{"inserted":body[key].as_array().unwrap().len(),"updated":0,"skipped":0}}}))
+        }).expect(2).mount(&server).await;
+    let reopened = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    let syncer = CloudSyncer::new_for_project(reopened.clone(), CloudConfig {
+        endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+    }, CloudSyncerConfig::default(), project.into(), temp.path());
+    let store = open_store_local(temp.path()).unwrap();
+    let rules = open_rule_store_local(temp.path()).unwrap();
+    let skills = open_skill_store_local(temp.path()).unwrap();
+    // A foreign endpoint must remain local, even across sync and restart.
+    syncer.pull_team(team, project, store.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
+    assert!(reopened.pending_for_team(team, 10, 5).unwrap().is_empty());
+    assert_eq!(reopened.list_all(10).unwrap()[0].id, original.id);
+    assert_eq!(reopened.list_all(10).unwrap()[0].created_at, original.created_at);
+    assert_eq!(reopened.list_all(10).unwrap()[0].payload, original.payload);
+    assert_eq!(tasks.get_dependencies("cb74-owned").unwrap().len(), 1);
+
+    // Resetting a retry count cannot authorize a still-foreign endpoint.
+    assert_eq!(reopened.retry_failed_for_reason("dependency_endpoint_foreign", 5).unwrap(), 1);
+    assert_eq!(syncer.push_team(team).unwrap().pushed_task_dependencies, 0);
+    assert_eq!(reopened.list_all(10).unwrap()[0].retry_count, 5);
+
+    // Simulate an explicit, verified ownership repair; sync must revalidate it.
+    to.origin_project = Some(project.into());
+    tasks.update(&to).unwrap();
+    // Request revalidation now rather than wait for the normal inventory
+    // interval after the preceding refused attempt.
+    assert_eq!(reopened.retry_failed_items(&[original.id], None, 5).unwrap(), 1);
+    let tasks = open_task_store_local(temp.path()).unwrap();
+    let repaired = syncer.pull_team(team, project, store.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
+    assert_eq!(repaired.healed_task_dependencies_to_cloud, 1);
+    let rows = reopened.pending_for_team(team, 10, 5).unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.retry_count == 0));
+    let repeated = syncer.pull_team(team, project, store.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
+    assert_eq!(repeated.healed_task_dependencies_to_cloud, 0);
+    assert_eq!(reopened.list_all(10).unwrap().len(), 3);
+    let pushed = syncer.push_team(team).unwrap();
+    assert_eq!(pushed.pushed_tasks, 2);
+    assert_eq!(pushed.pushed_task_dependencies, 1);
+    assert!(pushed.errors.is_empty(), "{:?}", pushed.errors);
+    assert!(reopened.list_all(10).unwrap().is_empty());
+    assert_eq!(syncer.push_team(team).unwrap().pushed_task_dependencies, 0);
+    assert_eq!(tasks.get_dependencies("cb74-owned").unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn heal_cloud_task_dependency_materializes_local_edge() {
     use crate::types::{Dependency, DependencyType};
 
@@ -5439,7 +5513,12 @@ async fn cas_9b5d_personal_daemon_sync_is_unchanged() {
 /// GH1268: only an exact, itemized equivalent write retires personal transport.
 /// All stores and the HTTP boundary are disposable; no live queue is opened.
 #[tokio::test]
-async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
+async fn cas_5986_team_linked_mixed_transport_requires_exact_delivery_cas_d152() {
+    for (explicit_team, team_only) in [(true, false), (true, true), (false, false)] {
+        check(explicit_team, team_only).await;
+    }
+
+    async fn check(explicit_team: bool, team_only: bool) {
     use crate::cloud::{CloudConfig, EntityType, SyncOperation};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -5451,9 +5530,14 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         "[project]\ncanonical_id = \"p\"\n",
     )
     .unwrap();
-    crate::store::open_task_store_local(temp.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(temp.path()).unwrap();
     let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
     queue.init().unwrap();
+    let mut legacy = crate::types::Task::new("legacy".into(), "Legacy personal copy".into());
+    legacy.origin_project = Some("p".into());
+    tasks.add(&legacy).unwrap();
+    queue.enqueue(EntityType::Task, "legacy", SyncOperation::Upsert,
+        Some(&serde_json::to_string(&legacy).unwrap())).unwrap();
     for id in [
         "absent",
         "different",
@@ -5500,15 +5584,20 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             let replacement = serde_json::json!({"id":"raced", "scope":"project", "origin_project":"p", "title":"newer mutation"}).to_string();
             race_queue.enqueue(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement)).unwrap();
             race_queue.enqueue_for_team(EntityType::Task, "raced", SyncOperation::Upsert, Some(&replacement), "team-1").unwrap();
+            let mut rows = vec![
+                    serde_json::json!({"id":"different","outcome":"updated"}),
+                    serde_json::json!({"id":"duplicate","outcome":"inserted"}),
+                    serde_json::json!({"id":"lww","outcome":"skipped_lww"}),
+                    serde_json::json!({"id":"transformed","outcome":"inserted"}),
+                    serde_json::json!({"id":"raced","outcome":"inserted"})
+                ];
+            let has_legacy = body["tasks"].as_array().unwrap().iter().any(|row| row["id"] == "legacy");
+            if has_legacy {
+                rows.push(serde_json::json!({"id":"legacy","outcome":"inserted"}));
+            }
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "canonical_id":"p", "synced":{"tasks":{"inserted":3,"updated":1,"skipped":1}},
-                "rows":[
-                    {"id":"different","outcome":"updated"},
-                    {"id":"duplicate","outcome":"inserted"},
-                    {"id":"lww","outcome":"skipped_lww"},
-                    {"id":"transformed","outcome":"inserted"},
-                    {"id":"raced","outcome":"inserted"}
-                ]
+                "canonical_id":"p", "synced":{"tasks":{"inserted":3 + usize::from(has_legacy),"updated":1,"skipped":1}},
+                "rows":rows
             }))
         }).mount(&server).await;
     let syncer = CloudSyncer::new_for_project(
@@ -5516,8 +5605,9 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         CloudConfig {
             endpoint: server.uri(),
             token: Some("test-token".into()),
-            team_id: Some("team-1".into()),
-            team_only: true,
+            team_id: explicit_team.then(|| "team-1".into()),
+            team_auto_promote: Some(true),
+            team_only,
             ..Default::default()
         },
         CloudSyncerConfig::default(),
@@ -5532,14 +5622,14 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
             .iter()
             .map(|row| row.entity_id.as_str())
             .collect::<Vec<_>>(),
-        [
+        if explicit_team { vec![
             "absent",
             "different",
             "lww",
             "transformed",
             "raced",
             "aggregate"
-        ]
+        ] } else { vec!["legacy", "absent", "different", "duplicate", "lww", "transformed", "raced", "aggregate"] }
     );
     let remaining_team = queue.pending_for_team("team-1", 20, 5).unwrap();
     assert_eq!(
@@ -5548,14 +5638,16 @@ async fn cas_5986_team_only_mixed_transport_requires_exact_delivery() {
         "HTTP acknowledgment cannot consume a newer queued team mutation"
     );
     assert_eq!(remaining_team[0].entity_id, "raced");
-    assert!(
+    assert_eq!(
         queue
             .list_metadata()
             .unwrap()
             .iter()
-            .all(|(key, _)| !key.starts_with("team_delivery_ack:")),
-        "successful cleanup removes only its receipt"
+            .filter(|(key, _)| key.starts_with("team_delivery_ack:")).count(),
+        usize::from(!explicit_team),
+        "only an explicit team link consumes delivery receipts"
     );
+    }
 }
 
 /// cas-abad: Cloud answers a personal pull for a team-owned project with an

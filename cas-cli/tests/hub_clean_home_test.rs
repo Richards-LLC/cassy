@@ -1703,6 +1703,23 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
 
 #[cfg(unix)]
 #[test]
+fn invalid_restart_bind_keeps_the_running_hub_serving() {
+    let home = private_home();
+    let path = system_path();
+    let record = start_hub(home.path(), &path, false);
+
+    let restart = cas_command(home.path(), &path)
+        .args(["--json", "hub", "restart", "--bind", "0.0.0.0"])
+        .output()
+        .expect("restart with a forbidden plaintext bind");
+    assert!(!restart.status.success());
+
+    // This checks real health and the original PID before cleaning up the hub.
+    assert_health_status_and_stop(home.path(), &path, &record);
+}
+
+#[cfg(unix)]
+#[test]
 fn current_hub_with_incomplete_lock_metadata_is_not_reported_ready() {
     let home = private_home();
     let path = system_path();

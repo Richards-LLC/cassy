@@ -176,10 +176,8 @@ fn announce_override(
     reason: &str,
 ) {
     let id = ask_id(ask);
-    let line = format!(
-        "⚠️ {supervisor_name} overrode an unanswered ask to {} on {task_id} (ask {id}) to merge: {reason}",
-        ask.recipient
-    );
+    let summary = format!("{supervisor_name} is merging without an answer from {}.", ask.recipient);
+    let line = format!("{summary}\nTask: {task_id}\nReason: {reason}");
     crate::quality_ledger::intervention(
         cas_root,
         cas_store::InterventionKind::OverrideMerge,
@@ -188,12 +186,13 @@ fn announce_override(
         Some(supervisor_name),
         Some(reason),
     );
-    let _ = crate::supervisor_notices::enqueue(
+    let _ = crate::supervisor_notices::enqueue_with_summary(
         cas_root,
         &crate::supervisor_notices::Recipient::operator(operator_session.unwrap_or("supervisor-recovery")),
         "peer_ask_override",
         &line,
         id,
+        &summary,
     );
 }
 
@@ -263,6 +262,16 @@ mod tests {
             .list_pending("operator")
             .unwrap();
         assert!(notices.iter().any(|notice| notice.payload.contains("prowl silent 7h")), "{notices:?}");
+        crate::supervisor_notices::adopt_operator_notices(&root, "gabber-factory").unwrap();
+        let operator = crate::store::open_prompt_queue_store(&root).unwrap()
+            .peek_all(10).unwrap().into_iter().find(|row| row.target == "operator").unwrap();
+        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&operator.prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert!(!regex::Regex::new(r"^[a-z0-9_]+$").unwrap().is_match(&payload.summary), "{:?}", payload.summary);
+        assert!(!payload.message.contains("ask-4249"), "ask identity stays in machine metadata");
+        let notice: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(notice["kind"], "peer_ask_override");
+        assert_eq!(notice["summary"], payload.summary);
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
         conn.execute(

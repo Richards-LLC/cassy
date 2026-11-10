@@ -15109,6 +15109,11 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
         let handoff = cas::config::factory_task_artifact_dirs(
             &env.cas_root, &artifacts_base, "cas-3111",
         )[0].join("HANDOFF.md");
+        let authored_checkpoint = "Keep this authored next command and open question.\n";
+        if action == "clear_context" {
+            std::fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+            std::fs::write(&handoff, authored_checkpoint).unwrap();
+        }
         let mut before = Vec::new();
         for (id, status) in [
             ("cas-3111", TaskStatus::InProgress),
@@ -15172,7 +15177,11 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
         );
         assert_eq!(std::fs::read(path.join("README")).unwrap(), checkout);
         let checkpoint = std::fs::read_to_string(&handoff).expect("recycle writes a durable task handoff");
-        assert!(checkpoint.contains(&env.task_store().get("cas-3111").unwrap().notes));
+        if action == "clear_context" {
+            assert_eq!(checkpoint, authored_checkpoint);
+        } else {
+            assert!(checkpoint.contains(&env.task_store().get("cas-3111").unwrap().notes));
+        }
         assert!(!path.join("HANDOFF.md").exists(), "recycle never writes scratch notes in the checkout");
         assert!(
             env.prompt_queue().peek_all(10).unwrap().is_empty(),

@@ -131,3 +131,60 @@ async fn a_capped_worker_ask_wakes_the_idle_supervisor_at_once_cas_922d() {
         .expect("the ask is queued");
     assert_eq!(wake_attempt(&mut daemon, id).await, cas_store::WakeAttempt::Fired);
 }
+
+/// GH #1780 part 1: answering a supervisor's ask must not require the worker
+/// to repeat kind=answer. Unsolicited status from that same worker stays capped.
+#[tokio::test(flavor = "current_thread")]
+async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for kind in [None, Some("status")] {
+        let (_root, mut daemon) = super::peer_mailbox_wake_tests::peer_fixture().await;
+        worker_with_landed_park(&daemon);
+        let cas_dir = daemon.app.cas_dir().to_path_buf();
+        let spent = chrono::Utc::now() - chrono::Duration::minutes(10);
+        for lead in 0..6 {
+            crate::supervisor_message_wakes::record(
+                &cas_dir, 900_000 + lead, daemon.app.supervisor_name(),
+                &["worker-id".to_string()], spent, spent,
+            ).unwrap();
+        }
+        let service = |agent: &str| {
+            let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+            core.set_agent_id_for_testing(agent.into());
+            #[cfg(feature = "mcp-proxy")]
+            let service = crate::mcp::tools::CasService::new(core, None);
+            #[cfg(not(feature = "mcp-proxy"))]
+            let service = crate::mcp::tools::CasService::new(core);
+            service
+        };
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let last_row = |body: &str| conn.query_row(
+            "SELECT MAX(id) FROM prompt_queue WHERE instr(prompt, ?1) > 0", [body], |row| row.get::<_, i64>(0),
+        ).unwrap();
+        let evidence = "The updated evidence is art-a757ae0e.";
+        let worker = service("worker-id");
+        let request = |reply_to: Option<i64>| {
+            serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "supervisor", "kind": kind,
+                "in_reply_to": reply_to, "summary": "Updated evidence",
+                "message": evidence,
+            })).unwrap()
+        };
+        worker.coordination(Parameters(request(None))).await.unwrap();
+        let unsolicited = last_row(evidence);
+        age(&daemon, unsolicited, 21);
+        assert_eq!(wake_attempt(&mut daemon, unsolicited).await, cas_store::WakeAttempt::NotAttempted,
+            "unsolicited {kind:?} traffic stays capped");
+
+        let ask = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": WORKER, "kind": "ask",
+            "summary": "Evidence needed", "message": "Which artifact contains the updated evidence?",
+        })).unwrap();
+        service("local-sup").coordination(Parameters(ask)).await.unwrap();
+        let asked = last_row("Which artifact contains the updated evidence?");
+        worker.coordination(Parameters(request(Some(asked)))).await.unwrap();
+        let answer = last_row(evidence);
+        assert_eq!(wake_attempt(&mut daemon, answer).await, cas_store::WakeAttempt::Fired,
+            "linked {kind:?} answer must bypass the cap and burst debounce");
+    }
+}

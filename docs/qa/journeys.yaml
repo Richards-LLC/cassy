@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  operator-mirror-expiry-notice:
+    title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
+    tasks: [cas-1a73]
+    journeys: [HUB-J5]
   operator-release-freeze-pairing:
     title: A verified default pairing can freeze and lift a release train without either worker-management scope; revoked and preview credentials cannot lift it
     tasks: [cas-16c0a]

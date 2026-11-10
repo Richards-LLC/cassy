@@ -36806,7 +36806,6 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
             write("src/feature.rs", "pub fn feature() {}\n");
-            write(".claude/CODEMAP.md", "# Map\n- src/feature.rs: delivered feature\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
             let anchor = head_sha(&p);
@@ -36841,13 +36840,11 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             let release = head_sha(&p);
             git(&p, &["checkout", "-q", "main"]);
             git(&p, &["merge", "--no-ff", "--no-commit", "-q", "epic/release"]);
-            // Regeneration in the integrating resolution replaces the lane map.
-            write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
             if removal == "source drop" {
                 write("src/feature.rs", "// lost feature\n");
             }
             git(&p, &["add", "-A"]);
-            git(&p, &["commit", "-q", "-m", "merge released train; regenerate codemap"]);
+            git(&p, &["commit", "-q", "-m", "merge released train"]);
             let mut task = worker_task("worker");
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());

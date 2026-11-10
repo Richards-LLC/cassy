@@ -1693,6 +1693,23 @@ fn assert_private_state_modes(home: &Path) {
 }
 
 #[test]
+fn hub_help_fits_80_columns() {
+    let home = private_home();
+    let path = system_path();
+    for flag in ["-h", "--help"] {
+        let output = cas_command(home.path(), &path)
+            .args(["hub", flag])
+            .output()
+            .expect("render hub help");
+        assert!(output.status.success());
+        let help = String::from_utf8(output.stdout).unwrap();
+        for line in help.lines() {
+            assert!(line.chars().count() <= 80, "help line exceeds 80 columns: {line}");
+        }
+    }
+}
+
+#[test]
 fn clean_home_process_start_health_status_stop_needs_no_init() {
     let home = private_home();
     let path = system_path();

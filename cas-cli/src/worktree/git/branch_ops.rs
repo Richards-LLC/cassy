@@ -347,7 +347,8 @@ impl GitOperations {
         Ok(true)
     }
 
-    /// Fetch a single branch from `origin`, bounded by [`FETCH_TIMEOUT`].
+    /// Fetch a branch into its origin tracking ref, or an explicit refspec,
+    /// bounded by [`FETCH_TIMEOUT`]. Git validates the refspec before writing.
     ///
     /// Best-effort by design: callers should treat an `Err` as "could not
     /// verify freshness" (offline, no remote configured, remote branch
@@ -363,8 +364,17 @@ impl GitOperations {
     /// seam that lets tests prove the bound actually fires without waiting
     /// out the default 10s.
     pub(crate) fn fetch_branch_bounded(&self, branch: &str, timeout: Duration) -> Result<()> {
+        // A source-only fetch updates FETCH_HEAD but may leave origin/<branch>
+        // stale when remote.origin.fetch tracks only another branch (cas-307e).
+        // Preserve callers that already supply their exact destination.
+        let refspec = if branch.contains(':') {
+            branch.to_string()
+        } else {
+            let branch = branch.strip_prefix("refs/heads/").unwrap_or(branch);
+            format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
+        };
         let mut cmd = Command::new("git");
-        cmd.args(["fetch", "origin", branch])
+        cmd.args(["fetch", "origin", &refspec])
             // Never block on an interactive credential prompt — fail fast
             // instead of hanging (mirrors cas-38e2's fetch_parent_branch_best_effort).
             .env("GIT_TERMINAL_PROMPT", "0")

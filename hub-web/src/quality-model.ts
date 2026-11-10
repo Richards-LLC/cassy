@@ -73,7 +73,7 @@ export const ACTORS: readonly [Actor, string][] = [["workers", "Workers"], ["sup
 
 export interface Point { label: string; release: number; value: number | undefined; perHour?: number; hours: number; change?: string }
 /** What stands behind one release's numbers: the merges counted and the friction filed. */
-export interface ReleaseRecords { label: string; deliveries?: number; coverage?: string; merged: MergedRow[]; friction: FrictionRow[] }
+export interface ReleaseRecords { label: string; deliveries?: number; coverage?: string; merged: MergedRow[]; friction: FrictionRow[]; wakeSources: WakeSourceRow[] }
 export interface Trend { change: string; word: "worse" | "better" | "no change" | "new"; ratio?: number }
 export interface RubricRow { actor: Actor; name: string; unit: string; points?: Point[]; trend?: Trend; format?: (value: number) => string; pending?: Pending }
 export interface WakeSourceRow { supervisor: string; source: string; wakes: number; noOp: number; average: number; total: number; was?: number }
@@ -141,11 +141,12 @@ export function qualityView(report: QualityReport, now = new Date()): QualityVie
   rubrics.sort((a, b) => ACTORS.findIndex(([key]) => key === a.actor) - ACTORS.findIndex(([key]) => key === b.actor) || order(b) - order(a));
   const movers = rubrics.filter((row): row is RubricRow & { points: Point[]; trend: Trend & { ratio: number } } => row.trend?.ratio !== undefined);
   const hero = movers.length ? movers.reduce((best, row) => row.trend.ratio > best.trend.ratio ? row : best) : undefined;
-  const current = releases.at(-1)!, previous = releases.at(-2);
+  const current = releases.at(-1)!;
   const names = report.supervisors ?? {};
-  const wakeSources: WakeSourceRow[] = Object.entries(current.turns_by_actor ?? {}).flatMap(([actor, sources]) =>
+  // Each release's supervisor tokens by wake source, against the release before it.
+  const wakeSourcesOf = (index: number): WakeSourceRow[] => Object.entries(releases[index].turns_by_actor ?? {}).flatMap(([actor, sources]) =>
     Object.entries(sources).map(([source, totals]) => {
-      const before = previous?.turns_by_actor?.[actor]?.[source];
+      const before = releases[index - 1]?.turns_by_actor?.[actor]?.[source];
       return {
         supervisor: names[actor] ?? `supervisor ${actor.slice(0, 8)}`, source,
         wakes: totals.wakes, noOp: totals.no_op_wakes, total: totals.input_tokens,
@@ -158,11 +159,11 @@ export function qualityView(report: QualityReport, now = new Date()): QualityVie
     interventions: Object.entries(current.interventions).sort((a, b) => b[1] - a[1]),
     serious: current.friction.filter(row => row.severity === "p0" || row.severity === "p1")
       .sort((a, b) => (a.severity ?? "").localeCompare(b.severity ?? "") || Number(a.state !== "open") - Number(b.state !== "open")).slice(0, 8),
-    wakeSources,
+    wakeSources: wakeSourcesOf(releases.length - 1),
     records: releases.map((release, index) => {
       const deliveries = release.deliveries;
       return {
-        label: labels[index], deliveries: known(deliveries), merged: release.merged ?? [], friction: release.friction,
+        label: labels[index], deliveries: known(deliveries), merged: release.merged ?? [], friction: release.friction, wakeSources: wakeSourcesOf(index),
         coverage: deliveries !== undefined && typeof deliveries === "object" ? deliveries.unknown : deliveries === undefined ? "this machine's Cassy reports no merge record" : undefined,
       };
     }),

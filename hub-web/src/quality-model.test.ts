@@ -49,4 +49,8 @@ it("breaks supervisor tokens down by wake source with the average against the pr
     ["cosmic-pelican-12", "operator", 8e6, undefined],
     ["supervisor 7ec6ea4c", "worker", 5e6, undefined],
   ]);
+  // Any selected release has its own table: 4.12 against 4.11, which had no turns.
+  expect(view.records[1].wakeSources.map(row => [row.supervisor, row.source, row.wakes, row.noOp, row.average, row.total, row.was])).toEqual([
+    ["cosmic-pelican-12", "daemon", 90, 80, 1e6, 90e6, undefined],
+  ]);
 });

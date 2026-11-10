@@ -1,6 +1,6 @@
 import "./quality-panel.css";
 import { escapeHtml } from "./cloud-brand";
-import { ACTORS, qualityView, tokens, type Point, type QualityReport, type QualityView, type ReleaseRecords, type RubricRow } from "./quality-model";
+import { ACTORS, qualityView, tokens, type Point, type QualityReport, type QualityView, type ReleaseRecords, type RubricRow, type WakeSourceRow } from "./quality-model";
 
 export interface QualityHost {
   load(signal: AbortSignal): Promise<QualityReport>;
@@ -44,13 +44,16 @@ const eastern = (iso: string) => `${new Date(iso).toLocaleString("en-US", { time
 /** A link the ledger recorded opens where it points; otherwise the reference stays quiet text. */
 const reference = (link: string | null | undefined, text: string) => link && /^https:\/\//.test(link) ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>` : escapeHtml(text);
 
+/** Supervisor tokens by wake source for one release, with the release before's average. */
+const wakeTable = (rows: readonly WakeSourceRow[], label: string) => rows.length ? `<table class="quality-data quality-wakes"><caption class="quality-eyebrow">Supervisor tokens by wake source, ${escapeHtml(label)}</caption><thead><tr><th scope="col">Supervisor</th><th scope="col">Woken by</th><th scope="col">Wakes</th><th scope="col">No-op</th><th scope="col">Avg input</th><th scope="col">Was</th><th scope="col">Total</th></tr></thead><tbody>${rows.map(row => `<tr><th scope="row">${escapeHtml(row.supervisor)}</th><td>${escapeHtml(row.source)}</td><td>${row.wakes}</td><td>${row.noOp}</td><td>${tokens(row.average)}</td><td>${row.was === undefined ? "–" : tokens(row.was)}</td><td>${tokens(row.total)}</td></tr>`).join("")}</tbody></table>` : "";
+
 /** The merges counted in a release's per-delivery denominator and the friction filed in it. */
 export function recordsMarkup(records: ReleaseRecords): string {
   const merged = records.coverage !== undefined
     ? `<p class="quality-quiet">Per-delivery rates are unknown for ${escapeHtml(records.label)}: ${escapeHtml(records.coverage)}.</p>`
     : records.merged.length ? `<ul class="quality-list">${records.merged.map(row => `<li data-task="${escapeHtml(row.task)}"><span>${escapeHtml(row.title || row.task)}</span><code>${escapeHtml(row.task)}</code><time datetime="${escapeHtml(row.merged_at)}">${escapeHtml(eastern(row.merged_at))}</time></li>`).join("")}</ul>` : '<p class="quality-quiet">No deliveries merged.</p>';
   const friction = records.friction.length ? `<ul class="quality-list">${records.friction.map(row => `<li data-reference="${escapeHtml(row.reference)}"><span>${escapeHtml(row.title || row.reference)}</span><code>${reference(row.link, row.reference)}</code><span class="quality-state">${escapeHtml(row.status ?? row.state)}</span></li>`).join("")}</ul>` : '<p class="quality-quiet">No friction filed.</p>';
-  return `<h3 id="quality-records-title" tabindex="-1">Behind ${escapeHtml(records.label)}</h3><div class="quality-split"><section aria-label="Merged deliveries"><p class="quality-eyebrow">Merged deliveries${records.deliveries === undefined ? "" : ` · ${records.deliveries}`}</p>${merged}</section><section aria-label="Friction filed"><p class="quality-eyebrow">Friction filed · ${records.friction.length}</p>${friction}</section></div>`;
+  return `<h3 id="quality-records-title" tabindex="-1">Behind ${escapeHtml(records.label)}</h3><div class="quality-split"><section aria-label="Merged deliveries"><p class="quality-eyebrow">Merged deliveries${records.deliveries === undefined ? "" : ` · ${records.deliveries}`}</p>${merged}</section><section aria-label="Friction filed"><p class="quality-eyebrow">Friction filed · ${records.friction.length}</p>${friction}</section></div>${wakeTable(records.wakeSources, records.label)}`;
 }
 
 /** The drill-down: every release's value, per hour for rates, and its window. */
@@ -75,7 +78,7 @@ export function qualityMarkup(view: QualityView): string {
     const rows = view.rubrics.filter(row => row.actor === actor);
     return `<section class="quality-group" aria-label="${escapeHtml(title)}"><h4>${escapeHtml(title)} <span>${rows.filter(row => row.points).length} of ${rows.length} measured</span></h4><ul class="quality-rubrics">${rows.map(rubricRow).join("")}</ul></section>`;
   }).join("");
-  const wake = view.wakeSources.length ? `<table class="quality-data quality-wakes"><caption class="quality-eyebrow">Supervisor tokens by wake source, ${escapeHtml(view.current)}</caption><thead><tr><th scope="col">Supervisor</th><th scope="col">Woken by</th><th scope="col">Wakes</th><th scope="col">No-op</th><th scope="col">Avg input</th><th scope="col">Was</th><th scope="col">Total</th></tr></thead><tbody>${view.wakeSources.map(row => `<tr><th scope="row">${escapeHtml(row.supervisor)}</th><td>${escapeHtml(row.source)}</td><td>${row.wakes}</td><td>${row.noOp}</td><td>${tokens(row.average)}</td><td>${row.was === undefined ? "–" : tokens(row.was)}</td><td>${tokens(row.total)}</td></tr>`).join("")}</tbody></table>` : "";
+  const wake = wakeTable(view.wakeSources, view.current);
   const mix = view.interventions.length ? `<ul class="quality-mix">${view.interventions.map(([kind, count]) => `<li><b>${count}</b><span>${escapeHtml(kind.replace(/_/g, " "))}</span></li>`).join("")}</ul>` : '<p class="quality-quiet">No gate overrides.</p>';
   const serious = view.serious.length ? `<table class="quality-drill"><caption class="quality-eyebrow">Serious friction filed this release</caption><tbody>${view.serious.map(row => `<tr><td class="quality-sev" data-severity="${escapeHtml(row.severity ?? "")}">${escapeHtml((row.severity ?? "").toUpperCase())}</td><td>${escapeHtml((row.title ?? "").split(" (GH")[0])}</td><td class="quality-state">${escapeHtml(row.state)}</td><td class="quality-ref">${reference(row.link, row.reference)}</td></tr>`).join("")}</tbody></table>` : '<p class="quality-quiet">No P0 or P1 friction filed this release.</p>';
   return `${heroMarkup}<section class="quality-card" aria-labelledby="quality-rubrics-title"><h3 id="quality-rubrics-title">Every rubric, by who it scores</h3><div class="quality-groups">${groups}</div></section><section class="quality-card" aria-labelledby="quality-behind-title"><h3 id="quality-behind-title">Behind the numbers</h3><div class="quality-split"><div><p class="quality-eyebrow">Gate overrides, by kind</p>${mix}</div>${serious}</div>${wake}<p class="quality-folio">Source: the friction ledger, ${escapeHtml(view.rubrics.find(row => row.points)?.points?.[0]?.label ?? view.current)} to ${escapeHtml(view.current)}${view.inProgress ? " in progress" : ""}. Rates are per merged delivery from the merge record; each row's data shows per hour, and a release there opens its records.</p></section><section class="quality-card quality-records" aria-labelledby="quality-records-title" hidden></section>`;

@@ -917,6 +917,21 @@ mod tests {
     }
 
     #[test]
+    fn release_inventory_contract_roundtrip() {
+        let (temp, _, train, _, args) = fixture();
+        let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
+        let scope = serde_json::json!({
+            "project_id": "release-fixture", "repository": "Example/Repo",
+            "release_id": "v9.99.2", "reviewed_sha": args.commit,
+            "final_release_sha": args.commit, "promotion_pr": null, "release_tag": "v9.99.2",
+            "constituent_epic_ids": [], "no_code_members": {}, "proof_refs": []
+        });
+        value["release_scope"] = scope.clone();
+        let restored: ReleaseContext = serde_json::from_value(value).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap()["release_scope"], scope);
+    }
+
+    #[test]
     fn release_tracking_and_installed_notice_are_restart_safe() {
         let (temp, root, mut train, owner, mut args) = fixture();
         let repo = temp.path();

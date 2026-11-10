@@ -2900,45 +2900,26 @@ fn collect_git_write_targets(
             name,
             "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser"
         ) {
-            for (position, arg) in args.iter().enumerate() {
-                let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
-                if flags_c || arg == "--command" {
-                    // Classify options instead of mistaking an option's value
-                    // for the command string. Unknown forms fail closed.
-                    let mut remaining = args[position + 1..].iter();
-                    let payload = loop {
-                        let Some(arg) = remaining.next() else { break None; };
-                        match arg.as_str() {
-                            "--" => break remaining.next(),
-                            "-o" | "+o" | "-O" | "+O" | "--rcfile" | "--init-file" => {
-                                if remaining.next().is_none() { break None; }
-                            }
-                            _ if arg.starts_with('-') || arg.starts_with('+') => {
-                                let flags = &arg[1..];
-                                if flags.is_empty() || !flags.bytes().all(|flag| {
-                                    b"abcefhiklmnprstuvxBCDEHPT".contains(&flag)
-                                }) {
-                                    break None;
-                                }
-                            }
-                            _ => break Some(arg),
-                        }
-                    };
-                    if let Some(payload) = payload {
-                        // A child inherits cwd but cannot change its parent's cwd.
-                        collect_git_write_targets(
-                            &mut shell_cwd.clone(), payload, depth + 1, targets,
-                        );
-                    } else {
-                        let mut target = default_target.clone();
-                        target.uncertain_scope = true;
-                        targets.push(target);
-                    }
-                    break;
-                }
-                if arg == "--" {
-                    break;
-                }
+            // Only these exact forms have an unambiguous command string.
+            // Do not interpret shell option bundles or their operands.
+            let args = if args.first().is_some_and(|arg| matches!(arg.as_str(), "-l" | "--login")) {
+                &args[1..]
+            } else {
+                args
+            };
+            let payload = match args {
+                [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
+                [flag, payload, ..] if flag == "-c"
+                    && !payload.starts_with('-') && !payload.starts_with('+') => Some(payload),
+                _ => None,
+            };
+            if let Some(payload) = payload {
+                // A child inherits cwd but cannot change its parent's cwd.
+                collect_git_write_targets(&mut shell_cwd.clone(), payload, depth + 1, targets);
+            } else {
+                let mut target = default_target.clone();
+                target.uncertain_scope = true;
+                targets.push(target);
             }
             continue;
         }
@@ -3147,7 +3128,7 @@ fn check_worker_git_commit_scope_at_target(
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
     if target.uncertain_scope {
-        return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Split the command into explicit operations inside your assigned worktree.".to_string());
+        return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Use the plain -c '<cmd>' form inside your assigned worktree; split deeply nested commands into explicit operations.".to_string());
     }
     let cwd = target.path_for_scope().display().to_string();
     let clone_path = registered_worktree_root
@@ -12743,15 +12724,9 @@ mod worker_commit_guard_tests {
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
             (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c -e 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c -o nounset 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c -O extglob 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c +o nounset 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c --rcfile config 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("bash -c --init-file config 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
-            (format!("zsh -lc 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("zsh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
             (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
             (format!("eval 'cd \"{repo_path}\"'; git commit -m probe"), true),

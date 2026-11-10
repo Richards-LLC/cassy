@@ -21,6 +21,8 @@ Projects declare their main journeys in the existing QA registry. Finding priori
 
 Cassy declares supervision, merge, close, release, spawn and QA receipt as primary factory/CLI journeys alongside Commander. Correcting a finding's severity, reach or journey label replaces that axis; clearing user labels retains finding provenance and resets triage to theoretical, preserving the derived-priority policy.
 
+Main-reach finding corrections require a declared live main journey before any task fields change. Corrections reuse the recorded runtime reproduction, and update replies show the resulting priority even when the request changes nothing.
+
 Managed project updates recognize the owned content Cassy previously wrote, including uncommitted generated settings. A genuine conflict preserves only that path in the working tree and index while other settings and skills refresh. The update summary and SessionStart name the preserved files for review.
 
 

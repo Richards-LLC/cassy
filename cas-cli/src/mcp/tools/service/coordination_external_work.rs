@@ -439,5 +439,17 @@ mod mention_claim_tests {
         assert_eq!(payload["kind"], "blocker");
         assert_eq!(payload["context"]["code"], "size_cap_exceeded");
         assert_eq!(payload["context"]["external_ref"], link);
+        let prompts = queue.peek_all(10).unwrap();
+        assert_eq!(prompts.len(), 1);
+        let prompt = &prompts[0];
+        assert_eq!(prompt.target, owner.name);
+        assert_eq!(prompt.factory_session, owner.factory_session);
+        assert_eq!(prompt.origin, Some(QueueOrigin::Daemon));
+        use crate::ui::factory::daemon::{FactoryDaemon, runtime::queue_and_events::SupervisorWakeClass};
+        let sender = FactoryDaemon::wake_sender_from_origin(prompt.origin.as_ref(), None);
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(&sender, &owner.name, &prompt.source, &prompt.prompt),
+            Some(SupervisorWakeClass::Blocker),
+        );
     }
 }

@@ -3458,6 +3458,11 @@ pub trait PromptQueueStore: Send + Sync {
     /// A reply must already exist durably; it is never inferred from activity.
     fn acknowledge_for_recipients(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: Option<i64>) -> Result<()>;
 
+    /// Settle a reply and append its wake authority only if no earlier reply
+    /// settled this recipient's copy. Eligibility belongs to the caller;
+    /// granting and recording the first answer share one transaction.
+    fn acknowledge_reply_with_wake(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: i64, wake_suffix: &str) -> Result<()>;
+
     /// Read-only rendering policy for transports; provisional handoffs remain full.
     fn recipient_delivery(&self, prompt_id: i64, recipient: &str) -> Result<Option<RecipientDelivery>>;
 
@@ -8579,7 +8584,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn acknowledge_for_recipients(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: Option<i64>) -> Result<()> {
-        self.settle_recipient_message(prompt_id, recipients, reply_prompt_id)
+        self.settle_recipient_message(prompt_id, recipients, reply_prompt_id, None)
+    }
+
+    fn acknowledge_reply_with_wake(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: i64, wake_suffix: &str) -> Result<()> {
+        self.settle_recipient_message(prompt_id, recipients, Some(reply_prompt_id), Some(wake_suffix))
     }
 
     fn recipient_delivery(&self, prompt_id: i64, recipient: &str) -> Result<Option<RecipientDelivery>> {

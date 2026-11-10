@@ -538,6 +538,10 @@ bug_families:
     tasks: [cas-0288]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-MANAGED-MENTION-CLAIMS]
+  requested-worker-reply-wake:
+    title: The first worker answer to an explicit supervisor ask wakes over the cap while instruction replies and repeated answers stay held
+    tasks: [cas-6c32]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

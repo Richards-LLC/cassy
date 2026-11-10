@@ -123,7 +123,16 @@ async fn resume(
         release_id: scope.release_id.clone(),
         final_release_sha: scope.final_release_sha.clone(),
     };
-    let operation = ReleaseOperation::open(root, key.clone()).map_err(|e| e.to_string())?;
+    let lock_root = root.to_path_buf();
+    let lock_key = key.clone();
+    let deadline = cas_store::wait_budget::wait_deadline();
+    let operation = tokio::task::spawn_blocking(move || {
+        let _budget = deadline.map(cas_store::wait_budget::bound_waits_until);
+        ReleaseOperation::open(&lock_root, lock_key)
+    })
+    .await
+    .map_err(|e| format!("RELEASE_OPERATION_LOCK_FAILED: {e}"))?
+    .map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().to_rfc3339();
     let mut receipt: ReleaseReconcileReceipt = match operation.load().map_err(|e| e.to_string())? {
         Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
@@ -360,9 +369,7 @@ pub(crate) fn completed_operation(
     root: &Path,
     key: &ReleaseOperationKey,
 ) -> Result<Option<ReleaseReconcileReceipt>> {
-    let operation = ReleaseOperation::open(root, key.clone()).map_err(|e| e.to_string())?;
-    operation
-        .load()
+    cas_store::release_reconcile_store::load_release_operation(root, key)
         .map_err(|e| e.to_string())?
         .map(|value| {
             serde_json::from_value::<ReleaseReconcileReceipt>(value).map_err(|e| e.to_string())
@@ -596,6 +603,8 @@ mod tests {
             checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<()>,
         ) -> Result<()> {
             for delivery in &inventory.deliveries {
+                // Force another event to enter while this operation owns its lock.
+                tokio::task::yield_now().await;
                 let id = &delivery.task_id;
                 if self.closed.insert(id.clone()) {
                     self.actual_closes += 1;
@@ -742,5 +751,45 @@ mod tests {
                 .unwrap()
                 .complete
         );
+        // Two events for a new immutable release share one effect/checkpoint
+        // cycle without blocking the current-thread runtime's lock holder.
+        let mut concurrent_scope = scope.clone();
+        concurrent_scope.release_id = "v9.99.1".into();
+        let mut concurrent_inventory = inventory.clone();
+        concurrent_inventory.scope = concurrent_scope.clone();
+        let effects_for = |owner: &str| Effects {
+            closed: BTreeSet::new(),
+            crash: false,
+            actual_closes: 0,
+            parent_passes: 0,
+            owner: owner.into(),
+        };
+        let mut first = effects_for("first-supervisor");
+        let mut second = effects_for("second-supervisor");
+        let (first_receipt, second_receipt) = tokio::join!(
+            resume(
+                temp.path(),
+                &concurrent_scope,
+                &concurrent_inventory,
+                ReconcileTrigger::Installed,
+                &mut first
+            ),
+            resume(
+                temp.path(),
+                &concurrent_scope,
+                &concurrent_inventory,
+                ReconcileTrigger::Backfill,
+                &mut second
+            ),
+        );
+        let first_receipt = first_receipt.unwrap();
+        let second_receipt = second_receipt.unwrap();
+        assert!(first_receipt.complete && second_receipt.complete);
+        assert_eq!(first.actual_closes + second.actual_closes, 2);
+        assert_eq!(first.parent_passes + second.parent_passes, 1);
+        let first_intent = first_receipt.notice_intent.unwrap();
+        let second_intent = second_receipt.notice_intent.unwrap();
+        assert_eq!(first_intent.key, second_intent.key);
+        assert_eq!(first_intent.recipient, second_intent.recipient);
     }
 }

@@ -78,26 +78,7 @@ impl ReleaseOperation {
     }
 
     pub fn load(&self) -> Result<Option<serde_json::Value>> {
-        let conn = self.connection()?;
-        let guard = crate::shared_db::lock_connection(&conn)?;
-        let json: Option<String> = guard
-            .query_row(
-                "SELECT receipt_json FROM release_reconcile_operations
-             WHERE project_id=?1 AND release_id=?2 AND final_release_sha=?3",
-                params![
-                    self.key.project_id,
-                    self.key.release_id,
-                    self.key.final_release_sha
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
-        json.map(|json| {
-            let receipt = serde_json::from_str(&json)?;
-            self.validate_receipt(&receipt)?;
-            Ok(receipt)
-        })
-        .transpose()
+        load_release_operation(&self.root, &self.key)
     }
 
     pub fn save(&self, receipt: &serde_json::Value) -> Result<()> {
@@ -125,6 +106,41 @@ impl ReleaseOperation {
         }
         Ok(())
     }
+}
+
+/// Read the atomic SQLite checkpoint without taking the effect lock. An
+/// in-flight operation can continue while an adapter checks for completion.
+pub fn load_release_operation(
+    root: &Path,
+    key: &ReleaseOperationKey,
+) -> Result<Option<serde_json::Value>> {
+    key.id()?;
+    let path = root.join("cas.db");
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    crate::shared_db::install_busy_handler(&conn)?;
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='release_reconcile_operations')", [], |r| r.get(0))?;
+    if !exists {
+        return Ok(None);
+    }
+    let json: Option<String> = conn.query_row(
+        "SELECT receipt_json FROM release_reconcile_operations WHERE project_id=?1 AND release_id=?2 AND final_release_sha=?3",
+        params![key.project_id, key.release_id, key.final_release_sha], |r| r.get(0),
+    ).optional()?;
+    json.map(|json| {
+        let receipt: serde_json::Value = serde_json::from_str(&json)?;
+        let saved: ReleaseOperationKey = serde_json::from_value(receipt["key"].clone())?;
+        if &saved != key {
+            return Err(StoreError::Parse(
+                "release receipt identity mismatch".into(),
+            ));
+        }
+        Ok(receipt)
+    })
+    .transpose()
 }
 
 /// A committed parent close makes its unfinished task-only verifier obsolete.
@@ -194,6 +210,10 @@ mod tests {
             let operation = ReleaseOperation::open(root.path(), key.clone()).unwrap();
             assert!(operation.load().unwrap().is_none());
             operation.save(&receipt).unwrap();
+            assert_eq!(
+                load_release_operation(root.path(), &key).unwrap(),
+                Some(receipt.clone())
+            );
             // A concurrent process cannot perform effects for this key.
             let contender = OpenOptions::new()
                 .read(true)

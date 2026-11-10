@@ -110,6 +110,9 @@ test("conversation header shares one row with reachable actions (cas-bcf0)", asy
       await expect(page.locator("#conversation-fleet")).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(more).toBeFocused();
+    } else {
+      await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Supervisor commands", exact: true })).toBeVisible();
     }
     await expect(page.locator(".conversation-title-line > #conversation-connection.status-chip")).toBeVisible();
     await expect(page.locator("#conversation-raw-output")).toBeVisible();

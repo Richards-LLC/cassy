@@ -2727,7 +2727,10 @@ button.chip:disabled { cursor: default; }
 .pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
+/* cas-5e8b: Close is an icon-only 40px circle; touch still reaches 44px. */
+.machines-dialog-heading button { position: relative; width: var(--button-height); min-width: var(--button-height); padding: 0; border-radius: var(--radius-pill); }
+.machines-dialog-heading button::after { content: ""; position: absolute; inset: calc((var(--button-height) - var(--rail-item-min)) / 2); }
+#paired-machine-filters { flex-wrap: wrap; margin-block: var(--space-3) var(--space-2); }
 /* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
    visual-qa probe read a third paired machine below the fold as clipped. */
 #paired-machines-dialog { padding: var(--space-6); overflow: auto; }

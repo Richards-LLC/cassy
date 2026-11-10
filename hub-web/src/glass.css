@@ -488,7 +488,7 @@ html[data-scheme="dark"] {
 
   /* Paired machines: the installations link and Remove sit apart, and Remove
      reads as the destructive action it is (cas-205e). */
-  :root .paired-machine-installations { margin-inline-end: var(--space-2); }
+  :root .paired-machine .paired-machine-installations { margin-inline-end: var(--space-2); background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
   :root .paired-machine .paired-machine-remove { color: var(--crit-bg); background: var(--look-glass-strong); border: 1.5px solid var(--crit-bg); border-radius: var(--radius-pill); }
 
   /* A confirmation such as "Details copied" is a solid card that appears at

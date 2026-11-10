@@ -280,11 +280,12 @@ test("HUB-J13 allow launch with a long machine name on a phone", journeyPart, as
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
     // cas-84a2: on a loaded queue runner the tap's touch dispatch never came
     // back while the sheet was still settling after the reload. Tap only once
-    // every finite animation on the page has finished (the sheet's own state,
-    // not a wall-clock wait), and give the tap its own deadline so a stall
-    // names the tap instead of eating the whole test timeout.
+    // every finite time-based animation on the page has finished (the sheet's
+    // own state, not a wall-clock wait; a scroll-driven one never finishes,
+    // cas-6c0d), and give the tap its own deadline so a stall names the tap
+    // instead of eating the whole test timeout.
     await page.evaluate(() => Promise.all(document.getAnimations()
-      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .filter((animation) => animation.timeline === document.timeline && animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
     // The machine already runs ledger-api: consent must reveal its live

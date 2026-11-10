@@ -2700,6 +2700,17 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
             git(repo, &["branch", "-D", old_branch]);
         }
         f.put(&task);
+        let previous = task.deliverables.factory_branch_start.clone();
+        let old_tip = if case == "missing-old" { None } else {
+            Some(git(repo, &["rev-parse", old_branch]))
+        };
+        // Unblock and reassign through the supervisor API, then consume the
+        // predecessor's actual no-code close and ordinary queue/start path.
+        let _ = call(&f.supervisor, serde_json::json!({
+            "action":"update", "id":id, "status":"open", "assignee":WORKER,
+        })).await;
+        let _ = queue_control(&f, Some(vec![id])).await;
+        // Evidence arriving after assignment must still fence queued adoption.
         if case == "receipt" {
             let receipt = cas_store::build_worker_completion_receipt(
                 &cas_types::WorkerCompletionReceiptInput {
@@ -2714,16 +2725,6 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
             cas_store::create_worker_delivery(&f.cas_dir(), &receipt,
                 cas_types::WorkerDeliveryState::AwaitingMerge, "former-worker-session").unwrap();
         }
-        let previous = task.deliverables.factory_branch_start.clone();
-        let old_tip = if case == "missing-old" { None } else {
-            Some(git(repo, &["rev-parse", old_branch]))
-        };
-        // Unblock and reassign through the supervisor API, then consume the
-        // predecessor's actual no-code close and ordinary queue/start path.
-        let _ = call(&f.supervisor, serde_json::json!({
-            "action":"update", "id":id, "status":"open", "assignee":WORKER,
-        })).await;
-        let _ = queue_control(&f, Some(vec![id])).await;
         let response = call(&f.worker, serde_json::json!({
             "action":"close", "id":"cas-8488-current", "reason":"Portable proof recorded",
         })).await;

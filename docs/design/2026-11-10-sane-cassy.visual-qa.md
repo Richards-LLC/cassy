@@ -8,10 +8,10 @@ Viewports: desktop (1280×800), phone (390×800)
 
 ## Surface readiness
 
-- docs/design/2026-11-10-sane-cassy.html · light · desktop: ready; text nodes: 391, characters: 13848, main landmarks: 1, content elements: 1, loading indicators: 0
-- docs/design/2026-11-10-sane-cassy.html · light · phone: ready; text nodes: 391, characters: 13848, main landmarks: 1, content elements: 1, loading indicators: 0
-- docs/design/2026-11-10-sane-cassy.html · dark · desktop: ready; text nodes: 391, characters: 13848, main landmarks: 1, content elements: 1, loading indicators: 0
-- docs/design/2026-11-10-sane-cassy.html · dark · phone: ready; text nodes: 391, characters: 13848, main landmarks: 1, content elements: 1, loading indicators: 0
+- docs/design/2026-11-10-sane-cassy.html · light · desktop: ready; text nodes: 391, characters: 13846, main landmarks: 1, content elements: 1, loading indicators: 0
+- docs/design/2026-11-10-sane-cassy.html · light · phone: ready; text nodes: 391, characters: 13846, main landmarks: 1, content elements: 1, loading indicators: 0
+- docs/design/2026-11-10-sane-cassy.html · dark · desktop: ready; text nodes: 391, characters: 13846, main landmarks: 1, content elements: 1, loading indicators: 0
+- docs/design/2026-11-10-sane-cassy.html · dark · phone: ready; text nodes: 391, characters: 13846, main landmarks: 1, content elements: 1, loading indicators: 0
 
 ## Findings
 

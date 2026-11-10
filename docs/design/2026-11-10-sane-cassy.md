@@ -46,18 +46,20 @@ All times Eastern, November 9–10. The full ledger of 21 incidents in 6 classes
 | Installer hang (I-15) | 9 h 30 min, 11:11 PM–8:42 AM; v4.12.0 about 1 h late on prowl; no watchdog fired | missing fact | move 2 (a "released, not installed after 20 min" deadline on recorded facts) |
 | Transcript-mirror blocker flood (I-16) | 98 wakes; 90 "Ignored." replies | missing fact | move 2 |
 | Stall watchdog false pages (I-05–I-07) | 5 false notices, 2 threatened pages, 3 finished tasks set to blocked by hand to stop a page | missing fact | move 2 |
-| Guard false positives (I-01–I-03, I-18, plus five hit while writing this) | GH #1752, #1615, #1754; a fix carried across 3 trains; blocked replay and diagnosis work | false positive | move 3 |
+| Guard false positives (I-01–I-03, I-18, plus six hit while writing this) | GH #1752, #1615, #1754; a fix carried across 3 trains; blocked replay and diagnosis work | false positive | move 3 |
 | Retroactive gates (I-10) | 2 finished QA tasks cancelled instead of closed | moving-state race | move 4 (gates apply as of approval) |
 
 <details open data-collapse>
-<summary>Five guard false positives on this spike's own read-only work</summary>
+<summary>Six guard false positives on this spike's own read-only work</summary>
 
-Five guard false positives hit this design spike's own read-only work, two of them in research agents:
+Six guard false positives hit this design spike's own read-only work, two of them in research agents:
 
-1. About 9:43 AM ET, the operator-credentials guard denied `find /Users/pippenz -maxdepth 6 -type d -name release-flow-review`, which reads directory names, not Neon or Vercel stores.
+1. About 9:43 AM ET, the operator-credentials guard denied `find <home> -maxdepth 6 -type d -name release-flow-review`, which reads directory names, not Neon or Vercel stores. At 10:42 AM ET it denied a `grep -rn` over this task's own artifact directory for the same reason (`operator_credentials.rs:541`: any recursive reader rooted under the home directory matches).
 2. About 9:55 AM ET, the worker tool denial refused the harness message tool for this worker's own read-only research subagents. Four of them had to be stopped and relaunched to correct their source pin.
 3. About 9:50 AM ET and again about 9:57 AM ET, the workspace-contract shell parser refused read-only loops because they contained `$((n+1))`: a merge-counting loop in the incident research (I-18) and this spike's `until ls …; do sleep 20; done` wait loop.
 4. At 10:06 AM ET, the operator-credentials guard refused the heredoc that wrote the guard inventory into the task's artifact directory, because the inventory's text names the credential store paths (`operator_credentials.rs:158-160`). The same bytes passed through the Write tool, which that guard does not inspect.
+
+The worker pre-push fast rows then refused this spike's docs-only push at 10:40 AM ET. They diff a fresh lane against current `main`, and this lane's epic base is 2,917 commits behind it, so 88 Markdown files and two script tests the delivery never touched counted as "changed" (`scripts/fast-rows-pre-push.sh:28`; logged as `SCOPED_PROOF SURFACE: base=main`). One finding was real (an absolute home path in this report) and was fixed; the push used the logged override for the rest.
 
 </details>
 
@@ -82,7 +84,7 @@ Table: Inventory by kind and verdict (rows; "reads moving state" = re-reads a br
 What the inventory shows, kind by kind:
 
 - **Gates.** `close_ops.rs` is 46,913 lines (about 23,200 production) with 553 inline tests, and 515 commits touched it since October 15. Refusals are free-text headings, not codes: `MERGE REQUIRED` appears 28 times, and the typed gate error has 12 variants for 127 gates. One gate is the hub of the churn: the merge-state gate and its content check (G-55, G-56) re-measure the current branch tip and target on every close, including Cassy's own post-merge close; the comments at `close_ops.rs:17229-17560` are six layered fixes for that. A near-reconciler already exists (G-123, G-90) but re-runs the ordinary gates. Review is enforced before merge (G-104) and again after (G-67–G-70). Four proof gates duplicate the merge queue (G-78–G-80, G-63). Park, close-after-merge and epic close hold 79 gates, 49 of which re-read moving state after the decision was made.
-- **Guards.** 22 of 35 PreToolUse guards parse shell text through 25 separate recognizers. `pre_tool.rs` grew from 8,938 to 13,824 lines since October 15 across 213 commits, and 26 commit subjects say "bypass": fixes for bypasses and fixes for false positives alternate. Of 23 guard false positives in 30 days (18 filed issues, from #1218 to #1754, plus 5 hit while writing this design), 21 hit guards that parse shell text; the workspace write guard alone has 11. For most of them the capability already exists in the codebase: Linux credential masking (`crates/cas-pty/src/store_isolation.rs:1-18`), CLI operator checks with a TTY and typed confirmation (`cas-cli/src/cli/config/operator_ops.rs:75-92`), MCP supervisor-only routes (`cas-cli/src/mcp/server/runtime.rs:410-416,623-633`) and per-worktree git hooks that the code itself calls "the hard floor" (`pre_tool.rs:2338-2339`).
+- **Guards.** 22 of 35 PreToolUse guards parse shell text through 25 separate recognizers. `pre_tool.rs` grew from 8,938 to 13,824 lines since October 15 across 213 commits, and 26 commit subjects say "bypass": fixes for bypasses and fixes for false positives alternate. Of 24 guard false positives in 30 days (18 filed issues, from #1218 to #1754, plus 6 hit while writing this design), 22 hit guards that parse shell text; the workspace write guard alone has 11. For most of them the capability already exists in the codebase: Linux credential masking (`crates/cas-pty/src/store_isolation.rs:1-18`), CLI operator checks with a TTY and typed confirmation (`cas-cli/src/cli/config/operator_ops.rs:75-92`), MCP supervisor-only routes (`cas-cli/src/mcp/server/runtime.rs:410-416,623-633`) and per-worktree git hooks that the code itself calls "the hard floor" (`pre_tool.rs:2338-2339`).
 - **Watchdogs and notices.** Three stall detectors key on absence of activity with different dedup keys, so one quiet night can page the operator twice (W-01/W-02, W-03/W-04, W-05–W-10). "Merged, not closed" has four reporters with four keys (W-45–W-47, W-51). A park is announced twice (N-24, W-48). One unread message can raise four notices and two operator escalations (W-31, W-28, W-33, W-69, W-34). 46 rows have no dedup; 71 re-poll live state, 6 of them for a fact the store already records.
 - **CI and release.** Workflows went from 7 to 8 and `ci.yml` from 1,877 lines and 19 jobs to 2,653 and 24 since October 15. Of cas-a677's delete list, the release train, the daemon sweeps (−10,658 lines) and the parity pins are gone; release-gate.sh, assembly proof, the memory scripts and the bookkeeping scripts remain or grew, and 887 lines of release scripts have no production caller. Train branches ran the full set 177 times across the last 8 trains (123 cancelled, 39 failed, about 1,639 wall-minutes) against one queue run per release.
 - **Generated docs.** journeys.yaml, PRODUCT_OVERVIEW.md and CODEMAP.md are the three most-conflicted files since October 27 (in 10, 8 and 7 of 43 conflict lists; no source file appears more than 3 times), because park gates G-49 and G-50 make every delivery rewrite them.
@@ -252,7 +254,7 @@ Prerequisites, all reversible: the OS sandbox on for Claude workers (writable ro
 
 - **Removes 19 guards:** H-29 and H-28 (workspace write roots), H-14 (config file writes), H-33 (protected patterns), H-09 and H-10 (operator credentials and denied CLIs), H-22, H-23 and H-25 (commit, local-merge push and raw `gh pr merge`), H-15 (push hook bypass), H-24 and H-26 (merge holds, becoming one required status check), H-03 and H-04 (Rust build text match, replaced by the cargo shim), H-05 (formatter spill, replaced by a one-time format normalization), H-08 (browser tier, enforced by the runner), H-12 (role env tampering, replaced by server-issued role), H-16 (process kill, replaced by PID or user isolation), H-17 (Neon production write, replaced by a branch-scoped credential).
 - **Adds 2:** the sandbox profile and the server-side ruleset. H-02 stays, now fed by the shim instead of text matching. Per decision 3, a harness whose sandbox is not verified keeps its text guards until it is.
-- **Ends:** all 21 shell-text false positives of the last 30 days, and the `pre_tool.rs` bypass/false-positive cycle.
+- **Ends:** all 22 shell-text false positives of the last 30 days, and the `pre_tool.rs` bypass/false-positive cycle.
 
 </details>
 
@@ -274,7 +276,7 @@ Prerequisites, all reversible: the OS sandbox on for Claude workers (writable ro
 | commit→main: epic PR opened → merged | ≤ 30 min | last 8 releases: median 19.8 min (17.5–24.9), 8 of 8 on target |
 | main→published: merged → GitHub release | ≤ 20 min | last 8: median 8.0 min (3.4–28.0), 7 of 8 on target |
 | Cassy defects filed per release | down across 3 releases | v4.5.0–v4.12.0: 101 issues (median 10.5), 186 bug tasks (median 14) |
-| Guard and gate false positives | down; zero per shell-text guard once replaced | Nov 9–10: 36 reviewed-drop overrides; 23 guard false positives in 30 days |
+| Guard and gate false positives | down; zero per shell-text guard once replaced | Nov 9–10: 36 reviewed-drop overrides; 24 guard false positives in 30 days |
 | Notices answered with no action | toward zero | Nov 9–10: 98 blocker wakes, 90 "Ignored." |
 | Supervisor steps to close a shipped delivery | 0 | gabber cas-d628: 5 steps, 50 min 35 s |
 | Check count (registry rows) | non-increasing | 388 today; 274 after 4.17 |

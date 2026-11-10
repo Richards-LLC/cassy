@@ -8020,6 +8020,7 @@ impl CasCore {
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
             && superseding_release_verdict.is_none()
+            && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
@@ -11749,6 +11750,7 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
+        if crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() { task.pending_verification = false; }
         task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);

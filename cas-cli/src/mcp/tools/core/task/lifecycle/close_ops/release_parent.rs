@@ -13,7 +13,12 @@ impl CasCore {
             Ok(task) => task,
             Err(error) => return held(error.to_string(), None),
         };
-        if task.status == TaskStatus::Closed { return ParentOutcome::Closed; }
+        if task.status == TaskStatus::Closed {
+            if let Err(error) = cas_store::release_reconcile_store::retire_closed_parent_dispatch(&self.cas_root, id, &inventory.scope.final_release_sha) {
+                return held(format!("RELEASE_PARENT_DISPATCH_CLEANUP: {error}"), task.epic_verification_owner.clone());
+            }
+            return ParentOutcome::Closed;
+        }
         let owner = task.epic_verification_owner.clone();
         if task.task_type != TaskType::Epic || task.is_terminal() {
             return held("RELEASE_PARENT_NOT_LIVE_EPIC".into(), owner);
@@ -34,6 +39,8 @@ impl CasCore {
                 if crate::qa_batch::release_close::parent_review(&self.cas_root, id).is_none() {
                     if let Some(pending) = self.queue_release_epic_verification(&task, &repo, &inventory.scope.final_release_sha)? { return Ok(pending); }
                 }
+                if crate::qa_batch::release_close::parent_review(&self.cas_root, id).is_some()
+                    && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, id) { return Err("RELEASE_PARENT_VERIFICATION_BOUNDARY_CHANGED".into()); }
                 let request = TaskCloseRequest {
                     id: id.into(), reason: Some(format!("Release {} at {}: independently reviewed parent acceptance and complete shipped child outcomes.", inventory.scope.release_id, inventory.scope.final_release_sha)),
                     commit_receipt: Some(inventory.scope.final_release_sha.clone()),
@@ -42,6 +49,7 @@ impl CasCore {
                 let response = as_cassy_merge_close(crate::async_runtime::heap_future(|| self.cas_task_close(Parameters(request)))).await
                     .map_err(|e| e.to_string())?;
                 if store.get(id).map_err(|e| e.to_string())?.status == TaskStatus::Closed {
+                    cas_store::release_reconcile_store::retire_closed_parent_dispatch(&self.cas_root, id, &inventory.scope.final_release_sha).map_err(|e| e.to_string())?;
                     Ok(ParentOutcome::Closed)
                 } else {
                     let gate = response.content.iter().filter_map(|c| match &c.raw {
@@ -64,6 +72,7 @@ impl CasCore {
                 return Err(format!("RELEASE_PARENT_VERIFICATION_BOUNDARY_CHANGED: {}", dispatch.id));
             }
             if matches!(dispatch.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed) {
+                if dispatch.deadline_at <= chrono::Utc::now() { return Err(format!("RELEASE_PARENT_VERIFICATION_EXPIRED: {}", dispatch.id)); }
                 return Ok(Some(ParentOutcome::Pending { dispatch_id: dispatch.id, owner: dispatch.owner_agent_id }));
             }
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -82,6 +91,7 @@ impl CasCore {
         ).map_err(|e| e.to_string())? {
             CloseVerificationDispatch::Requested(d) | CloseVerificationDispatch::AlreadyActive(d) => d,
         };
+        if dispatch.repository != boundary.repository { return Err("RELEASE_PARENT_VERIFICATION_BOUNDARY_CHANGED".into()); }
         Ok(Some(ParentOutcome::Pending { dispatch_id: dispatch.id, owner: dispatch.owner_agent_id }))
     }
 }
@@ -117,7 +127,7 @@ pub(super) async fn probe_deleted_parent_and_single_pending_cycle(
     }
     let mut review_scope = scope.clone();
     review_scope.constituent_epic_ids = vec!["cas-release-train".into(), "cas-release-pending".into()];
-    let manifest = serde_json::json!({
+    let mut manifest = serde_json::json!({
         "project_id": scope.project_id, "release_id": scope.release_id,
         "reviewed_sha": scope.reviewed_sha, "final_release_sha": scope.final_release_sha,
         "epics": [
@@ -154,4 +164,23 @@ pub(super) async fn probe_deleted_parent_and_single_pending_cycle(
         assert!(closed.epic_verification_owner.as_deref().unwrap().starts_with("release:"));
         assert!(cas_store::get_latest_verification_dispatch(root, id).unwrap().is_none());
     }
+    // Acceptance arriving after the pending checkpoint consumes that same
+    // release boundary; no second verifier or timeout wake survives the close.
+    manifest["epics"][2]["child_ids"] = serde_json::json!([leaf]);
+    let accepted_ledger = repo.join("parent-release-accepted.md");
+    std::fs::write(&accepted_ledger, format!("# Parent acceptance\n{leaf} PASS\n```cassy-release-epics\n{manifest}\n```\n")).unwrap();
+    let accepted_artifact = crate::artifacts::publish(&context, &accepted_ledger).unwrap().artifact;
+    let accepted = crate::qa_batch::prepare_receipt(root, &agents.get("supervisor-id").unwrap(), "supervisor-id", &[leaf.into()], &scope.reviewed_sha, &accepted_artifact.id, &accepted_ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
+    cas_store::record_qa_batch_receipt(root, &accepted).unwrap();
+    review_scope.proof_refs = vec![crate::qa_batch::ReleaseProofRef {
+        kind: crate::qa_batch::ReleaseProofKind::Review, artifact_id: accepted_artifact.id, sha256: accepted_artifact.sha256,
+        size_bytes: accepted_artifact.size_bytes, reviewed_sha: scope.reviewed_sha.clone(), receipt_id: Some(accepted.id),
+    }];
+    let resumed = crate::qa_batch::resolve_release_inventory(root, repo, &review_scope).unwrap();
+    let completed = core.close_release_parent(&resumed, "cas-release-pending").await;
+    assert_eq!(completed, ParentOutcome::Closed, "{completed:?}");
+    let retired = cas_store::get_latest_verification_dispatch(root, "cas-release-pending").unwrap().unwrap();
+    assert_eq!(retired.id, dispatch_id);
+    assert_eq!(retired.state, cas_types::VerificationDispatchState::Invalidated);
+
 }

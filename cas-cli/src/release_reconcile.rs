@@ -184,7 +184,7 @@ async fn resume(
     // This is a persisted intent, never a claim that a notice was sent. The
     // publish/promotion adapter alone enqueues it with this stable dedupe key.
     receipt.notice_intent = Some(ReleaseNoticeIntent {
-        key: format!("release-closeout:{}:{fingerprint}", receipt.key.id().map_err(|e| e.to_string())?),
+        key: format!("release-closeout:{}", receipt.key.id().map_err(|e| e.to_string())?),
         recipient, fingerprint,
     });
     receipt.updated_at = chrono::Utc::now().to_rfc3339();

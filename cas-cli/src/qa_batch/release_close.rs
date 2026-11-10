@@ -526,6 +526,7 @@ struct ParentReleaseEvidence {
     task_id: String,
     generation: String,
     child_versions: BTreeMap<String, String>,
+    immediate_ids: std::collections::BTreeSet<String>,
     review: Option<String>,
     integration: Option<String>,
 }
@@ -534,8 +535,18 @@ impl ParentReleaseEvidence {
     fn validate_children(&self, root: &Path) -> Result<(), String> {
         let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
         let children = store.get_subtasks(&self.task_id).map_err(|e| e.to_string())?;
-        let current: BTreeMap<_, _> = children.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect();
-        if children.is_empty() || !children.iter().all(Task::is_terminal) || current != self.child_versions {
+        let immediate: std::collections::BTreeSet<_> = children.iter().map(|c| c.id.clone()).collect();
+        let mut pending = children;
+        let mut current = BTreeMap::new();
+        while let Some(child) = pending.pop() {
+            if current.contains_key(&child.id) { continue; }
+            if child.id == self.task_id || !child.is_terminal() { return Err("RELEASE_PARENT_CHILDREN_CHANGED".into()); }
+            if child.task_type == cas_types::TaskType::Epic {
+                pending.extend(store.get_subtasks(&child.id).map_err(|e| e.to_string())?);
+            }
+            current.insert(child.id.clone(), child.updated_at.to_rfc3339());
+        }
+        if immediate.is_empty() || immediate != self.immediate_ids || current != self.child_versions {
             return Err("RELEASE_PARENT_CHILDREN_CHANGED".into());
         }
         Ok(())
@@ -555,7 +566,8 @@ impl ReleaseClose {
         let mut pending = children.to_vec();
         let mut seen = std::collections::BTreeSet::new();
         while let Some(child) = pending.pop() {
-            if !seen.insert(child.id.clone()) { return Err("RELEASE_PARENT_CYCLE".into()); }
+            if child.id == task.id { return Err("RELEASE_PARENT_CYCLE".into()); }
+            if !seen.insert(child.id.clone()) { continue; }
             if child.task_type == cas_types::TaskType::Epic {
                 let nested = store.get_subtasks(&child.id).map_err(|e| e.to_string())?;
                 if nested.is_empty() { return Err("RELEASE_EMPTY_PARENT".into()); }
@@ -590,8 +602,9 @@ impl ReleaseClose {
             let actual: std::collections::BTreeSet<_> = row.child_ids.iter().map(String::as_str).collect();
             if row.generation != task.updated_at.to_rfc3339() || actual != expected || actual.len() != row.child_ids.len() { continue; }
             let author = receipt.ledger_author_id.as_deref().ok_or("RELEASE_REVIEW_AUTHOR_MISSING")?;
+            let agents = crate::store::open_agent_store(&self.root).map_err(|e| e.to_string())?;
             for member in std::iter::once(task).chain(descendants.iter()) {
-                if !author_is_independent(&self.root, member, &self.repo, author)? {
+                if in_lineage(agents.as_ref(), &implementation_lineage(&self.root, member, &self.repo)?, author) {
                     return Err(format!("RELEASE_EPIC_REVIEW_NOT_INDEPENDENT: {}", member.id));
                 }
             }
@@ -612,7 +625,8 @@ impl ReleaseClose {
         }).await?;
         self.parent = Some(ParentReleaseEvidence {
             task_id: task.id.clone(), generation: task.updated_at.to_rfc3339(),
-            child_versions: children.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect(), review, integration,
+            child_versions: descendants.iter().map(|c| (c.id.clone(), c.updated_at.to_rfc3339())).collect(),
+            immediate_ids: children.iter().map(|c| c.id.clone()).collect(), review, integration,
         });
         Ok(self)
     }
@@ -642,4 +656,17 @@ pub(crate) fn revalidate_parent_children(root: &Path, id: &str) -> Result<(), St
         if c.root != root { return Ok(()); }
         c.parent.as_ref().filter(|p| p.task_id == id).map(|p| p.validate_children(root)).unwrap_or(Ok(()))
     }).unwrap_or(Ok(()))
+}
+
+
+/// A later independent parent review can satisfy only the exact task-only
+/// dispatch at this release SHA. A foreign/newer proof cycle keeps its gate.
+pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
+    CURRENT.try_with(|c| {
+        c.root == root && c.parent.as_ref().is_some_and(|p| p.task_id == id && p.review.is_some())
+            && cas_store::get_latest_verification_dispatch(root, id).is_ok_and(|dispatch| dispatch.is_none_or(|d| {
+                d.receipt_id.is_none() && d.delivery_transaction_id.is_none()
+                    && d.repository.as_ref().is_some_and(|r| r.head_commit == c.inventory.scope.final_release_sha)
+            }))
+    }).unwrap_or(false)
 }

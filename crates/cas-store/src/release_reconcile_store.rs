@@ -100,6 +100,30 @@ impl ReleaseOperation {
     }
 }
 
+/// A committed parent close makes its unfinished task-only verifier obsolete.
+/// Retire it atomically without minting a verdict or modifying task state.
+/// A newer delivery boundary or another SHA is never consumed by this cleanup.
+pub fn retire_closed_parent_dispatch(root: &Path, task_id: &str, final_sha: &str) -> Result<bool> {
+    let _schema = crate::SqliteVerificationStore::open(root)?;
+    let conn = crate::shared_db::shared_connection(&root.join("cas.db"))?;
+    let tx = crate::shared_db::begin_immediate_pooled(&conn)?;
+    let status: Option<String> = tx.query_row("SELECT status FROM tasks WHERE id=?1", [task_id], |r| r.get(0)).optional()?;
+    if status.as_deref() != Some("closed") { tx.commit()?; return Ok(false); }
+    let Some(dispatch) = crate::get_latest_verification_dispatch_with_conn(&tx, task_id)? else { tx.commit()?; return Ok(false); };
+    if dispatch.receipt_id.is_some() || dispatch.delivery_transaction_id.is_some()
+        || !dispatch.repository.as_ref().is_some_and(|r| r.head_commit == final_sha)
+        || !matches!(dispatch.state, cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed | cas_types::VerificationDispatchState::TimedOut)
+    { tx.commit()?; return Ok(false); }
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Some(capability) = &dispatch.capability_id {
+        tx.execute("UPDATE verification_capabilities SET consumed_at=COALESCE(consumed_at,?2) WHERE id=?1", params![capability, now])?;
+        tx.execute("UPDATE verification_handoffs SET state='consumed', consumed_at=COALESCE(consumed_at,?2) WHERE capability_id=?1 AND state IN ('pending','bound')", params![capability, now])?;
+    }
+    tx.execute("UPDATE verification_dispatches SET state='invalidated', resolved_at=?2 WHERE id=?1 AND state IN ('pending','claimed','timed_out')", params![dispatch.id, now])?;
+    tx.commit()?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

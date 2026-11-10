@@ -552,8 +552,9 @@ mod tests {
 
     /// A train is not landed while a child is in flight, before any child
     /// delivered, or while its lane holds work the integration branch lacks.
-    #[test]
-    fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+    #[tokio::test]
+    async fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+        let _env = TestEnvGuard::temp_home();
         let temp = repo();
         let repo = temp.path();
         git(repo, &["branch", "epic/train"]);
@@ -588,5 +589,10 @@ mod tests {
         assert!(!landed(store.as_ref(), repo, &train, "main"), "lane ahead of main");
         git(repo, &["merge", "-q", "--no-ff", "epic/train"]);
         assert!(landed(store.as_ref(), repo, &train, "main"));
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let (next, _) = core.release_train_for_new_task(store.as_ref()).await;
+        assert_ne!(next.as_deref(), Some(train.id.as_str()));
+        assert_ne!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
     }
 }

@@ -51,7 +51,7 @@ impl World {
                 "claim",
                 &json!({"code":"acquired","receipt":{
                     "resource":{"id":"resource","state":"claimed"},
-                    "visible_owner":{"registration_id":"sup"},
+                    "visible_owner":{"registration_id":"sup"}, "generation":1,
                     "expires_at":(now + chrono::Duration::hours(1)).to_rfc3339()
                 }}),
                 None,
@@ -116,7 +116,14 @@ impl World {
         sha
     }
 
-    fn owner(&self, request: &str, owner: Option<&str>, state: &str, expires: DateTime<Utc>) {
+    fn owner(
+        &self,
+        request: &str,
+        owner: Option<&str>,
+        state: &str,
+        generation: u64,
+        expires: DateTime<Utc>,
+    ) {
         let journal = super::super::external_work::SqliteRequestJournal::open(&self.root).unwrap();
         journal
             .prepare(
@@ -130,7 +137,7 @@ impl World {
                 request,
                 &json!({"code":"status","receipt":{
                     "resource":{"id":"resource","state":state},
-                    "visible_owner":owner.map(|id| json!({"registration_id":id})),
+                    "visible_owner":owner.map(|id| json!({"registration_id":id})), "generation":generation,
                     "expires_at":expires.to_rfc3339()
                 }}),
                 None,
@@ -177,12 +184,14 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
                 "expired",
                 Some("sup"),
                 "claimed",
+                1,
                 world.now - chrono::Duration::minutes(1),
             );
             world.owner(
                 "released",
                 None,
                 "released",
+                2,
                 world.now - chrono::Duration::minutes(1),
             );
         }
@@ -246,6 +255,7 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         "takeover",
         Some("peer"),
         "claimed",
+        3,
         world.now + chrono::Duration::hours(1),
     );
     reconcile(
@@ -262,6 +272,29 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         .unwrap();
     assert_eq!(status.owner.as_deref(), Some("peer"));
     assert!(status.pending);
+    // A delayed response from before takeover must not revive the former
+    // owner's authority merely because its journal row arrived last.
+    world.owner(
+        "late-prior-owner",
+        Some("sup"),
+        "claimed",
+        1,
+        world.now + chrono::Duration::hours(1),
+    );
+    assert_eq!(
+        audit_at(&world.root, false, world.now).unwrap()[0]
+            .owner
+            .as_deref(),
+        Some("peer")
+    );
+    reconcile(
+        &world.root,
+        "sup",
+        "session",
+        world.now + chrono::Duration::minutes(10),
+        &mut |_, _| panic!("stale generation revived prior owner"),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -535,6 +568,7 @@ fn source_reaction_authority_and_identity_fences() {
                 "mid-read-takeover",
                 Some("peer"),
                 "claimed",
+                2,
                 world.now + chrono::Duration::hours(1),
             );
             Ok(read(&[]))

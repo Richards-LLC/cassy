@@ -2,7 +2,7 @@
 import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { AccountsSheet, type AccountsHost } from "./accounts-panel";
 import { accountCapacity, accountMeters, accountTime, type AccountRow, type AccountOperation, type AccountsCatalog } from "./accounts-model";
-const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: true, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
+const row: AccountRow = { key: "claude:spare", provider: "claude", name: "spare", display_name: "hello@example.test", login_state: "stale_login", disabled: false, duplicate_of: null, is_default: false, recommendation: null, windows: [], usage_observed_at: null, capabilities: { remove: null, disable: null, enable: "Already enabled", rename: null, set_default: null } };
 beforeAll(() => {
   HTMLDialogElement.prototype.showModal = function() { this.setAttribute("open", ""); };
   HTMLDialogElement.prototype.close = function() { this.removeAttribute("open"); this.dispatchEvent(new Event("close")); };

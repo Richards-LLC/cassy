@@ -434,7 +434,7 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
         &context.train_id,
         &tag,
         close_shipped_train(root, &context.train_id, &tag)?,
-        super::release_adapters::release_reconcile::ReconcileTrigger::Installed,
+        crate::release_reconcile::ReconcileTrigger::Installed,
     )?;
     println!("{reconciled}");
     Ok(true)
@@ -833,7 +833,7 @@ pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
                     train,
                     tag,
                     report,
-                    super::release_adapters::release_reconcile::ReconcileTrigger::Backfill,
+                    crate::release_reconcile::ReconcileTrigger::Backfill,
                 )
             })
         };

@@ -16,8 +16,8 @@
 //!
 //! The issue *state* comes from `gh`, bounded and offline-tolerant: a failed
 //! or slow `gh` is reported as "could not check", never as an empty list.
-//! Closing issues automatically belongs to the release train and is out of
-//! scope here (rule-176).
+//! The release adapter closes complete issues after task reconciliation with
+//! [`reconcile_release_issues`]; partials and transport failures stay explicit.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -72,6 +72,21 @@ impl GhIssueStates {
         Self {
             binary,
             deadline: Deadline::after(budget),
+        }
+    }
+
+    fn close_completed(&self, issue: &IssueRef, comment: &str) -> Result<(), String> {
+        let repo = repo_key(&issue.owner, &issue.repo);
+        let mut command = Command::new(&self.binary);
+        command.args(["issue", "close", &issue.number.to_string(), "--repo", &repo,
+            "--reason", "completed", "--comment", comment]).env("GH_PROMPT_DISABLED", "1");
+        let output = run_command(&mut command, self.deadline, GH_BUDGET)
+            .map_err(|error| format!("gh issue close {} did not complete: {error:?}", issue.display()))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!("gh issue close {} failed: {}", issue.display(),
+                String::from_utf8_lossy(&output.stderr).lines().next().unwrap_or("").trim()))
         }
     }
 }
@@ -442,12 +457,139 @@ pub(crate) enum IssueAction {
 /// Called after release task closes. Re-read status and membership before any
 /// GitHub write; close results alone never prove shipping or current task state.
 pub(crate) fn reconcile_release_issues(
-    _root: &Path,
-    _repo: &Path,
-    _inventory: &crate::qa_batch::ReleaseInventory,
-    _close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
 ) -> Vec<IssueOutcome> {
-    Vec::new()
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let default_repo = Some(inventory.scope.repository.as_str());
+    let failed = |error: String| vec![IssueOutcome {
+        issue: inventory.scope.repository.clone(), action: IssueAction::Failed,
+        comment_or_error: error,
+        task_ids: inventory.deliveries.iter().map(|d| d.task_id.clone()).collect(),
+    }];
+    let tasks = match release_issue_tasks(root) {
+        Ok(tasks) => tasks,
+        Err(error) => return failed(error),
+    };
+    let mut issues = BTreeMap::new();
+    for delivery in &inventory.deliveries {
+        if let Some(task) = tasks.get(&delivery.task_id) {
+            for issue in task_issue_refs(task, default_repo) {
+                issues.entry(issue_key(&issue)).or_insert(issue);
+            }
+        }
+    }
+    if issues.is_empty() {
+        return Vec::new();
+    }
+    // Terminal fixes from older releases may be outside the incoming scope;
+    // include every referencing task before asking the same resolver again.
+    let mut scope = inventory.scope.clone();
+    for task in tasks.values().filter(|t| t.status != TaskStatus::Cancelled) {
+        if task_issue_refs(task, default_repo).iter().any(|i| issues.contains_key(&issue_key(i))) {
+            scope.included_task_ids.push(task.id.clone());
+        }
+    }
+    scope.included_task_ids.sort();
+    scope.included_task_ids.dedup();
+    let refreshed = match crate::qa_batch::resolve_release_inventory(root, repo, &scope) {
+        Ok(inventory) => inventory,
+        Err(error) => return issues.into_values().map(|issue| IssueOutcome {
+            issue: issue.display(), action: IssueAction::Failed, comment_or_error: error.clone(),
+            task_ids: tasks.values().filter(|t| references_issue(t, &issue, default_repo)).map(|t| t.id.clone()).collect(),
+        }).collect(),
+    };
+    let shipped: BTreeSet<_> = refreshed.deliveries.iter().map(|d| d.task_id.as_str()).collect();
+    let quarantined: BTreeSet<_> = refreshed.exceptions.iter()
+        .filter(|e| e.code == crate::qa_batch::ReleaseInventoryCode::Quarantined)
+        .map(|e| e.task_id.as_str()).collect();
+    let gh = GhIssueStates::new(GH_BUDGET);
+    let states = open_states(&issues.values().cloned().collect::<Vec<_>>(), &gh, default_repo);
+    issues.into_values().map(|issue| {
+        let linked: Vec<_> = tasks.values().filter(|t| references_issue(t, &issue, default_repo)).collect();
+        let mut outcome = IssueOutcome {
+            issue: issue.display(), action: IssueAction::Skipped, comment_or_error: String::new(),
+            task_ids: linked.iter().map(|t| t.id.clone()).collect(),
+        };
+        match states.get(&repo_key(&issue.owner, &issue.repo)) {
+            Some(Ok(open)) if !open.contains(&issue.number) => {
+                outcome.comment_or_error = "GitHub issue is already closed.".into();
+                return outcome;
+            }
+            Some(Ok(_)) => {},
+            state => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = match state {
+                    Some(Err(error)) => error.clone(),
+                    _ => "repository limit reached".into(),
+                };
+                return outcome;
+            }
+        }
+        let remaining: Vec<_> = linked.iter().filter(|t| {
+            t.status != TaskStatus::Closed || !shipped.contains(t.id.as_str())
+                || quarantined.contains(t.id.as_str())
+                || matches!(close_results.get(&t.id), Some(CassyMergeClose::Held(_) | CassyMergeClose::NotEligible))
+        }).map(|t| t.id.as_str()).collect();
+        if !remaining.is_empty() {
+            outcome.action = IssueAction::Partial;
+            outcome.comment_or_error = format!("Tasks not both closed and shipped, or independently held: {}", remaining.join(", "));
+            return outcome;
+        }
+        // GitHub reads may take seconds. A changed or newly linked task must
+        // not inherit the old snapshot's permission to close this issue.
+        let current = match release_issue_tasks(root) {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = error;
+                return outcome;
+            }
+        };
+        let versions = |tasks: &BTreeMap<String, Task>| tasks.values()
+            .filter(|t| references_issue(t, &issue, default_repo))
+            .map(|t| (t.id.clone(), t.updated_at)).collect::<BTreeMap<_, _>>();
+        if versions(&tasks) != versions(&current) {
+            outcome.action = IssueAction::Partial;
+            outcome.comment_or_error = "Referencing tasks changed during reconciliation; retry with a fresh inventory.".into();
+            outcome.task_ids = versions(&current).into_keys().collect();
+            return outcome;
+        }
+        outcome.comment_or_error = format!("Released in {} at commit {}.\n\nShipped tasks: {}.",
+            scope.release_id, scope.final_release_sha, outcome.task_ids.join(", "));
+        match gh.close_completed(&issue, &outcome.comment_or_error) {
+            Ok(()) => outcome.action = IssueAction::Closed,
+            Err(error) => {
+                outcome.action = IssueAction::Failed;
+                outcome.comment_or_error = error;
+            }
+        }
+        outcome
+    }).collect()
+}
+
+fn issue_key(issue: &IssueRef) -> (String, u64) {
+    (repo_key(&issue.owner, &issue.repo), issue.number)
+}
+
+fn references_issue(task: &Task, issue: &IssueRef, default_repo: Option<&str>) -> bool {
+    task.status != TaskStatus::Cancelled
+        && task_issue_refs(task, default_repo).iter().any(|i| issue_key(i) == issue_key(issue))
+}
+
+/// List suppression must never hide an unfinished part of a fix from closing.
+fn release_issue_tasks(root: &Path) -> Result<BTreeMap<String, Task>, String> {
+    let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let mut tasks: BTreeMap<_, _> = store.list(None).map_err(|e| e.to_string())?
+        .into_iter().map(|t| (t.id.clone(), t)).collect();
+    let queue = crate::cloud::SyncQueue::open_read_only(root).map_err(|e| e.to_string())?;
+    for id in queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).map_err(|e| e.to_string())? {
+        let task = store.get(&id).map_err(|e| e.to_string())?;
+        tasks.insert(id, task);
+    }
+    Ok(tasks)
 }
 
 #[cfg(test)]

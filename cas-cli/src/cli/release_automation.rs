@@ -1453,7 +1453,7 @@ mod tests {
         current.deliverables.work_target = shipped.deliverables.work_target.clone();
         store.add(&current).unwrap();
 
-        let mut shipped_child = Task::new("cas-a100".into(), "GH #101 GH #102 GH #103: shipped fix".into());
+        let mut shipped_child = Task::new("cas-a100".into(), "GH #101 GH #102 GH #103 GH #104 GH #105: shipped fix".into());
         shipped_child.origin_project = Some("release-fixture".into());
         shipped_child.assignee = Some(owner.id.clone());
         shipped_child.status = TaskStatus::AwaitingMerge;
@@ -1493,6 +1493,15 @@ mod tests {
         });
         store.create_atomic(&another_open_child, &[], Some(&shipped.id), None).unwrap();
 
+        let mut prior = Task::new("cas-prior".into(), "GH #104: older released part".into());
+        prior.origin_project = Some("release-fixture".into());
+        prior.status = TaskStatus::Closed;
+        prior.deliverables.factory_branch_anchor = shipped_child.deliverables.factory_branch_anchor.clone();
+        store.add(&prior).unwrap();
+        let hidden = Task::new("cas-hidden".into(), "GH #105: unfinished hidden part".into());
+        store.add(&hidden).unwrap();
+        crate::cloud::SyncQueue::open(&root).unwrap()
+            .quarantine_row(crate::cloud::QUARANTINE_TASK, &hidden.id, "fixture hidden reference").unwrap();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_SESSION_ID", &owner.id);
         env.set("CAS_AGENT_NAME", &owner.name);
@@ -1504,8 +1513,11 @@ root = pathlib.Path(__file__).parent
 args = sys.argv[1:]
 with (root / 'gh-calls.jsonl').open('a') as log:
     log.write(json.dumps(args) + '\n')
+if (root / 'gh-offline').exists():
+    print('fixture offline', file=sys.stderr)
+    sys.exit(1)
 if args[:2] == ['issue', 'list']:
-    print(json.dumps([{'number': n} for n in [101, 102, 103] if not (root / f'closed-{n}').exists()]))
+    print(json.dumps([{'number': n} for n in [101, 102, 103, 104, 105] if not (root / f'closed-{n}').exists()]))
 elif args[:2] == ['issue', 'close']:
     if args[2] == '103':
         print('fixture transport failure', file=sys.stderr)
@@ -1546,7 +1558,7 @@ else:
         let receipt: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v4.3.0-issues.json")).unwrap()).unwrap();
         let actions: Vec<_> = receipt["issues"].as_array().unwrap().iter()
             .map(|issue| (issue["issue"].as_str().unwrap(), issue["action"].as_str().unwrap())).collect();
-        assert_eq!(actions, vec![("Example/Repo#101", "closed"), ("Example/Repo#102", "partial"), ("Example/Repo#103", "failed")]);
+        assert_eq!(actions, vec![("Example/Repo#101", "closed"), ("Example/Repo#102", "partial"), ("Example/Repo#103", "failed"), ("Example/Repo#104", "closed"), ("Example/Repo#105", "partial")]);
         assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains("v4.3.0"));
         assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains(&git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap()));
         assert_eq!(receipt["issues"][0]["task_ids"], serde_json::json!(["cas-a100"]));
@@ -1558,6 +1570,9 @@ else:
         assert_eq!(close, &expected_close);
         assert!(!repo.join("closed-102").exists());
         assert!(!repo.join("closed-103").exists());
+        assert_eq!(receipt["issues"][3]["task_ids"], serde_json::json!(["cas-a100", "cas-prior"]));
+        assert_eq!(receipt["issues"][4]["task_ids"], serde_json::json!(["cas-a100", "cas-hidden"]));
+        assert!(!repo.join("closed-105").exists());
 
         assert!(first.contains("reconciled"), "{first}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open, "{first}");
@@ -1583,6 +1598,12 @@ else:
         let calls: Vec<Vec<String>> = fs::read_to_string(repo.join("gh-calls.jsonl")).unwrap().lines()
             .map(|line| serde_json::from_str(line).unwrap()).collect();
         assert_eq!(calls.iter().filter(|args| args.get(2).is_some_and(|n| n == "101")).count(), 1);
+        fs::write(repo.join("gh-offline"), "offline").unwrap();
+        close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
+        let offline: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v4.3.0-issues.json")).unwrap()).unwrap();
+        assert_eq!(offline["issues"].as_array().unwrap().len(), 5);
+        assert!(offline["issues"].as_array().unwrap().iter().all(|i| i["action"] == "failed"));
+
 
     }
 

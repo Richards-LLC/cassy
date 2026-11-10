@@ -70,3 +70,36 @@ uses the existing by-ID inspection path to preserve their shipped facts and
 adds a `quarantined` exception; membership never lifts that independent hold.
 Recorded anchors and bases must resolve to their own full SHA, never a symbolic
 branch alias.
+
+## GitHub issue outcomes after task reconciliation
+
+`issue_reconcile::reconcile_release_issues(root: &Path, repo: &Path,
+ inventory: &ReleaseInventory, close_results: &BTreeMap<String, CassyMergeClose>)
+ -> Vec<IssueOutcome>` runs after the delivery close calls. `CassyMergeClose`
+comes from `mcp::tools::core::task::lifecycle::merge_close`. Each serializable
+`IssueOutcome` has `issue`, `action` (`closed`, `partial`, `failed`, `skipped`),
+`comment_or_error`, and sorted `task_ids`. The next release receipt should embed
+this vector directly; issue failures do not undo successful local task closes.
+
+The incoming inventory selects candidate issues through `task_issue_refs`.
+The function reloads every referencing task, including quarantined rows and
+terminal deliveries outside the original scope, and expands that scope through
+the same inventory resolver. As with `shipped_open_issues`, cancelled attempts
+do not keep an otherwise complete issue open. Every remaining reference must
+be closed and have proven shipped membership; a held close or quarantine keeps
+the issue partial. Missing/invalid start bases do not erase proven ancestry of
+an already closed task. Explicit no-code membership still needs the scope's
+portable proof. Referencing task versions are checked again after GitHub reads;
+changes require a fresh run.
+
+GitHub reads and writes share the existing six-second deadline and repository
+bound. A successful close uses reason `completed` and a comment naming the
+release identity, immutable final SHA and every referencing task. Already closed
+issues are skipped on replay. Partials and every read/write failure remain named
+outcomes; offline does not mean closed. Dry runs never contact GitHub.
+
+The current installed/backfill adapter invokes this function after closes and
+atomically saves `.cas/releases/<tag>-issues.json` with `scope` and `issues`, then
+includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
+exists for historical releases that have no tracked cut receipt. Publication
+verification precedes this stage; the issue helper never publishes a release.

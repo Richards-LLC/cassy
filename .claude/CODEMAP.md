@@ -151,3 +151,5 @@
 - **CLI/library:** `cas-cli/src/main.rs` (`cas`), `cas-cli/src/lib.rs`; MCP daemon `cas-cli/src/mcp/daemon.rs` (`cas serve`).
 - **Factory:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`; Commander `hub-web/src/main.ts`.
 - **In-place daemon updates:** `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs`, `cas-cli/src/cli/factory/reexec.rs`; real-hub journey HUB-J11.
+
+- `cas-cli/src/issue_reconcile.rs` - bounded GitHub reconciliation and typed release issue outcomes after delivery closes.

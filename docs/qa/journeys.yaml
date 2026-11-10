@@ -464,6 +464,10 @@ bug_families:
     title: Expired dead-owner Slack claims recover only after matching reply settlement; uncertain outcomes and live owners stay held without reposting
     tasks: [cas-f039]
     journeys: [FACTORY-SPAWN]
+  composer-digits-text-face:
+    title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
+    tasks: [cas-f47a]
+    journeys: [HUB-J6]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

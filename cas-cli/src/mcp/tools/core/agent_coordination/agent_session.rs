@@ -110,6 +110,7 @@ mod tests {
                 if reuses {
                     assert_eq!(registered.registered_at, before.registered_at);
                     assert_eq!(registered.factory_session, before.factory_session);
+                    assert!(service.inner.has_server_internal_identity(&old_id));
                 }
             }
         }

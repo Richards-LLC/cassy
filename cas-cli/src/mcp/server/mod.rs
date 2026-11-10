@@ -807,6 +807,14 @@ impl CasCore {
                 message: Cow::from(format!("Could not inspect existing registration: {error}")),
                 data: None,
             };
+            // Registration can be the first tool call after reconnect. The
+            // read-only lookup authenticates the stored harness before caching
+            // it; a caller-supplied name alone must never select an identity.
+            if self.agent_id.get().is_none()
+                && let Ok(id) = self.get_registered_agent_id_read_only()
+            {
+                self.bind_agent_identity(id, AgentIdentitySource::ServerInternal)?;
+            }
             let existing = self.agent_id.get().and_then(Option::as_deref)
                 .map(|id| agent_store.get(id)).transpose().map_err(inspect_error)?;
             let harness = crate::agent_id::get_cc_pid_for_mcp();

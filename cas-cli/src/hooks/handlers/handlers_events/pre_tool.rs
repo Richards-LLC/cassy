@@ -2800,7 +2800,16 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     let is_write = match operation {
         "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
         "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
-        "checkout" => args.iter().any(|arg| !arg.starts_with('-')),
+        "checkout" => {
+            // Creating a replay branch navigates existing history, just like
+            // clone or switch; it does not commit to the target repository.
+            // Keep branch resets (-B) and path restores behind the guard.
+            let creates_branch = args
+                .iter()
+                .take_while(|arg| arg.as_str() != "--")
+                .any(|arg| arg.starts_with("-b"));
+            !creates_branch && args.iter().any(|arg| !arg.starts_with('-'))
+        }
         "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
         _ => false,
     };
@@ -11943,6 +11952,8 @@ mod worker_commit_guard_tests {
             "git cherry-pick --continue",
             "git reset --hard HEAD~1",
             "git checkout main",
+            "git checkout -B replay-at-release HEAD",
+            "git checkout HEAD -- -b",
             "git add -A",
         ] {
             assert!(
@@ -12560,10 +12571,7 @@ mod worker_commit_guard_tests {
         );
     }
 
-    /// cas-93e8: a `cd` in the same shell command changes the repository
-    /// targeted by every following Git history mutation. The hook cwd alone
-    /// is not sufficient because a worker can leave its worktree with
-    /// `cd /primary/checkout && git commit`.
+    /// GH #1752: preparing an isolated replay fixture creates no commit.
     #[test]
     fn isolated_replay_checkout_batch_is_not_a_commit_cas_7584() {
         let worktree = tempfile::tempdir().unwrap();
@@ -12586,9 +12594,16 @@ mod worker_commit_guard_tests {
         let input = hook_git_write_input(&worktree_path, &command);
         let output = handle_pre_tool_use(&input, None).expect("handler ok");
         let value = serde_json::to_value(output).unwrap();
-        assert_ne!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
+        assert_ne!(
+            value["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{value}"
+        );
     }
 
+    /// cas-93e8: a `cd` in the same shell command changes the repository
+    /// targeted by every following Git history mutation. The hook cwd alone
+    /// is not sufficient because a worker can leave its worktree with
+    /// `cd /primary/checkout && git commit`.
     #[test]
     fn explicit_cd_outside_worker_worktree_is_denied_for_history_writes_cas_93e8() {
         let parent = tempfile::tempdir().unwrap();
@@ -12614,7 +12629,9 @@ mod worker_commit_guard_tests {
             "git add -A",
         ] {
             let command = format!("cd '{outside_path}' && {operation}");
-            assert!(check_worker_git_commit_scope_for_command(&worktree_path, &command).is_some());
+            assert!(
+                check_worker_git_commit_scope_for_command(&worktree_path, &command).is_some()
+            );
         }
         for options in [
             format!("-C '{outside_path}'"),
@@ -12634,7 +12651,10 @@ mod worker_commit_guard_tests {
             let input = hook_git_write_input(&worktree_path, &command);
             let output = handle_pre_tool_use(&input, None).expect("handler ok");
             let value = serde_json::to_value(output).unwrap();
-            assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny", "{value}");
+            assert_eq!(
+                value["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{value}"
+            );
         }
     }
 

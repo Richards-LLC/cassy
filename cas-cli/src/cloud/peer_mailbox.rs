@@ -1581,6 +1581,9 @@ pub(crate) fn send_premerge_receipt(root: &Path, message: PeerSend, label: &str)
     outbox::enqueue_premerge_receipt(root, message, label)
 }
 
+/// Cassy Cloud's peer-message body limit, in characters.
+pub(crate) const CLOUD_BODY_MAX_CHARS: usize = 64_000;
+
 /// Build overflow uses a task-stable key in the existing durable outbox.
 pub(crate) fn send_build_route(root: &Path, message: PeerSend, label: &str) -> Result<SendReceipt, PeerSendError> {
     outbox::enqueue_and_send(root, message, label)

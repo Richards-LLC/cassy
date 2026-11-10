@@ -80,6 +80,14 @@ fn enqueue_with_recovery(
 ) -> Result<SendReceipt, PeerSendError> {
     // Refuse before persisting: no login means no retry promise.
     http_mailbox(root).ok_or_else(|| failed("not logged in to Cassy Cloud", None))?;
+    // Cloud refuses a longer body, so a row above the cap could only be abandoned.
+    let chars = message.body.chars().count();
+    if chars > super::CLOUD_BODY_MAX_CHARS {
+        return Err(failed(
+            format!("message body is {chars} characters; Cassy Cloud accepts at most {}. Nothing was queued", super::CLOUD_BODY_MAX_CHARS),
+            None,
+        ));
+    }
     let sender = crate::store::open_agent_store(root)
         .and_then(|agents| {
             agents

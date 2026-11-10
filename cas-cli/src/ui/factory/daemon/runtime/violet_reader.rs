@@ -373,7 +373,7 @@ impl VioletReader {
         let actor = actor.clone();
         let classes: Vec<Result<Option<Withheld>, NamedRefusal>> = deliveries
             .iter()
-            .map(|d| Self::check_owner(actor, d).and_then(|()| match self.classify(port, &d.target) {
+            .map(|d| Self::check_owner(&actor, d).and_then(|()| match self.classify(port, &d.target) {
                 // Already quarantined by this process: the record is durable.
                 Some(class) if self.typed.contains(&d.id) => Ok(Some(class)),
                 Some(class) => io.quarantine.hold(d, class, now).map(|()| Some(class)),

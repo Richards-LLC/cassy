@@ -1,0 +1,4 @@
+### Added — Commander
+
+- **Quality sheet** — The command palette opens Quality for the selected conversation's project: the rubric that got worse by the largest factor since the last release leads with its trend line, every worker and supervisor rubric follows per merged delivery (per hour in each row's data), releases that shipped new features carry a change marker, and rubrics without a signal yet show whether they await session scoring or the AI judge. Supervisor tokens are broken down by wake source with the previous release's average.
+- **Ledger per supervisor** — `cas ledger report --json` adds `deliveries` (tasks whose close the verifier accepted) and `turns_by_actor` (each supervisor's turns by wake channel), and the hub serves the last five releases plus work in progress read-only at `GET /v1/sessions/{session}/quality`.

@@ -997,6 +997,11 @@ export class HubConnectionSupervisor {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/status`);
   }
 
+  /** The session project's friction ledger per release, for Commander's Quality sheet (cas-3dd7). */
+  async quality(session: string): Promise<import("./quality-model").QualityReport> {
+    return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/quality`);
+  }
+
   async lease(session: string): Promise<LeaseState> {
     return this.request("GET", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }

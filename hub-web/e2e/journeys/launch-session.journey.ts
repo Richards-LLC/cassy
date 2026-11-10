@@ -571,3 +571,54 @@ test("HUB-J13 check native account usage before starting without switching", jou
   }
   expect(calls).toContain("claude:main"); expect(calls).toContain("codex:main");
 });
+
+// cas-3dd7: the selected conversation's friction ledger, release over release, from the palette.
+test("HUB-J13 read a project's quality trend from the palette", journeyPart, async ({ page, journey }, testInfo) => {
+  await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"] });
+  const headers = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization,dpop,content-type", "access-control-allow-methods": "GET,OPTIONS" };
+  const turns = (wakes: number, noOp: number, input: number) => ({ wakes, no_op_wakes: noOp, input_tokens: input, output_tokens: 0, minutes: 0, missing_tokens: 0, missing_minutes: 0 });
+  const release = (name: string, from: string, to: string | null, deliveries: number, input: number, features: string[]) => ({
+    release: name, published: to !== null, from, to, deliveries, turns: turns(100, 40, input), interventions_total: deliveries, interventions: { override_close: deliveries },
+    checks: { verifier: { pass: deliveries, fail: 1 }, lane: { pass: 20, fail: 2 } }, escapes: [], features: Object.fromEntries(features.map(key => [key, {}])),
+    friction: [{ reference: "cas-89fa", severity: "p1", title: "Audit aggregation double-counts verifier passes", state: "open" }],
+    turns_by_actor: { "f056bf8a-0427-4d4f": { daemon: turns(80, 40, input * 0.8), operator: turns(20, 0, input * 0.2) } },
+  });
+  let reads = 0;
+  await page.route(/^https:\/\/atlas\.test\/v1\/sessions\/[^/]+\/quality$/, route => {
+    if (route.request().method() === "OPTIONS") return route.fulfill({ status: 204, headers });
+    reads++;
+    return route.fulfill({ headers, json: { supervisors: { "f056bf8a-0427-4d4f": "cosmic-pelican-12" }, releases: [
+      release("v4.11.0", "2026-11-10T00:30:00Z", "2026-11-10T04:00:00Z", 30, 175e6, ["verification_dispatch"]),
+      release("v4.12.0", "2026-11-10T04:00:00Z", "2026-11-10T12:40:00Z", 20, 100e6, ["verification_dispatch"]),
+      release("unreleased", "2026-11-10T12:40:00Z", null, 150, 2200e6, ["verification_dispatch", "delivery_watchdog"]),
+    ] } });
+  });
+  await journey.open();
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
+    await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
+      // Ctrl/Cmd+K lands in the list search; pressed again, it opens the palette.
+      const palette = page.locator("#command-palette");
+      await page.keyboard.press("ControlOrMeta+k");
+      if (!await palette.isVisible()) await page.keyboard.press("ControlOrMeta+k");
+      await palette.getByRole("button", { name: /^Quality/ }).click();
+      const dialog = page.getByRole("dialog", { name: "Quality" });
+      // Context burn per delivery doubled (14.7M against 5M): the headline names it with a factor on one line.
+      const factor = dialog.locator(".quality-factor");
+      await expect(factor).toHaveText("2.9× worse");
+      expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
+      await expect(dialog.locator(".quality-hero svg")).toBeVisible();
+      await expect(dialog.locator(".quality-rubric:not(.quality-pending)")).toHaveCount(7);
+      await expect(dialog.locator(".quality-pending")).not.toHaveCount(0);
+      await expect(dialog.locator(".quality-wakes tbody tr")).toHaveCount(2);
+      await expect(dialog.locator(".quality-wakes")).toContainText("cosmic-pelican-12");
+      expect(await dialog.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath(`quality-${width}-${colorScheme}.png`) });
+      await dialog.getByRole("button", { name: "Close quality" }).click();
+      await expect(dialog).toBeHidden();
+    });
+  }
+  expect(reads).toBe(4);
+});

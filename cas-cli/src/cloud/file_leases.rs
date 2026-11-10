@@ -305,6 +305,21 @@ pub(crate) fn claim_with(
     lease
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CollisionAdvice {
+    SeparateEntries,
+    Coordinate,
+}
+
+fn collision_advice(relative_path: &str) -> CollisionAdvice {
+    match relative_path {
+        "docs/PRODUCT_OVERVIEW.md" | ".claude/CODEMAP.md" | "docs/qa/journeys.yaml" => {
+            CollisionAdvice::SeparateEntries
+        }
+        _ => CollisionAdvice::Coordinate,
+    }
+}
+
 /// The advisory a worker sees before editing a file another agent holds.
 pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
     let (who, handoff) = match holder {
@@ -318,6 +333,13 @@ pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
         ),
         FileHolder::UnknownSession(worker) => (worker.clone(), ""),
     };
+    if collision_advice(relative_path) == CollisionAdvice::SeparateEntries {
+        return format!(
+            "⚠️ SHARED FILE: {relative_path} is being edited by {who}. Separate entries need no coordination. \
+             Rebase onto the updated target if the other delivery lands first. If both edits touch the same entry, \
+             coordinate through your supervisor{handoff}."
+        );
+    }
     format!(
         "⚠️ SHARED FILE: {relative_path} is being edited by {who}. Before you change it, \
          coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`){handoff}, \
@@ -364,6 +386,14 @@ pub fn notify_worker_of_holder(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_entry_documents_use_advice_without_required_coordination() {
+        for path in ["docs/PRODUCT_OVERVIEW.md", ".claude/CODEMAP.md", "docs/qa/journeys.yaml"] {
+            assert_eq!(collision_advice(path), CollisionAdvice::SeparateEntries, "{path}");
+        }
+        assert_eq!(collision_advice("src/lib.rs"), CollisionAdvice::Coordinate);
+    }
 
     /// cas-a30e9: a Codex worker cannot be given PreToolUse context, so it is
     /// messaged who holds a contended file, once per file per window.

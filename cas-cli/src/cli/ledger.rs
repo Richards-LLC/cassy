@@ -1463,17 +1463,6 @@ mod tests {
         assert!(text.contains("filed 1, fixed 1, open 1"), "{text}");
     }
 
-    /// Temporary read-only probe of a copied real ledger (cas-3dd7 review ask).
-    #[test]
-    fn quality_reports_real_ledger_probe() {
-        let root = "/mnt/rewind/cas/scratch/gt55/qroot";
-        if !Path::new(root).join(".cas/cas.db").exists() { return }
-        let quality = quality_reports(Path::new(&root).join(".cas").as_path(), 5).unwrap();
-        let labels: Vec<String> = quality["releases"].as_array().unwrap().iter()
-            .map(|r| format!("{} deliveries={} changes={}", r["release"], r["deliveries"], r["changes"])).collect();
-        std::fs::write(Path::new(&root).join("probe.txt"), labels.join("\n")).unwrap();
-    }
-
     /// The train's receipt becomes a release event, and the report for that
     /// release shows its speed, the window's interventions and the fleet's rows.
     #[test]

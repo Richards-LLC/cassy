@@ -14,7 +14,7 @@ When your pane exits on its own (`/exit`, a crash, a kill), the factory shuts do
 
 - **New `cas serve` binary:** ask the operator to use the harness's MCP reconnect control (Claude Code: `/mcp`). Your pane and the workers keep running; use `recycle_worker` for stale workers.
 - **A new harness version or a fresh context:** record a handoff with `memory action=remember entry_type=handoff`, then run `factory action=restart_supervisor`. The daemon starts a new session with the factory's boot harness, model and effort; workers keep their tasks, panes and leases, and a `/model` change does not carry over. If your session still runs after 10 seconds, the restart did not happen: a refusal arrives as a message, and silence means the daemon predates the action.
-- **A crash, or a daemon without `restart_supervisor`:** treat it as a factory restart. Have each worker commit and push or park and write `HANDOFF.md`, record your handoff, then after the restart and preflight respawn the workers by name on their tasks; a respawn by name reuses the kept worktree.
+- **A crash, or a daemon without `restart_supervisor`:** treat it as a factory restart. Have each worker commit and push or park and write `HANDOFF.md` under each task's artifacts directory, record your handoff, then after the restart and preflight respawn the workers by name on their tasks; a respawn by name reuses the kept worktree.
 
 ## Disposable verification and walk checkouts
 
@@ -92,7 +92,7 @@ On `SPAWN QUEUE STALLED`, `FACTORY DAEMON LOOP WEDGED` or `SPAWN IN FLIGHT FOR`,
 
 1. `coordination action=message target=<worker> summary="Context near limit — commit now" message="Commit any in-progress work now, then report what you committed."`
 2. Wait for the commit on a `task_*` or `worker_idle` event reminder, or check `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`.
-3. Once work is committed, `HANDOFF.md` written and the worker idle, run `factory action=recycle_worker target=<worker>`; it keeps the name, recipe and worktree. `RECYCLE RECOMMENDED` names the same command for an idle Codex worker.
+3. Once work is committed, `HANDOFF.md` written under the task's artifacts directory and the worker idle, run `factory action=recycle_worker target=<worker>`; it keeps the name, recipe and worktree. `RECYCLE RECOMMENDED` names the same command for an idle Codex worker.
 
 ### Garbage Output (Context Exhaustion)
 

@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  released-delivery-metadata-supersession:
+    title: Released fragments and generated codemaps do not block close; missing source and unpromoted entries still refuse
+    tasks: [cas-2fe8]
+    journeys: [FACTORY-CLOSE]
   epic-timeout-recovery:
     title: Timeout recovery commands record an exact supervisor verdict of the correct type before ordinary close; stale verdicts and unshipped receipts do not authorize the current dispatch
     tasks: [cas-bf13]

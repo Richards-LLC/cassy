@@ -14822,7 +14822,9 @@ fn without_promoted_changelog_fragments(
                 .map(str::trim_end)
                 .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                 .collect();
-            let Some(release) = git_text(&["log", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
+            // Default path simplification hides the release when the train is
+            // merged into a target that never held the fragment (cas-2fe8).
+            let Some(release) = git_text(&["log", "--full-history", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
                 .map(|sha| sha.trim().to_string())
                 .filter(|sha| !sha.is_empty())
             else {
@@ -25851,6 +25853,13 @@ fn delivery_content_presence_on_target_for_paths(
     let DeliveryContentPresence::Dropped { paths } = presence else {
         return presence;
     };
+    // CODEMAP is generated for the integrated tree; its lane-specific text is
+    // never delivery content to preserve verbatim (cas-2fe8).
+    let remaining = paths
+        .iter()
+        .filter(|path| path.as_str() != ".claude/CODEMAP.md")
+        .cloned()
+        .collect();
     // A release cut consumes per-task fragments after promoting their entries
     // into CHANGELOG.md. Apply that content-equivalence rule at the shared
     // target seam so close, merge and epic callers cannot disagree.
@@ -25858,7 +25867,7 @@ fn delivery_content_presence_on_target_for_paths(
         repo_path,
         delivery_commit,
         target_ref,
-        paths.clone(),
+        remaining,
         owners,
     );
     if let Some(note) = note {
@@ -36634,13 +36643,15 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
             write("src/feature.rs", "pub fn feature() {}\n");
+            write(".claude/CODEMAP.md", "# Map\n- src/feature.rs: delivered feature\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
             let anchor = head_sha(&p);
-            git(&p, &["checkout", "-q", "main"]);
+            // The release happens on the train before main ever has the fragment.
+            git(&p, &["checkout", "-q", "-b", "epic/release", "main"]);
             git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
             match removal {
-                "release" => {
+                "release" | "source drop" => {
                     let promoted = std::process::Command::new("python3")
                         .args(["scripts/release_changelog.py", "promote", "CHANGELOG.md", "1.0.1", "2026-11-04", "1.0.0"])
                         .current_dir(&p)
@@ -36664,10 +36675,20 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                     git(&p, &["commit", "-q", "-am", "release: v1.0.1"]);
                 }
             }
+            let release = head_sha(&p);
+            git(&p, &["checkout", "-q", "main"]);
+            git(&p, &["merge", "--no-ff", "--no-commit", "-q", "epic/release"]);
+            // Regeneration in the integrating resolution replaces the lane map.
+            write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
+            if removal == "source drop" {
+                write("src/feature.rs", "// lost feature\n");
+            }
+            git(&p, &["add", "-A"]);
+            git(&p, &["commit", "-q", "-m", "merge released train; regenerate codemap"]);
             let mut task = worker_task("worker");
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
-            (dir, task, anchor, fragment)
+            (dir, task, anchor, fragment, release)
         };
         let refused = |dir: &TempDir, task: &Task, fragment: &str, case: &str| {
             match run_factory_branch_merge_gate(task, &base_req(&task.id), "main", dir.path()) {
@@ -36679,10 +36700,10 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             }
         };
 
-        let (dir, task, _, fragment) = build("cas-test1", "release");
+        let (dir, task, _, fragment, release) = build("cas-test1", "release");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", dir.path()) {
             MergeStateGateOutcome::ProceedWithNote(note) => {
-                assert!(note.contains(&task.id) && note.contains(&fragment), "{note}")
+                assert!(note.contains(&task.id) && note.contains(&fragment) && note.contains(&release[..12]), "{note}")
             }
             other => panic!("a release-promoted fragment is delivered: {other:?}"),
         }
@@ -36702,9 +36723,11 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         git(p, &["commit", "-q", "-am", "lose the promoted entry"]);
         refused(&dir, &task, &fragment, "a target that later loses the promoted entry");
 
-        let (dir, task, _, fragment) = build("cas-test1", "chore");
+        let (dir, task, _, _, _) = build("cas-test1", "source drop");
+        refused(&dir, &task, "src/feature.rs", "a real source drop beside promoted metadata");
+        let (dir, task, _, fragment, _) = build("cas-test1", "chore");
         refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
-        let (dir, task, _, fragment) = build("cas-test1", "older section");
+        let (dir, task, _, fragment, _) = build("cas-test1", "older section");
         refused(&dir, &task, &fragment, "a release that did not add the fragment's lines");
         assert!(
             matches!(
@@ -36717,13 +36740,13 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "a release tag without the fragment's changelog lines stays dropped"
         );
 
-        let (dir, task, anchor, fragment) = build("cas-other", "release");
+        let (dir, task, anchor, fragment, release) = build("cas-other", "release");
         refused(&dir, &task, &fragment, "another task's fragment");
         let sibling = Task { id: "cas-other".into(), ..task.clone() };
         let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");
         assert!(
             matches!(presence, DeliveryContentPresence::Present { .. })
-                && note.as_deref().is_some_and(|note| note.contains("cas-other") && note.contains(&fragment)),
+                && note.as_deref().is_some_and(|note| note.contains("cas-other") && note.contains(&fragment) && note.contains(&release[..12])),
             "an epic close accepts its child's promoted fragment: {presence:?} {note:?}"
         );
     }

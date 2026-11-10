@@ -669,7 +669,7 @@ impl CasCore {
                     let (repo, target) = qa_batch::task_context(&self.cas_root, &task)?;
                     let anchor = delivery.anchor.as_deref().ok_or("RELEASE_NO_CODE_REQUIRES_OWN_CLOSE")?;
                     qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, anchor)?
-                        .ok_or_else(|| "RELEASE_REVIEW_MISSING: no bound independent review or shipping verdict".into())
+                        .ok_or_else(|| "RELEASE_REVIEW_MISSING: no bound independent release review".into())
                 })();
                 match result {
                     Ok(mut receipt) => {
@@ -772,6 +772,11 @@ impl CasCore {
                     hold("the release tag no longer contains this delivery");
                     continue;
                 }
+            }
+            match super::super::block_hold::read(store.as_ref(), &task.id) {
+                Ok(Some(_)) => { hold("RELEASE_MEMBER_HELD: independent task hold remains active"); continue; }
+                Err(error) => { hold(&format!("RELEASE_HOLD_UNREADABLE: {error}")); continue; }
+                Ok(None) => {}
             }
             let own_review = match release_receipt_close_admission(&self.cas_root, &task, &repo) {
                 Ok(own_review) => own_review,

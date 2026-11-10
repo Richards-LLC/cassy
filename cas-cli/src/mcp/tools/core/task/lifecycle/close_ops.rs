@@ -29812,7 +29812,7 @@ mod merge_state_gate_tests {
             }
             if row == "release-inventory-target" {
                 std::fs::write(p.join(".claude/CODEMAP.md"), "release view\n").unwrap();
-                std::fs::write(p.join("CHANGELOG.md"), "## [9.9.9]\n### Fixed\n- proof entry\n").unwrap();
+                std::fs::write(p.join("CHANGELOG.md"), "## [9.9.9] - 2026-11-10\n### Fixed\n- proof entry\n").unwrap();
                 git(p, &["rm", "-q", "changelog.d/cas-fee3.md"]);
                 git(p, &["add", ".claude/CODEMAP.md", "CHANGELOG.md"]);
                 git(p, &["commit", "-qm", "release: v9.9.9"]);

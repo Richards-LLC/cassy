@@ -108,8 +108,14 @@ cover the original anchor. This represents a reviewed skill-authored view, not
 a claimed deterministic generator run. Ordinary source files cannot use this
 rule. Built-output regeneration retains its existing generator checks.
 
+The reviewed candidate and final release must have identical trees apart from
+explicitly reviewed maintained-view transformations. Adapters bind their review
+after release preparation; an unreviewed product/configuration change requires
+new affected proof rather than an ancestry-only transfer.
+
 QA walk receipts, independent review receipts and published-tag shipping
-verdicts keep their distinct kinds. A shipping verdict never creates a QA PASS.
+verdicts keep their distinct kinds. The inventory close entry requires independent review; shipping alone never
+creates a review or a QA PASS.
 Missing bytes, bad bindings, changed task versions, unknown producers or lost
 source leave the delivery held. Existing receipt callbacks also pin ordinary
 close to their reviewed SHA; full inventory adapters additionally supply the

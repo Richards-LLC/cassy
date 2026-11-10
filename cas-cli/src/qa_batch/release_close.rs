@@ -128,6 +128,36 @@ impl ReleaseClose {
                 transformations.push((receipt.clone(), manifest));
             }
         }
+        let changed = git_text(
+            repo,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                &inventory.scope.reviewed_sha,
+                &inventory.scope.final_release_sha,
+                "--",
+            ],
+        )
+        .ok_or("RELEASE_REVIEW_MAPPING: cannot inspect candidate-to-release inputs")?;
+        for path in changed.split('\0').filter(|path| !path.is_empty()) {
+            if !transformations.iter().any(|(_, manifest)| {
+                manifest.paths.iter().any(|proof| {
+                    proof.path == path
+                        && transformation_matches(
+                            repo,
+                            &inventory.scope.reviewed_sha,
+                            &inventory.scope.final_release_sha,
+                            proof,
+                        )
+                })
+            }) {
+                return Err(format!(
+                    "RELEASE_REVIEW_MAPPING: unreviewed release change at {path}"
+                ));
+            }
+        }
         Ok(Self {
             root: root.to_path_buf(),
             repo: repo.to_path_buf(),
@@ -308,9 +338,8 @@ pub(crate) fn receipt_allowed(root: &Path, task: &Task, receipt: &QaBatchReceipt
                 return false;
             };
             if receipt.schema_version == cas_store::RELEASE_TAG_VERDICT_SCHEMA {
-                return receipt.release_tag == context.inventory.scope.release_tag
-                    && receipt.release_tag.is_some()
-                    && receipt.staging_sha == context.inventory.scope.final_release_sha;
+                // Publication is shipping evidence, never independent review.
+                return false;
             }
             receipt.ledger_author_id.is_some()
                 && receipt.staging_sha == context.inventory.scope.reviewed_sha

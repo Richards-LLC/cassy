@@ -468,6 +468,10 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
+  empty-conversation-harness-mark:
+    title: An empty conversation's card wears the same provider mark as its header and list row when the session reports a harness
+    tasks: [cas-36cb]
+    journeys: [HUB-J3]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

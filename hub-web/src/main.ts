@@ -577,6 +577,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       supervisor: target,
       machine: machines.get(selectedMachineId!)?.label,
       project: hubSession?.project_name?.trim() || projectTitle(hubSession?.project_dir),
+      harness: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.harness,
       header: false,
       sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
       // Older daemons can establish activity but cannot name its phase/time.

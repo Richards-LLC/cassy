@@ -2441,6 +2441,9 @@ button.chip:disabled { cursor: default; }
 .thread .empty { flex: 1; align-self: stretch; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; min-width: 0; padding: 60px 40px; text-align: center; color: var(--ink); }
 .thread .empty[hidden], .thread .msgs[hidden] { display: none; }
 .thread .empty .mono { display: flex; align-items: center; justify-content: center; flex: none; width: 76px; height: 76px; border-radius: var(--radius-pill); background: var(--accent, var(--you-bg)); color: var(--accent-fg); font: var(--weight-semibold) 30px/1 var(--font-ui); box-shadow: var(--lift-strong); }
+/* cas-36cb: a session that reports its harness shows its provider's mark, as the header does. */
+.thread .empty .mono.harness-mark { background: var(--bg-panel); color: var(--ink); border: var(--line-width) solid var(--line-subtle); box-sizing: border-box; }
+.thread .empty .mono .provider-mark { width: calc(var(--avatar-mark) * 76 / 42); height: calc(var(--avatar-mark) * 76 / 42); }
 .thread .empty b { max-width: 100%; font: var(--weight-semibold) 21px/1.2 var(--font-ui); letter-spacing: -0.015em; white-space: normal; overflow-wrap: anywhere; }
 /* A generated codename is never broken at its hyphens (journey F13): as the
    title (no project) or in the meta line it stays on one line and ellipsises,

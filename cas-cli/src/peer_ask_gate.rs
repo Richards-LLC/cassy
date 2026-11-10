@@ -263,6 +263,16 @@ mod tests {
             .list_pending("operator")
             .unwrap();
         assert!(notices.iter().any(|notice| notice.payload.contains("prowl silent 7h")), "{notices:?}");
+        crate::supervisor_notices::adopt_operator_notices(&root, "gabber-factory").unwrap();
+        let operator = crate::store::open_prompt_queue_store(&root).unwrap()
+            .peek_all(10).unwrap().into_iter().find(|row| row.target == "operator").unwrap();
+        let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&operator.prompt).unwrap();
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+        assert!(!regex::Regex::new(r"^[a-z0-9_]+$").unwrap().is_match(&payload.summary), "{:?}", payload.summary);
+        assert!(!payload.message.contains("ask-4249"), "ask identity stays in machine metadata");
+        let notice: serde_json::Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(notice["kind"], "peer_ask_override");
+        assert_eq!(notice["summary"], payload.summary);
         let events = cas_store::quality_events_between(&root, None, None).unwrap();
         assert!(events.iter().any(|event| event.task_id.as_deref() == Some("cas-0c7f")), "{events:?}");
         conn.execute(

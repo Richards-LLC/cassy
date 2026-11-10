@@ -1005,3 +1005,9 @@ export function applyHistoryCursor(cursor: HistoryCursor, page: { has_earlier: b
   cursor.loading = false;
   cursor.nextBefore = page.next_before;
 }
+
+/** The question a waiting conversation asks, as its ask summarises it. */
+export function waitingQuestion(history: ConversationHistory | undefined): string | undefined {
+  const ask = history?.waiting()[0];
+  return ask ? (ask.summary?.trim() || ask.message?.trim() || undefined) : undefined;
+}

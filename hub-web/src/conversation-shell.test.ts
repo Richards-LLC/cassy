@@ -116,6 +116,14 @@ describe("cloudBrand", () => {
 });
 
 describe("conversation header identity (DESIGN.md Conversation header)", () => {
+  it("puts the observed connection state in a pill beside the project title (cas-bcf0)", () => {
+    const model = { selected: true, loaded: true, paired: true, projectDir: "/projects/cas-src", supervisor: "lively-fox-47", host: "prowl", connectionLabel: "Live" };
+    const root = document.createElement("div"); root.innerHTML = conversationHeaderMarkup(model);
+    const state = root.querySelector("#conversation-connection");
+    expect(state?.matches(".conversation-identity h1 .status-chip")).toBe(true);
+    expect(state?.textContent).toBe(model.connectionLabel);
+    expect(root.querySelector(".conversation-host #conversation-connection")).toBeNull();
+  });
   it("leads with the provider mark and shows model and effort, or the harness until they are reported", () => {
     const header = document.createElement("div");
     header.innerHTML = conversationHeaderMarkup({ selected: true, loaded: true, paired: true, supervisor: "calm-swan-15", projectDir: "/home/me/cassy", host: "soundwave", harness: "claude" });

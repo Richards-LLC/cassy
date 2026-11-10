@@ -1,5 +1,6 @@
 //! One durable closeout record per immutable project/release/commit identity.
 use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -47,10 +48,32 @@ impl ReleaseOperation {
     pub fn path(&self) -> &Path { &self.path }
 
     pub fn load(&self) -> Result<Option<serde_json::Value>> {
-        Ok(None)
+        let bytes = match std::fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let receipt: serde_json::Value = serde_json::from_slice(&bytes)?;
+        self.validate_receipt(&receipt)?;
+        Ok(Some(receipt))
     }
 
-    pub fn save(&self, _receipt: &serde_json::Value) -> Result<()> {
+    pub fn save(&self, receipt: &serde_json::Value) -> Result<()> {
+        self.validate_receipt(receipt)?;
+        let dir = self.path.parent().expect("operation path has a parent");
+        let mut pending = tempfile::NamedTempFile::new_in(dir)?;
+        pending.write_all(&serde_json::to_vec_pretty(receipt)?)?;
+        pending.as_file().sync_all()?;
+        pending.persist(&self.path).map_err(|error| StoreError::Io(error.error))?;
+        File::open(dir)?.sync_all()?;
+        Ok(())
+    }
+
+    fn validate_receipt(&self, receipt: &serde_json::Value) -> Result<()> {
+        let key: ReleaseOperationKey = serde_json::from_value(receipt["key"].clone())?;
+        if key != self.key {
+            return Err(StoreError::Parse("release receipt identity mismatch".into()));
+        }
         Ok(())
     }
 }

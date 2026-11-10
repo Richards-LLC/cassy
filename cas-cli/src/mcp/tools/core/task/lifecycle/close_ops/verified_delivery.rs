@@ -154,8 +154,12 @@ impl ReviewedDelivery {
         let Some(landed) = resolve_branch_sha(repo, reference) else {
             return false;
         };
+        let target_matches = candidate.target_branch == target
+            || (crate::qa_batch::release_close::delivery_base(repo, &candidate.source_sha, target).is_some()
+                && task.deliverables.factory_branch_start.as_ref().is_some_and(|start|
+                    start.work_target.target_branch == candidate.target_branch));
         if candidate.task_id != task.id
-            || candidate.target_branch != target
+            || !target_matches
             || task.deliverables.factory_branch_anchor.as_deref()
                 != Some(candidate.source_sha.as_str())
             || !git_commit_is_ancestor(repo, &candidate.source_sha, &landed)

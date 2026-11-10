@@ -2613,6 +2613,16 @@ impl CasCore {
                 status != TaskStatus::InProgress)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
+        // Fence queue repair until the old assignment and its lease have been
+        // removed. Otherwise repair can start the just-unassigned cursor again.
+        let prior_queue = if task.assignee != prior_assignee {
+            match prior_assignee.as_deref() {
+                Some(worker) => self.lock_assignment_queue(worker).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
@@ -2754,6 +2764,16 @@ impl CasCore {
                     "Lease retained by {holder_label} until {}. Assignment/status changes did not release it; ask a live supervisor to reassign or transfer the task, or have the holder yield with status=blocked before starting.",
                     lease.expires_at.to_rfc3339(),
                 ));
+            }
+        }
+
+        if let Some((worker, lock)) = prior_queue.filter(|(worker, _)| {
+            task.assignee.as_deref().is_none_or(|assignee| assignee != worker.name && assignee != worker.id)
+        }) {
+            match self.drop_from_locked_queue(&req.id, worker, lock, "assignment removed").await {
+                Ok(Some(note)) => warnings.push(note),
+                Ok(None) => {},
+                Err(error) => warnings.push(format!("Assignment persisted but task queue cleanup failed: {}", error.message)),
             }
         }
 

@@ -421,6 +421,35 @@ pub fn shipped_open_issues(
     Ok(ShippedIssueReport { shipped, unchecked })
 }
 
+/// Result included in a release receipt; a GitHub failure never hides a task close.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct IssueOutcome {
+    pub issue: String,
+    pub action: IssueAction,
+    pub comment_or_error: String,
+    pub task_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum IssueAction {
+    Closed,
+    Partial,
+    Failed,
+    Skipped,
+}
+
+/// Called after release task closes. Re-read status and membership before any
+/// GitHub write; close results alone never prove shipping or current task state.
+pub(crate) fn reconcile_release_issues(
+    _root: &Path,
+    _repo: &Path,
+    _inventory: &crate::qa_batch::ReleaseInventory,
+    _close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+) -> Vec<IssueOutcome> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

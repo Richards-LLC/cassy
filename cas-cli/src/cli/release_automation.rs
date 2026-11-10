@@ -623,6 +623,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     }
 
     let mut closed_count = 0;
+    let mut issue_close_results = std::collections::BTreeMap::new();
     let mut receipt_failed = Vec::new();
     for (receipt_tag, included) in included_by_tag {
         let closing_ids: Vec<_> = included.iter().filter(|id| {
@@ -684,6 +685,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
                         *existing = line;
                     }
                 }
+                issue_close_results.extend(outcomes);
             }
         }
         closed_count += closing_ids.iter().filter(|id| {
@@ -728,6 +730,30 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
         };
         preview.push_str(&format!("\n  Train verdict: {train_action}"));
         return Ok(preview);
+    }
+    let repository = crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3))
+        .map_err(anyhow::Error::msg)?;
+    if children.iter().any(|task| !crate::issue_reconcile::task_issue_refs(task, repository.as_deref()).is_empty()) {
+        let scope = ReleaseScope {
+            project_id: crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?,
+            repository: repository.context("release issue reconciliation has no GitHub origin")?,
+            release_id: tag.to_string(), reviewed_sha: tag_sha.clone(), final_release_sha: tag_sha.clone(),
+            promotion_pr: None, release_tag: Some(tag.to_string()),
+            constituent_epic_ids: vec![train_id.to_string()],
+            included_task_ids: children.iter().map(|task| task.id.clone()).collect(),
+            no_code_members: Default::default(), proof_refs: Vec::new(),
+        };
+        let inventory = crate::qa_batch::resolve_release_inventory(root, &repo, &scope)
+            .map_err(anyhow::Error::msg)?;
+        let issues = crate::issue_reconcile::reconcile_release_issues(root, &repo, &inventory, &issue_close_results);
+        let dir = root.join("releases");
+        fs::create_dir_all(&dir)?;
+        let mut receipt = tempfile::NamedTempFile::new_in(&dir)?;
+        use std::io::Write;
+        receipt.write_all(&serde_json::to_vec_pretty(&serde_json::json!({"scope": scope, "issues": issues}))?)?;
+        receipt.as_file().sync_all()?;
+        receipt.persist(dir.join(format!("{tag}-issues.json")))?;
+        report.push(format!("issue_outcomes={}", serde_json::to_string(&issues)?));
     }
     let changed = closed_count > 0 || moved_count > 0 || train_closed || receipt_recorded;
     Ok(if changed {
@@ -1377,7 +1403,8 @@ mod tests {
             "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nepic_base_branch = \"main\"\nrelease_train = true\n\n[qa]\nmode = \"batch\"\n").unwrap();
         let bare = temp.path().join("origin.git");
         git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
-        git(repo, &["remote", "set-url", "origin", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/Example/Repo.git"]).unwrap();
+        git(repo, &["remote", "set-url", "origin", "https://github.com/Example/Repo.git"]).unwrap();
         fs::create_dir_all(repo.join("src")).unwrap();
         fs::write(repo.join("src/released.rs"), "pub fn released() {}\n").unwrap();
         git(repo, &["add", "src/released.rs"]).unwrap();
@@ -1426,7 +1453,7 @@ mod tests {
         current.deliverables.work_target = shipped.deliverables.work_target.clone();
         store.add(&current).unwrap();
 
-        let mut shipped_child = Task::new("cas-a100".into(), "Shipped child".into());
+        let mut shipped_child = Task::new("cas-a100".into(), "GH #101 GH #102 GH #103: shipped fix".into());
         shipped_child.origin_project = Some("release-fixture".into());
         shipped_child.assignee = Some(owner.id.clone());
         shipped_child.status = TaskStatus::AwaitingMerge;
@@ -1444,7 +1471,7 @@ mod tests {
         shipped_child.deliverables.work_target = Some(shipped_target);
         assert_eq!(unmerged_factory_commit_count(repo, &shipped_child, &release_sha), 1);
         store.create_atomic(&shipped_child, &[], Some(&shipped.id), None).unwrap();
-        let mut unmerged_child = Task::new("cas-a102".into(), "Unmerged release child".into());
+        let mut unmerged_child = Task::new("cas-a102".into(), "GH #102: remaining part".into());
         unmerged_child.origin_project = Some("release-fixture".into());
         let unmerged_target = WorkTarget {
             repo_selector: "project:release-fixture".into(),
@@ -1470,6 +1497,28 @@ mod tests {
         env.set("CAS_SESSION_ID", &owner.id);
         env.set("CAS_AGENT_NAME", &owner.name);
         env.set("CAS_AGENT_ROLE", "supervisor");
+        let gh = repo.join("fixture-gh.py");
+        fs::write(&gh, r#"#!/usr/bin/env python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+args = sys.argv[1:]
+with (root / 'gh-calls.jsonl').open('a') as log:
+    log.write(json.dumps(args) + '\n')
+if args[:2] == ['issue', 'list']:
+    print(json.dumps([{'number': n} for n in [101, 102, 103] if not (root / f'closed-{n}').exists()]))
+elif args[:2] == ['issue', 'close']:
+    if args[2] == '103':
+        print('fixture transport failure', file=sys.stderr)
+        sys.exit(1)
+    (root / f'closed-{args[2]}').touch()
+else:
+    sys.exit(2)
+"#).unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
         let _cwd = env.enter_dir(repo);
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.1").is_err());
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open);
@@ -1494,6 +1543,21 @@ mod tests {
         assert_eq!(store.get(&another_open_child.id).unwrap().deliverables.work_target.unwrap().target_branch, old_lane);
         assert!(cas_store::release_verdicts_for_task(&root, "release-fixture", &shipped_child.id).unwrap().is_empty());
         let first = close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v4.3.0-issues.json")).unwrap()).unwrap();
+        let actions: Vec<_> = receipt["issues"].as_array().unwrap().iter()
+            .map(|issue| (issue["issue"].as_str().unwrap(), issue["action"].as_str().unwrap())).collect();
+        assert_eq!(actions, vec![("Example/Repo#101", "closed"), ("Example/Repo#102", "partial"), ("Example/Repo#103", "failed")]);
+        assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains("v4.3.0"));
+        assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains(&git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap()));
+        assert_eq!(receipt["issues"][0]["task_ids"], serde_json::json!(["cas-a100"]));
+        assert_eq!(receipt["issues"][1]["task_ids"], serde_json::json!(["cas-a100", "cas-a102"]));
+        let calls: Vec<Vec<String>> = fs::read_to_string(repo.join("gh-calls.jsonl")).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        let close = calls.iter().find(|args| args.get(2).is_some_and(|n| n == "101")).unwrap();
+        assert_eq!(close, &vec!["issue".into(), "close".into(), "101".into(), "--repo".into(), "example/repo".into(), "--reason".into(), "completed".into(), "--comment".into(), receipt["issues"][0]["comment_or_error"].as_str().unwrap().into()]);
+        assert!(!repo.join("closed-102").exists());
+        assert!(!repo.join("closed-103").exists());
+
         assert!(first.contains("reconciled"), "{first}");
         assert_eq!(store.get(&shipped.id).unwrap().status, TaskStatus::Open, "{first}");
         assert_eq!(store.get(&shipped_child.id).unwrap().status, TaskStatus::Closed);
@@ -1513,6 +1577,12 @@ mod tests {
                 && receipt.ledger_author_id.is_none()
         }));
         assert!(close_shipped_train(&root, &shipped.id, "v4.3.0").unwrap().contains("no close changes"));
+        let replay: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v4.3.0-issues.json")).unwrap()).unwrap();
+        assert_eq!(replay["issues"][0]["action"], "skipped");
+        let calls: Vec<Vec<String>> = fs::read_to_string(repo.join("gh-calls.jsonl")).unwrap().lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(calls.iter().filter(|args| args.get(2).is_some_and(|n| n == "101")).count(), 1);
+
     }
 
     fn published_backfill_fixture() -> (tempfile::TempDir, PathBuf, Task, Task) {

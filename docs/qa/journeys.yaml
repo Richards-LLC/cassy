@@ -385,6 +385,58 @@ bug_families:
     tasks: [cas-307e]
     journeys: [FACTORY-SPAWN]
     invariants: [FACTORY-SPAWN-FETCH-TRACKING]
+  installed-release-notice-deadline:
+    title: Hung post-release notices time out and remain pending per version while newer releases install first; retries reuse notice and close receipts
+    tasks: [cas-a00be]
+    journeys: [CLI-RELEASE]
+  worker-context-respawn:
+    title: Typed worker respawn requests queue one recycle and a quiet receipt while preserving recipe, task bindings and the handoff path
+    tasks: [cas-53ed]
+    invariants: [FACTORY-WORKER-RESPAWN]
+    journeys: [FACTORY-SUPERVISE]
+  returning-batch-qa-owner:
+    title: Superseded batch QA offers return once per ownership episode when the same supervisor session regains the outstanding set
+    tasks: [cas-b26e]
+    journeys: [FACTORY-QA-RECEIPT]
+  drained-inbox-delivery-watchdog:
+    title: Drained worker and supervisor inboxes retire delivery wakes while fresh unread notifications still wake
+    tasks: [cas-40ed]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
+  named-live-focus-choices:
+    title: Focus choices preserve titles and include only live owned epics, with the release train first and current focus excluded
+    tasks: [cas-b200]
+    invariants: [HUB-J17-FOCUS-CHOICES]
+    journeys: [HUB-J17]
+  peer-cap-sender-feedback:
+    title: Capped peer messages notify the sender with a retry time while substantive linked replies bypass the cap
+    tasks: [cas-0e49]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-PEER-CAP-FEEDBACK]
+  managed-thread-verified-file-replies:
+    title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
+    tasks: [cas-4deb]
+    journeys: [FACTORY-SUPERVISE]
+  leaderless-registry-holder-lifetime:
+    title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
+    tasks: [cas-919d]
+    journeys: [FACTORY-SPAWN, HUB-J26]
+  long-sandbox-daemon-socket:
+    title: Long canonical store paths use a private bounded daemon socket so native caller discovery, reminders and handoffs work without manual registration
+    tasks: [cas-d9bd]
+    journeys: [FACTORY-SPAWN]
+  worker-commit-directory-identity:
+    title: Worker commit guards follow the commit directory through relative cd and literal variable bindings and report unresolved identity truthfully
+    tasks: [cas-84ea]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-COMMIT-DIRECTORY]
+  published-release-staffing-gap:
+    title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
+    tasks: [cas-a3c3]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  canonical-artifact-write-root:
+    title: Configured artifact symlinks and canonical cwd writes share containment while refusals identify both roots
+    tasks: [cas-a767]
+    journeys: [FACTORY-CLOSE, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -423,6 +475,18 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-ARTIFACT-METADATA:
+    statement: A cold peer fetches committed proof in its configured personal/team project scope regardless of account size, validates task/project identity, and verifies the downloaded bytes before caching.
+    check: Run cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c and proof_note_publishes_and_resolves_on_another_machine_cas_4bb2 through MCP; cover both scope kinds with an 87-project account and the singular task endpoint, retaining cross-project conflict, denied scope, forged owner and checksum controls.
+    bug: {task: cas-e75c}
+  FACTORY-WORKER-RESPAWN:
+    statement: Only the worker's same-session status can request its recycle, with the recorded recipe, retained task bindings, saved handoff and a quiet supervisor receipt; the per-worker cooldown survives dequeue and restart.
+    check: Run typed_worker_respawn_queues_one_recycle_cas_53ed through message_send; verify one recycle, recipe and task retention, handoff path, quiet mail, sibling-session refusal and duplicate suppression after dequeue.
+    bug: {task: cas-53ed}
+  FACTORY-COMMIT-DIRECTORY:
+    statement: Worker Git guards inspect the actual commit directory, support prior literal path bindings, distinguish unresolved identity from detached HEAD, and preserve foreign/protected branch refusals.
+    check: Run pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree through PreToolUse for nested relative directories, quoted W and braced variables, paths with spaces, protected targets and unknown or mutated bindings; require unchanged reflog. Retain cas-7584 replay and per-invocation -C tests plus detached, sibling and paused-rebase cases.
+    bug: {task: cas-84ea}
   FACTORY-EXACT-TIMEOUT-RECOVERY:
     statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
     check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
@@ -477,6 +541,10 @@ invariants:
     statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
     check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
     bug: {task: cas-ef5e8}
+  FACTORY-PEER-CAP-FEEDBACK:
+    statement: A peer status held by the hourly wake cap produces one sender-facing hold and retry-time reply; substantive linked answers remain eligible without consuming an extra debounce wait.
+    check: Run peer_cap_reports_eta_and_releases_linked_answer_cas_0e49 through the real scheduler and durable outbox for project and user scopes. Spend six wakes, hold a release-go status, inspect one correctly addressed feedback payload and retry time across reselection, then admit its linked status answer. Verify no network runs on the scheduler lane and quiet intent remains quiet.
+    bug: {task: cas-0e49}
   FACTORY-SPAWN-FETCH-TRACKING:
     statement: Successful spawn fetches refresh the requested origin tracking ref even outside the configured fetch mapping, so workers contain the fetched commit.
     check: Run work_target_checkout_uses_fetched_origin_tip_when_local_branch_is_stale_cas_7a87 with matching stale local and tracking staging refs, a main-only remote refspec and a newer remote staging commit. Verify FETCH_HEAD, origin/staging and the actual worker checkout use the new commit; retain configured-origin failure refusal and managed/local-only epic behavior.
@@ -916,6 +984,10 @@ invariants:
     statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and supervisors have no lift action.
     check: Run hub::tests::release_freeze_default_pairing_cas_16c0a and the existing fleet-ops view freeze/lift case. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
     bug: {task: cas-16c0a}
+  HUB-J17-FOCUS-CHOICES:
+    statement: Focus epic offers only titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and orders the release train before priority. Progress, completion and Undo use titles while operations keep exact IDs; the desktop menu scrolls within a short region.
+    check: Run the mixed-catalog fleet-ops vitest and the filtered HUB-J17 phone pickers journey, including its desktop cas-b200 stage in light and dark. Require only live owned IDs, title labels, exact focus precondition and a bounded menu.
+    bug: {task: cas-b200}
   HUB-J17-STATUS-TRUTH:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
@@ -1082,8 +1154,8 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE
@@ -1117,8 +1189,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
+  owners: [cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs]
+  invariants: [FACTORY-COMMIT-DIRECTORY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE
@@ -1127,7 +1199,7 @@ journeys:
   kind: cli
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Read the release publication receipt]
-  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/finding_triage.rs]
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
@@ -1147,8 +1219,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:verification', trigger: qa_record or batch_receipt}
   steps: [Review the delivered candidate, Record independent evidence, Read the receipt bound to the delivery]
-  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/qa_ledger.rs, cas-cli/src/cli/qa_ledger.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-LEDGER-COVERAGE, FACTORY-QA-EVIDENCE-IDENTITY]
+  owners: [cas-cli/src/mcp/tools/service/qa_pass_ops.rs, cas-cli/src/qa_pass.rs, cas-cli/src/qa_batch.rs, cas-cli/src/qa_ledger.rs, cas-cli/src/cli/qa_ledger.rs, cas-cli/src/finding_triage.rs, cas-cli/src/qa_post_release.rs, cas-cli/src/supervisor_notices.rs, cas-cli/src/artifacts/cloud.rs, cas-cli/src/artifacts/proof.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-QA-NOTICE-OWNER, FACTORY-QA-LEDGER-COVERAGE, FACTORY-QA-EVIDENCE-IDENTITY, FACTORY-ARTIFACT-METADATA]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   check: Run waived_ledger_author_release_exit_cas_ace0 through supervisor MCP; an exact-head waiver closes a QA-record-only delivery on its release verdict, while missing or stale waivers, product or catalog changes, self-authored QA receipts and an implementing recorder remain refused.
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
@@ -2573,6 +2645,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
   - HUB-J17-RELEASE-FREEZE-PAIRING

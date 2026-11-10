@@ -477,7 +477,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await row.locator(".accounts-more > summary").click();
     await row.getByRole("button", { name: "Remove", exact: true }).focus();
     await page.keyboard.press("Enter");
-    await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
+    await expect(dialog.getByRole("textbox", { name: /claude:spare/ })).toBeFocused();
     await dialog.getByRole("textbox").fill("cancelled confirmation");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(dialog.locator(".accounts-editor")).toBeHidden();

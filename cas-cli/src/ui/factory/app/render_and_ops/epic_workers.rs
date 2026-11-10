@@ -2088,6 +2088,8 @@ pub(crate) fn recycle_resume_brief(
         "Your context was reset; your worktree and every task binding were kept.\n"
             .to_string();
     brief.push_str(&crate::finding_triage::focus_brief(cas_dir));
+    let config = crate::config::Config::load(cas_dir).unwrap_or_default();
+    let artifacts = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let line = |task: &cas_types::Task| format!("- {} [{}] {}", task.id, task.status, task.title);
     for task in held
         .iter()
@@ -2100,6 +2102,11 @@ pub(crate) fn recycle_resume_brief(
             task.id,
             task.id
         ));
+        if let Some(handoff) = crate::config::factory_task_artifact_dirs(cas_dir, &artifacts, &task.id)
+            .into_iter().map(|directory| directory.join("HANDOFF.md")).find(|path| path.is_file())
+        {
+            brief.push_str(&format!("  Read the saved checkpoint before continuing: {}\n", handoff.display()));
+        }
     }
     let parked: Vec<String> = held
         .iter()

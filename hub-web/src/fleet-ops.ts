@@ -10,6 +10,7 @@
  * current}, and announces FleetChanged; nothing here polls.
  */
 
+import { epicTitle, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate, type FleetOperation } from "./fleet-permissions";
 import type { Scope } from "./types";
 
@@ -189,17 +190,19 @@ export function assignAction(task: FleetTask, worker: string | null): FleetActio
 }
 
 /** Focus the factory on an epic (O2). Reversible. */
-export function focusEpicAction(epicId: string, current: string | null): FleetAction {
+export function focusEpicAction(epic: Pick<ReleaseEpic, "id" | "title">, current: Pick<ReleaseEpic, "id" | "title"> | null): FleetAction {
+  const epicId = epic.id;
+  const title = epicTitle(epic) || "Untitled epic";
   return {
     id: `focus:${epicId}`,
     operation: "focus-epic",
-    label: `Focus ${epicId}`,
+    label: title,
     destructive: false,
-    request: { op: { kind: "focus_epic", epic_id: epicId }, expected: { epic_id: current } },
-    progress: `Focusing ${epicId}…`,
-    done: `Focused on ${epicId}.`,
+    request: { op: { kind: "focus_epic", epic_id: epicId }, expected: { epic_id: current?.id ?? null } },
+    progress: `Focusing ${title}…`,
+    done: `Focused on ${title}.`,
     // Undo restores the previous focus, or clears it when there was none.
-    inverse: () => (current ? focusEpicAction(current, epicId) : clearFocusAction(epicId)),
+    inverse: () => (current ? focusEpicAction(current, epic) : clearFocusAction(epic)),
   };
 }
 
@@ -243,13 +246,13 @@ export function autoCutAction(epicId: string, paused: boolean): FleetAction {
 }
 
 /** Clear the factory's epic focus: focus_epic with clear=true (cas-566b). */
-export function clearFocusAction(current: string): FleetAction {
+export function clearFocusAction(current: Pick<ReleaseEpic, "id" | "title">): FleetAction {
   return {
     id: "focus:clear",
     operation: "focus-epic",
     label: "Clear focus",
     destructive: false,
-    request: { op: { kind: "focus_epic", clear: true }, expected: { epic_id: current } },
+    request: { op: { kind: "focus_epic", clear: true }, expected: { epic_id: current.id } },
     progress: "Clearing the epic focus…",
     done: "Epic focus cleared.",
     inverse: () => focusEpicAction(current, null),

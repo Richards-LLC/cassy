@@ -815,6 +815,7 @@ main {
 .fleet-ops button.danger { color: var(--state-crit); }
 .fleet-ops .primary, .fleet-ops-header .primary { width: auto; min-height: var(--rail-item-min); padding: 0 var(--space-4); border: 0; border-radius: var(--radius-pill); cursor: pointer; }
 .fleet-ops-menu { display: grid; gap: var(--space-1); min-width: 12rem; padding: var(--space-2); background: var(--bg-panel); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); z-index: 2; }
+.fleet-ops-epics[role="menu"] { max-block-size: min(20rem, 50dvh); overflow-y: auto; overflow-wrap: anywhere; }
 .fleet-ops-menu [role="menuitem"] { justify-self: stretch; text-align: left; border-color: transparent; }
 .fleet-ops-separator { height: var(--line-width); margin: var(--space-1) 0; background: var(--line-subtle); }
 .fleet-ops-reason, .fleet-ops-instruction { display: block; color: var(--text-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }

@@ -50,7 +50,12 @@ it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOpera
   if (["remove", "disable", "rename"].includes(operation)) {
     expect(host.change).not.toHaveBeenCalled();
     const input = document.querySelector<HTMLInputElement>(".accounts-editor input")!;
+    const confirm = document.querySelector<HTMLButtonElement>("[data-accounts-confirm]")!;
     if (operation === "remove") {
+      // cas-b2e9: the confirmation sits in the acting card, and Confirm waits for the exact text.
+      expect(input.closest(".accounts-row")!.querySelector(`[data-account="${row.key}"]`)).not.toBeNull();
+      expect(input.required).toBe(false);
+      expect(confirm.disabled).toBe(true);
       input.value = "cancelled confirmation";
       click("[data-accounts-cancel]");
       expect(input.value).toBe("");
@@ -71,7 +76,8 @@ it.each(["remove", "disable", "rename", "enable", "set_default"] as AccountOpera
       expect(host.change).not.toHaveBeenCalled();
     }
     input.value = operation === "rename" ? "renamed" : row.key;
-    input.dispatchEvent(new Event("input"));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(confirm.disabled).toBe(false);
     document.querySelector(".accounts-editor")!.dispatchEvent(new Event("submit", { cancelable: true }));
   }
   await settle();
@@ -102,13 +108,16 @@ it("groups by provider in headroom order, says where each lives, and cleans up s
   const healthy: AccountRow = { ...row, key: "claude:work", name: "work", display_name: "work@example.test", location: "~/.claude-work", login_state: "logged_in", windows: [{ name: "weekly", used_percent: 38, resets_at: "2099-11-02T18:20:00Z" }] };
   const duplicate: AccountRow = { ...row, key: "claude:main", name: "main", location: "~/.claude", duplicate_of: "claude:work", is_default: false };
   const tight: AccountRow = { ...healthy, key: "claude:tight", name: "tight", display_name: "tight@example.test", location: "~/.claude-tight", windows: [{ name: "weekly", used_percent: 95, resets_at: "2099-11-02T18:20:00Z" }] };
+  // cas-b2e9: a protected main duplicate is never offered for cleanup.
+  const protectedMain: AccountRow = { ...duplicate, key: "claude:default", name: "default", location: "~/.claude", capabilities: { ...row.capabilities, remove: "The main account is protected" } };
   const { host, sheet } = setup(true, healthy);
-  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy] });
+  vi.mocked(host.list).mockResolvedValue({ accounts: [duplicate, tight, healthy, protectedMain] });
   sheet.open(); await settle();
   const groups = [...document.querySelectorAll(".accounts-provider-group")];
-  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([2, 1]);
+  expect(groups.map(group => group.querySelectorAll(".accounts-row").length)).toEqual([3, 1]);
   expect(groups[1]!.querySelector<HTMLElement>(".accounts-identity strong")!.title).toBe(duplicate.key);
-  expect([...groups[0]!.querySelectorAll(".accounts-identity strong")].map(name => name.textContent)).toEqual(["work@example.test", "tight@example.test"]);
+  expect([...groups[0]!.querySelectorAll<HTMLElement>(".accounts-identity strong")].map(name => name.title)).toEqual([healthy.key, tight.key, protectedMain.key]);
+  for (const line of document.querySelectorAll("[data-duplicate-of]")) expect(line.textContent).not.toContain(healthy.key);
   expect(groups[0]!.querySelector(".accounts-bar .crit")).not.toBeNull();
   expect(groups[0]!.textContent).toContain("~/.claude-work");
   expect(groups[0]!.textContent).toContain("62%");

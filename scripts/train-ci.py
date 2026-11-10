@@ -127,8 +127,13 @@ def collect(args):
     for path in sorted(args.evidence.rglob('shard.json')):
         row = json.loads(path.read_text())
         slot = row.get('shard')
-        if any(row.get(key) != receipt[key] for key in identity()) or slot in slots:
+        attempt = row.get('run_attempt')
+        if (any(row.get(key) != receipt[key] for key in identity() if key != 'run_attempt')
+                or type(attempt) is not int or not 1 <= attempt <= receipt['run_attempt'] or slot in slots):
             raise ValueError('duplicate or foreign suite shard receipt')
+        if attempt < receipt['run_attempt'] and (row['status'] != 0 or row['failures']
+                or not row['tests'] or not (path.parent/'native.log').is_file()):
+            raise ValueError('earlier-attempt suite shard did not succeed')
         slots.add(slot)
         receipt['tests'] += row['tests']
         receipt['failures'].extend(row['failures'])
@@ -427,6 +432,24 @@ def queue_timing(api, repo, branch, head):
     return {}
 
 
+def mark_red(repo, state, previous, parent):
+    head = state['head']
+    state['red_since'] = previous.get('red_since') or head
+    state['red_head'] = head
+    green = previous.get('last_green')
+    state['introducing_merge'] = head if green == parent else None
+    state['merge_range'] = []
+    baseline = parent
+    if green and subprocess.run(['git', 'merge-base', '--is-ancestor', green, head], cwd=repo).returncode == 0:
+        baseline = green
+    for record in git(repo, 'log', '--first-parent', '--format=%H%x00%s%x00%B%x1e', f'{baseline}..{head}').split('\x1e'):
+        if record.strip():
+            sha, title, body = record.strip().split('\x00', 2)
+            state['merge_range'].append({'sha': sha, 'title': title,
+                                         'tasks': sorted(set(re.findall(r'cas-[a-z0-9]+', body)))})
+    state['last_green'] = green
+
+
 def observe(args):
     branch = args.branch or git(args.repo, 'branch', '--show-current')
     if not branch.startswith(PREFIX):
@@ -453,6 +476,18 @@ def observe(args):
         write(state_path, state)
         return state
     run_id, attempt = str(run['id']), run.get('run_attempt', 1)
+    def red_without_receipt():
+        # A completed failed GitHub run is enough to hold the train, but
+        # cannot manufacture a tested full-set receipt or its timings.
+        run_url = f'https://github.com/{slug}/actions/runs/{run_id}'
+        red = {'branch': branch, 'head': head, 'run_id': run_id, 'run_attempt': attempt,
+               'outcome': 'FAIL', 'failure_kind': 'run_failed_before_receipt',
+               'failures': ['run failed before receipt'], 'receipt': None,
+               'artifact': 'unavailable', 'run_url': run_url, 'complete_log': run_url}
+        mark_red(args.repo, red, previous, git(args.repo, 'rev-parse', head + '^1'))
+        write(state_path, red)
+        return red
+
     destination = out/f'{run_id}-{attempt}'
     receipt_path = destination/'receipt.json'
     if not receipt_path.exists():
@@ -461,7 +496,14 @@ def observe(args):
         with tempfile.TemporaryDirectory(dir=out) as temporary:
             pending = Path(temporary)/'evidence'
             pending.mkdir()
-            command([gh, 'run', 'download', run_id, '--name', ARTIFACT, '--dir', str(pending)], args.repo)
+            try:
+                command([gh, 'run', 'download', run_id, '--name', ARTIFACT, '--dir', str(pending)], args.repo)
+            except (ValueError, OSError, subprocess.SubprocessError):
+                if run['conclusion'] == 'failure':
+                    return red_without_receipt()
+                raise
+            if not (pending/'receipt.json').is_file() and run['conclusion'] == 'failure':
+                return red_without_receipt()
             with (pending/'complete-workflow-logs.zip').open('wb') as log:
                 command([gh, 'api', f'repos/{slug}/actions/runs/{run_id}/attempts/{attempt}/logs'], args.repo, log)
             pending.rename(destination)
@@ -487,21 +529,10 @@ def observe(args):
         state['last_green'] = head
         state.pop('red_since', None)
         state.pop('red_head', None)
+        state.pop('failure_kind', None)
     else:
-        state['red_since'] = previous.get('red_since') or head
-        state['red_head'] = head
-        green = previous.get('last_green')
-        state['introducing_merge'] = head if green == receipt['parent'] else None
-        state['merge_range'] = []
-        baseline = receipt['parent']
-        if green and subprocess.run(['git', 'merge-base', '--is-ancestor', green, head], cwd=args.repo).returncode == 0:
-            baseline = green
-        for record in git(args.repo, 'log', '--first-parent', '--format=%H%x00%s%x00%B%x1e', f'{baseline}..{head}').split('\x1e'):
-            if record.strip():
-                sha, title, body = record.strip().split('\x00', 2)
-                state['merge_range'].append({'sha': sha, 'title': title,
-                                             'tasks': sorted(set(re.findall(r'cas-[a-z0-9]+', body)))})
-        state['last_green'] = green
+        state.pop('failure_kind', None)
+        mark_red(args.repo, state, previous, receipt['parent'])
     if run.get('run_started_at') and fanin[0].get('completed_at'):
         state['elapsed_seconds'] = elapsed(run['run_started_at'], fanin[0]['completed_at'])
     if requested_head != head:
@@ -590,10 +621,12 @@ def main():
     else:
         state = observe(args)
         print(json.dumps(state))
+        if args.command == 'check' and state['outcome'] != 'PASS':
+            if state.get('failure_kind') == 'run_failed_before_receipt':
+                raise ValueError(f'train tip {state["head"]}: run failed before receipt ({state["run_url"]}); repair the train')
+            raise ValueError(f'train tip {state["head"]} has no green full-set receipt ({state["outcome"]}); wait for CI or repair the train')
         if args.command == 'check' and state.get('main_baseline') != git(args.repo, 'rev-parse', 'origin/' + os.environ.get('GITHUB_DEFAULT_BRANCH', 'main')):
             raise ValueError('train full-set receipt predates the current main baseline')
-        if args.command == 'check' and state['outcome'] != 'PASS':
-            raise ValueError(f'train tip {state["head"]} has no green full-set receipt ({state["outcome"]}); wait for CI or repair the train')
 
 
 if __name__ == '__main__':

@@ -21,6 +21,7 @@ if args[:2]==['repo','view']: print('fixture/repo')
 elif args[:2]==['run','download']:
  name=args[args.index('--name')+1]
  source=data.get('job_downloads',{}).get(name,data.get('artifact',''))
+ if source is None: sys.exit(1)
  shutil.copytree(root/source,pathlib.Path(args[args.index('--dir')+1]),dirs_exist_ok=True)
 elif args[0]=='api':
  endpoint=next(a.lstrip('/') for a in args if a.lstrip('/').startswith('repos/'))
@@ -187,7 +188,7 @@ class TrainReceipts(unittest.TestCase):
 
     def forge(self, artifact, status='completed', conclusion='success', fanin='success'):
         (self.root/'forge.json').write_text(json.dumps({'artifact': artifact, 'fanin': fanin, 'runs': [{
-            'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': 1, 'head_sha': self.env['GITHUB_SHA'],
+            'id': int(self.env['GITHUB_RUN_ID']), 'run_attempt': int(self.env['GITHUB_RUN_ATTEMPT']), 'head_sha': self.env['GITHUB_SHA'],
             'head_branch': self.env['GITHUB_REF_NAME'], 'event': 'push', 'status': status, 'conclusion': conclusion}]}))
 
     def observe(self, check=False, expected=0):
@@ -243,6 +244,50 @@ class TrainReceipts(unittest.TestCase):
         row.write_text(json.dumps(data))
         self.run_cli('collect', '--repo', self.repo, '--evidence', out,
                      '--build-status', 'success', '--shards-status', 'success', expected=1)
+
+    def test_rerun_failed_shard_keeps_successful_earlier_attempts(self):
+        self.evidence('mixed', failed=True)
+        out = self.root/'mixed'
+        self.env['GITHUB_RUN_ATTEMPT'] = '2'
+        self.run_cli('shard', '--log', self.root/'native.log', '--junit', self.root/'junit.xml',
+                     '--status', 0, '--shard', '2/3', '--out', out/'2')
+        result = self.run_cli('collect', '--repo', self.repo, '--evidence', out,
+                              '--build-status', 'success', '--shards-status', 'success')
+        self.assertEqual((result['outcome'], result['run_attempt'], result['tests']), ('PASS', 2, 3))
+        row = out/'1/shard.json'
+        original = json.loads(row.read_text())
+        for mutation in ({'status': 1}, {'run_attempt': 3}, {'run_id': 'foreign'}):
+            with self.subTest(mutation=mutation):
+                row.write_text(json.dumps({**original, **mutation}))
+                self.run_cli('collect', '--repo', self.repo, '--evidence', out,
+                             '--build-status', 'success', '--shards-status', 'success', expected=1)
+
+    def test_failed_run_without_receipt_records_red_unknown(self):
+        self.evidence('green')
+        self.forge('green')
+        green = self.observe(check=True)
+        self.commit('classify failure before receipt')
+        self.env.update(GITHUB_SHA=self.git('rev-parse', 'HEAD'), GITHUB_RUN_ID='102')
+        self.forge(None, conclusion='failure', fanin='failure')
+        red = self.observe()
+        self.assertEqual(red['outcome'], 'FAIL')
+        self.assertEqual(red['failure_kind'], 'run_failed_before_receipt')
+        self.assertEqual((red['run_id'], red['run_attempt']), ('102', 1))
+        self.assertEqual(red['red_head'], self.env['GITHUB_SHA'])
+        self.assertEqual(red['red_since'], self.env['GITHUB_SHA'])
+        self.assertEqual(red['last_green'], green['last_green'])
+        self.assertIsNone(red['receipt'])
+        self.assertNotIn('elapsed_seconds', red)
+        self.assertNotIn('schema', red)
+        self.assertEqual(self.observe(), red)
+        self.observe(check=True, expected=1)
+        self.env['GITHUB_RUN_ATTEMPT'] = '2'
+        self.evidence('recovered')
+        self.forge('recovered')
+        recovered = self.observe(check=True)
+        self.assertEqual(recovered['last_green'], self.env['GITHUB_SHA'])
+        self.assertNotIn('red_since', recovered)
+        self.assertNotIn('failure_kind', recovered)
 
     def test_full_receipt_refuses_partial_legacy_and_wrong_tree(self):
         self.evidence('full')

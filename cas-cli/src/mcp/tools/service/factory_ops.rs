@@ -3616,6 +3616,16 @@ impl CasService {
                     })
                 })
             });
+        let release_subject = req.task_id.as_deref()
+            .and_then(|id| task_store.get(id).ok())
+            .or_else(|| ctx.factory_session.as_deref()
+                .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
+                .and_then(|id| task_store.get(&id).ok()));
+        let release_notice = release_subject.as_ref().map(|subject| {
+            crate::mcp::tools::core::task::lifecycle::epic_lane::published_release_note(
+                &self.inner.cas_root, task_store.as_ref(), subject,
+            )
+        }).unwrap_or_default();
         let related_context = recall_subject
             .and_then(|subject| {
                 self.inner.related_recall_excluding(
@@ -3631,11 +3641,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{release_notice}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{release_notice}{related_context}",
                 worker_names.join(", "),
                 request_id
             )

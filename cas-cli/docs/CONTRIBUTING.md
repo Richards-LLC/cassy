@@ -1,5 +1,17 @@
 # Contributing to Cassy
 
+## Managed Slack file replies
+
+`artifact action=post reply_to=...` and `cas violet post --reply-to ... --file ...`
+resolve the caller's live reply intent from the project's coordination journal.
+Both external-upload steps carry its operation ID, claim generation and one
+request UUID. The CLI's `--request-id` reuses that UUID for the same reply.
+An expired, released or absent caller intent on a locally known managed thread
+fails before contacting Violet. Unknown and unmanaged threads retain Violet's
+ordinary posting policy; Violet owns authoritative checks before allocation,
+including authority changes on other machines. Never retry an uncertain reply
+with a new request ID.
+
 ## Memory update receipts
 
 `memory action=update id=<id> title=<title>` saves the title alone or together
@@ -54,6 +66,16 @@ after five minutes without a newer lifecycle, including a cancelled compaction
 whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
+
+## Staffing behind a published release
+
+Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
+the subject epic lacks commits from the latest recorded published release.
+The advisory names the tag and missing commit count, and asks the supervisor
+to sync the integration branch into the epic first. It does not refuse work or
+move Git refs. Publication comes from the target repository's Release ledger;
+a tag alone is not publication evidence. Missing receipts or unavailable refs
+produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
 
 ## Worker contracts across machines
 
@@ -225,6 +247,19 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+An authenticated worker sends `coordination action=message target=supervisor
+kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
+after committing/pushing and writing `HANDOFF.md` in its task artifact directory.
+This typed status queues the existing `recycle_worker` path with the worker's
+recorded recipe and task bindings. The director processes the recycle; its
+supervisor copy is a quiet receipt. Requests are limited to one per worker and
+factory session every ten minutes, persisted across replacement and daemon
+restart. Recycle's existing unsaved-work and recipe refusals still apply.
+The replacement's resume brief links its saved `HANDOFF.md` when present.
+Ordinary `kind=status` messages, including prose saying `need: respawn`, retain
+their action-wake behavior. This authenticated worker contract is MCP-only;
+the external `cas factory message --kind` CLI remains for Commander turns.
+
 Supervisor follow-ups about a worker's current InProgress or Blocked task remain
 conversation, including `kind=answer` and messages with an explicit `task_id`.
 They do not assign work again or replace the recorded delivery start. Ownership
@@ -265,8 +300,11 @@ individual stale-task revalidation. Busy panes, tool calls and drafts defer.
 `kind=receipt`, pure acknowledgements such as “thanks, received”, broadcasts and
 `wake=false` do not start turns; their bodies remain readable at the next turn.
 A rolling sender/recipient cap (`factory.supervisor_message_wakes_per_hour`,
-default 6) holds further wake attempts and places a readable wake-cap notice in
-the inbox. Other senders retain their own budget. Restarting the daemon retains
+default 6) holds further status wakes and places a readable notice in the inbox.
+Held senders receive one deduplicated notice with the earliest cap retry time;
+peer feedback is persisted to the existing outbox for automatic delivery.
+Substantive linked replies, asks, answers and blockers bypass the cap and debounce.
+Explicit quiet and receipt intent remains quiet. Other senders retain their own budget. Restarting the daemon retains
 the ledger and cap. Use `coordination action=message_status notification_id=<id>`
 for wakes in the last hour, measured turns, median input+output tokens per woken
 turn and maximum observed start latency. Claude/Codex usage is matched to the
@@ -1202,8 +1240,14 @@ task's scoped artifacts directory. It imports the record into the existing
 artifact ledger, making `show`, `list` and close citations usable there too.
 `--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
 or bearer is included in the note, output or saved record. Fetch requires the
-synced task and Cloud credentials; proof interpretation remains the verifier's
-responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
+Cloud credentials. If the task note is not cached locally, fetch first reads
+the task in the configured personal/team project scope, so unrelated account
+projects do not block a same-project proof. Scoped entity reads use
+`/api[/teams/<team>]/sync/task/<task>?project_id=<project>`. Missing scoped proof
+can use bounded cross-project discovery; both paths share one fifteen-second
+metadata deadline and validate the returned task/project before reading proof.
+Proof interpretation remains the verifier's responsibility. Task note mutation
+remains MCP-only; CLI publish is unchanged.
 
 ### Artifact revocation
 
@@ -2165,16 +2209,26 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
-## Cloud coordinator request correlation
+## Cloud request correlation
 
-`CloudCoordinator` attaches `X-Cas-Attempt-Id` only to GET `/api/agents`,
-GET `/api/agents/tasks/:task/lock` and POST `/api/agents/tasks/:task/claim`.
-Both agent-list entry points are covered; every keyset page gets its own random
-canonical v4 UUID. The ID and a `pre_dispatch` INFO receipt are created before
-ureq dispatch and DNS. These are diagnostic IDs, with no replay or ownership
-meaning. Cloud accept/echo alignment remains a cross-repository follow-up;
+Cloud mutation clients attach `X-Cassy-Attempt-Id` (Cloud #256), a random v4
+UUID for one logical operation. `mutation_request` in `cloud/coordinator.rs`
+owns the shared transport: build the request outside retry loops and clone it
+for each send, keeping the ID across 5xx, timeout and 429 retries. A later
+operation gets a new ID. The embedding, ordinary binding and operator clients
+use the same tracing middleware with their existing deadlines and redirects.
+Signed operator mutations retain the ID across clock/generation recovery;
+the diagnostic header is outside the PoP signature, and reads pass through.
+Signed object-storage uploads and separate
+Violet/Hub service requests keep their own contracts. This ID is diagnostic,
+with no idempotency, replay or ownership meaning.
+
+`CloudCoordinator` also keeps correlation on GET `/api/agents` and
+GET `/api/agents/tasks/:task/lock`; every keyset page gets its own ID. The ID
+and a `pre_dispatch` INFO receipt precede ureq dispatch and DNS.
 `ATTEMPT_ID_HEADER` and `RESPONSE_REQUEST_ID_HEADERS` in `cloud/coordinator.rs`
-are the single contract owners.
+own the wire names. Transport failures, including timeouts, emit a WARN
+receipt with the attempt ID; status receipts remain INFO.
 
 The existing local tracing logger records route templates, method, UTC start,
 configured budget, page ordinal/cursor presence and monotonic elapsed time.

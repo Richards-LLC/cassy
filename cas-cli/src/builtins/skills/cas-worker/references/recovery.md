@@ -91,7 +91,7 @@ fails, report the error.
 
 - Reassignment or stand-down: checkpoint authorized work, push unless
   local_merge, note done and remaining work with the SHA, and stop editing.
-- Low context: At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `coordination action=message target=supervisor kind=respawn` with the return contract and task_id. Cassy queues the existing recycle path with the same recipe and task bindings; the supervisor receives a quiet receipt. Repeated requests within ten minutes are held, including after replacement or daemon restart. A recycle safety refusal still requires a checkpoint; never force it.
+- Low context: At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `coordination action=message target=supervisor kind=respawn summary=Checkpoint message="<return contract>" task_id=<task>`. Cassy queues the existing recycle path with the same recipe and task bindings; the supervisor receives a quiet receipt. Repeated requests within ten minutes are held, including after replacement or daemon restart. A recycle safety refusal still requires a checkpoint; never force it.
   Read 80% from Cassy's `context used: N%` notice (`context used: unknown` is
   not exhaustion). `HANDOFF.md` goes in the task artifact directory (SHAs,
   remaining steps, next command, open questions); the respawned worker resumes from it.

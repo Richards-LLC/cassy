@@ -51,7 +51,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
   use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Checkpoint, never compact. At 80% or a compaction warning: commit, push, save task-artifact HANDOFF.md, send one `coordination action=message target=supervisor kind=respawn`. See recovery for details.
+- Checkpoint, never compact. At 80% or a compaction warning: commit, push, save task-artifact HANDOFF.md; send `coordination action=message target=supervisor kind=respawn summary=Checkpoint message="<return contract>"`.
   See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 
 ## Phase references

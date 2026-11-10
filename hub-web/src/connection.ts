@@ -112,8 +112,8 @@ export interface HubCallbacks {
   onOperatorNoticeResolved?(session: string, resolved: OperatorNoticeResolved): void;
   onConversationHistory?(session: string, page: ConversationHistoryPage, fence?: CredentialFence): void;
   /** A history page is on its way; its answer is onConversationHistory. */
-  onConversationHistoryRequested?(session: string, before?: number): void;
-  onConversationHistoryFailed?(session: string, detail: string, before?: number): void;
+  onConversationHistoryRequested?(session: string, before: number | undefined, requestId: string): void;
+  onConversationHistoryFailed?(session: string, detail: string, before: number | undefined, requestId: string): void;
   /** The session attached without durable history: no first page will come (cas-010f). */
   onConversationHistoryUnavailable?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
@@ -2064,7 +2064,7 @@ export class HubConnectionSupervisor {
       },
     });
     if (!sent) {
-      this.callbacks.onConversationHistoryFailed?.(session, "Conversation history could not be requested. Retry when the session is live.", before);
+      this.callbacks.onConversationHistoryFailed?.(session, "Conversation history could not be requested. Retry when the session is live.", before, request_id);
       return false;
     }
     // A reconnect supersedes the previous request's deadline. Late pages can
@@ -2076,7 +2076,7 @@ export class HubConnectionSupervisor {
       this.failHistoryRequest(session, request_id, "Conversation history did not arrive. Some answers may be missing.");
     }, 15_000);
     this.historyRequests.set(request_id, { session, timer, before });
-    this.callbacks.onConversationHistoryRequested?.(session, before);
+    this.callbacks.onConversationHistoryRequested?.(session, before, request_id);
     return true;
   }
 
@@ -2091,7 +2091,7 @@ export class HubConnectionSupervisor {
   private failHistoryRequest(session: string, requestId: string, detail: string): boolean {
     const request = this.settleHistoryRequest(session, requestId);
     if (!request) return false;
-    this.callbacks.onConversationHistoryFailed?.(session, detail, request.before);
+    this.callbacks.onConversationHistoryFailed?.(session, detail, request.before, requestId);
     return true;
   }
 

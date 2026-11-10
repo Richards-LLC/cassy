@@ -926,6 +926,34 @@ export function supervisorWorking(
 /** The thread's paging state: how far back it has loaded, and whether more is offered. */
 export interface HistoryCursor { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean }
 
+/** Request state shared by the connection callbacks and the history controls. */
+export class HistoryPageState implements HistoryCursor {
+  hasEarlier = false;
+  nextBefore?: number;
+  loading = false;
+  loaded = false;
+  requested = false;
+  unavailable = false;
+  failure?: { detail: string; before?: number };
+
+  request(_requestId: string, before?: number): void {
+    this.failure = undefined;
+    this.loading = before !== undefined;
+    this.requested = true;
+  }
+
+  fail(_requestId: string, detail: string, before?: number): void {
+    this.loading = false;
+    this.requested = false;
+    this.failure = { detail, before };
+  }
+
+  receive(page: { request_id: string; has_earlier: boolean; next_before?: number }): void {
+    this.failure = undefined;
+    applyHistoryCursor(this, page);
+  }
+}
+
 /**
  * Fold one history page into the thread's cursor (cas-2093). Every attach
  * asks again for the newest page, and a reconnect lands that page on a thread

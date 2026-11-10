@@ -25,7 +25,7 @@ import "./glass.css";
 import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
 import { ProjectNavigation, sessionProjectKey } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
-import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
+import { HistoryPageState, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { drainHeld, HeldSendFlushes } from "./held-send-flush";
@@ -355,11 +355,11 @@ function dismissedAskStorage(): DismissedAsksStorage | undefined {
  * `unavailable`: the session attached without durable history (a daemon
  * from before conversation_history), so no first page will ever arrive.
  */
-const conversationHistoryPages = new Map<string, { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean; failure?: { detail: string; before?: number } }>();
-function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore?: number; loading: boolean; loaded: boolean; requested?: boolean; unavailable?: boolean; failure?: { detail: string; before?: number } } {
+const conversationHistoryPages = new Map<string, HistoryPageState>();
+function conversationHistoryPage(key: string): HistoryPageState {
   let page = conversationHistoryPages.get(key);
   if (!page) {
-    page = { hasEarlier: false, loading: false, loaded: false };
+    page = new HistoryPageState();
     conversationHistoryPages.set(key, page);
   }
   return page;
@@ -1212,19 +1212,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       scheduleReceiptCheck(sessionKey(machine.id, session));
       scheduleReplyPresentation();
     },
-    onConversationHistoryRequested: (session, before) => {
+    onConversationHistoryRequested: (session, before, requestId) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
-      cursor.failure = undefined;
-      // A retry of an older page holds the paging control just like its first read.
-      cursor.loading = before !== undefined;
-      cursor.requested = true;
+      cursor.request(requestId, before);
       updateConversationViews();
     },
-    onConversationHistoryFailed: (session, detail, before) => {
+    onConversationHistoryFailed: (session, detail, before, requestId) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));
-      cursor.loading = false;
-      cursor.requested = false;
-      cursor.failure = { detail, before };
+      cursor.fail(requestId, detail, before);
       updateConversationViews();
     },
     onConversationHistoryUnavailable: (session) => {
@@ -1241,8 +1236,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const cursor = conversationHistoryPage(key);
       // Only "Load earlier" sets loading; the first page is not a look back.
       if (cursor.loading) countUsage("history.older");
-      cursor.failure = undefined;
-      applyHistoryCursor(cursor, page);
+      cursor.receive(page);
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {
         const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));

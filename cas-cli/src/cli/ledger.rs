@@ -1,5 +1,5 @@
 //! `cas ledger`: north-star numbers and feature verdicts from `quality_events`.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
@@ -587,6 +587,10 @@ struct LedgerReport {
     projects: Vec<String>,
     turns: TurnTotals,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
+    /// Turns per supervisor (its agent id), then per wake channel.
+    turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
+    /// Distinct tasks whose close the verifier accepted: the per-delivery denominator.
+    deliveries: usize,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -797,6 +801,8 @@ fn aggregate(
         projects: Vec::new(),
         turns: TurnTotals::default(),
         turns_by_channel: BTreeMap::new(),
+        turns_by_actor: BTreeMap::new(),
+        deliveries: 0,
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -819,6 +825,7 @@ fn aggregate(
         estimates: crate::quality_ledger::estimates::calibration(events),
         estimate_trend: Vec::new(),
     };
+    let mut delivered = BTreeSet::new();
     for event in events {
         let project = project_name(event);
         if !report.projects.contains(&project) {
@@ -829,12 +836,22 @@ fn aggregate(
                 report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns_by_channel.entry(woken_by.as_str()).or_default()
                     .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                if let Some(actor) = &event.actor {
+                    report.turns_by_actor.entry(actor.clone()).or_default()
+                        .entry(woken_by.as_str()).or_default()
+                        .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                }
             }
             QualityPayload::Intervention { intervention, .. } => {
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
             }
             QualityPayload::CheckRun { stage, outcome, .. } => {
+                if (*stage, *outcome) == (cas_store::CheckStage::Verifier, CheckOutcome::Pass)
+                    && let Some(task) = &event.task_id
+                {
+                    delivered.insert(task.clone());
+                }
                 let stage = serde_json::to_value(stage)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
@@ -897,7 +914,38 @@ fn aggregate(
         && matches!(&event.payload, QualityPayload::CheckRun { check_id, stage: cas_store::CheckStage::Queue,
             outcome: CheckOutcome::Fail, .. } if check_id == crate::quality_ledger::MERGE_QUEUE_CHECK)).count() as u32;
     report.ejections = report.ejections.max(observed_ejections);
+    report.deliveries = delivered.len();
     report
+}
+
+/// Commander's Quality sheet (cas-3dd7): the newest `published` releases, oldest
+/// first, then work in progress, plus names for the supervisors their turns name.
+/// Local SQLite and git only; the CLI's Cloud pull is not the hub's job.
+pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde_json::Value> {
+    let repo = cas_root.parent().unwrap_or(cas_root);
+    let mut releases: Vec<Option<String>> = Vec::new();
+    for version in cas_store::quality_release_events(cas_root)?.into_iter().filter_map(|event| event.release_version) {
+        if releases.len() < published && !releases.contains(&Some(version.clone())) {
+            releases.push(Some(version));
+        }
+    }
+    releases.reverse();
+    releases.push(None);
+    // Each report shells out to git; build them side by side.
+    let reports: Vec<LedgerReport> = std::thread::scope(|scope| {
+        let builds: Vec<_> = releases
+            .iter()
+            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref())))
+            .collect();
+        builds.into_iter().filter_map(|build| build.join().ok()?.ok()).collect()
+    });
+    let agents = crate::store::open_agent_store(cas_root).ok();
+    let supervisors: BTreeMap<&str, String> = reports
+        .iter()
+        .flat_map(|report| report.turns_by_actor.keys())
+        .filter_map(|id| Some((id.as_str(), agents.as_ref()?.get(id).ok()?.name)))
+        .collect();
+    Ok(serde_json::json!({ "releases": reports, "supervisors": supervisors }))
 }
 
 fn verdict_name(verdict: FeedbackVerdict) -> &'static str {
@@ -1382,6 +1430,17 @@ mod tests {
                 no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
             });
             event.occurred_at = occurred_at;
+            event.actor = Some("sup-a".into());
+            crate::quality_ledger::emit(&cas_root, &event);
+        }
+        // Two accepted closes of one task and one of another are two deliveries.
+        for (key, task) in [("close 1", "cas-a"), ("close 2", "cas-a"), ("close 3", "cas-b")] {
+            let mut event = NewQualityEvent::new(key, QualityPayload::CheckRun {
+                check_id: "close".into(), stage: cas_store::CheckStage::Verifier,
+                outcome: CheckOutcome::Pass, sha: None, minutes: None,
+            });
+            event.occurred_at = at(2, 8);
+            event.task_id = Some(task.into());
             crate::quality_ledger::emit(&cas_root, &event);
         }
         // Found two days after the release, it still counts against that release.
@@ -1508,6 +1567,12 @@ mod tests {
         assert_eq!(json["turns"]["minutes"], 0.5);
         assert_eq!(json["turns"]["missing_tokens"], 1);
         assert_eq!(json["turns_by_channel"]["director"]["wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["worker"]["no_op_wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["director"]["input_tokens"], 30);
+        assert_eq!(json["deliveries"], 2);
+        let quality = quality_reports(&cas_root, 5).unwrap();
+        let shown: Vec<_> = quality["releases"].as_array().unwrap().iter().map(|r| r["release"].clone()).collect();
+        assert_eq!(shown, ["v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",

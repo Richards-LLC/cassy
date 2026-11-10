@@ -1915,6 +1915,65 @@ mod tests {
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
     }
+    #[test]
+    fn candidate_regenerates_dist_like_worktree_merge_cas_e4b9() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        commit_file(repo, ".gitignore", ".cas/\n", "state");
+        commit_file(repo, ".gitattributes", "hub-web/dist/** merge=cas-generated\n", "attributes");
+        commit_file(repo, "hub-web/src/a", "a0\n", "source a");
+        commit_file(repo, "hub-web/src/b", "b0\n", "source b");
+        commit_file(repo, "hub-web/dist/app.js", "a0\nb0\n", "bundle");
+        commit_file(repo, crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT,
+            "#!/usr/bin/env bash\nset -euo pipefail\n\
+             git diff --quiet \"$1\" \"$2\" -- hub-web/src && exit 0\n\
+             cat hub-web/src/a hub-web/src/b > hub-web/dist/app.js\n\
+             if [ -n \"$(git status --porcelain -- hub-web/dist)\" ]; then\n\
+               git add hub-web/dist\n\
+               git commit -q -m 'build(hub-web): regenerate dist from merged sources'\n\
+             fi\n", "generator");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        commit_file(repo, "hub-web/src/b", "b1\n", "delivery source");
+        commit_file(repo, "hub-web/dist/app.js", "a0\nb1\n", "delivery bundle");
+        run(repo, &["checkout", "-q", "main"]);
+        commit_file(repo, "hub-web/src/a", "a1\n", "target source");
+        let target = commit_file(repo, "hub-web/dist/app.js", "a1\nb0\n", "target bundle");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-e4b9-fixture".into(), "Review".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let candidate = core.build_verification_candidate(
+            &task, repo, "factory/w", "main", "fixture".into(), None,
+        ).unwrap();
+        let reviewed = run(repo, &["show", &format!("{}:hub-web/dist/app.js", candidate.proof.head_commit)]);
+        assert_eq!(reviewed, "a1\nb1", "review must execute the bundle built from both merged inputs");
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+        assert_eq!(run(repo, &["status", "--porcelain"]), "");
+        assert_eq!(candidate.tree_on(&target).unwrap(), candidate.tree);
+        let moved = commit_file(repo, "README.md", "unrelated\n", "target moved again");
+        candidate.tree_on(&moved).unwrap();
+        let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let landed = operations.merge_branch("main", "factory/w", true).unwrap().unwrap();
+        assert_eq!(run(repo, &["show", &format!("{landed}:hub-web/dist/app.js")]), reviewed);
+        assert_eq!(candidate.verify_landing(&landed), Ok(()));
+        // Rebuild the same original target to compare the complete tree, too.
+        run(repo, &["checkout", "-q", "-b", "original-target", &target]);
+        let exact = operations.merge_branch("original-target", "factory/w", true).unwrap().unwrap();
+        assert_eq!(run(repo, &["rev-parse", &format!("{exact}^{{tree}}")]), candidate.tree);
+        // A broken generator cannot publish a stale review checkout.
+        run(repo, &["checkout", "-q", "factory/w"]);
+        commit_file(repo, crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT,
+            "#!/usr/bin/env bash\nexit 3\n", "broken generator");
+        assert!(core.build_verification_candidate(
+            &task, repo, "factory/w", "original-target", "failure".into(), None,
+        ).is_err());
+    }
+
     /// cas-ded57: replay parallel top-of-map insertions through factory's manager,
     /// including its merge-tree preflight, before the real merge installs a driver.
     #[test]

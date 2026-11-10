@@ -61,10 +61,10 @@ pub struct BackfillArgs {
     dry_run: bool,
 }
 #[derive(Debug, Serialize, Deserialize)]
-struct ReleaseContext {
-    train_id: String,
-    owner: String,
-    repository: String,
+pub(super) struct ReleaseContext {
+    pub(super) train_id: String,
+    pub(super) owner: String,
+    pub(super) repository: String,
     branch: String,
     integration: String,
     release_commit: Option<String>,
@@ -73,9 +73,9 @@ struct ReleaseContext {
     landing_reminder: Option<i64>,
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    release_inputs: Option<serde_json::Value>,
+    pub(super) release_inputs: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    release_scope: Option<ReleaseScope>,
+    pub(super) release_scope: Option<ReleaseScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     release_inventory: Option<ReleaseInventory>,
 }
@@ -87,7 +87,7 @@ fn version_ok(version: &str) -> bool {
             .iter()
             .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
 }
-fn receipt_path(root: &Path, version: &str) -> Result<PathBuf> {
+pub(super) fn receipt_path(root: &Path, version: &str) -> Result<PathBuf> {
     ensure!(version_ok(version), "expected version x.y.z");
     Ok(root.join("releases").join(format!("v{version}.json")))
 }
@@ -101,7 +101,7 @@ fn save(path: &Path, context: &ReleaseContext) -> Result<()> {
     tmp.persist(path)?;
     Ok(())
 }
-fn git(repo: &Path, args: &[&str]) -> Result<String> {
+pub(super) fn git(repo: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -412,14 +412,9 @@ fn cancel_superseded_watches(
 }
 
 fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
-    let path = receipt_path(root, version)?;
-    if !path.exists() {
+    let Some(context) = tracked_context(root, repo, version)? else {
         return Ok(false);
-    }
-    let context: ReleaseContext = serde_json::from_slice(&fs::read(path)?)?;
-    if !context.repository.eq_ignore_ascii_case(repo) {
-        return Ok(false);
-    }
+    };
     // Load even a closed train: core may already have rolled to the next one.
     let mut train = open_task_store(root)?.get(&context.train_id)?;
     // The cut receipt retains its owner if core already rolled the train over.
@@ -438,10 +433,14 @@ fn installed_at_root(root: &Path, repo: &str, version: &str) -> Result<bool> {
     Ok(true)
 }
 
-/// Apply the published tag verdict to one release train. All effects are
-/// idempotent: existing tag receipts are reused, terminal children are skipped,
-/// and migrated children already target the next train.
+/// Recovery adapter for installed/backfill. All effects are idempotent:
+/// existing tag receipts are reused, terminal children are skipped, and
+/// migrated children already target the next train. A release whose publish
+/// adapter already recorded its closeout is a no-op here.
 pub fn close_shipped_train(root: &Path, train_id: &str, tag: &str) -> Result<String> {
+    if let Some(done) = super::release_adapters::recorded_closeout_for_tag(root, tag) {
+        return Ok(done);
+    }
     reconcile_shipped_train(root, train_id, tag, false)
 }
 
@@ -765,7 +764,7 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
     })
 }
 
-fn published_tag_sha(repo: &Path, tag: &str) -> Result<String> {
+pub(super) fn published_tag_sha(repo: &Path, tag: &str) -> Result<String> {
     ensure!(semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).is_ok(), "invalid release tag {tag}");
     let local = git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
     let remote = std::process::Command::new("git")
@@ -845,16 +844,14 @@ pub fn backfill(args: &BackfillArgs, root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()> {
-    let publication: serde_json::Value = serde_json::from_slice(&fs::read(&args.receipt)?)?;
+/// The version of a non-draft GitHub release publication read from `path`.
+pub(super) fn published_version(path: &Path) -> Result<String> {
+    let publication: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
     let version = publication["tag_name"]
         .as_str()
         .and_then(|s| s.strip_prefix('v'))
         .context("publication has no version tag")?;
-    ensure!(
-        version_ok(version) && version == env!("CARGO_PKG_VERSION"),
-        "publication must match the installed binary"
-    );
+    ensure!(version_ok(version), "expected version x.y.z");
     ensure!(
         publication["draft"].as_bool() == Some(false),
         "release is still a draft"
@@ -863,6 +860,11 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
         .as_str()
         .context("release is not published")?;
     chrono::DateTime::parse_from_rfc3339(published).context("invalid published_at")?;
+    Ok(version.to_string())
+}
+
+/// This project plus every healthy tracked project on this host.
+pub(super) fn release_roots(current_root: Option<&Path>) -> Result<std::collections::BTreeSet<PathBuf>> {
     let mut roots = std::collections::BTreeSet::new();
     if let Some(root) = current_root {
         roots.insert(root.to_path_buf());
@@ -872,20 +874,39 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
             roots.insert(crate::store::CasContext::from_path(&repo.path)?.cas_root);
         }
     }
+    Ok(roots)
+}
+
+/// The tracked cut receipt of `version` for `repo`, if this project cut it.
+pub(super) fn tracked_context(root: &Path, repo: &str, version: &str) -> Result<Option<ReleaseContext>> {
+    let path = receipt_path(root, version)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let context: ReleaseContext = serde_json::from_slice(&fs::read(path)?)?;
+    Ok(context.repository.eq_ignore_ascii_case(repo).then_some(context))
+}
+
+pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()> {
+    let version = published_version(&args.receipt)?;
+    ensure!(
+        version == env!("CARGO_PKG_VERSION"),
+        "publication must match the installed binary"
+    );
     let mut delivered = 0;
-    for root in roots {
-        delivered += usize::from(installed_at_root(&root, &args.repo, version)?);
+    for root in release_roots(current_root)? {
+        delivered += usize::from(installed_at_root(&root, &args.repo, &version)?);
     }
     println!("Post-release notice recorded for v{version} ({delivered} project(s))");
     Ok(())
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use cas_types::{Agent, AgentRole, Task, TaskType, WorkTarget};
 
-    fn fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
+    pub(in crate::cli) fn fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = temp.path();
         git(repo, &["init", "-b", "main"]).unwrap();

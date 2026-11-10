@@ -96,9 +96,21 @@ pub(crate) fn enqueue_with_context(
     occurrence: &str,
     context: Option<serde_json::Value>,
 ) -> Result<(), crate::error::CasError> {
+    let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
+    enqueue_keyed(root, recipient, kind, detail, &key, context)
+}
+
+/// Exactly one notice per caller-owned `key`, whoever the recipient becomes.
+pub(crate) fn enqueue_keyed(
+    root: &Path,
+    recipient: &Recipient,
+    kind: &str,
+    detail: &str,
+    key: &str,
+    context: Option<serde_json::Value>,
+) -> Result<(), crate::error::CasError> {
     let sq = open_supervisor_queue_store(root)?;
     let pq = open_prompt_queue_store(root)?;
-    let key = format!("supervisor-notice:{kind}:{occurrence}:{}", recipient.id);
     let mut payload = serde_json::json!({ "kind": kind, "detail": detail, "recipient": recipient.name, "factory_session": recipient.session });
     if let Some(context) = context { payload["context"] = context; }
     let payload = payload.to_string();
@@ -107,7 +119,7 @@ pub(crate) fn enqueue_with_context(
         "supervisor_notice",
         &payload,
         NotificationPriority::High,
-        &key,
+        key,
     )? {
         NotifyIdempotentResult::Created(id) | NotifyIdempotentResult::AlreadyExists { id, .. } => {
             id
@@ -129,7 +141,7 @@ pub(crate) fn enqueue_with_context(
         recipient.session.as_deref(),
         Some(kind),
         Some(NotificationPriority::High),
-        &key,
+        key,
         Some(&QueueOrigin::Daemon),
     )?;
     sq.mark_prompt_delivered(id)?;
@@ -300,7 +312,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "factory_binary_skew", "train_ci_red"]
+    let valid_kind = ["premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_closeout", "factory_binary_skew", "train_ci_red"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

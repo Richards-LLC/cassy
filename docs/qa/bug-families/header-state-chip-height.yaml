@@ -1,4 +1,4 @@
 title: The conversation header keeps one height across connection-state changes regardless of the runner's fonts
-tasks: [cas-f19b]
+tasks: [cas-f19b, cas-53b9]
 invariants: [HUB-HEADER-STATE-HEIGHT-STABLE]
 journeys: [HUB-J4]

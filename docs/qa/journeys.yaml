@@ -569,7 +569,7 @@ invariants:
   HUB-HEADER-STATE-HEIGHT-STABLE:
     statement: Swapping the conversation state chip (Live, reconnecting, failed) never changes the header's height in any font, so the reader's thread stays where it was when the connection drops.
     check: Run HUB-J4 "open reports and recover their notices without moving the reader" on a font-sparse Linux runner and on macOS; the anchored turn stays within 3px across the drop and reconnect.
-    bug: {task: cas-f19b}
+    bug: {task: cas-53b9}
   HUB-RELEASE-UNKNOWN-EVIDENCE:
     statement: Without a reported release train, the shared rail and Team release renderer emits one evidence paragraph with no heading or emphasized count; known releases retain their titles while unavailable counts stay evidence.
     check: Run fleet-ops.test.ts through releaseHeader with absent and partial release data. In batch QA inspect the empty rail and Team at phone and desktop widths in light and dark, using the regular ink-mid meta style.

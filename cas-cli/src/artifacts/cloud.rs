@@ -34,7 +34,16 @@ pub(crate) struct ScopedTaskNotes {
 
 const MAX_PROOF_SCOPES: usize = 32;
 const MAX_PROOF_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
-const PROOF_LOOKUP_DEADLINE: Duration = Duration::from_secs(15);
+pub(super) const PROOF_LOOKUP_DEADLINE: Duration = Duration::from_secs(15);
+
+fn validate_proof_task_id(task_id: &str) -> Result<(), String> {
+    if task_id.is_empty()
+        || !task_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("invalid task id".into());
+    }
+    Ok(())
+}
 
 /// Matches the other cloud clients in this module tree.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -365,18 +374,25 @@ impl ArtifactUploadClient {
         Ok(receipt)
     }
 
+    /// The current project's authenticated scope does not need account-wide
+    /// discovery. A cold peer can resolve its own task even on a large account.
+    pub(crate) fn configured_task_notes(
+        &self,
+        task_id: &str,
+        deadline: Instant,
+    ) -> Result<Option<ScopedTaskNotes>, String> {
+        validate_proof_task_id(task_id)?;
+        let Some(project_id) = self.project_id.as_deref() else {
+            return Ok(None);
+        };
+        self.task_notes_in_scope(task_id, self.team_id.as_deref(), project_id, deadline)
+    }
+
     /// Read one named task in every visible project, with a fixed read budget.
     /// A failed scope makes the result incomplete; callers must not interpret
     /// it as proof that the artifact is absent.
-    pub(crate) fn visible_task_notes(&self, task_id: &str) -> Result<Vec<ScopedTaskNotes>, String> {
-        if task_id.is_empty()
-            || !task_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err("invalid task id".into());
-        }
-        let deadline = Instant::now() + PROOF_LOOKUP_DEADLINE;
+    pub(crate) fn visible_task_notes(&self, task_id: &str, deadline: Instant) -> Result<Vec<ScopedTaskNotes>, String> {
+        validate_proof_task_id(task_id)?;
         let mut projects_url =
             url::Url::parse(&self.endpoint).map_err(|_| "invalid Cloud endpoint".to_string())?;
         projects_url.set_path("/api/account/projects");
@@ -414,43 +430,51 @@ impl ArtifactUploadClient {
         }
         let mut matches = Vec::new();
         for (team_id, project_id) in scopes {
-            let mut url = url::Url::parse(&self.endpoint)
-                .map_err(|_| "invalid Cloud endpoint".to_string())?;
-            {
-                let mut path = url
-                    .path_segments_mut()
-                    .map_err(|_| "invalid Cloud endpoint".to_string())?;
-                path.clear().push("api");
-                if let Some(team_id) = &team_id {
-                    path.push("teams").push(team_id);
-                }
-                path.push("sync").push("tasks").push(task_id);
+            if let Some(row) = self.task_notes_in_scope(task_id, team_id.as_deref(), &project_id, deadline)? {
+                matches.push(row);
             }
-            url.query_pairs_mut().append_pair("project_id", &project_id);
-            let Some(row) = self.proof_get_json(&url, deadline)? else {
-                continue;
-            };
-            if row.get("id").and_then(serde_json::Value::as_str) != Some(task_id) {
-                return Err("scoped task response has a different id".into());
-            }
-            if row
-                .get("origin_project")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|origin| origin != project_id)
-            {
-                return Err("scoped task response has a different project".into());
-            }
-            let notes = row
-                .get("notes")
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "scoped task response has no notes".to_string())?;
-            matches.push(ScopedTaskNotes {
-                team_id,
-                project_id,
-                notes: notes.to_string(),
-            });
         }
         Ok(matches)
+    }
+
+    fn task_notes_in_scope(
+        &self,
+        task_id: &str,
+        team_id: Option<&str>,
+        project_id: &str,
+        deadline: Instant,
+    ) -> Result<Option<ScopedTaskNotes>, String> {
+        let mut url = url::Url::parse(&self.endpoint)
+            .map_err(|_| "invalid Cloud endpoint".to_string())?;
+        {
+            let mut path = url.path_segments_mut()
+                .map_err(|_| "invalid Cloud endpoint".to_string())?;
+            path.clear().push("api");
+            if let Some(team_id) = team_id {
+                path.push("teams").push(team_id);
+            }
+            // The entity endpoint takes the singular type, not a collection.
+            path.push("sync").push("task").push(task_id);
+        }
+        url.query_pairs_mut().append_pair("project_id", project_id);
+        let Some(row) = self.proof_get_json(&url, deadline)? else {
+            return Ok(None);
+        };
+        if row.get("id").and_then(serde_json::Value::as_str) != Some(task_id) {
+            return Err("scoped task response has a different id".into());
+        }
+        if row.get("origin_project").and_then(serde_json::Value::as_str)
+            .is_some_and(|origin| origin != project_id)
+        {
+            return Err("scoped task response has a different project".into());
+        }
+        let notes = row.get("notes").and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "scoped task response has no notes".to_string())?;
+        Ok(Some(ScopedTaskNotes {
+            team_id: team_id.map(str::to_string),
+            project_id: project_id.to_string(),
+            notes: notes.to_string(),
+        }))
     }
 
     fn proof_get_json(

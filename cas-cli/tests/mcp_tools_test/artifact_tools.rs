@@ -308,9 +308,13 @@ async fn cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c(
     let server = MockServer::start().await;
     // The live account has 87 visible projects. Cold same-project reads must
     // not depend on the size of the cross-project discovery budget.
-    let projects = (0..87).map(|index| serde_json::json!({
+    let mut projects = (0..85).map(|index| serde_json::json!({
         "canonical_id": format!("project-{index}"), "team_id": null, "scope": "personal",
     })).collect::<Vec<_>>();
+    projects.extend([
+        serde_json::json!({"canonical_id":"github.com/source/blue", "team_id":null, "scope":"personal"}),
+        serde_json::json!({"canonical_id":"github.com/source/blue", "team_id":"team-source", "scope":"team"}),
+    ]);
     Mock::given(method("GET"))
         .and(path("/api/account/projects"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": projects})))
@@ -337,8 +341,8 @@ async fn cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c(
             "cloud_url": null, "slack_permalink": null, "created_at": "2026-11-10T12:00:00Z",
         });
         let route = match team {
-            Some(team) => format!("/api/teams/{team}/sync/tasks/{task_id}"),
-            None => format!("/api/sync/tasks/{task_id}"),
+            Some(team) => format!("/api/teams/{team}/sync/task/{task_id}"),
+            None => format!("/api/sync/task/{task_id}"),
         };
         Mock::given(method("GET"))
             .and(path(route))
@@ -716,7 +720,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(path("/api/teams/team-source/sync/task/cas-proof"))
         .and(query_param("project_id", "github.com/source/blue"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&synced))
@@ -786,7 +790,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     conflicting.origin_project = Some("github.com/source/green".into());
     conflicting.notes = conflicting.notes.replace(sha, &"0".repeat(64));
     let alternate = Mock::given(method("GET"))
-        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(path("/api/teams/team-source/sync/task/cas-proof"))
         .and(query_param("project_id", "github.com/source/green"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&conflicting))
@@ -816,7 +820,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     let mut bad_proof = synced.clone();
     bad_proof.notes = bad_proof.notes.replace(sha, &"0".repeat(64));
     let mismatched = Mock::given(method("GET"))
-        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(path("/api/teams/team-source/sync/task/cas-proof"))
         .and(query_param("project_id", "github.com/source/blue"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&bad_proof))
@@ -860,7 +864,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(path("/api/teams/team-source/sync/task/cas-proof"))
         .and(header("Authorization", "Bearer outsider"))
         .respond_with(ResponseTemplate::new(403))
         .mount(&server)
@@ -939,7 +943,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(path("/api/teams/team-source/sync/task/cas-proof"))
         .and(query_param("project_id", "github.com/source/blue"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&forged_owner))

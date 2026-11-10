@@ -922,6 +922,7 @@ mod tests {
     #[test]
     fn release_tracking_and_installed_notice_are_restart_safe() {
         let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, mut train, owner, mut args) = fixture();
         // A pending notice must remain deliverable after the binary upgrades.
         args.version = "0.1.0".into();

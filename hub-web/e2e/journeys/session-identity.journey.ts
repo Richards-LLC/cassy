@@ -61,6 +61,8 @@ test("HUB-J14 a stopped catalog before journal restoration still exposes the sav
   await expect(page.getByRole("log").locator('.conversation-held')).toHaveCount(1);
   machine.sessions[0]!.liveness = "stale_metadata";
   await page.addInitScript(() => {
+    // A cold catalog makes the initial empty list observable before the reply.
+    localStorage.removeItem("cas-commander-conversation:catalog:v1");
     const fetch = window.fetch;
     let releaseCatalog!: () => void;
     const catalogReady = new Promise<void>(resolve => { releaseCatalog = resolve; });

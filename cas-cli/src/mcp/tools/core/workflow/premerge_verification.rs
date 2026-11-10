@@ -188,6 +188,26 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Build the tree the merge will ship, including repository-owned regeneration.
+fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
+    let merged = git(repo, &["merge-tree", "--write-tree", target, source])?;
+    let tree = merged.lines().next().ok_or("merge candidate tree missing")?;
+    if git(
+        repo,
+        &["ls-tree", "--name-only", tree, "--", crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT],
+    )?.is_empty() {
+        return Ok(tree.to_string());
+    }
+    let merged_head = git(
+        repo,
+        &["commit-tree", tree, "-p", target, "-p", source,
+          "-m", "Prepare generated artifacts for merge candidate"],
+    )?;
+    crate::worktree::GitOperations::new(repo.to_path_buf())
+        .regenerated_candidate_tree(&merged_head, target)
+        .map_err(|error| error.to_string())
+}
+
 /// cas-d4b7: whitespace-exact, full-context (three-line) patch-id of the
 /// change `tree` adds to `target`. Patch-ids ignore hunk headers, so a
 /// zero-context id would hide a target edit beside a delivered hunk (`if ok`
@@ -429,7 +449,7 @@ fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
 
 fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+    hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
@@ -541,11 +561,10 @@ impl Candidate {
         // move that recomputes the exact reviewed tree, such as a ref fast-
         // forward or a queue merge of commits the source already carries,
         // changes no reviewed content, whatever the path overlap says.
-        let merged = git(
-            &self.repository,
-            &["merge-tree", "--write-tree", target, &self.source_sha],
-        )?;
-        let tree = merged.lines().next().ok_or("merge tree missing")?.to_string();
+        if target == self.target_sha {
+            return Ok(self.tree.clone());
+        }
+        let tree = regenerated_merge_tree(&self.repository, target, &self.source_sha)?;
         if tree == self.tree {
             return Ok(self.tree.clone());
         }
@@ -652,12 +671,16 @@ impl Candidate {
 
     fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
-        let landed = self.delivery_landing(landed)?;
-        if git(
+        // Check the final bundle after regeneration, not the stale dist in
+        // the merge commit below it. History/projection outputs retain their
+        // existing regeneration exemption.
+        let changed = git(
             &self.repository,
-            &["rev-parse", &format!("{landed}^{{tree}}")],
-        )? != expected
-        {
+            &["diff", "--name-only", "--no-renames", &expected, landed],
+        )?;
+        if changed.lines().any(|path| {
+            !is_regenerated_output(path) || path.starts_with("hub-web/dist/")
+        }) {
             return Err(
                 "landed tree differs from the recomputed approved delivery; publication refused"
                     .into(),
@@ -1430,16 +1453,7 @@ impl CasCore {
                 manifest.display(), dispatch.id,
             )));
         }
-        let merged = git(
-            repo,
-            &["merge-tree", "--write-tree", &target_sha, &source_sha],
-        )
-        .map_err(fail)?;
-        let tree = merged
-            .lines()
-            .next()
-            .ok_or_else(|| fail("merge candidate tree missing"))?
-            .to_string();
+        let tree = regenerated_merge_tree(repo, &target_sha, &source_sha).map_err(fail)?;
         let candidate_sha = git(
             repo,
             &[
@@ -1965,6 +1979,8 @@ mod tests {
         run(repo, &["checkout", "-q", "-b", "original-target", &target]);
         let exact = operations.merge_branch("original-target", "factory/w", true).unwrap().unwrap();
         assert_eq!(run(repo, &["rev-parse", &format!("{exact}^{{tree}}")]), candidate.tree);
+        let corrupted = commit_file(repo, "hub-web/dist/app.js", "stale\n", "incorrect regeneration");
+        assert!(candidate.verify_landing(&corrupted).is_err());
         // A broken generator cannot publish a stale review checkout.
         run(repo, &["checkout", "-q", "factory/w"]);
         commit_file(repo, crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT,

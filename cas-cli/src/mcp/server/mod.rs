@@ -813,14 +813,18 @@ impl CasCore {
                 message: Cow::from(format!("Could not inspect existing registration: {error}")),
                 data: None,
             };
-            // Registration can be the first tool call after reconnect. The
-            // read-only lookup authenticates the stored harness without
-            // caching it: only an actual rebind below may bind that identity,
-            // so a public call never inherits server-internal authority
-            // (cas-e1db). A caller-supplied name alone never selects one.
+            // Registration can be the first tool call after reconnect. Only a
+            // server-internal identity, or the harness's own CAS_SESSION_ID
+            // authenticated read-only and uncached, may name the predecessor.
+            // A row a public registration created (its session file or PID
+            // mapping) never becomes server-internal (cas-e1db), and a
+            // caller-supplied name alone never selects an identity.
             let caller = match self.agent_id.get() {
-                Some(id) => id.clone(),
-                None => self.resolve_registered_agent_id_read_only().ok(),
+                Some(Some(id)) => self.has_server_internal_identity(id).then(|| id.clone()),
+                Some(None) => None,
+                None => std::env::var("CAS_SESSION_ID").ok()
+                    .filter(|id| !id.trim().is_empty())
+                    .and_then(|_| self.resolve_registered_agent_id_read_only().ok()),
             };
             let existing = caller.as_deref()
                 .map(|id| agent_store.get(id)).transpose().map_err(inspect_error)?;

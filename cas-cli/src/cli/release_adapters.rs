@@ -18,6 +18,7 @@ use crate::qa_batch::{
     ReleaseInventory, ReleaseProofKind, ReleaseProofRef, ReleaseScope,
 };
 use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize};
 use clap::Args;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -374,7 +375,12 @@ fn promoted_with(root: &Path, pr: u64, reconciler: &dyn Reconciler) -> Result<St
         no_code_members: BTreeMap::new(),
         proof_refs,
     };
-    reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)
+    let report = reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)?;
+    match fs::remove_file(pending_promotion_path(root, pr)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+        _ => {}
+    }
+    Ok(report)
 }
 
 /// The integration branch a project promotes to its default branch by PR, if
@@ -389,14 +395,15 @@ fn promotion_base(root: &Path, repo: &Path) -> Option<String> {
 /// PostToolUse: a supervisor's successful `gh pr merge` of a staging→main
 /// promotion starts the release's one reconciliation in the background. Any
 /// other command or role returns at the first check, before any I/O.
-pub(crate) fn observe_promotion_merge(cas_root: &Path, cwd: &Path, command: &str) -> Option<String> {
-    observe_promotion_merge_with(cas_root, cwd, command, &|pr| spawn_promoted(cas_root, cwd, pr))
+pub(crate) fn observe_promotion_merge(cas_root: &Path, cwd: &Path, command: &str, owner: &str) -> Option<String> {
+    observe_promotion_merge_with(cas_root, cwd, command, owner, &|pr| spawn_promoted(cas_root, cwd, pr))
 }
 
 fn observe_promotion_merge_with(
     cas_root: &Path,
     cwd: &Path,
     command: &str,
+    owner: &str,
     launch: &dyn Fn(u64) -> Result<()>,
 ) -> Option<String> {
     if !command.contains("pr merge") || std::env::var("CAS_AGENT_ROLE").as_deref() != Ok("supervisor") {
@@ -412,15 +419,103 @@ fn observe_promotion_merge_with(
         if view["baseRefName"] != default.as_str() {
             continue;
         }
-        if view["state"] != "MERGED" {
-            lines.push(format!(
-                "PR #{pr} is queued, not merged: after it lands, run `cas release promoted --pr {pr}` (backfill stays the recovery path)."
-            ));
-        } else if let Err(error) = launch(pr) {
-            lines.push(format!("Promotion closeout for PR #{pr} did not start ({error:#}); run `cas release promoted --pr {pr}`."));
+        let result = if view["state"] == "MERGED" {
+            launch(pr)
+        } else {
+            view["headRefOid"]
+                .as_str()
+                .context("PR has no head commit")
+                .and_then(|head| arm_pending_promotion(cas_root, owner, pr, &default, head))
+        };
+        if let Err(error) = result {
+            lines.push(format!("Promotion closeout for PR #{pr} did not start ({error:#}); run `cas release promoted --pr {pr}` once it lands."));
         }
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+// ---- Pending promotion: the daemon's existing landing observer finishes it. ----
+
+/// Message prefix of the `branch_contained_in` reminder that carries a
+/// pending promotion; the daemon runs [`promotion_from_reminder`] before firing it.
+const PROMOTION_REMINDER: &str = "PROMOTION CLOSEOUT pr=";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PendingPromotion {
+    project_id: String,
+    pr: u64,
+    base: String,
+    head: String,
+}
+
+fn pending_promotion_path(cas_root: &Path, pr: u64) -> PathBuf {
+    cas_root.join("release-reconcile").join("pending-promotions").join(format!("pr-{pr}.json"))
+}
+
+/// A queued or auto-merge promotion: persist its intent and arm the existing
+/// `branch_contained_in` landing observation of its head on the default branch.
+fn arm_pending_promotion(cas_root: &Path, owner: &str, pr: u64, base: &str, head: &str) -> Result<()> {
+    let intent = PendingPromotion {
+        project_id: crate::cloud::resolve_canonical_id(cas_root).context("project identity unavailable")?,
+        pr,
+        base: base.to_string(),
+        head: head.to_string(),
+    };
+    let path = pending_promotion_path(cas_root, pr);
+    let dir = path.parent().context("pending promotion directory")?;
+    fs::create_dir_all(dir)?;
+    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    fs::write(tmp.path(), serde_json::to_vec(&intent)?)?;
+    tmp.persist(&path)?;
+    let filter = serde_json::json!({"commit": head, "target_branch": base});
+    let reminders = crate::store::open_reminder_store(cas_root)?;
+    let message = format!("{PROMOTION_REMINDER}{pr}: PR #{pr} landed on {base}; its release closeout started in the background");
+    if !reminders.list_all_pending()?.iter().any(|r| r.message == message && r.trigger_filter.as_ref() == Some(&filter)) {
+        reminders.create_with_scope(
+            owner,
+            None,
+            &message,
+            cas_store::ReminderTriggerType::Event,
+            None,
+            Some("branch_contained_in"),
+            Some(&filter),
+            7 * 24 * 3600,
+            None,
+            None,
+            true,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
+/// The daemon's landing observer calls this before firing a pending
+/// promotion's reminder; an error keeps the reminder pending for the next scan.
+pub(crate) fn promotion_from_reminder(cas_root: &Path, reminder: &cas_store::Reminder) -> Result<()> {
+    let project = cas_root.parent().context("project checkout unavailable")?;
+    promotion_from_reminder_with(cas_root, reminder, &|pr| spawn_promoted(cas_root, project, pr))
+}
+
+fn promotion_from_reminder_with(
+    cas_root: &Path,
+    reminder: &cas_store::Reminder,
+    launch: &dyn Fn(u64) -> Result<()>,
+) -> Result<()> {
+    if reminder.trigger_event.as_deref() != Some("branch_contained_in") {
+        return Ok(());
+    }
+    let Some(pr) = reminder
+        .message
+        .strip_prefix(PROMOTION_REMINDER)
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|pr| pr.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+    if !pending_promotion_path(cas_root, pr).exists() {
+        return Ok(()); // already reconciled and retired
+    }
+    launch(pr)
 }
 
 /// Detached `cas release promoted`; its output goes to the release-reconcile log.
@@ -759,10 +854,11 @@ mod tests {
         assert!(notices[0].prompt.contains("cas-b001"));
     }
 
-    /// A supervisor's `gh pr merge` of a staging→main promotion reaches the
-    /// release reconciliation through the PostToolUse observer, once.
+    /// A supervisor's queued staging→main promotion PR is reconciled when the
+    /// daemon's landing observer sees it on main: one Promotion call, through
+    /// the reminder's typed action, and a later merged observation is a no-op.
     #[test]
-    fn supervisor_promotion_merge_reaches_the_reconciliation_once() {
+    fn queued_promotion_reconciles_once_when_its_landing_is_observed() {
         let (temp, root, _, owner, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();
         fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'release-fixture'\n[factory]\nepic_base_branch = 'staging'\n").unwrap();
@@ -772,10 +868,16 @@ mod tests {
         git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
         git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/Example/Repo.git"]).unwrap();
         git(repo, &["push", "origin", "main"]).unwrap();
+        let view = temp.path().join("pr-view.json");
+        let set_state = |state: &str| fs::write(&view, serde_json::json!({
+            "state": state, "baseRefName": "main",
+            "mergeCommit": {"oid": merge_sha}, "headRefOid": merge_sha,
+        }).to_string()).unwrap();
+        set_state("OPEN");
         let gh = temp.path().join("gh");
-        fs::write(&gh, format!(
-            "#!/bin/sh\nprintf '%s' '{{\"state\":\"MERGED\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"{merge_sha}\"}},\"headRefOid\":\"{merge_sha}\"}}'\n"
-        )).unwrap();
+        fs::write(&gh, format!("#!/bin/sh
+cat '{}'
+", view.display())).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -785,13 +887,29 @@ mod tests {
         env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
         let reconciler = Recording { recipient: owner.id.clone(), calls: Default::default(), done: Default::default() };
         let launch = |pr: u64| promoted_with(&root, pr, &reconciler).map(drop);
-        let command = ["gh", "pr", "merge", "4396", "--merge"].join(" ");
+        let command = ["gh", "pr", "merge", "4396", "--auto", "--merge"].join(" ");
         env.set("CAS_AGENT_ROLE", "worker");
-        assert!(observe_promotion_merge_with(&root, repo, &command, &launch).is_none());
+        assert!(observe_promotion_merge_with(&root, repo, &command, &owner.id, &launch).is_none());
+        assert!(!pending_promotion_path(&root, 4396).exists());
+
+        // Queued: no reconcile yet; a pending intent and its landing watch.
         env.set("CAS_AGENT_ROLE", "supervisor");
+        assert!(observe_promotion_merge_with(&root, repo, &command, &owner.id, &launch).is_none());
+        assert!(reconciler.calls.borrow().is_empty());
+        let reminders = crate::store::open_reminder_store(&root).unwrap();
+        let watch: Vec<_> = reminders.list_all_pending().unwrap().into_iter()
+            .filter(|r| r.message.starts_with(PROMOTION_REMINDER)).collect();
+        assert_eq!(watch.len(), 1);
+        assert_eq!(watch[0].trigger_filter, Some(serde_json::json!({"commit": merge_sha, "target_branch": "main"})));
+
+        // The observer sees the landing: the typed action reconciles once and retires the intent.
+        set_state("MERGED");
         for _ in 0..2 {
-            assert!(observe_promotion_merge_with(&root, repo, &command, &launch).is_none());
+            promotion_from_reminder_with(&root, &watch[0], &launch).unwrap();
         }
+        assert!(!pending_promotion_path(&root, 4396).exists());
+        let merged = ["gh", "pr", "merge", "4396", "--merge"].join(" ");
+        assert!(observe_promotion_merge_with(&root, repo, &merged, &owner.id, &launch).is_none());
         assert_eq!(*reconciler.calls.borrow(), vec![ReconcileTrigger::Promotion { pr: 4396, merge_sha }]);
     }
 }

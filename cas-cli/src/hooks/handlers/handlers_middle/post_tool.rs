@@ -185,6 +185,7 @@ fn handle_post_tool_use_with_guardrail(
             cas_root,
             Path::new(&input.cwd),
             command,
+            &input.session_id,
         )
     {
         let context = merge_post_tool_contexts(tmpfs_guardrail_warning.as_ref(), note);

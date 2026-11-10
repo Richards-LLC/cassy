@@ -230,7 +230,7 @@ exceptions, and partial or failed GitHub issues.
 | Trigger | Adapter | Evidence read |
 | --- | --- | --- |
 | `Publish{tag}` | `cas release published --receipt <release.json> --repo <slug>`, run by `scripts/install-on-publish.sh` once per newly seen publication, before installing | The timer's existing latest-release read; tag SHA verified on origin |
-| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, started in the background by the supervisor's PostToolUse hook after its successful raw PR merge into the default branch of a staging-promotion project (log: `.cas/release-reconcile/promotion.log`). A queued or auto-merge PR prints the command to run once it lands | One `gh pr view`: merged into the default branch, merge commit on origin |
+| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, started in the background by the supervisor's PostToolUse hook after its successful raw PR merge into the default branch of a staging-promotion project (log: `.cas/release-reconcile/promotion.log`). A queued or auto-merge PR records a pending promotion under `.cas/release-reconcile/pending-promotions/` and arms the daemon's existing `branch_contained_in` landing observation of its head; when that fires, the same command runs once and the intent is retired | One `gh pr view`: merged into the default branch, merge commit on origin |
 | `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: the same operation with its own trigger, a no-op once complete. `cas release backfill --dry-run` is a read-only preview |
 
 The scope comes from the tracked cut receipt (cas-src) or the merged PR

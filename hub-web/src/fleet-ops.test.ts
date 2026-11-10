@@ -171,11 +171,14 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const choose = vi.fn();
     const frozen = { id: "cas-tr", title: "Release train vNEXT", freeze: { frozen_at: "2026-11-07T19:05:00Z", eta: "2026-11-07T19:50:00Z", summary: "Frozen 2:05 PM ET · ETA 2:50 PM ET" } };
     expect(releaseHeader(document, frozen).querySelector(".release-freeze")?.textContent).toBe("Frozen 2:05 PM ET · ETA 2:50 PM ET");
-    const lift = trainControls(document, context([...CONTROL, "factory-operate", "factory-manage"], new FleetOpsState(), { choose }), frozen).querySelector("button")!;
-    expect(lift.textContent).toBe("Lift freeze");
+    // cas-16c0a: release decisions work with a default read-only pairing.
+    const readOnly: Scope[] = ["machine-read", "session-read", "pane-read"];
+    const lift = trainControls(document, context(readOnly, new FleetOpsState(), { choose }), frozen).querySelector("button")!;
+    expect(lift.disabled).toBe(false);
+    expect(lift.getAttribute("aria-disabled")).not.toBe("true");
     lift.click();
     expect(choose.mock.calls[0]![1].request.op).toEqual({ kind: "lift_train_freeze", epic_id: "cas-tr" });
-    const freeze = trainControls(document, context([...CONTROL, "factory-operate"], new FleetOpsState(), { choose }), { id: "cas-tr" }).querySelector("button")!;
+    const freeze = trainControls(document, context(readOnly, new FleetOpsState(), { choose }), { id: "cas-tr" }).querySelector("button")!;
     freeze.click();
     expect(choose.mock.calls[1]![1].request.op).toEqual({ kind: "freeze_train", epic_id: "cas-tr" });
     // cas-e060: a train row offers the operator Pause, and Resume once paused.

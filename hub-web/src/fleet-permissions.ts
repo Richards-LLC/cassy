@@ -36,8 +36,9 @@ export type FleetOperation =
 
 /**
  * Operator decision: Stop, Restart and End session are destructive and need
- * factory:manage; the rest need factory:operate; asking the supervisor to
- * merge is an ordinary message.
+ * factory:manage; worker/task management needs factory:operate; asking the
+ * supervisor to merge is an ordinary message. Release freeze decisions use
+ * the verified pairing's baseline machine-read permission.
  */
 const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "ask-merge": "message-send",
@@ -49,8 +50,8 @@ const OPERATION_SCOPE: Readonly<Record<FleetOperation, Scope>> = {
   "stop-worker": FACTORY_MANAGE_SCOPE,
   "end-session": FACTORY_MANAGE_SCOPE,
   "write-access": FACTORY_MANAGE_SCOPE,
-  "freeze-train": FACTORY_OPERATE_SCOPE,
-  "lift-freeze": FACTORY_MANAGE_SCOPE,
+  "freeze-train": "machine-read",
+  "lift-freeze": "machine-read",
   "auto-cut": FACTORY_OPERATE_SCOPE,
 };
 

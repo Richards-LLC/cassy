@@ -1294,19 +1294,18 @@ impl FleetOperation {
 
     /// O1 is an explicit supervisor message. Reversible and additive
     /// operations need `factory:operate`; destructive ones (restart, stop)
-    /// need `factory:manage` (brief: distinct scopes for destructive actions).
+    /// need `factory:manage`. Release freeze decisions need only a verified
+    /// pairing's baseline read scope; preview mutations are still refused.
     fn scope(&self) -> Scope {
         match self {
             Self::RequestMerge { .. } => Scope::MessageSend,
+            Self::FreezeTrain { .. } | Self::LiftTrainFreeze { .. } => Scope::MachineRead,
             Self::FocusEpic { .. }
             | Self::SpawnWorkers { .. }
             | Self::SetWorkerHold { .. }
             | Self::AssignTask { .. }
-            | Self::FreezeTrain { .. }
             | Self::SetAutoCutPaused { .. } => Scope::FactoryOperate,
-            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } | Self::LiftTrainFreeze { .. } => {
-                Scope::FactoryManage
-            }
+            Self::RecycleWorker { .. } | Self::ShutdownWorkers { .. } => Scope::FactoryManage,
         }
     }
 

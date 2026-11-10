@@ -523,6 +523,15 @@ fn path_operand_is_path_shaped(reference: &str) -> bool {
 }
 
 fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> bool {
+    path_references_store_with_glob(reference, cwd, include_parent, true)
+}
+
+fn path_references_store_with_glob(
+    reference: &str,
+    cwd: &Path,
+    include_parent: bool,
+    match_hidden: bool,
+) -> bool {
     let reference = normalize_path_operand(reference);
     if reference.is_empty() {
         return false;
@@ -531,10 +540,9 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
     if let Some(expanded) = expand_path_prefix(reference) {
         let candidate = lexical_absolute(Path::new(&expanded), cwd);
         if candidate.to_string_lossy().contains(['*', '?', '[']) {
-            if roots
-                .iter()
-                .any(|root| glob_path_may_reach_root(&candidate, root, include_parent))
-            {
+            if roots.iter().any(|root| {
+                glob_path_may_reach_root(&candidate, root, include_parent, match_hidden)
+            }) {
                 return true;
             }
         } else if roots.iter().any(|root| {
@@ -572,7 +580,12 @@ fn attached_file_value(word: &str) -> Option<&str> {
     Some(&flags[index + flag.len_utf8()..])
 }
 
-fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -> bool {
+fn glob_path_may_reach_root(
+    pattern: &Path,
+    root: &Path,
+    include_parent: bool,
+    match_hidden: bool,
+) -> bool {
     let pattern: Vec<String> = pattern
         .components()
         .filter_map(|component| match component {
@@ -591,7 +604,10 @@ fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -
     if !pattern[..shared]
         .iter()
         .zip(&root[..shared])
-        .all(|(pattern, component)| glob_component_matches(pattern, component))
+        .all(|(pattern, component)| {
+            (match_hidden || !component.starts_with('.') || pattern.starts_with('.'))
+                && glob_component_matches(pattern, component)
+        })
     {
         return false;
     }
@@ -778,11 +794,22 @@ fn alias_references_store(reference: &str, include_parent: bool) -> bool {
 }
 
 fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
+    static PYTHON_GLOB_OPERAND: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\bglob\.(?:glob|iglob)\(\s*(?:os\.path\.expanduser\(\s*)?$")
+                .expect("static Python glob operand pattern")
+        });
     let strings = quoted_strings(script);
-    if strings
-        .iter()
-        .any(|part| path_operand_is_path_shaped(part) && path_references_store(part, cwd, false))
-    {
+    // Python glob's default '*' cannot enter .config or .local. Restrict
+    // that allowance to a literal glob operand, never another script path.
+    // Explicit or dynamically supplied keyword options stay conservative.
+    let default_glob_options = !script.contains("include_hidden") && !script.contains("**");
+    if strings.iter().any(|(offset, part)| {
+        let match_hidden =
+            !default_glob_options || !PYTHON_GLOB_OPERAND.is_match(&script[..*offset]);
+        path_operand_is_path_shaped(part)
+            && path_references_store_with_glob(part, cwd, false, match_hidden)
+    }) {
         return true;
     }
     let source = script.to_ascii_lowercase();
@@ -816,7 +843,12 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
     {
         return true;
     }
-    let components = strings.join("/").to_ascii_lowercase();
+    let components = strings
+        .iter()
+        .map(|(_, value)| value.as_str())
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_ascii_lowercase();
     [
         ".config/neonctl/credentials.json",
         ".local/share/com.vercel.cli/auth.json",
@@ -833,24 +865,24 @@ fn script_constructs_store_path(script: &str, cwd: &Path) -> bool {
                 .any(|suffix| components.contains(suffix)))
 }
 
-fn quoted_strings(source: &str) -> Vec<String> {
+fn quoted_strings(source: &str) -> Vec<(usize, String)> {
     let mut strings = Vec::new();
-    let mut chars = source.chars().peekable();
-    while let Some(ch) = chars.next() {
+    let mut chars = source.char_indices().peekable();
+    while let Some((offset, ch)) = chars.next() {
         if !matches!(ch, '\'' | '"') {
             continue;
         }
         let quote = ch;
         let mut value = String::new();
         let mut escaped = false;
-        for ch in chars.by_ref() {
+        for (_, ch) in chars.by_ref() {
             if escaped {
                 value.push(ch);
                 escaped = false;
             } else if ch == '\\' {
                 escaped = true;
             } else if ch == quote {
-                strings.push(value);
+                strings.push((offset, value));
                 break;
             } else {
                 value.push(ch);

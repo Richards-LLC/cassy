@@ -47,6 +47,8 @@ describe("work events (cas-ff22)", () => {
       const subject = { worker: worker.name, status, task: task.id, taskTitle: task.title, stateLabel };
       renderWorkerTimeline(dialog, subject, undefined, undefined, handlers);
       expect(dialog.querySelector("#worker-timeline-subject .status-chip")?.textContent).toBe(stateLabel);
+      const line = dialog.querySelector("#worker-timeline-subject")!;
+      expect([...line.childNodes].some(node => node.nodeType === Node.TEXT_NODE && /^\s*·/.test(node.textContent ?? ""))).toBe(false);
     }
     dialog.remove();
   });

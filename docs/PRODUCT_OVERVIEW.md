@@ -230,7 +230,7 @@ instruction sentences do not decide whether a delivery or release can proceed.
 - Before/after evidence: `cas deliverable capture` captures masked merge-base/head shots or passing journey goals in one bounded run; `cas deliverable pairs` selects complete verified pairs by task or commit provenance. Project defaults live under `[qa.capture]`. New pair manifests use schema 2 and seal both PNG and JPG files. Close also accepts historical schema 1 PNG-sealed evidence without rewriting it or requesting new BEFORE captures; every supplied seal is verified, and unsupported versions require a compatible reader or an explicit migration.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md` inventories and stops the session's background tasks and registered servers, verifying none remain before handing back.
 - Test value audit: `cas-cli/src/builtins/skills/cas-test-audit/` is a read-only agent procedure (buckets, detector recipes, CI-timing recipes, ledger format); cuts need operator approval and each names a covering test.
-- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section.
+- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section. A returned task retains its own fragment's delivery provenance when a merge resolution revises the entry; its current tip must still contain a valid titled entry.
 
 
 

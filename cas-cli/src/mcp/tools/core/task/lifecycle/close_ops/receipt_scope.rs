@@ -334,7 +334,9 @@ pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
 /// merge and drop target-sync and other tasks' merges (cas-2a65). Without
 /// them, first-parent commits since the merge-base count. A merge can credit
 /// only this task's fragment newly authored in its result, absent from every
-/// parent, so entries imported from another branch cannot count.
+/// parent, so entries imported from another branch cannot count. A fragment
+/// already changed by this task's segments retains that provenance when a
+/// target-sync merge revises it; validate its current entry against that base.
 fn has_titled_unreleased_delta(
     repo: &Path,
     head: &str,
@@ -407,6 +409,19 @@ fn has_titled_unreleased_delta(
         } else {
             changelog.clone()
         };
+        // A returned delivery's target-sync merge is deliberately outside
+        // its attributed segments. Credit the tip's own fragment when a
+        // segment changed that file, even if the merge replaced its entry.
+        // Imported fragments without that provenance cannot use this path.
+        let own_fragment = format!("{CHANGELOG_FRAGMENT_DIR}/{task_id}.md");
+        if fragments && paths.contains(&own_fragment) {
+            let owned = [own_fragment];
+            if let (Some(before), Some(final_entries)) = (entries_at(base, &owned), entries_at(head, &owned))
+                && final_entries.iter().any(|(key, entry)| before.get(key) != Some(entry))
+            {
+                return true;
+            }
+        }
         let (Some(after), Some(final_entries)) = (entries_at(tip, &paths), entries_at(head, &paths)) else {
             return false;
         };
@@ -1263,6 +1278,8 @@ mod tests {
         assert_eq!(ranges, vec![(base, parked), (merge, head.clone())]);
         let paths = task_attribution::paths(repo.path(), "main", &window, Some(&head)).unwrap();
         assert!(!paths.iter().any(|path| path == "changelog.d/cas-beef.md"));
+        let imported = Task::new("cas-beef".into(), "imported fragment without delivery provenance".into());
+        assert!(changelog_refusal(repo.path(), &imported, &paths, &head, "main", Some(&ranges)).is_some());
         assert!(changelog_refusal(repo.path(), &task, &paths, &head, "main", Some(&ranges)).is_none());
 
         // The imported note cannot replace missing or malformed task evidence.

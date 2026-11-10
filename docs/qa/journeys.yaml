@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  returned-delivery-merge-fragment:
+    title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
+    tasks: [cas-3623]
+    journeys: [FACTORY-CLOSE]
   parallel-journey-registry-merge:
     title: Parallel inline QA families and updated dates merge while competing family and policy edits remain conflicts
     tasks: [cas-ded57]

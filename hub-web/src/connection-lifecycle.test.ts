@@ -1443,6 +1443,7 @@ describe("Commander live connection lifecycle", () => {
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
     const connection = supervisor(await storedMachine("catalog-removal"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     connection.start();
     await waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const attached = connection.attach("session-a");

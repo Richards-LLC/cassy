@@ -202,6 +202,7 @@ fn reader_walks_cloud_order_and_types_a_redelivered_id_once() {
     let mut reader = VioletReader::new("factory-session");
     for registration in [REGISTRATION, "successor-registration"] {
         cloud.registration_id = registration;
+        cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(registration);
         let outcome = tick_with(&mut reader, &cloud, registration, &violet_body(None));
         assert!(matches!(outcome, ClaimOutcome::Read(_)));
     }
@@ -803,7 +804,7 @@ fn managed_wake_reports_source_age_and_preserves_dedupe_cas_8875() {
     let delivery = ClaimedDelivery {
         id: DELIVERY.to_owned(),
         occurrence_id: None,
-        event_kind: None,
+        event_kind: None, registration_id: None, route_kind: None,
         delivery_generation: 1,
         lease_token: "fixture-lease".into(),
         target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":old}, "message_ts":old}),
@@ -868,7 +869,7 @@ fn managed_wake_invalid_future_and_fresh_age_policy_cas_8875() {
         let delivery = ClaimedDelivery {
             id: DELIVERY.to_owned(),
             occurrence_id: None,
-            event_kind: None,
+            event_kind: None, registration_id: None, route_kind: None,
             delivery_generation: 1,
             lease_token: "fixture-lease".into(),
             target: json!({"external_ref":{"channel_id":"C_FIXTURE", "root_ts":fresh}, "message_ts":source}),
@@ -949,16 +950,31 @@ fn managed_claims_leave_bounded_receipts_without_bodies() {
 
 #[test]
 fn owner_routed_mention_wakes_only_its_registration_cas_0288() {
-    let temp = tempfile::tempdir().unwrap();
-    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(); queue.init().unwrap();
-    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
-    cloud.claim["deliveries"][0]["delivery"]["event_kind"] = json!("app_mention");
-    for (registration, session) in [("reg-supervisor-beta-07", "other-session"), (REGISTRATION, "owner-session")] {
-        cloud.registration_id = registration;
-        let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &Quarantined(&cloud) };
-        VioletReader::new(session).tick(&cloud, registration, &io, Utc::now());
+    for route in ["owner", "unclaimed_fanout"] {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(); queue.init().unwrap();
+        let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+        cloud.claim["deliveries"][0]["delivery"]["event_kind"] = json!("app_mention");
+        cloud.claim["deliveries"][0]["delivery"]["route_kind"] = json!(route);
+        for (registration, session) in [("reg-supervisor-beta-07", "other-session"), (REGISTRATION, "owner-session")] {
+            cloud.registration_id = registration;
+            if route == "unclaimed_fanout" {
+                cloud.claim["deliveries"][0]["delivery"]["id"] = json!(if registration == REGISTRATION {
+                    DELIVERY
+                } else { "0000de2b-1111-4111-8111-00000000de2b" });
+                cloud.claim["deliveries"][0]["delivery"]["registration_id"] = json!(registration);
+            }
+            let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &Quarantined(&cloud) };
+            VioletReader::new(session).tick(&cloud, registration, &io, Utc::now());
+        }
+        let rows = queue.peek_all(10).unwrap();
+        if route == "owner" {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].factory_session.as_deref(), Some("owner-session"));
+        } else {
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows.iter().map(|row| row.factory_session.as_deref().unwrap()).collect::<std::collections::BTreeSet<_>>(),
+                ["owner-session", "other-session"].into());
+        }
     }
-    let rows = queue.peek_all(10).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].factory_session.as_deref(), Some("owner-session"));
 }

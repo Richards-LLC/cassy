@@ -66,6 +66,7 @@ pub struct PostError {
     /// Set once `begin` allocated an upload: the post may be partly done, so
     /// the caller inspects Slack before trying again.
     pub file_id: Option<String>,
+    pub retryable: bool,
 }
 
 impl PostError {
@@ -74,6 +75,7 @@ impl PostError {
             code: code.to_string(),
             message: message.into(),
             file_id: None,
+            retryable: code == "authority_unavailable",
         }
     }
 }
@@ -429,7 +431,9 @@ pub fn envelope(result: Value) -> Result<Value, PostError> {
         .and_then(Value::as_str)
         .map(excerpt)
         .unwrap_or_else(|| "Violet refused the post".to_string()));
-    Err(PostError::new(code, message))
+    let mut error = PostError::new(code, message);
+    error.retryable |= value.pointer("/error/retryable").and_then(Value::as_bool).unwrap_or(false);
+    Err(error)
 }
 
 /// Required contact evidence must survive the generic 300-character error

@@ -652,7 +652,10 @@ pub trait VioletThreadResolver: Send + Sync {
 
 /// Arguments shared by both thread identity resolvers.
 pub(crate) fn violet_identity_read_args(external_ref: &str) -> serde_json::Map<String, Value> {
-    serde_json::Map::from_iter([("external_ref".into(), json!(external_ref))])
+    serde_json::Map::from_iter([
+        ("external_ref".into(), json!(external_ref)),
+        ("include_threads".into(), json!(false)),
+    ])
 }
 
 /// cas-85c1 (GH #1292): the one mapping from a proxied `violet_read` call to

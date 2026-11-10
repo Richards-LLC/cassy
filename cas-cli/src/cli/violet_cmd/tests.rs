@@ -1302,14 +1302,17 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     assert_eq!(hub.uploads()[0].1, sha(&big_bytes));
     assert_eq!(hub.uploads()[0].2, big_bytes.len() as u64);
 
-    let hub = ScriptedHub::with(vec![json!({"ok": false, "error": {
-        "code": "stale_generation", "message": "claim changed", "retryable": false,
-    }})]);
-    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
-    assert_eq!(error.code, "stale_generation");
-    assert!(error.file_ids.is_empty());
-    assert!(hub.uploads().is_empty());
-    assert_eq!(hub.calls().len(), 1);
+    for (code, retryable) in [("stale_generation", false), ("managed_reply_required", false), ("authority_unavailable", true)] {
+        let hub = ScriptedHub::with(vec![json!({"ok": false, "error": {
+            "code": code, "message": "preflight refused", "retryable": retryable,
+        }})]);
+        let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+        assert_eq!(error.code, code);
+        assert_eq!(error.retryable, retryable);
+        assert!(error.file_ids.is_empty());
+        assert!(hub.uploads().is_empty());
+        assert_eq!(hub.calls().len(), 1);
+    }
 
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
         "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});

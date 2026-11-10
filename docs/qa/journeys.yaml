@@ -412,9 +412,14 @@ bug_families:
     tasks: [cas-0e49]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-CAP-FEEDBACK]
+  managed-mention-claim-failures:
+    title: Identity-only claims avoid full-thread size caps; a refused mentioned claim records one owner blocker and owner-routed wakes do not reach peers
+    tasks: [cas-0288]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-MANAGED-MENTION-CLAIMS]
   managed-thread-verified-file-replies:
     title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
-    tasks: [cas-4deb]
+    tasks: [cas-4deb, cas-0288]
     journeys: [FACTORY-SUPERVISE]
   leaderless-registry-holder-lifetime:
     title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
@@ -458,6 +463,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-MANAGED-MENTION-CLAIMS:
+    statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker for that owner without claiming proactively.
+    check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay and exact owner destination; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
+    bug: {task: cas-0288}
   FACTORY-WORKER-RESPAWN:
     statement: Only the worker's same-session status can request its recycle, with the recorded recipe, retained task bindings, saved handoff and a quiet supervisor receipt; the per-worker cooldown survives dequeue and restart.
     check: Run typed_worker_respawn_queues_one_recycle_cas_53ed through message_send; verify one recycle, recipe and task retention, handoff path, quiet mail, sibling-session refusal and duplicate suppression after dequeue.

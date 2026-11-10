@@ -84,6 +84,8 @@ pub(crate) struct ClaimedDelivery {
     pub id: String,
     pub occurrence_id: Option<String>,
     pub event_kind: Option<String>,
+    pub registration_id: Option<String>,
+    pub route_kind: Option<String>,
     pub delivery_generation: u64,
     pub lease_token: String,
     pub target: Value,
@@ -344,6 +346,15 @@ impl VioletReader {
         ClaimOutcome::Read(report)
     }
 
+    fn check_owner(actor: &Value, delivery: &ClaimedDelivery) -> Result<(), NamedRefusal> {
+        if delivery.route_kind.as_deref() == Some("owner")
+            && delivery.registration_id.as_deref() != actor["registration_id"].as_str()
+        {
+            return Err(NamedRefusal::new("owner_registration_mismatch", "Delivery belongs to another supervisor"));
+        }
+        Ok(())
+    }
+
     /// Ack the claimed deliveries, then walk each one. cas-b94d: a withheld
     /// delivery is quarantined first and acked `admitted` only once that
     /// local record is durable; if it is not, its lease is `released`.
@@ -362,12 +373,12 @@ impl VioletReader {
         let actor = actor.clone();
         let classes: Vec<Result<Option<Withheld>, NamedRefusal>> = deliveries
             .iter()
-            .map(|d| match self.classify(port, &d.target) {
+            .map(|d| Self::check_owner(actor, d).and_then(|()| match self.classify(port, &d.target) {
                 // Already quarantined by this process: the record is durable.
                 Some(class) if self.typed.contains(&d.id) => Ok(Some(class)),
                 Some(class) => io.quarantine.hold(d, class, now).map(|()| Some(class)),
                 None => Ok(None),
-            })
+            }))
             .collect();
         let outcomes: Vec<_> = deliveries
             .iter()
@@ -510,10 +521,17 @@ impl VioletReader {
                 "expected_delivery_generation": delivery.delivery_generation,
             });
             let rebound = call(port, &delivery_path(&delivery.id, "rebind")?, &rebind)?;
+            if let Some(registration) = rebound["receipt"]["delivery"]["registration_id"].as_str() {
+                delivery.registration_id = Some(registration.to_string());
+            }
+            if let Some(route) = rebound["receipt"]["delivery"]["route_kind"].as_str() {
+                delivery.route_kind = Some(route.to_string());
+            }
             delivery.delivery_generation = rebound["receipt"]["delivery"]["delivery_generation"]
                 .as_u64()
                 .ok_or_else(|| NamedRefusal::new("invalid_response", "rebind receipt lacks delivery_generation"))?;
         }
+        Self::check_owner(actor, delivery)?;
         match recovery["mode"].as_str() {
             Some("resume") => self.walk(port, actor, delivery, io, now),
             Some("recovery_notice") => {
@@ -537,6 +555,7 @@ impl VioletReader {
         io: &ReaderIo<'_>,
         now: DateTime<Utc>,
     ) -> Result<Walked, NamedRefusal> {
+        Self::check_owner(actor, delivery)?;
         if let Some(class) = self.classify(port, &delivery.target) {
             return self.hold(delivery, class, io, now);
         }
@@ -636,6 +655,8 @@ fn parse_delivery(item: &Value) -> Option<ClaimedDelivery> {
             .and_then(|id| uuid::Uuid::parse_str(id).ok())
             .map(|id| id.to_string()),
         event_kind: item["delivery"]["event_kind"].as_str().map(str::to_string),
+        registration_id: item["delivery"]["registration_id"].as_str().map(str::to_string),
+        route_kind: item["delivery"]["route_kind"].as_str().map(str::to_string),
         delivery_generation: item["delivery"]["delivery_generation"].as_u64()?,
         // Recover listings carry no lease: their admissions are already acked.
         lease_token: item["lease_token"].as_str().unwrap_or_default().to_string(),

@@ -1,0 +1,4 @@
+title: A stale source-free peer cannot delegate another supervisor's Slack task or use a historical acceptance to bypass source ownership
+tasks: [cas-0fd5]
+invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+journeys: [FACTORY-SPAWN]

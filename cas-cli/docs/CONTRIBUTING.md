@@ -1067,6 +1067,9 @@ A task with no epic can be its own split scope: its owner offers
 `factory action=epic_split id=<task> target=<builder> theirs=<task>`, and the
 builder accepts the returned split. No parent task or dependency is created.
 For a Slack source, only the current thread claim owner may offer the work.
+The receiver checks the authenticated issuer against its own current source-owner
+receipt before accepting or claiming work, and again before an accepted split
+bypasses source admission. Missing, expired or mismatched receipts grant no bypass.
 After acceptance the builder can assign and start that task with `external_ref`
 intact; the accepted local share grants work without claiming the thread.
 Pending offers and another supervisor's shares grant no work authority. Reply

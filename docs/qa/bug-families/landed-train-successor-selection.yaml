@@ -1,0 +1,3 @@
+title: Standalone tasks join the successor while a landed train waits for release reconciliation
+tasks: [cas-b584]
+journeys: [CLI-RELEASE]

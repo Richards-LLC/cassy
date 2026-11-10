@@ -109,8 +109,8 @@ bug_families:
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
   peer-release-wait-progress-watchdog:
-    title: Contained deliveries, binding peer handoffs and operator-owned blocked checks do not page the operator while genuine local stalls still do
-    tasks: [cas-c1fb, cas-e239, cas-8391]
+    title: Current close-gate refusals, contained deliveries, binding peer handoffs and operator-owned blocked checks do not cause false stall pages
+    tasks: [cas-c1fb, cas-e239, cas-8391, cas-098dd]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26]
   train-rust-red-feedback:
@@ -473,6 +473,14 @@ bug_families:
     tasks: [cas-bcf0]
     journeys: [HUB-J14, HUB-J15, HUB-J17, HUB-J25]
     invariants: [HUB-CONVERSATION-HEADER-ROW]
+  dialog-action-bar-sheet-at-rest:
+    title: New session and Operator inbox action bars frost only while fields scroll beneath them and are otherwise the sheet with its hairline
+    tasks: [cas-6c0d]
+    journeys: [HUB-J13, HUB-J19]
+  paired-machines-chips-close-installations:
+    title: Paired machines keeps its filter chips clear of the description, closes from a 40px circle and offers installations as an action pill
+    tasks: [cas-5e8b]
+    journeys: [HUB-J3]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

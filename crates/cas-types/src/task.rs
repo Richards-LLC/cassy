@@ -941,6 +941,17 @@ pub struct TaskAnsweredBlocker {
     pub decision_event_id: Option<i64>,
 }
 
+/// Latest close gate, with a specific identity or the close_gate fallback,
+/// bound to the task inputs it refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskCloseRefusal {
+    pub code: String,
+    pub next_action: String,
+    pub operator_action_required: bool,
+    pub input_digest: String,
+}
+
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "phase",
     "receipts",
@@ -951,6 +962,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "answered_blocker",
     "blocker_ask",
     "qa_impact",
+    "close_refusal",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -1101,6 +1113,22 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
                 return Err(format!(
                     "qa_impact exceeds the {TASK_QA_IMPACT_MAX_BYTES}-byte limit"
                 ));
+            }
+            Ok(())
+        }
+        "close_refusal" => {
+            let refusal: TaskCloseRefusal = serde_json::from_value(value.clone())
+                .map_err(|error| format!("invalid close_refusal: {error}"))?;
+            if refusal.input_digest.len() != 64
+                || !refusal.input_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err("close_refusal requires a full input_digest".into());
+            }
+            for (field, text) in [("code", refusal.code), ("next_action", refusal.next_action)] {
+                if text.trim().is_empty() {
+                    return Err(format!("close_refusal requires {field}"));
+                }
+                validate_state_string(field, &Value::String(text))?;
             }
             Ok(())
         }
@@ -1749,6 +1777,27 @@ mod tests {
             assert_eq!(merge_task_execution_state_patch(&state, &serde_json::json!({
                 "answered_blocker": receipt
             })).is_ok(), valid);
+        }
+
+        let refusal = serde_json::json!({
+            "code": "phase_outcome_gate", "next_action": "provide_outcome_receipt",
+            "operator_action_required": false, "input_digest": "a".repeat(64),
+        });
+        let refused = merge_task_execution_state_patch(&state,
+            &serde_json::json!({"close_refusal": refusal})).unwrap();
+        assert_eq!(refused["close_refusal"]["code"], "phase_outcome_gate");
+        assert_eq!(merge_task_execution_state_patch(&refused,
+            &serde_json::json!({"close_refusal": null})).unwrap(), state);
+        for (field, invalid) in [
+            ("code", serde_json::json!(" ")),
+            ("next_action", serde_json::json!(" ")),
+            ("operator_action_required", serde_json::json!("false")),
+            ("input_digest", serde_json::json!("invalid")),
+        ] {
+            let mut invalid_refusal = refusal.clone();
+            invalid_refusal[field] = invalid;
+            assert!(merge_task_execution_state_patch(&state,
+                &serde_json::json!({"close_refusal": invalid_refusal})).is_err());
         }
 
         let mut future = answered.clone();

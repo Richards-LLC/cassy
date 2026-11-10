@@ -561,6 +561,7 @@ fn render_review_blocks(root: &Path, repo: &Path, inventory: &ReleaseInventory) 
         if epic.is_terminal() || epics.contains_key(&epic.id) {
             continue;
         }
+        // child_ids is the full recursive subtree (get_subtasks), nested epics included.
         let children = store.get_subtasks(&epic.id)?;
         if !children.iter().all(|c| c.is_terminal() || finishing.contains(&c.id)) {
             continue;
@@ -686,5 +687,71 @@ mod tests {
             && crate::supervisor_notices::is_action_envelope(&row.prompt)
             && row.prompt.contains("cas-0002")
             && row.prompt.contains("record the batch QA receipt")));
+    }
+
+    #[test]
+    fn review_epics_block_lists_each_finished_epics_full_subtree() {
+        use crate::qa_batch::{ReleaseDelivery, ReleaseMembership};
+        use cas_types::{Dependency, DependencyType, Task, TaskType};
+        let (temp, root, _, _, _) = super::super::release_automation::tests::release_fixture();
+        let repo = temp.path();
+        let sha = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let link = |child: &str, parent: &str| {
+            store.add_dependency(&Dependency {
+                from_id: child.into(),
+                to_id: parent.into(),
+                dep_type: DependencyType::ParentChild,
+                created_at: chrono::Utc::now(),
+                created_by: None,
+            }).unwrap();
+        };
+        for (id, epic) in [("cas-e000", true), ("cas-e001", true), ("cas-d001", false), ("cas-d002", false)] {
+            let mut task = Task::new(id.into(), id.into());
+            if epic {
+                task.task_type = TaskType::Epic;
+            }
+            store.add(&task).unwrap();
+        }
+        link("cas-e001", "cas-e000");
+        link("cas-d001", "cas-e001");
+        link("cas-d002", "cas-e000");
+        let delivery = |id: &str| ReleaseDelivery {
+            task_id: id.into(),
+            generation: String::new(),
+            anchor: None,
+            base_sha: None,
+            shipped_commit: None,
+            membership: ReleaseMembership::Ancestry,
+            proof_refs: Vec::new(),
+        };
+        let inventory = ReleaseInventory {
+            scope: ReleaseScope {
+                project_id: "release-fixture".into(),
+                repository: "Example/Repo".into(),
+                release_id: "v9.99.2".into(),
+                reviewed_sha: sha.clone(),
+                final_release_sha: sha.clone(),
+                promotion_pr: None,
+                release_tag: Some("v9.99.2".into()),
+                constituent_epic_ids: Vec::new(),
+                included_task_ids: Vec::new(),
+                no_code_members: BTreeMap::new(),
+                proof_refs: Vec::new(),
+            },
+            deliveries: vec![delivery("cas-d001"), delivery("cas-d002")],
+            exceptions: Vec::new(),
+        };
+        let blocks = render_review_blocks(&root, repo, &inventory).unwrap();
+        let json = blocks.split("```cassy-release-epics\n").nth(1).unwrap().split("\n```").next().unwrap();
+        let epics: serde_json::Value = serde_json::from_str(json).unwrap();
+        let subtrees: BTreeMap<String, Vec<String>> = epics["epics"].as_array().unwrap().iter()
+            .map(|e| (e["task_id"].as_str().unwrap().to_string(),
+                e["child_ids"].as_array().unwrap().iter().map(|c| c.as_str().unwrap().to_string()).collect()))
+            .collect();
+        assert_eq!(subtrees, BTreeMap::from([
+            ("cas-e000".to_string(), vec!["cas-d001".to_string(), "cas-d002".into(), "cas-e001".into()]),
+            ("cas-e001".to_string(), vec!["cas-d001".to_string()]),
+        ]));
     }
 }

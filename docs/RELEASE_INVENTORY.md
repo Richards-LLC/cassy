@@ -182,5 +182,6 @@ No CI job, poller or test rerun is added, and GitHub is read only as evidence.
 
 `cas release review-blocks --scope scope.json` prints the release review's
 `cassy-release-transformations` and `cassy-release-epics` fenced blocks for that
-scope. The reviewer includes them in the published ledger. Remove any epic
+scope. Each epic's `child_ids` is its full recursive subtree, nested epics'
+descendants included. The reviewer includes them in the published ledger. Remove any epic
 whose acceptance was not verified before publishing.

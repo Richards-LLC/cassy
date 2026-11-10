@@ -425,6 +425,19 @@ bug_families:
     title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
     tasks: [cas-919d]
     journeys: [FACTORY-SPAWN, HUB-J26]
+  long-sandbox-daemon-socket:
+    title: Long canonical store paths use a private bounded daemon socket so native caller discovery, reminders and handoffs work without manual registration
+    tasks: [cas-d9bd]
+    journeys: [FACTORY-SPAWN]
+  worker-commit-directory-identity:
+    title: Worker commit guards follow the commit directory through relative cd and literal variable bindings and report unresolved identity truthfully
+    tasks: [cas-84ea]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-COMMIT-DIRECTORY]
+  published-release-staffing-gap:
+    title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
+    tasks: [cas-a3c3]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -471,6 +484,10 @@ invariants:
     statement: CLOSE_OUTCOME prefers this close request's committed disposition over a legacy error-shaped park reply; an already parked row without a commit by this request cannot suppress a genuine refusal or its details.
     check: Run server_handler::tests::late_close_outcome_prefers_own_park_receipt_cas_fd21 through the real late-outcome recorder and stores with the 55s budget/142.5s elapsed replay; also run close_deadline_before_any_write_records_the_late_outcome_cas_3b81 through the deadline handler. Verify exact caller machine payloads and task status, without human-wording assertions.
     bug: {task: cas-fd21}
+  FACTORY-COMMIT-DIRECTORY:
+    statement: Worker Git guards inspect the actual commit directory, support prior literal path bindings, distinguish unresolved identity from detached HEAD, and preserve foreign/protected branch refusals.
+    check: Run pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree through PreToolUse for nested relative directories, quoted W and braced variables, paths with spaces, protected targets and unknown or mutated bindings; require unchanged reflog. Retain cas-7584 replay and per-invocation -C tests plus detached, sibling and paused-rebase cases.
+    bug: {task: cas-84ea}
   FACTORY-EXACT-TIMEOUT-RECOVERY:
     statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
     check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
@@ -1173,8 +1190,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/service/server_handler.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs]
-  invariants: [FACTORY-CLOSE-LATE-PARK, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY]
+  owners: [cas-cli/src/mcp/tools/service/server_handler.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs]
+  invariants: [FACTORY-CLOSE-LATE-PARK, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

@@ -67,6 +67,16 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Staffing behind a published release
+
+Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
+the subject epic lacks commits from the latest recorded published release.
+The advisory names the tag and missing commit count, and asks the supervisor
+to sync the integration branch into the epic first. It does not refuse work or
+move Git refs. Publication comes from the target repository's Release ledger;
+a tag alone is not publication evidence. Missing receipts or unavailable refs
+produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
+
 ## Worker contracts across machines
 
 `coordination action=message target=<worker>@<machine>` can carry an advisory
@@ -2190,16 +2200,26 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
-## Cloud coordinator request correlation
+## Cloud request correlation
 
-`CloudCoordinator` attaches `X-Cas-Attempt-Id` only to GET `/api/agents`,
-GET `/api/agents/tasks/:task/lock` and POST `/api/agents/tasks/:task/claim`.
-Both agent-list entry points are covered; every keyset page gets its own random
-canonical v4 UUID. The ID and a `pre_dispatch` INFO receipt are created before
-ureq dispatch and DNS. These are diagnostic IDs, with no replay or ownership
-meaning. Cloud accept/echo alignment remains a cross-repository follow-up;
+Cloud mutation clients attach `X-Cassy-Attempt-Id` (Cloud #256), a random v4
+UUID for one logical operation. `mutation_request` in `cloud/coordinator.rs`
+owns the shared transport: build the request outside retry loops and clone it
+for each send, keeping the ID across 5xx, timeout and 429 retries. A later
+operation gets a new ID. The embedding, ordinary binding and operator clients
+use the same tracing middleware with their existing deadlines and redirects.
+Signed operator mutations retain the ID across clock/generation recovery;
+the diagnostic header is outside the PoP signature, and reads pass through.
+Signed object-storage uploads and separate
+Violet/Hub service requests keep their own contracts. This ID is diagnostic,
+with no idempotency, replay or ownership meaning.
+
+`CloudCoordinator` also keeps correlation on GET `/api/agents` and
+GET `/api/agents/tasks/:task/lock`; every keyset page gets its own ID. The ID
+and a `pre_dispatch` INFO receipt precede ureq dispatch and DNS.
 `ATTEMPT_ID_HEADER` and `RESPONSE_REQUEST_ID_HEADERS` in `cloud/coordinator.rs`
-are the single contract owners.
+own the wire names. Transport failures, including timeouts, emit a WARN
+receipt with the attempt ID; status receipts remain INFO.
 
 The existing local tracing logger records route templates, method, UTC start,
 configured budget, page ordinal/cursor presence and monotonic elapsed time.

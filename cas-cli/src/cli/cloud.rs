@@ -762,7 +762,7 @@ fn delete_unlink_remote_records(
                 "team",
             ),
         };
-        match ureq::delete(&path)
+        match crate::cloud::mutation_request("DELETE", &path)
             .timeout(Duration::from_secs(30))
             .set("Authorization", &format!("Bearer {token}"))
             .call()

@@ -394,3 +394,57 @@ pub(crate) fn cited_commit_warning(
         lines.join("; ")
     )
 }
+
+/// Staffing is still admitted when an epic lacks published release history.
+/// Use publication receipts, not arbitrary tags, and the subject's own repo.
+pub(crate) fn published_release_note(
+    root: &Path,
+    store: &dyn cas_store::TaskStore,
+    subject: &cas_types::Task,
+) -> String {
+    let inspect = || -> Option<String> {
+        let epic = if subject.task_type == cas_types::TaskType::Epic {
+            subject.clone()
+        } else {
+            store.get_parent_epic(&subject.id).ok()??
+        };
+        let branch = super::super::repo_context::effective_epic_branch(&epic)?;
+        let repo = crate::train_guardrails::train_repo_root(root, &epic).ok()?;
+        if subject.task_type != cas_types::TaskType::Epic
+            && let Some(target) = super::super::repo_context::effective_task_work_target(subject, Some(&epic))
+            && (target.target_branch.strip_prefix("origin/").unwrap_or(&target.target_branch) != branch
+                || !super::super::repo_context::repo_answers_to(&repo, &target.repo_selector))
+        {
+            return None;
+        }
+        let release_root = crate::store::find_cas_root_ignoring_env(&repo).ok()?;
+        let version = cas_store::quality_release_events(&release_root).ok()?
+            .into_iter().find_map(|event| event.release_version)?;
+        let mut tag = version.trim().to_string();
+        if !git_ok(&repo, &["rev-parse", "--verify", "--quiet", &format!("refs/tags/{tag}^{{commit}}")]) {
+            tag = format!("v{}", tag.trim_start_matches('v'));
+        }
+        let release = git_stdout(&repo, &["rev-parse", "--verify", &format!("refs/tags/{tag}^{{commit}}")])?;
+        // Match spawning's fresher-origin choice without fetching or moving refs.
+        let resolve = |reference: &str| git_stdout(&repo, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]);
+        let tip = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
+            (Some(local), Some(remote)) => {
+                if git_ok(&repo, &["merge-base", "--is-ancestor", &local, &remote]) { remote } else { local }
+            }
+            (Some(tip), None) | (None, Some(tip)) => tip,
+            (None, None) => return None,
+        };
+        let missing: usize = git_stdout(&repo, &["rev-list", "--count", &format!("{tip}..{release}"), "--"])?
+            .parse().ok()?;
+        if missing == 0 { return None; }
+        let target = epic.deliverables.work_target.as_ref()
+            .map(|target| target.target_branch.clone())
+            .filter(|target| target != branch)
+            .unwrap_or_else(|| GitOperations::new(repo).detect_default_branch());
+        Some(format!(
+            "\n⚠️ [EPIC_BEHIND_RELEASE] epic={} branch={branch} tag={tag} missing_commits={missing}. Sync {target} into {branch} before staffing more workers.",
+            epic.id,
+        ))
+    };
+    inspect().unwrap_or_default()
+}

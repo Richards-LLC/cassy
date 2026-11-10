@@ -800,6 +800,10 @@ async fn cas_4ac8_ack_retries_rate_limit_without_readmission() {
     .unwrap();
     assert!(result.is_ok(), "{result:?}");
     assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let ids = requests.iter().map(|request| request.headers.get("X-Cassy-Attempt-Id").unwrap()).collect::<Vec<_>>();
+    assert_eq!(ids[0], ids[1]);
 }
 
 #[tokio::test]

@@ -2162,16 +2162,23 @@ A missing side remains unpaired and is excluded from report evidence.
 Global `--json` returns the full receipt. Exit codes are 0 for success,
 1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
-## Cloud coordinator request correlation
+## Cloud request correlation
 
-`CloudCoordinator` attaches `X-Cas-Attempt-Id` only to GET `/api/agents`,
-GET `/api/agents/tasks/:task/lock` and POST `/api/agents/tasks/:task/claim`.
-Both agent-list entry points are covered; every keyset page gets its own random
-canonical v4 UUID. The ID and a `pre_dispatch` INFO receipt are created before
-ureq dispatch and DNS. These are diagnostic IDs, with no replay or ownership
-meaning. Cloud accept/echo alignment remains a cross-repository follow-up;
+Cloud mutation clients attach `X-Cassy-Attempt-Id` (Cloud #256), a random v4
+UUID for one logical operation. `mutation_request` in `cloud/coordinator.rs`
+owns the shared transport: build the request outside retry loops and clone it
+for each send, keeping the ID across 5xx, timeout and 429 retries. A later
+operation gets a new ID. The embedding client uses the same tracing middleware
+with its explicit connect deadline. Signed object-storage uploads and separate
+Violet/Hub service requests keep their own contracts. This ID is diagnostic,
+with no idempotency, replay or ownership meaning.
+
+`CloudCoordinator` also keeps correlation on GET `/api/agents` and
+GET `/api/agents/tasks/:task/lock`; every keyset page gets its own ID. The ID
+and a `pre_dispatch` INFO receipt precede ureq dispatch and DNS.
 `ATTEMPT_ID_HEADER` and `RESPONSE_REQUEST_ID_HEADERS` in `cloud/coordinator.rs`
-are the single contract owners.
+own the wire names. Transport failures, including timeouts, emit a WARN
+receipt with the attempt ID; status receipts remain INFO.
 
 The existing local tracing logger records route templates, method, UTC start,
 configured budget, page ordinal/cursor presence and monotonic elapsed time.

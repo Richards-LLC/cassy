@@ -699,7 +699,7 @@ impl CasService {
                     .set("Authorization", &format!("Bearer {token}"))
                     .call(),
                 "POST" => {
-                    let req = ureq::post(&url)
+                    let req = crate::cloud::mutation_request("POST", &url)
                         .timeout(timeout)
                         .set("Authorization", &format!("Bearer {token}"))
                         .set("Content-Type", "application/json");
@@ -720,7 +720,7 @@ impl CasService {
                     }
                 }
                 "PATCH" => {
-                    let req = ureq::patch(&url)
+                    let req = crate::cloud::mutation_request("PATCH", &url)
                         .timeout(timeout)
                         .set("Authorization", &format!("Bearer {token}"))
                         .set("Content-Type", "application/json");
@@ -730,7 +730,7 @@ impl CasService {
                         req.send_json(serde_json::json!({}))
                     }
                 }
-                "DELETE" => ureq::delete(&url)
+                "DELETE" => crate::cloud::mutation_request("DELETE", &url)
                     .timeout(timeout)
                     .set("Authorization", &format!("Bearer {token}"))
                     .call(),

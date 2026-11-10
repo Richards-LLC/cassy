@@ -1818,7 +1818,12 @@ impl HttpPeerMailbox {
     }
 
     fn post(&self, suffix: &str, body: serde_json::Value) -> Result<ureq::Response, ureq::Error> {
-        self.post_with_timeout(suffix, body, MAILBOX_TIMEOUT)
+        self.post_with_timeout(&self.request(suffix), body, MAILBOX_TIMEOUT)
+    }
+
+    fn request(&self, suffix: &str) -> ureq::Request {
+        crate::cloud::mutation_request("POST", &self.url(suffix))
+            .set("Authorization", &format!("Bearer {}", self.token))
     }
 
     /// Later chunks and ACKs share the server cooldown. A local refusal
@@ -1856,7 +1861,7 @@ impl HttpPeerMailbox {
 
     fn post_with_timeout(
         &self,
-        suffix: &str,
+        request: &ureq::Request,
         body: serde_json::Value,
         timeout: Duration,
     ) -> Result<ureq::Response, ureq::Error> {
@@ -1864,9 +1869,8 @@ impl HttpPeerMailbox {
             return Err(error);
         }
         self.observe(
-            ureq::post(&self.url(suffix))
+            request.clone()
                 .timeout(timeout)
-                .set("Authorization", &format!("Bearer {}", self.token))
                 .send_json(body),
         )
     }
@@ -2003,11 +2007,12 @@ impl PeerMailbox for HttpPeerMailbox {
                 .iter()
                 .map(|(id, outcome)| serde_json::json!({"id":id,"outcome":outcome}))
                 .collect();
+            let request = self.request("/ack");
             let response: AckResponse = Self::read(
                 "peer message ack",
                 super::rate_limit::call(MAILBOX_TIMEOUT, |left| {
                     self.post_with_timeout(
-                        "/ack",
+                        &request,
                         serde_json::json!({"consumer_id":consumer_id,"acks":items}),
                         left,
                     )

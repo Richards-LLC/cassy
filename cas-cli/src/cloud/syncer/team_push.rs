@@ -797,18 +797,18 @@ impl CloudSyncer {
             .map_err(|e| CasError::Other(format!("JSON serialization failed: {e}")))?;
         let compressed = Self::gzip_json(&json_bytes)?;
 
+        let request = crate::cloud::mutation_request("POST", &push_url)
+            .timeout(self.config.timeout)
+            .set("Authorization", &format!("Bearer {token}"))
+            .set("Content-Type", "application/json")
+            .set("Content-Encoding", "gzip");
         let mut last_error = None;
         for attempt in 0..3 {
             if attempt > 0 {
                 std::thread::sleep(self.config.backoff_duration(attempt as u32));
             }
 
-            let response = ureq::post(&push_url)
-                .timeout(self.config.timeout)
-                .set("Authorization", &format!("Bearer {token}"))
-                .set("Content-Type", "application/json")
-                .set("Content-Encoding", "gzip")
-                .send_bytes(&compressed);
+            let response = request.clone().send_bytes(&compressed);
 
             match response {
                 Ok(resp) => {
@@ -1052,7 +1052,7 @@ impl CloudSyncer {
             project_id.replace('/', "%2F")
         );
 
-        let response = ureq::delete(&delete_url)
+        let response = crate::cloud::mutation_request("DELETE", &delete_url)
             .timeout(self.config.timeout)
             .set("Authorization", &format!("Bearer {token}"))
             .call();

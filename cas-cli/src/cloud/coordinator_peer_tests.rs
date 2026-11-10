@@ -38,28 +38,20 @@ impl ReceiptLog {
 
 fn dispatch_receipt(log: ReceiptLog, response: ResponseTemplate) -> impl wiremock::Respond {
     move |request: &wiremock::Request| {
-        let scoped = request.url.path() == "/api/agents"
-            || request.url.path().ends_with("/claim")
-            || request.url.path().ends_with("/lock");
-        // pin: supervisor #4219767's cross-repo diagnostic header contract.
-        let id = request.headers.get("X-Cas-Attempt-Id");
-        if scoped {
-            let id = id
-                .expect("scoped dispatch needs an attempt ID")
-                .to_str()
-                .unwrap();
-            let uuid = uuid::Uuid::parse_str(id).unwrap();
-            assert_eq!(uuid.to_string(), id);
-            assert_eq!(uuid.get_version_num(), 4);
-            assert!(
-                log.text()
-                    .lines()
-                    .any(|line| line.contains("phase=\"pre_dispatch\"") && line.contains(id)),
-                "the local receipt must exist before the server receives the request"
-            );
-        } else {
-            assert!(id.is_none(), "unscoped route must keep its wire contract");
-        }
+        // Cloud #256 consumes this exact wire header.
+        let id = request.headers.get("X-Cassy-Attempt-Id")
+            .expect("Cloud dispatch needs an attempt ID")
+            .to_str()
+            .unwrap();
+        let uuid = uuid::Uuid::parse_str(id).unwrap();
+        assert_eq!(uuid.to_string(), id);
+        assert_eq!(uuid.get_version_num(), 4);
+        assert!(
+            log.text()
+                .lines()
+                .any(|line| line.contains("phase=\"pre_dispatch\"") && line.contains(id)),
+            "the local receipt must exist before the server receives the request"
+        );
         response.clone()
     }
 }
@@ -274,8 +266,8 @@ async fn list_agent_infos_follows_every_keyset_page() {
     let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
     assert_eq!(ids, ["a1", "a2", "a3"]);
     let requests = server.received_requests().await.unwrap();
-    let first = requests[0].headers.get("X-Cas-Attempt-Id").unwrap();
-    let second = requests[1].headers.get("X-Cas-Attempt-Id").unwrap();
+    let first = requests[0].headers.get("X-Cassy-Attempt-Id").unwrap();
+    let second = requests[1].headers.get("X-Cassy-Attempt-Id").unwrap();
     assert_ne!(first, second, "each page is an explicit dispatch");
 }
 
@@ -385,9 +377,9 @@ async fn cas_f707_register_list_and_claim_calls_carry_the_canonical_id() {
     let requests = server.received_requests().await.unwrap();
     let ids: std::collections::HashSet<_> = requests
         .iter()
-        .filter_map(|request| request.headers.get("X-Cas-Attempt-Id"))
+        .filter_map(|request| request.headers.get("X-Cassy-Attempt-Id"))
         .collect();
-    assert_eq!(ids.len(), 4, "each explicit scoped dispatch has a fresh ID");
+    assert_eq!(ids.len(), requests.len(), "each logical dispatch has a fresh ID");
 }
 
 #[tokio::test]
@@ -515,6 +507,10 @@ async fn cas_4ac8_shutdown_and_release_retry_after_rate_limit() {
         .await
         .unwrap();
         assert!(result.is_ok(), "{result:?}");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let ids = requests.iter().map(|request| request.headers.get("X-Cassy-Attempt-Id").unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids[0], ids[1]);
         assert!(
             started.elapsed() >= Duration::from_secs(1),
             "Retry-After was ignored"
@@ -728,7 +724,7 @@ async fn correlation_body_complete_records_parse_failure_without_logging_body() 
         let request = server.received_requests().await.unwrap().pop().unwrap();
         let id = request
             .headers
-            .get("X-Cas-Attempt-Id")
+            .get("X-Cassy-Attempt-Id")
             .unwrap()
             .to_str()
             .unwrap();
@@ -770,7 +766,7 @@ fn correlation_transport_error_retains_attempt_and_unknown_claim_outcome() {
         .lines()
         .find_map(|line| {
             line.split_once(": ")
-                .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cas-Attempt-Id"))
+                .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cassy-Attempt-Id"))
                 .map(|(_, value)| value)
         })
         .expect("wire correlation ID");

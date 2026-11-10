@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  rail-worker-name-visible:
+    title: Worker names remain visible in card headers after provider avatars, without opening Team
+    tasks: [cas-e466c]
+    invariants: [HUB-J17-WORKER-NAME]
+    journeys: [HUB-J17]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]
@@ -963,6 +968,10 @@ invariants:
     statement: Focus epic offers only titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and orders the release train before priority. Progress, completion and Undo use titles while operations keep exact IDs; the desktop menu scrolls within a short region.
     check: Run the mixed-catalog fleet-ops vitest and the filtered HUB-J17 phone pickers journey, including its desktop cas-b200 stage in light and dark. Require only live owned IDs, title labels, exact focus precondition and a bounded menu.
     bug: {task: cas-b200}
+  HUB-J17-WORKER-NAME:
+    statement: Each worker card in Tasks & progress names its worker in the header after its provider avatar, without opening Team, on desktop and phone in both themes.
+    check: Run the filtered HUB-J17 phone pickers case in fleet-ops.journey.ts, whose namedWorkers DOM assertions cover every reported worker at 390 and 1280 widths in light and dark. Require each exact worker name visible in its header; verify no Team activation.
+    bug: {task: cas-e466c}
   HUB-J17-STATUS-TRUTH:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
@@ -2620,6 +2629,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-WORKER-NAME
   - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH

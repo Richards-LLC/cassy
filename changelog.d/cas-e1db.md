@@ -5,4 +5,3 @@
 ### Fixed — Commander
 
 - **Header actions menu on desktop** — The inline actions menu no longer acts as a scroll box, so the Show work label is fully drawn.
-- **Phone header machine name** — The phone header's action buttons sit closer together, so the host line keeps part of the machine name visible.

@@ -2634,8 +2634,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity { flex: 1; gap: var(--space-2); padding: 0; }
   .conversation-identity .conversation-avatar { width: 36px; height: 36px; font-size: 15px; }
   /* The actions always take the last column, whichever others show. */
-  /* 44px targets sit edge to edge-ish so the host line keeps some of the machine (cas-766c). */
-  .conversation-header-actions { flex: none; gap: 2px; margin: 0; }
+  .conversation-header-actions { flex: none; gap: var(--space-1); margin: 0; }
   .conversation-topline .conversation-action.conversation-more-toggle { display: inline-flex; }
   #conversation-raw-output .action-label, #conversation-interrupt .action-label { display: none; }
   .conversation-more-menu:not(:popover-open) { display: none; }

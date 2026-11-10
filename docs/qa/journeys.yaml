@@ -562,6 +562,10 @@ invariants:
     statement: Conversation identity and actions share one row, even with the context rail open. The observed state is a pill beside the project title; phone headers keep direct Raw output and Interrupt controls while secondary actions remain reachable through one native overflow menu with return focus and attention count.
     check: Run the cas-bcf0 installed-safe-area fixture case at 1280/390 in light/dark, conversation-shell/conversations/session-thread-identity Vitest and the named phone fleet-picker and Show work parts. In batch QA include warning, reconnecting, ended, long identity, rotation and installed safe-area states.
     bug: {task: cas-bcf0}
+  HUB-PHONE-OVERFLOW-ANCHOR:
+    statement: An action chosen from the phone header's overflow menu opens its dropdown under the visible overflow toggle and returns focus there; the desktop inline actions menu draws every label without becoming a scroll box.
+    check: Run HUB-J27 at 390 (Commands through More conversation actions; palette below the toggle, Escape returns focus to it) and the web visual QA conversation fixture at desktop in light and dark.
+    bug: {task: cas-e1db}
   HUB-RELEASE-UNKNOWN-EVIDENCE:
     statement: Without a reported release train, the shared rail and Team release renderer emits one evidence paragraph with no heading or emphasized count; known releases retain their titles while unavailable counts stay evidence.
     check: Run fleet-ops.test.ts through releaseHeader with absent and partial release data. In batch QA inspect the empty rail and Team at phone and desktop widths in light and dark, using the regular ink-mid meta style.

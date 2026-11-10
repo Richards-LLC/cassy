@@ -1500,8 +1500,9 @@ mod tests {
         store.add(&prior).unwrap();
         let hidden = Task::new("cas-hidden".into(), "GH #105: unfinished hidden part".into());
         store.add(&hidden).unwrap();
-        crate::cloud::SyncQueue::open(&root).unwrap()
-            .quarantine_row(crate::cloud::QUARANTINE_TASK, &hidden.id, "fixture hidden reference").unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.quarantine_row(crate::cloud::QUARANTINE_TASK, &hidden.id, "fixture hidden reference").unwrap();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_SESSION_ID", &owner.id);
         env.set("CAS_AGENT_NAME", &owner.name);
@@ -1561,6 +1562,8 @@ else:
         assert_eq!(actions, vec![("Example/Repo#101", "closed"), ("Example/Repo#102", "partial"), ("Example/Repo#103", "failed"), ("Example/Repo#104", "closed"), ("Example/Repo#105", "partial")]);
         assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains("v4.3.0"));
         assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains(&git(repo, &["rev-parse", "v4.3.0^{commit}"]).unwrap()));
+        assert!(receipt["issues"][0]["comment_or_error"].as_str().unwrap().contains("cas-a100"));
+        assert!(!receipt["issues"][2]["comment_or_error"].as_str().unwrap().is_empty());
         assert_eq!(receipt["issues"][0]["task_ids"], serde_json::json!(["cas-a100"]));
         assert_eq!(receipt["issues"][1]["task_ids"], serde_json::json!(["cas-a100", "cas-a102"]));
         let calls: Vec<Vec<String>> = fs::read_to_string(repo.join("gh-calls.jsonl")).unwrap().lines()

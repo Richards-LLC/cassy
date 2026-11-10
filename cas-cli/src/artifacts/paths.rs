@@ -207,6 +207,25 @@ mod tests {
         path.to_path_buf()
     }
 
+    fn nested_worktree(f: &Fixture) -> PathBuf {
+        let git = |args: &[&std::ffi::OsStr]| {
+            let output = std::process::Command::new("git")
+                .arg("-C").arg(&f.project_root)
+                .args(["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
+                    "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"])
+                .args(args)
+                .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        };
+        git(&["init".as_ref()]);
+        git(&["commit".as_ref(), "--allow-empty".as_ref(), "-m".as_ref(), "fixture".as_ref()]);
+        let checkout = f.project_root.join(".cas/worktrees/worker");
+        git(&["worktree".as_ref(), "add".as_ref(), "--detach".as_ref(), checkout.as_os_str()]);
+        checkout
+    }
+
     #[test]
     fn projects_with_the_same_task_id_cannot_publish_each_others_evidence_cas_6ebf() {
         let temp = TempDir::new().unwrap();
@@ -279,6 +298,14 @@ mod tests {
     }
 
     #[test]
+    fn registered_nested_worktree_report_is_publishable_cas_9615() {
+        let f = fixture();
+        let checkout = nested_worktree(&f);
+        let report = write(&checkout.join("docs/release-reports/v4.10.0.html"), "report");
+        assert_eq!(resolve_publishable_path(&report, &f.roots).unwrap(), report);
+    }
+
+    #[test]
     fn a_file_outside_both_roots_is_refused_and_the_message_names_both() {
         let f = fixture();
         let file = write(&f.outside.join("secrets.txt"), "nope");
@@ -347,6 +374,7 @@ mod tests {
     #[test]
     fn the_credential_and_git_directories_are_never_publishable() {
         let f = fixture();
+        let checkout = nested_worktree(&f);
         let cloud = write(
             &f.project_root.join(".cas").join("cloud.json"),
             "{\"token\":\"x\"}",
@@ -362,6 +390,30 @@ mod tests {
             resolve_publishable_path(&git_config, &f.roots).unwrap_err(),
             PathRefusal::SensitiveDirectory { .. }
         ));
+
+        for path in [
+            checkout.join(".cas/cloud.json"),
+            checkout.join(".cas/cas.db"),
+            checkout.join(".cas/keys/private.pem"),
+            checkout.join(".git"),
+            f.project_root.join(".cas/worktrees/unregistered/docs/report.html"),
+        ] {
+            if !path.exists() {
+                write(&path, "protected");
+            }
+            assert!(matches!(
+                resolve_publishable_path(&path, &f.roots),
+                Err(PathRefusal::SensitiveDirectory { .. })
+            ), "{}", path.display());
+        }
+        #[cfg(unix)]
+        {
+            let alias = checkout.join("docs/credentials.json");
+            fs::create_dir_all(alias.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&cloud, &alias).unwrap();
+            assert!(matches!(resolve_publishable_path(&alias, &f.roots),
+                Err(PathRefusal::SensitiveDirectory { .. })));
+        }
     }
 
     #[test]

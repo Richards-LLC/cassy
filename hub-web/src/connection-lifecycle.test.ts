@@ -1471,7 +1471,13 @@ describe("Commander live connection lifecycle", () => {
     expect(subscriptions()).toHaveLength(1);
     listed = true;
     await connection.refreshSessions();
-    await waitFor(() => expect(subscriptions()).toHaveLength(2));
+    // The replacement shares the two-attaches-per-second budget. Advance its
+    // rate slot rather than racing a real one-second timer against waitFor.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    socket.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
   it("recovers transport after offline even when the catalog fails", async () => {

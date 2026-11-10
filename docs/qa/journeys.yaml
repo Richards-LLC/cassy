@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  omitted-session-replacement-clock:
+    title: Catalog omission preserves live attaches, explicit stops fence sends, and running replacements resume after their controlled rate slot
+    tasks: [cas-f640]
+    invariants: [HUB-J14-RUNNING-ONLY]
+    journeys: [HUB-J11, HUB-J14]
   task-start-preserves-supervisor-notes:
     title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
     tasks: [cas-3045]

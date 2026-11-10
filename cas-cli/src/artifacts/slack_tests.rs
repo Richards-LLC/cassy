@@ -214,12 +214,14 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
     }
     assert!(calls[0].get("file_id").is_none());
     assert_eq!(calls[1]["file_id"], "F1148");
-    for code in ["managed_reply_required", "stale_generation", "reply_target_mismatch"] {
+    for (code, retryable) in [("managed_reply_required", false), ("stale_generation", false),
+        ("reply_target_mismatch", false), ("authority_unavailable", true)] {
         let violet = ScriptedViolet::new(vec![wrapped(json!({
-            "ok": false, "error": {"code": code, "message": "authority refused", "retryable": false},
+            "ok": false, "error": {"code": code, "message": "authority refused", "retryable": retryable},
         }))]);
         let error = post_verified(&violet, &view, b"hello world".to_vec(), &options).await.unwrap_err();
         assert_eq!(error.code, code);
+        assert_eq!(serde_json::to_value(&error).unwrap()["retryable"], retryable);
         assert!(error.file_id.is_none());
         assert_eq!(violet.calls().len(), 1);
     }

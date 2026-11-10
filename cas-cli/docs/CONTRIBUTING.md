@@ -313,6 +313,8 @@ cross-session and suspended waits. Supervisor-owned cross-session event watches
 retain their completion semantics. A supervisor-stalled prompt requires the
 configured interval of observed actionable idle time, readable worker holds,
 current open tasks, and the existing pinned-epic assignment boundary.
+With no focused epic it does not propose the project's open backlog. Explicit
+worker queues continue independently; idle workers do not authorize new scope.
 
 Authenticated messages directed to a supervisor wake its idle pane, including
 peer field reports with no `kind`. The first message opens a fixed burst window
@@ -4441,6 +4443,10 @@ statement or test/helper declaration, or on the assertion line. A reason does
 not convert a source-order assertion into behavior coverage.
 
 Tests assert behavior or stable error/rule IDs, never human-message wording.
+Exact `.command` or `.redirect_command` fields/accessors are also machine
+projections: `assert_eq!(error.redirect_command(), "cas cloud project set")`
+checks an executable redirect. Assert the typed command, not its surrounding
+rendered error sentence; `to_string().contains(...)` remains a prose pin.
 The source guard checks newly changed error assertions at park with
 `--messages-only --changed-since <target>`; `pin:` comments do not waive it.
 Rust assertion diagnostics and exact caller-supplied payload preservation remain

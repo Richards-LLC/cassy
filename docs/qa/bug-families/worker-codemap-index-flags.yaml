@@ -1,0 +1,3 @@
+title: Clean CODEMAP files with legacy skip-worktree metadata allow queued checkout and fast-forward while real edits remain protected
+tasks: [cas-e0d8]
+journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]

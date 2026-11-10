@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { test, expect, journeyPart, type Journey } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
 import { journeyStamp } from "./clock";
 import type { FleetWorld, Machine, WorkEventWire, WorkWorld } from "./hub-double";
 import { ATLAS, PELICAN } from "./world";
@@ -61,7 +61,7 @@ test("HUB-J25 inspect tool-reported edits per turn", journeyPart, async ({ page,
   // A named section without a heading is still a region with an accessible name.
   await journey.stage("Scan tool-reported edits without opening the tool log", async () => {
     await openConversation(page, journey);
-    await page.locator("#conversation-show-work").click();
+    await clickConversationHeaderAction(page, "#conversation-show-work");
     await expect(card).toHaveCount(1);
     await expect(card.getByRole("button", { name: "Tool-reported edits · 2 files" })).toHaveAttribute("aria-expanded", "false");
     expect(hub.frames.filter(frame => frame.kind === "WorkEventDetailRequest")).toHaveLength(0);
@@ -143,7 +143,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       });
 
       await journey.stage("Turn Show work on", async () => {
-        await toggle.click();
+        await clickConversationHeaderAction(page, "#conversation-show-work");
         await expect(toggle).toHaveAttribute("aria-pressed", "true");
         // The work between the two replies is one collapsed block, in order,
         // with its task chip showing and its rows not.
@@ -152,7 +152,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(order).toEqual(["before", "work", "after"]);
         const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
         await expect(summary).toHaveAttribute("aria-expanded", "false");
-        await expect(blocks.locator(".work-chip")).toHaveText("cas-42 parked");
+        // cas-943b: the chip leads with the task title; its id stays in the title attribute.
+        await expect(blocks.locator(".work-chip")).toHaveAttribute("title", /cas-42/);
         await expect(blocks.locator(".work-row")).toHaveCount(0);
         // The worker's own tool call belongs to its timeline, not the thread.
         await expect(thread).not.toContainText("limits.rs");
@@ -258,7 +259,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await expect(send).toBeVisible();
         await expect(toggle).toHaveAttribute("aria-pressed", "true");
         await expect(blocks.first()).toBeVisible();
-        await toggle.click();
+        await clickConversationHeaderAction(page, "#conversation-show-work");
         await expect(toggle).toHaveAttribute("aria-pressed", "false");
         await expect(blocks).toHaveCount(0);
       });
@@ -271,7 +272,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
 
       await journey.stage("Open a worker's timeline from Tasks & progress", async () => {
         await openConversation(page, journey);
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         const cardState = await open.locator("..").locator(".status-chip").textContent();
         await open.click();
         await expect(dialog).toBeVisible();

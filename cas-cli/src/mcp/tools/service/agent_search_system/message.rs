@@ -2139,6 +2139,7 @@ impl CasService {
         // Direct replies settle their addressed copy; a broadcast answer
         // settles only this recipient, never the shared row (cas-009c).
         let mut explicit_reply_settles = false;
+        let mut explicit_reply_answers_ask = false;
         let mut replied_blocker = None;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
@@ -2173,6 +2174,9 @@ impl CasService {
             ];
             let reference =
                 classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
+            explicit_reply_answers_ask = reference == Some(ReplyReference::DirectReply)
+                && prior.factory_session == factory_session
+                && crate::supervisor_message_wakes::is_ask(&prior.prompt);
             explicit_reply_settles = reference == Some(ReplyReference::DirectReply)
                 || (reference == Some(ReplyReference::Thread)
                     && prior.target.eq_ignore_ascii_case("all_workers")
@@ -2321,8 +2325,16 @@ impl CasService {
         }
         // cas-922d: a worker's ask or answer is the conversation; keep its
         // kind on the row so the supervisor's wake cap and debounce skip it.
+        // cas-6c32 (GH #1780 part 1): a linked worker answer gets authority
+        // only when its first settlement of a supervisor ask commits below.
+        // Persist supervisor ask intent so instructions cannot mint exemptions.
+        if role == "supervisor" && req.kind.as_deref() == Some("ask") {
+            message = crate::supervisor_message_wakes::attach_waking_kind(&message, "ask");
+        }
+        let linked_worker_reply = worker_to_own_supervisor && explicit_reply_to.is_some();
         if role == "worker"
             && let Some(kind @ ("ask" | "answer")) = req.kind.as_deref()
+            && !(kind == "answer" && linked_worker_reply)
         {
             message = crate::supervisor_message_wakes::attach_waking_kind(&message, kind);
         }
@@ -3212,7 +3224,10 @@ impl CasService {
                     agent_from_store.as_ref(),
                     resolved_target_agent.as_ref(),
                 );
-                let enqueue_result = if worker_action_kind.is_some() {
+                // An ask's reply must retain its row identity until the first
+                // settlement grants wake authority; coalescing could otherwise
+                // supersede the winning row between enqueue and settlement.
+                let enqueue_result = if worker_action_kind.is_some() && !explicit_reply_answers_ask {
                     let action_session = row_session
                         .as_deref()
                         .expect("validated worker action has a same-session supervisor");
@@ -3332,7 +3347,15 @@ impl CasService {
             let sender_name = agent_from_store.as_ref().map(|a| a.name.as_str())
                 .unwrap_or(display_name.as_str());
             let sender_aliases = crate::harness_policy::inbox_aliases(sender_name, role == "supervisor");
-            queue.acknowledge_for_recipients(notification_id, &sender_aliases, Some(message_id)).map_err(|error| {
+            let settled = if worker_to_own_supervisor && explicit_reply_answers_ask && !quiet_message {
+                queue.acknowledge_reply_with_wake(
+                    notification_id, &sender_aliases, message_id,
+                    &crate::supervisor_message_wakes::attach_waking_kind("", "answer"),
+                )
+            } else {
+                queue.acknowledge_for_recipients(notification_id, &sender_aliases, Some(message_id))
+            };
+            settled.map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!(

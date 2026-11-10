@@ -7,6 +7,175 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.13.0] - 2026-11-10
+
+### Fixed — QA evidence
+
+- **Historical ledger scaffolds** — Ledger initialization can use the recorded immutable delivery anchor after its local source branch is cleaned. Ordinary local source selection, task bindings and existing evidence stay unchanged; invalid anchors remain refused.
+
+### Fixed — Factory
+
+- **Offline conflict precheck** — An unreachable origin no longer prevents the advisory merge conflict check from inspecting the local target. Reachable remote checks and publication gates remain active.
+- **Supervisor registration keeps one identity** — Rebind a new harness session to its existing live supervisor in the same pane. Registrations that exceed their response budget continue with an explicit status and deliver their final result to the caller's inbox, preventing unseen late writes after an unknown timeout.
+- **Drained inboxes stop delivery wakes** — The delivery watchdog retires a notification after it is read or acknowledged, including worker and supervisor inboxes. A still-unread message keeps its normal wake, now naming the notification it asks the recipient to read.
+- **Automatic worker context respawn** — Workers can request a fresh context with a typed respawn message. Cassy queues their existing recycle path, keeps their recipe and task bindings, links the saved handoff in the resume brief, and leaves a quiet supervisor receipt. A persistent ten-minute limit prevents repeated recycles for the same worker.
+- **Worker queue corrections** — Unassigning work removes it from its previous worker’s queue, and supervisors can reorder an open task without a live lease. Queue starts continue to respect hard prerequisites while allowing parallel preparation through ordinary blocking dependencies.
+- **Stopping a worker on purpose no longer reads as a failed boot** — When the supervisor shuts down a worker that registered and finished its work inside the first minute, Cassy no longer reports a failed spawn, a blocker or a boot-time death for it.
+- **Isolated replay checkout** — Preparing a replay clone with `git checkout -b` no longer triggers the worker commit guard. Each Git invocation retains its own repository target, and actual commits outside the assigned worktree remain refused.
+- **Quiet child work stays active** — Worker status and stall recovery recognize measured CPU or output writes from owned child processes, including non-Rust test logs. The factory progress watchdog counts that advancement, while silent or exited children still allow recovery and escalation.
+- **Artifact-root refusals show both paths** — Workspace guard diagnostics identify the configured artifact directory and its canonical target. Regression coverage checks inline writes from either spelling and keeps symlink escapes refused.
+- **Returning QA ownership** — Batch QA offers resume when an outstanding delivery set returns to the same supervisor session after its prior notice was superseded. An unchanged active offer stays deduplicated.
+- **Unread warnings no longer misreport a supervisor's native answer** — A Codex supervisor that read and answered a worker message in its own pane, before its session id was bound, now gets that message's read receipt, so Cassy no longer warns the sender or pages the operator about it. The operator's unread-message page now says what Cassy can prove (no read, acknowledgement or observed turn) instead of claiming the recipient never started a turn.
+- **Keep worker handoffs out of deliveries** — Recycling keeps checkpoint notes in task artifacts, assignment briefs name that path, and parking refuses commits containing a repo-root `HANDOFF.md`, including files retained from an earlier push.
+- **Shutting down a booting worker is not a crash** — A worker the supervisor stops before it finishes starting is recorded as stopped, with no "failed during boot" death notice or respawn advice.
+- **Detached worker handoffs prepare the successor branch** — Starting a fresh task from a clean detached target now checks out its named task branch and preserves held delivery branches. Detached work, tracked edits and detached task resumes refuse before accepting the start, with branch setup guidance.
+- **Read-only SSH diagnosis** — Python checkout discovery using the default `glob.glob` behavior no longer falsely triggers the operator credential guard. Direct credential paths, explicit hidden-directory globs and requests to include hidden files remain refused.
+- **Public registration cannot inherit supervisor authority** — A public `register` or `session_start` call now rebinds only to an identity the server has authenticated, either its own server-internal identity or the harness's `CAS_SESSION_ID`. A row created by an earlier public registration can no longer approve verifications.
+- **Single-task merge conflict check is advisory** — Outside a release train, the pre-merge conflict check no longer fetches origin. If the target is missing locally, the source cannot be resolved, or origin has diverged, the check defers to the normal merge path.
+- **Committed park outcomes** — A timed-out close reports its own successful park instead of labelling its legacy reply as a refusal. Genuine refusals keep their details, including on tasks parked by earlier requests.
+
+### Fixed — Factory progress
+
+- **Report a refused close without a false stall page** — The progress watchdog now shows the close refusal code and next action when a Cassy gate holds the work. It leaves the operator unpaged unless the gate explicitly requires operator action; genuine stalls, parameter errors and merge handoffs retain their normal escalation policy.
+
+### Fixed — Commander
+
+- **Browser installations explains a failed load and offers Retry** — When a machine doesn't return its browser installations, the dialog now says so in a full sentence, for example "Atlas didn't return its browser installations.", followed by the reason, and offers Retry next to Close.
+- **One bad frame no longer drops the whole connection** — If Commander fails while handling a single message from a machine (for example while drawing it), it now reports the error and keeps the connection, instead of tearing it down. Before, the same message arrived again after every reconnect, so every supervisor on that machine kept showing "Reconnecting".
+- **The hub says why a Commander connection closed** — The hub log now records why each Commander machine connection ended (the browser closed it, the command backlog filled, a write failed, the device was revoked or failed its recheck), so a reconnect loop is diagnosable from the hub alone.
+- **An empty conversation shows the same assistant mark as its header** — Opening a supervisor that has no messages yet now shows its assistant's mark (for example Claude) in the middle of the conversation, matching the header and the conversation list, instead of the machine's letter.
+- **Quiet missing-release evidence** — Supervisors without a release train show one regular evidence line. Missing merge counts also use evidence styling instead of bold count styling.
+- **Reading position holds when the connection drops** — The conversation's state chip keeps one fixed height in any font, so switching from Live to a reconnecting state no longer moves the thread you are reading.
+- **Easier taps in New session on a phone** — The Known projects and Browse tabs and the Cancel and Start buttons are now full-size touch targets on a phone, so they are easier to hit.
+- **Clearer Add worker panel and phone action sheets** — Add worker now has an "Add workers" heading and labelled "How many" and "Start on" fields that fit inside the side panel. On a phone, the actions sheet for a worker or task now shows which one it acts on, for example "Actions for swift-lark-3".
+- **Tidier Paired machines dialog** — The machine filter buttons now have space below the description and wrap onto a new line instead of running off the edge on a phone. Close is a round button, and "Browser installations on …" now looks like a button you can press.
+- **Cleaner action bars in New session and Operator inbox** — The buttons at the bottom of these dialogs no longer sit on a white box with square corners. The bar now looks like part of the dialog, with a thin line above it, and only becomes frosted while there is more content to scroll underneath it.
+- **Task titles lead work surfaces** — Worker cards, Show work task chips, worker timeline subjects and Write access options show the task title before its ID. IDs remain available in tooltips or option values.
+- **Bare links are clickable** — A plain `https://` address in a supervisor or worker message, or in a work row, now opens in a new tab, like a labelled link. Trailing punctuation and an unmatched closing parenthesis stay outside the link, and addresses inside code spans stay as text.
+- **Named focus choices** — Focus epic shows this supervisor’s live epics by title, with the release train first and current focus excluded. Historical and foreign choices are omitted, desktop scrolling stays compact, and operation feedback uses titles.
+- **Account removal confirms in its own card** — Removing, disabling or cleaning up an account now asks for confirmation inside the card you clicked, with Confirm disabled until the typed name matches and no browser "Please fill out this field" bubble. Escape cancels just the confirmation. Duplicate notes name the other account and where it lives instead of an internal key, protected main accounts no longer appear under Needs cleanup, and a Claude profile named like another tool (for example "grok") is labelled as a Claude profile.
+- **One-row conversation headers** — Identity and actions share a row, including a compact phone header. The observed live state is a pill beside the project title; phone secondary actions use a native overflow menu, with Raw output and Interrupt directly reachable. Commands has a keyboard icon.
+- **Header actions menu on desktop** — The inline actions menu no longer acts as a scroll box, so the Show work label is fully drawn.
+- **Commands on a phone** — The commands palette opens under the More button you chose it from, not over the top of the header.
+- **Named worker cards** — Tasks & progress shows every worker’s name after its provider avatar on desktop and phone, without opening Team.
+- **Accounts no longer offers Set default on the default account** — The default account shows its Default badge without a Set default button. Usage no longer shows a reset time that has already passed, in Accounts or New session; it says the usage is unknown and you can check it again.
+- **Readable peer override reasons** — Needs-you rows show an operator sentence instead of a machine reason code, including retained notices. Peer override notices keep the ask identity in routing metadata and omit it from the visible message.
+- **Numbers in the reply box use the normal font** — Digits, `#` and `*` you type in a message now appear in the same font and spacing as the rest of the text, so "4.13" no longer shows as wide emoji-style characters. Emoji you type or pick still show in colour.
+
+### Fixed — Peer coordination
+
+- **Show wake-cap holds to the sender** — Held peer messages now return one notice with the earliest retry time. Substantive replies linked with `in_reply_to` bypass the cap and debounce so release answers can proceed.
+
+### Fixed — Peer task sharing
+
+- **Validate Slack work issuers** — Incoming task shares must match the receiver's current source-owner receipt before acceptance or staffing; older accepted shares cannot bypass this check. Thread reply authority stays with its owner.
+
+### Fixed — Release reports
+
+- **Generated verdicts pass the report gate** — Release reports mark their opening verdict so the report quality check accepts it without a manual HTML edit, including when regenerating from a preserved Markdown source.
+
+### Fixed — Factory merges
+
+- **Return conflicting candidates to their workers** — Single delivery merges now report CONTENT CONFLICT with the conflicting paths and reopen the task to its assigned worker instead of stopping on an unnamed pre-merge verification failure.
+
+### Fixed — Hub
+
+- **Fit hub help in a standard terminal** — Hub help wraps command descriptions, options, defaults and aliases within 80 columns, including piped output.
+- **Keep an explicit stop** — `cas update` and install-on-publish used to restart a hub stopped with `cas hub stop`. They now leave it stopped until an explicit start, restart or service install; crashed hubs still recover.
+- **Keep the hub running after an invalid restart address** — `cas hub restart` validates `--bind` before stopping the existing hub, so a refused address leaves Commander available.
+
+### Fixed — Task triage
+
+- **Keep finding priority visible during corrections** — Main-reach label updates require a declared live main journey before changing any task fields. Relabelling uses the stored runtime reproduction to derive priority, and every successful update reports its resulting priority in text and structured output.
+
+### Fixed — Task storage
+
+- **Keep supervisor notes when workers start** — A worker starting from an older task snapshot preserves notes appended by the supervisor, including concurrent discovery updates.
+
+### Fixed — Worker spawning
+
+- **Refresh branches outside a narrow fetch mapping** — Worker base checks now update the requested origin tracking ref explicitly, so a main-only fetch configuration cannot silently start a worker from stale staging code.
+
+### Fixed — Cloud sync
+
+- **Personal backlog visibility** — Cloud status and doctor show the personal queue count and oldest age for projects without an explicit team link, with commands to link and preview migration. Inspection preserves queued rows and project scope.
+- **Recover retained dependency failures** — Queue details expose item IDs, scope and repair advice; retry selected items with `--retry --ids`. Scoped pulls revalidate retained dependency endpoints after ownership repairs, while preserving foreign boundaries and local graph data. Replayed identical conflict snapshots no longer grow the journal.
+- **Recover personal copies after team linking** — Explicitly linked projects automatically enqueue eligible legacy personal snapshots for team delivery and retire personal copies only after matching itemized acknowledgments, including when team-only mode is off. Inherited defaults do not authorize recovery; rejected, changed and unproven snapshots stay local.
+
+### Fixed — Slack files
+
+- **Attach verified files to managed threads** — Artifact sharing resolves the caller's live reply intent, and the Violet CLI supports managed files above the inline limit. Both upload steps keep the same claim and request identity; missing or expired authority for a locally known managed thread is refused before upload.
+
+### Fixed — Report reviews
+
+- **Judge the plan before the presentation** — Report briefs and reviews now compare the verdict with the originating goal, criteria and evidence before scoring form. Author-added thresholds and recommendations stay separate from the plan verdict.
+
+### Fixed — Violet compatibility
+
+- **Follow the connected hub’s message contract** — Cassy supplies message request IDs and reconciles by them only when Violet advertises both capabilities. Older hubs receive unchanged posts, and reconnect refreshes the contract without ever resending an uncertain write.
+
+### Fixed — Memory
+
+- **Protect handoff provenance during edits** — Retain existing machine and owner stamps when memory tags change, discard supplied replacements, and stamp new handoffs from their authenticated writer. Editing tags cannot make another machine's handoff local.
+
+### Fixed — Configuration
+
+- **Point project identity changes to their command** — `cas config set project.canonical_id` now names `cas cloud project set <canonical-id>` instead of reporting an unknown key.
+
+### Fixed — Worker commit guard
+
+- **Inspect the commit's actual directory** — Compound worker commands using relative directory changes or prior literal path variables now resolve the correct branch. Unresolved directories and Git read failures report uncertainty instead of a false detached-HEAD diagnosis.
+
+### Fixed — Cloud requests
+
+- **Correlate mutation timeouts** — Cloud mutations send the server-supported `X-Cassy-Attempt-Id`, reuse it across transport and rate-limit retries, and include it in timeout diagnostics. Separate logical operations receive fresh IDs; request bodies and credentials stay out of correlation logs.
+
+### Fixed — CI
+
+- **Keep fresh reruns in the queue** — The queued-run watchdog ages each workflow attempt from its own start time, so rerunning an older workflow gets the normal scheduling window. First attempts still expire when genuinely stale; reruns with no current start timestamp remain queued until their age can be established.
+
+### Fixed — Factory guidance
+
+- **Rebased-delivery refusals keep merge ownership clear** — When close finds a task's recorded anchor rewritten away, it now tells the worker to park the current task tip and let the supervisor merge it, instead of telling the worker to merge it into the parent branch.
+
+### Fixed — Releases
+
+- **Automatic updates survive stuck release notices** — Bound release Git probes and post-install notice delivery, retain pending notices by version, and install newer publications before retrying older notices. Notice retries remain valid after a binary upgrade and reuse existing delivery receipts.
+- **Open report uploads in their Slack thread** — Release-report receipts retain the upload message's returned permalink separately from the PDF file link, so receipt and POSTED links lead back to the conversation.
+- **Train CI reruns and early failures** — Re-running only failed Rust shards now retains successful shards from earlier attempts of the same run. A failed train run without a receipt records an explicit unknown red result, wakes its owner and holds merges; release cuts report the missing receipt until a verified green clears the hold.
+
+### Fixed — Violet connection recovery
+
+- **Recover without restarting the session** — Violet reconnects on the next call after a transport close. Message posts carry a request ID; uncertain outcomes are reconciled by that ID without sending the message again.
+
+### Added — Factory
+
+- **Published release gap warning** — Worker spawn and task assignment receipts now name the latest recorded published tag and its missing commit count when an epic is behind it, with advice to sync the integration branch first. The advisory also works when the epic exists only on origin.
+
+### Fixed — Factory supervision
+
+- **Quiet unscoped backlog** — Idle staffing nudges no longer offer the historical project backlog when no epic is focused. Focused ready work retains its idle grace period, worker holds and repeated-candidate cooldown.
+
+### Fixed — Factory verification
+
+- **Recover approval after a reviewed peer repair** — A newer authenticated approval from the same source supervisor and machine can replace its stale peer approval for the current delivery. The replacement retains both verdicts and an audit event; stale proof and local reviews remain protected.
+
+### Fixed — MCP
+
+- **Keep native registration working in deep sandboxes** — Long project paths use a bounded private daemon socket, preserving normal caller discovery, reminders and session handoffs while retaining sandbox and socket ownership checks.
+
+### Fixed — QA ledger
+
+- **Ledger init resumes an existing ledger** — Rerunning `cas qa ledger init --task <id>` on a resumed task keeps the existing ledger byte for byte and prints its path, instead of failing with "File exists". An existing ledger that does not validate for the task is refused with its diagnostics, and is never overwritten.
+
+### Fixed — Artifact sharing
+
+- **Fetch proof on a cold peer** — Artifact fetch now resolves its configured project before account-wide discovery and uses Cloud's task endpoint correctly. Committed proof remains fetchable when the receiving machine lacks local metadata and the account has many projects.
+
+### Fixed — Coordination
+
+- **Recover expired Slack claims after an uncertain reply** — When Cloud identifies an expired claim held by a departed supervisor, Cassy asks Violet to read back and settle its unresolved reply before reclaiming the thread. Recovery preserves request identity across retries and leaves live owners and unproven reply outcomes held.
+
 ## [4.12.0] - 2026-11-10
 
 ### Fixed — Commander

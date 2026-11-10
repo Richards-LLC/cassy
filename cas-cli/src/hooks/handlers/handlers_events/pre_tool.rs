@@ -2758,6 +2758,7 @@ struct GitCommandTarget {
     work_tree: Option<std::path::PathBuf>,
     is_detached_checkout: bool,
     unresolved_directory: bool,
+    uncertain_scope: bool,
 }
 
 impl GitCommandTarget {
@@ -2773,6 +2774,7 @@ impl GitCommandTarget {
             work_tree: None,
             is_detached_checkout: false,
             unresolved_directory: false,
+            uncertain_scope: false,
         }
     }
 
@@ -2875,10 +2877,28 @@ fn worker_path_value(
 /// parsed before the operation so a linked worktree is checked instead of the
 /// hook's cwd. Explicit `cd` statements are carried forward across `&&`, `;`,
 /// and `|` statements because the hook receives the whole shell command.
+/// Shell command strings inherit cwd; only eval changes the enclosing cwd.
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let default_target = GitCommandTarget::from_cwd(cwd);
     let mut targets = Vec::new();
     let mut shell_cwd = Some(default_target.cwd.clone());
+    collect_git_write_targets(&default_target, &mut shell_cwd, command, 0, &mut targets);
+    targets
+}
+
+fn collect_git_write_targets(
+    default_target: &GitCommandTarget,
+    shell_cwd: &mut Option<std::path::PathBuf>,
+    command: &str,
+    depth: usize,
+    targets: &mut Vec<GitCommandTarget>,
+) {
+    if depth > 6 {
+        let mut target = default_target.clone();
+        target.uncertain_scope = true;
+        targets.push(target);
+        return;
+    }
     let projected = shell_command_without_heredoc_bodies(command);
     let lexed = factory_shell_lex(&projected, false, 0);
     let mut path_words = std::collections::HashMap::<String, WorkerPathWord>::new();
@@ -2948,11 +2968,50 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         };
         prefix_bindings = false;
         let name = shell_word_basename(&words[command_index]);
-        if matches!(name, "read" | "readarray" | "mapfile" | "getopts" | "declare" | "typeset" | "local" | "export" | "readonly" | "let" | "unset" | "eval" | "source" | ".")
+        let args = &words[command_index + 1..];
+        if name == "eval" {
+            let args = if args.first().is_some_and(|arg| arg == "--") {
+                &args[1..]
+            } else {
+                args
+            };
+            bindings.clear();
+            // eval runs in this shell: its cd also affects following commands.
+            collect_git_write_targets(default_target, shell_cwd, &args.join(" "), depth + 1, targets);
+            continue;
+        }
+        if matches!(
+            name,
+            "sh" | "bash" | "zsh" | "dash" | "ksh" | "script" | "su" | "runuser"
+        ) {
+            // Only these exact forms have an unambiguous command string.
+            // Do not interpret shell option bundles or their operands.
+            let args = if args.first().is_some_and(|arg| matches!(arg.as_str(), "-l" | "--login")) {
+                &args[1..]
+            } else {
+                args
+            };
+            let payload = match args {
+                [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
+                [flag, payload, ..] if flag == "-c"
+                    && !payload.starts_with('-') && !payload.starts_with('+') => Some(payload),
+                _ => None,
+            };
+            if let Some(payload) = payload {
+                // A child inherits cwd but cannot change its parent's cwd.
+                collect_git_write_targets(default_target, &mut shell_cwd.clone(), payload, depth + 1, targets);
+            } else {
+                let mut target = default_target.clone();
+                target.uncertain_scope = true;
+                targets.push(target);
+            }
+            continue;
+        }
+        if matches!(name, "read" | "readarray" | "mapfile" | "getopts" | "declare" | "typeset" | "local" | "export" | "readonly" | "let" | "unset" | "source" | ".")
             || (name == "printf" && words[command_index + 1..].iter().any(|arg| arg.starts_with("-v")))
         {
             bindings.clear();
-            if matches!(name, "eval" | "source" | ".") { shell_cwd = None; }
+            if matches!(name, "source" | ".") { *shell_cwd = None; }
         }
         let resolve_path = |base: Option<&std::path::Path>, value: &str, spelling: &str| {
             let value = worker_path_value(value, path_word(spelling), &bindings, allow_variables)?;
@@ -2980,7 +3039,7 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
             let cdpath = words[..command_index].iter().any(|word| word.starts_with("CDPATH=") && word != "CDPATH=")
                 || bindings.get("CDPATH").is_some_and(|value| !value.is_empty())
                 || std::env::var("CDPATH").is_ok_and(|value| !value.is_empty());
-            shell_cwd = path.and_then(|path| {
+            *shell_cwd = path.and_then(|path| {
                 let value = worker_path_value(path, path_word(path), &bindings, allow_variables)?;
                 if cdpath && !std::path::Path::new(&value).is_absolute()
                     && !value.starts_with("./") && !value.starts_with("../")
@@ -3064,8 +3123,6 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         }
         targets.push(target);
     }
-
-    targets
 }
 
 fn git_command_at_target(target: &GitCommandTarget) -> std::process::Command {
@@ -3185,6 +3242,9 @@ fn check_worker_git_commit_scope_at_target(
     target: &GitCommandTarget,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
+    if target.uncertain_scope {
+        return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Use the plain -c '<cmd>' form inside your assigned worktree; split deeply nested commands into explicit operations.".to_string());
+    }
     let unresolved = || format!(
         "WORKER_GIT_TARGET_UNRESOLVED: Cannot determine Git identity for the commit directory ({}). Branch state is unknown. Use a literal directory or a previously bound literal path, then retry.",
         crate::worktree::GitOperations::visible_git_label(&target.cwd.to_string_lossy()),
@@ -4994,53 +5054,42 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     targets
 }
 
-/// Claude Code advertises this exact per-session ephemeral root to agents:
-/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...` (or the
-/// macOS canonical spelling `/private/tmp/...`).
+/// Shared by scratchpad admission and its refusal guidance. The UID and project
+/// components are placeholders; the session component is always literal.
+fn harness_session_scratchpad_pattern(session_id: &str) -> [&str; 5] {
+    ["tmp", "claude-<uid>", "<project-slug>", session_id, "scratchpad"]
+}
+
+/// Claude Code's per-session ephemeral root, including its macOS canonical
+/// spelling `/private/tmp/...`. Allow creating the root as well as its files.
 /// Bind the exemption to the hook's own session ID and reject traversal so it
 /// cannot become a general `/tmp` escape hatch.
 pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
     use std::path::Component;
 
-    let mut components = path.components();
+    let mut components = path.components().peekable();
     if components.next() != Some(Component::RootDir) {
         return false;
     }
-    match components.next() {
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("tmp") => {}
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("private") => {
-            if components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp"))) {
-                return false;
-            }
+    if components.peek() == Some(&Component::Normal(std::ffi::OsStr::new("private"))) {
+        components.next();
+    }
+    for (index, expected) in harness_session_scratchpad_pattern(session_id).iter().enumerate() {
+        let Some(Component::Normal(actual)) = components.next() else {
+            return false;
+        };
+        let matches = match index {
+            1 => actual.to_str().and_then(|value| value.strip_prefix("claude-"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())),
+            2 => true,
+            _ => actual == std::ffi::OsStr::new(expected),
+        };
+        if !matches {
+            return false;
         }
-        _ => return false,
-    }
-    let Some(Component::Normal(claude_user)) = components.next() else {
-        return false;
-    };
-    let Some(uid) = claude_user
-        .to_str()
-        .and_then(|value| value.strip_prefix("claude-"))
-    else {
-        return false;
-    };
-    if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    if !matches!(components.next(), Some(Component::Normal(_)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new(session_id)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("scratchpad")))
-    {
-        return false;
     }
 
-    // The sanctioned root is for files below `scratchpad`, not the directory
-    // entry itself, and no `..` component may escape it.
-    let remaining: Vec<_> = components.collect();
-    !remaining.is_empty()
-        && remaining
-            .iter()
-            .all(|component| matches!(component, Component::Normal(_)))
+    components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[cfg(test)]
@@ -7864,8 +7913,9 @@ fn factory_workspace_contract_denial(
             scratch,
         );
     }
+    let scratchpad = harness_session_scratchpad_pattern(&input.session_id).join("/");
     format!(
-        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; this session's harness scratchpad `/{scratchpad}` (also `/private/{scratchpad}`) is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
         worktree.display(),
         artifacts,
@@ -12882,6 +12932,73 @@ mod worker_commit_guard_tests {
                 && log.contains("reset --hard"),
             "git workspace refusal must be durable and identify the operation/path: {log}"
         );
+    }
+
+    #[test]
+    fn nested_shell_commit_scope_cas_4923e() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/nested-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "nested-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        let mut deep_command = format!("cd '{repo_path}'; git commit -m probe");
+        for _ in 0..8 {
+            deep_command = shell_words_as_command(&["sh".into(), "-c".into(), deep_command]);
+        }
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
+            (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
+            (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("zsh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
+            (format!("eval 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("eval -- 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("cd '{repo_path}'; bash -c 'git commit -m probe'"), true),
+            (deep_command, true),
+            ("bash -c 'git commit -m work'".to_string(), false),
+            ("bash -c -- 'git commit -m work'".to_string(), false),
+            ("bash -l -c 'git commit -m work'".to_string(), false),
+            ("bash -l -c -- 'git commit -m work'".to_string(), false),
+            ("bash --login -c 'git commit -m work'".to_string(), false),
+            ("bash --login -c -- 'git commit -m work'".to_string(), false),
+            ("bash -c 'git commit -m work' -ec".to_string(), false),
+            ("bash -co nounset 'git commit -m work'".to_string(), true),
+            ("bash -oc nounset 'git commit -m work'".to_string(), true),
+            ("bash -ec 'git commit -m work'".to_string(), true),
+            ("bash -O extglob -c 'git commit -m work'".to_string(), true),
+            ("bash -c -e 'git commit -m work'".to_string(), true),
+            ("bash -c -o nounset 'git commit -m work'".to_string(), true),
+            ("bash -c +O extglob 'git commit -m work'".to_string(), true),
+            ("bash -c --rcfile config 'git commit -m work'".to_string(), true),
+            ("bash -c --unknown 'git commit -m work'".to_string(), true),
+            ("bash -c -Z 'git commit -m work'".to_string(), true),
+            ("bash -c -o".to_string(), true),
+            ("bash -c --".to_string(), true),
+            (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
+            (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
+            // The merged directory resolver also applies inside shell payloads.
+            (format!("bash -c 'W=\"{linked_path}\"; cd \"$W\"; git commit -m work'"), false),
+            ("bash -c 'cd \"$TASK_WORKTREE_UNSET\"; git commit -m work'".into(), true),
+            ("eval 'cd \"$TASK_WORKTREE_UNSET\"'; git commit -m work".into(), true),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            if (value["hookSpecificOutput"]["permissionDecision"] == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────

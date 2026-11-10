@@ -1208,6 +1208,7 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
     // cas-031e integration: worker-exit cleanup also cancels evidence owned
     // by that pane, without restoring any inline crash I/O.
     let probe = super::queue_and_events::NormalDeliveryProbe {
+        source: "supervisor".into(),
         pane: relay_worker().into(),
         target: relay_worker().into(),
         bytes_at_delivery: 0,

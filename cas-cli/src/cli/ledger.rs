@@ -587,6 +587,15 @@ struct LedgerReport {
     projects: Vec<String>,
     turns: TurnTotals,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
+    /// Turns per supervisor (its agent id), then per wake channel.
+    turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
+    /// Distinct tasks whose delivery merged in the window, from the merge record:
+    /// the per-delivery denominator. Unknown when the record does not cover the window.
+    deliveries: Measure<usize>,
+    /// The merges behind `deliveries`, oldest first.
+    merged: Vec<MergedRow>,
+    /// Skills, guards, rules and gates the release changed, from git between its tags.
+    changes: Measure<Vec<String>>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -677,6 +686,11 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         published_at,
     );
     report.friction = friction_rows(cas_root, repo, &events);
+    (report.deliveries, report.merged) = merged_in_window(cas_root, from, to);
+    report.changes = match release_range(repo, &report.release, published) {
+        Ok((from, to)) => gate_changes(repo, &from, &to),
+        Err(reason) => unknown(reason),
+    };
     let history=cas_store::quality_events_between(cas_root,None,None)?;
     let mut grouped=BTreeMap::<String,Vec<QualityEvent>>::new();
     let releases=cas_store::quality_release_events(cas_root)?;
@@ -797,6 +811,10 @@ fn aggregate(
         projects: Vec::new(),
         turns: TurnTotals::default(),
         turns_by_channel: BTreeMap::new(),
+        turns_by_actor: BTreeMap::new(),
+        deliveries: unknown("no merge record read"),
+        merged: Vec::new(),
+        changes: unknown("no repository read"),
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -829,6 +847,11 @@ fn aggregate(
                 report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns_by_channel.entry(woken_by.as_str()).or_default()
                     .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                if let Some(actor) = &event.actor {
+                    report.turns_by_actor.entry(actor.clone()).or_default()
+                        .entry(woken_by.as_str()).or_default()
+                        .add(*no_op, *input_tokens, *output_tokens, *minutes);
+                }
             }
             QualityPayload::Intervention { intervention, .. } => {
                 report.interventions_total += 1;
@@ -898,6 +921,118 @@ fn aggregate(
             outcome: CheckOutcome::Fail, .. } if check_id == crate::quality_ledger::MERGE_QUEUE_CHECK)).count() as u32;
     report.ejections = report.ejections.max(observed_ejections);
     report
+}
+
+/// One delivery that merged in the window (cas-3dd7).
+#[derive(Debug, Serialize)]
+struct MergedRow {
+    task: String,
+    title: Option<String>,
+    merged_at: DateTime<Utc>,
+}
+
+/// Distinct tasks whose delivery merged in `(from, to]`, first merge each. The
+/// record must already exist before the window opens, or the count would read
+/// a partly recorded window as a small number.
+fn merged_in_window(
+    cas_root: &Path,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> (Measure<usize>, Vec<MergedRow>) {
+    let merges = match cas_store::observed_delivery_merges(cas_root) {
+        Ok(merges) => merges,
+        Err(error) => return (unknown(format!("merge record unreadable: {error}")), Vec::new()),
+    };
+    let Some(from) = from else { return (unknown("the window has no start"), Vec::new()) };
+    if !merges.first().is_some_and(|first| first.created_at <= from) {
+        return (unknown("the merge record starts inside this window"), Vec::new());
+    }
+    let tasks = crate::store::open_task_store(cas_root).ok();
+    let mut rows: Vec<MergedRow> = Vec::new();
+    for merge in merges.into_iter().filter(|merge| merge.created_at > from && to.is_none_or(|to| merge.created_at <= to)) {
+        if rows.iter().any(|row| row.task == merge.task_id) {
+            continue;
+        }
+        let title = tasks.as_ref().and_then(|store| store.get(&merge.task_id).ok()).map(|task| task.title);
+        rows.push(MergedRow { task: merge.task_id, title, merged_at: merge.created_at });
+    }
+    (Measure::Known(rows.len()), rows)
+}
+
+/// Paths whose change alters how work is gated or guided, and what to call it.
+const GATE_PATHS: &[(&str, &str)] = &[
+    ("cas-cli/src/builtins/skills/", "skill"),
+    ("cas-cli/src/hooks/", "guard"),
+    (".claude/rules/", "rule"),
+    ("cas-cli/src/mcp/tools/core/task/lifecycle/close_ops", "close gate"),
+    ("cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs", "merge gate"),
+    ("cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs", "merge gate"),
+];
+
+/// The skills, guards, rules and gates touched between a release's tags:
+/// "skill cas-worker", "guard handlers", "rule rule-176", "close gate".
+fn gate_changes(repo: &Path, from: &str, to: &str) -> Measure<Vec<String>> {
+    let range = format!("{from}..{to}");
+    let mut args = vec!["log", "--format=", "--name-only", range.as_str(), "--"];
+    args.extend(GATE_PATHS.iter().map(|(path, _)| *path));
+    let Some(paths) = git_output(repo, &args) else {
+        return unknown(format!("git log {range} failed"));
+    };
+    let mut changes: Vec<String> = paths
+        .lines()
+        .filter_map(|path| {
+            let (prefix, kind) = GATE_PATHS.iter().find(|(prefix, _)| path.starts_with(prefix))?;
+            Some(match *kind {
+                "skill" => format!("skill {}", path[prefix.len()..].split('/').next()?),
+                "guard" | "rule" => format!("{kind} {}", Path::new(path).file_stem()?.to_string_lossy()),
+                gate => gate.to_string(),
+            })
+        })
+        .collect();
+    changes.sort();
+    changes.dedup();
+    Measure::Known(changes)
+}
+
+/// Commander's Quality sheet (cas-3dd7): the newest `published` releases, oldest
+/// first, then work in progress, plus names for the supervisors their turns name.
+/// Local SQLite and git only; the CLI's Cloud pull is not the hub's job.
+pub(crate) fn quality_reports(cas_root: &Path, published: usize) -> Result<serde_json::Value> {
+    let repo = cas_root.parent().unwrap_or(cas_root);
+    // Published releases are the tags, plus any release event without one; a
+    // tag with no event still has a window (release_window falls back to tag time).
+    let mut versions: Vec<String> = git_output(repo, &["tag", "--list", "v*.*.0"])
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for event in cas_store::quality_release_events(cas_root)? {
+        if let Some(version) = event.release_version.filter(|version| !versions.contains(version)) {
+            versions.push(version);
+        }
+    }
+    let order = |version: &str| -> Vec<u64> {
+        version.trim_start_matches('v').split('.').map(|part| part.parse().unwrap_or(0)).collect()
+    };
+    versions.sort_by_key(|version| std::cmp::Reverse(order(version)));
+    let mut releases: Vec<Option<String>> = versions.into_iter().take(published).map(Some).collect();
+    releases.reverse();
+    releases.push(None);
+    // Each report shells out to git; build them side by side.
+    let reports: Vec<LedgerReport> = std::thread::scope(|scope| {
+        let builds: Vec<_> = releases
+            .iter()
+            .map(|release| scope.spawn(move || build_report(cas_root, repo, release.as_deref())))
+            .collect();
+        builds.into_iter().filter_map(|build| build.join().ok()?.ok()).collect()
+    });
+    let agents = crate::store::open_agent_store(cas_root).ok();
+    let supervisors: BTreeMap<&str, String> = reports
+        .iter()
+        .flat_map(|report| report.turns_by_actor.keys())
+        .filter_map(|id| Some((id.as_str(), agents.as_ref()?.get(id).ok()?.name)))
+        .collect();
+    Ok(serde_json::json!({ "releases": reports, "supervisors": supervisors }))
 }
 
 fn verdict_name(verdict: FeedbackVerdict) -> &'static str {
@@ -1339,6 +1474,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         git_in(repo, &["init", "-q", "-b", "main"]);
         for (tag, date) in [("v1.0.0", "2026-10-01T12:00:00Z"), ("v1.1.0", "2026-10-02T12:00:00Z")] {
+            if tag == "v1.1.0" {
+                // A skill and a rule changed inside the release are its change markers.
+                for path in ["cas-cli/src/builtins/skills/cas-worker/SKILL.md", ".claude/rules/rule-176.md"] {
+                    let file = repo.join(path);
+                    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                    std::fs::write(&file, "changed\n").unwrap();
+                    git_in(repo, &["add", path]);
+                }
+            }
             let commit = Command::new("git")
                 .current_dir(repo)
                 .args(["commit", "-q", "--allow-empty", "-m", tag])
@@ -1382,7 +1526,16 @@ mod tests {
                 no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
             });
             event.occurred_at = occurred_at;
+            event.actor = Some("sup-a".into());
             crate::quality_ledger::emit(&cas_root, &event);
+        }
+        // The merge record: one task merged twice and another once inside v1.1.0,
+        // one before it (so the record covers the window) and one after it.
+        cas_store::record_observed_delivery_merge(&cas_root, "cas-late", "factory/w-late", "main", "s0", "m0", "sup").unwrap();
+        let db = rusqlite::Connection::open(cas_root.join("cas.db")).unwrap();
+        for (task, merge, merged_at) in [("cas-old", "m1", at(1, 6)), ("cas-a", "m2", at(2, 8)), ("cas-a", "m3", at(2, 9)), ("cas-b", "m4", at(2, 10))] {
+            db.execute("INSERT INTO observed_delivery_merges VALUES (?1, 'factory/w', 'main', ?2, ?2, 'sup', ?3)",
+                rusqlite::params![task, merge, merged_at.to_rfc3339()]).unwrap();
         }
         // Found two days after the release, it still counts against that release.
         let mut escape = NewQualityEvent::new(
@@ -1508,6 +1661,15 @@ mod tests {
         assert_eq!(json["turns"]["minutes"], 0.5);
         assert_eq!(json["turns"]["missing_tokens"], 1);
         assert_eq!(json["turns_by_channel"]["director"]["wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["worker"]["no_op_wakes"], 1);
+        assert_eq!(json["turns_by_actor"]["sup-a"]["director"]["input_tokens"], 30);
+        assert_eq!(json["deliveries"], 2, "distinct tasks merged in the window");
+        assert_eq!(json["merged"][0]["task"], "cas-a");
+        assert_eq!(json["changes"], serde_json::json!(["rule rule-176", "skill cas-worker"]));
+        let quality = quality_reports(&cas_root, 5).unwrap();
+        let shown: Vec<_> = quality["releases"].as_array().unwrap().iter().map(|r| r["release"].clone()).collect();
+        // v1.0.0 is tagged but has no release event: it still appears, in order.
+        assert_eq!(shown, ["v1.0.0", "v1.1.0", "unreleased"], "oldest release first, work in progress last");
         let text = render(&report);
         for expected in [
             "Friction ledger: v1.1.0",

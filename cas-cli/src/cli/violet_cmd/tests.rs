@@ -638,6 +638,67 @@ fn a_stopped_thread_reports_failed_index_and_exits_non_zero() {
     );
 }
 
+/// GH #1779: delivery receipts, including a reconciled last reply, determine
+/// success. An outer ok flag alone cannot prove the entire thread landed.
+#[test]
+fn thread_outcomes_follow_confirmed_parts_cas_c962() {
+    let argv = ["thread", "--channel", "cas-internal", "--text", "Release is live.",
+        "--reply", "Details follow.", "--idempotency-key", "c962"];
+    let root = json!({"index":0,"message_id":"1.0","thread_id":"1.0","permalink":"https://slack.test/0"});
+    let reply = json!({"index":1,"message_id":"1.1","thread_id":"1.0","permalink":"https://slack.test/1"});
+    for (outer_ok, posted, expected_ok, failed_index) in [
+        (false, json!([root, reply]), true, Value::Null),
+        (true, json!([root]), false, json!(1)),
+        (true, json!([root, root]), false, json!(1)),
+        (true, json!([root, {"index":1}]), false, json!(1)),
+    ] {
+        let hub = ScriptedHub::with(vec![json!({"ok":outer_ok,"kind":"thread",
+            "posted":posted,"failed_index":1,"resume_safe":false,
+            "error":{"code":"ambiguous_post","retryable":false}})]);
+        let (out, result) = run_cli(&argv, &hub, true, &no_gate);
+        let printed: Value = serde_json::from_str(&out).expect("one complete JSON document");
+        assert_eq!(result.is_ok(), expected_ok, "{printed}");
+        assert_eq!(printed["ok"], expected_ok);
+        assert_eq!(printed["failed_index"], failed_index);
+        assert_eq!(printed["posted"], posted);
+        if expected_ok { assert!(printed.get("error").is_none()); }
+        assert_eq!(hub.calls().len(), 1, "no retry or new write");
+    }
+}
+
+#[test]
+fn thread_readability_names_the_part_and_prior_posts_cas_c962() {
+    for (text, reply, failed) in [("At 14:42Z.", "Details follow.", 0),
+        ("Release is live.", "At 14:42Z.", 1)] {
+        let hub = ScriptedHub::default();
+        let (out, result) = run_cli(&["thread", "--channel", "cas-internal", "--text", text,
+            "--reply", reply, "--idempotency-key", "c962"], &hub, true, &no_gate);
+        assert_eq!(result.unwrap_err().code, "format_unreadable");
+        let printed: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(printed["failed_index"], failed);
+        assert_eq!(printed["posted"], json!([]));
+        assert_eq!(printed["error"]["detail"]["part_index"], failed);
+        assert_eq!(hub.connects(), 0);
+    }
+    let mut refusal = format_unreadable_receipt();
+    refusal["kind"] = json!("thread");
+    refusal["posted"] = json!([{"index":0,"message_id":"1.0","thread_id":"1.0"}]);
+    refusal["failed_index"] = json!(1);
+    refusal["resume_safe"] = json!(false);
+    let hub = ScriptedHub::with(vec![refusal.clone()]);
+    let (out, result) = run_cli(&["thread", "--channel", "cas-internal", "--text", "Release is live.",
+        "--reply", "Details follow.", "--idempotency-key", "c962"], &hub, true, &no_gate);
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "format_unreadable");
+    let printed: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(printed["failed_index"], 1);
+    assert_eq!(printed["posted"], refusal["posted"]);
+    assert_eq!(printed["error"]["detail"]["part_index"], 1);
+    assert_eq!(printed["error"]["detail"]["posted_indices"], json!([0]));
+    assert_eq!(printed["error"]["detail"]["violations"], refusal["error"]["detail"]["violations"]);
+    assert_eq!(hub.calls().len(), 1);
+}
+
 /// GH #1251: an `ok: true` thread receipt that does not show every reply
 /// file attached is not a success. The run fails with a named code, keeps the
 /// posted ids, and says to read the thread instead of reposting.
@@ -1302,14 +1363,17 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     assert_eq!(hub.uploads()[0].1, sha(&big_bytes));
     assert_eq!(hub.uploads()[0].2, big_bytes.len() as u64);
 
-    let hub = ScriptedHub::with(vec![json!({"ok": false, "error": {
-        "code": "stale_generation", "message": "claim changed", "retryable": false,
-    }})]);
-    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
-    assert_eq!(error.code, "stale_generation");
-    assert!(error.file_ids.is_empty());
-    assert!(hub.uploads().is_empty());
-    assert_eq!(hub.calls().len(), 1);
+    for (code, retryable) in [("stale_generation", false), ("managed_reply_required", false), ("authority_unavailable", true)] {
+        let hub = ScriptedHub::with(vec![json!({"ok": false, "error": {
+            "code": code, "message": "preflight refused", "retryable": retryable,
+        }})]);
+        let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+        assert_eq!(error.code, code);
+        assert_eq!(error.retryable, retryable);
+        assert!(error.file_ids.is_empty());
+        assert!(hub.uploads().is_empty());
+        assert_eq!(hub.calls().len(), 1);
+    }
 
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
         "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});

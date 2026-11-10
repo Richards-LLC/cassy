@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  violet-transport-request-recovery:
+    title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
+    tasks: [cas-a0c5]
+    journeys: [FACTORY-SUPERVISE]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

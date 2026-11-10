@@ -1446,11 +1446,24 @@ impl ProxyEngine {
 
         let violet_message = server_name == config::VIOLET_SERVER && tool_name == "violet_post"
             && arguments.as_ref().is_some_and(|args| args.get("kind").and_then(Value::as_str) == Some("message"));
-        if violet_message && let Some(args) = arguments.as_mut() {
-            args.entry("request_id").or_insert_with(|| Value::String(uuid::Uuid::new_v4().to_string()));
-        }
         self.authorize(caller, dispatch_kind, server_name, tool_name, &arguments)
             .await?;
+        let violet_request_lookup = server_name == config::VIOLET_SERVER && tool_name == "violet_reconcile_reply"
+            && arguments.as_ref().is_some_and(|args| args.contains_key("request_id"));
+        if violet_message || violet_request_lookup {
+            // Reconnect lists tools again. Consult that live schema before
+            // changing a write or issuing a request-ID lookup, never the old catalog.
+            if !self.servers.read().await.contains_key(server_name) {
+                self.reconnect_if_due(server_name).await;
+            }
+            let supported = self.violet_request_ids_supported().await;
+            if violet_request_lookup && !supported {
+                anyhow::bail!("Violet does not advertise standalone request-ID reconciliation");
+            }
+            if violet_message && supported && let Some(args) = arguments.as_mut() {
+                args.entry("request_id").or_insert_with(|| Value::String(uuid::Uuid::new_v4().to_string()));
+            }
+        }
 
         let interceptor = self.interceptor.read().await.clone();
         let prepared = if let Some(interceptor) = &interceptor {
@@ -1538,6 +1551,20 @@ impl ProxyEngine {
         }
 
         Ok(result)
+    }
+
+    /// Older hubs expose post.request_id only for managed replies. Standalone
+    /// messages are safe only when the companion lookup accepts that ID alone.
+    async fn violet_request_ids_supported(&self) -> bool {
+        let catalog = self.catalog.read().await;
+        let Some(tools) = catalog.get(config::VIOLET_SERVER) else { return false };
+        let advertises_id = |tool: &Tool| tool.input_schema.get("properties")
+            .and_then(|properties| properties.get("request_id")).is_some_and(Value::is_object);
+        tools.iter().find(|tool| tool.name == "violet_post").is_some_and(|tool| advertises_id(tool))
+            && tools.iter().find(|tool| tool.name == "violet_reconcile_reply").is_some_and(|tool| {
+                advertises_id(tool) && tool.input_schema.get("required").and_then(Value::as_array)
+                    .is_none_or(|required| required.iter().all(|field| field.as_str() == Some("request_id")))
+            })
     }
 
     /// A lost response is never permission to repeat a write. Reconcile only
@@ -3517,7 +3544,7 @@ for line in sys.stdin:
         if violet:
             request_id = args.get("request_id")
             with open(log + ".requests", "a") as handle:
-                handle.write(json.dumps({"name": name, "request_id": request_id}) + "\n")
+                handle.write(json.dumps({"name": name, "request_id": request_id, "arguments": args}) + "\n")
             state_path = log + ".state"
             if name == "violet_read" and args.get("channel") == "close":
                 os._exit(0)
@@ -3526,7 +3553,10 @@ for line in sys.stdin:
                 state = mode if mode in ("outcome_unknown", "not_posted") else "posted"
                 with open(state_path, "w") as handle:
                     json.dump({"request_id": request_id, "state": state, "mismatch": mode == "mismatch"}, handle)
-                if mode == "transport":
+                if mode == "transport_rollback":
+                    with open(log + ".schema", "w") as handle:
+                        handle.write("legacy")
+                if mode in ("transport", "transport_rollback"):
                     os._exit(0)
                 body = {"ok": False, "request_id": request_id, "error": {"code": "outcome_unknown", "retryable": False},
                         "reconcile": {"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}}}
@@ -3610,6 +3640,7 @@ for line in sys.stdin:
         for (schema, mode, expected) in [("modern", "posted", "posted"), ("modern", "transport", "posted"),
             ("modern", "outcome_unknown", "outcome_unknown"), ("modern", "not_posted", "not_posted"),
             ("modern", "denied", "outcome_unknown"), ("modern", "mismatch", "outcome_unknown"),
+            ("modern", "transport_rollback", "outcome_unknown"),
             ("legacy", "posted", "posted"), ("legacy", "outcome_unknown", "outcome_unknown"),
             ("rollback", "posted", "posted"), ("upgrade", "posted", "posted")] {
             let dir = tempfile::tempdir().unwrap();
@@ -3643,23 +3674,24 @@ for line in sys.stdin:
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0]["name"], "violet_post");
                 assert!(calls[0]["request_id"].is_null());
+                assert_eq!(calls[0]["arguments"], args);
                 assert!(body.get("request_id").is_none());
                 assert!(body.get("reconcile").is_none());
                 assert_eq!(body["ok"], expected == "posted");
                 engine.shutdown().await;
                 continue;
             }
-            assert_eq!(calls.len(), if mode == "denied" { 1 } else { 2 }, "{mode}: {calls:?}");
+            assert_eq!(calls.len(), if matches!(mode, "denied" | "transport_rollback") { 1 } else { 2 }, "{mode}: {calls:?}");
             assert_eq!(calls[0]["name"], "violet_post");
             let request_id = calls[0]["request_id"].as_str().unwrap();
             assert!(uuid::Uuid::parse_str(request_id).is_ok());
-            if mode != "denied" {
+            if !matches!(mode, "denied" | "transport_rollback") {
                 assert_eq!(calls[1]["name"], "violet_reconcile_reply");
                 assert_eq!(calls[1]["request_id"], request_id);
             } else {
                 let audit = engine.policy_audit();
                 assert_eq!(audit.last().unwrap().tool, "violet_reconcile_reply");
-                assert!(!audit.last().unwrap().allowed);
+                assert_eq!(audit.last().unwrap().allowed, mode == "transport_rollback");
             }
             assert_eq!(body["request_id"], request_id);
             if mode == "transport" {

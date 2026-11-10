@@ -4716,7 +4716,7 @@ function render(captureDraft = true, stoppedSelection = false): void {
   }
   renderRegions({ selected, session: selectedSession, status, connectionSnapshot, liveRegions });
   if (keepHeaderMenu && phoneLayout() && !contextSheetOpen()) {
-    document.querySelector<HTMLElement>("#conversation-more-menu")?.showPopover({ source: document.getElementById("conversation-more")! });
+    document.getElementById("conversation-more")?.click();
   }
   if (attentionFocus?.isConnected && document.activeElement === document.body) attentionFocus.focus({ preventScroll: true });
   // After the regions, not before: a control can be hidden in fresh shell

@@ -428,7 +428,7 @@ export function fitMachineLine(line: HTMLElement | null | undefined, available: 
   if (machine.scrollWidth + gap + codenameNeeds > available - 2) line.classList.add("codename-squeezed");
 }
 
-/** The conversation header's host line, fitted to the room beside its connection state. */
+/** Fit the supporting host line to the identity's available width. */
 export function fitConversationHost(root: ParentNode): void {
   const identity = root.querySelector<HTMLElement>(".conversation-identity");
   const host = identity?.querySelector<HTMLElement>(".conversation-host");
@@ -440,7 +440,6 @@ export function fitConversationHost(root: ParentNode): void {
   const style = getComputedStyle(identity);
   const room = identity.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0")
     - (avatar ? avatar.getBoundingClientRect().width + (parseFloat(style.columnGap) || 0) : 0);
-  const connection = host.querySelector<HTMLElement>("#conversation-connection");
   // cas-d043 G02: the device in control, when another one is, keeps its place too.
   const control = host.querySelector<HTMLElement>("#conversation-control");
   // The harness name leads the host line (DESIGN.md Conversation header).
@@ -448,7 +447,7 @@ export function fitConversationHost(root: ParentNode): void {
   // cas-d043 QA round 1: on a phone the header's codename shows whole or
   // steps aside, never as a cut slot beside the machine.
   const phoneHeader = identity.ownerDocument.defaultView?.matchMedia?.("(max-width: 53rem), (max-height: 30rem) and (pointer: coarse)").matches === true;
-  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (connection?.getBoundingClientRect().width ?? 0) - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
+  fitMachineLine(host.querySelector<HTMLElement>(":scope > .host-where"), room - (control?.getBoundingClientRect().width ?? 0) - (harness && harness.getBoundingClientRect().width > 1 ? harness.getBoundingClientRect().width + 8 : 0), phoneHeader);
 }
 
 /**

@@ -272,10 +272,13 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       await journey.stage("Open a worker's timeline from Tasks & progress", async () => {
         await openConversation(page, journey);
         if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        const cardState = await open.locator("..").locator(".status-chip").textContent();
         await open.click();
         await expect(dialog).toBeVisible();
-        await expect(dialog).toBeVisible();
-        await expect(dialog).toContainText("cas-42");
+        const subject = dialog.locator("#worker-timeline-subject");
+        await expect(subject).toHaveAttribute("title", "cas-42");
+        expect((await subject.textContent())?.startsWith(fleet().tasks![0]!.title)).toBe(true);
+        await expect(subject.locator(".status-chip")).toHaveText(cardState!);
         const rows = dialog.locator(".work-row");
         await expect(rows.first()).toContainText("Read: src/limits.rs");
         await expect(dialog).not.toContainText("Run the tests");

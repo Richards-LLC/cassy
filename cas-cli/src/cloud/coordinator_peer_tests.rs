@@ -76,6 +76,65 @@ fn coordinator(endpoint: &str) -> CloudCoordinator {
     .with_canonical_id(Some(REPO.to_string()))
 }
 
+#[tokio::test]
+async fn cas_9214_cloud_mutation_retries_keep_attempt_and_log_timeouts() {
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue};
+    use std::sync::{Arc, Mutex};
+
+    let server = MockServer::start().await;
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let captured_attempts = attempts.clone();
+    Mock::given(method("POST")).and(path("/api/sync/push"))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut attempts = captured_attempts.lock().unwrap();
+            attempts.push(request.headers.get("X-Cassy-Attempt-Id")
+                .map(|id| id.to_str().unwrap().to_owned()));
+            match attempts.len() {
+                1 => ResponseTemplate::new(503),
+                2 => ResponseTemplate::new(200).set_body_json(json!({"synced":{"tasks":1}})),
+                // Real socket deadlines exercise timeout logging; no test sleep.
+                _ => ResponseTemplate::new(200).set_delay(Duration::from_secs(10)),
+            }
+        }).mount(&server).await;
+    let log = ReceiptLog::default();
+    let captured_log = log.clone();
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::subscriber::set_default(captured_log.subscriber());
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let mut task = crate::types::Task::new("correlation".into(), "private-payload".into());
+        task.origin_project = Some("p".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let payload = serde_json::to_string(&task).unwrap();
+        let config = CloudConfig { endpoint, token: Some("private-token".into()), ..Default::default() };
+        for (timeout, succeeds) in [(Duration::from_secs(5), true), (Duration::from_millis(250), false)] {
+            queue.enqueue(EntityType::Task, &task.id, SyncOperation::Upsert, Some(&payload)).unwrap();
+            let syncer = CloudSyncer::new_for_project(queue.clone(), config.clone(),
+                CloudSyncerConfig { timeout, backoff_base_ms: 0, ..Default::default() },
+                "p".into(), &root);
+            let result = syncer.push().unwrap();
+            assert_eq!(result.errors.is_empty(), succeeds);
+        }
+    }).await.unwrap();
+
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 5);
+    let ids = attempts.iter().map(|id| id.as_deref().expect("Cloud mutation attempt header"))
+        .collect::<Vec<_>>();
+    for id in &ids { assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4); }
+    assert_eq!(ids[0], ids[1]);
+    assert!(ids[2..].iter().all(|id| *id == ids[2]));
+    assert_ne!(ids[0], ids[2]);
+    let text = log.text();
+    assert_eq!(text.lines().filter(|line| line.contains("phase=\"transport_error\"") && line.contains(ids[2])).count(), 3);
+    assert!(!text.contains("private-token"));
+    assert!(!text.contains("private-payload"));
+}
+
 fn agent_json(id: &str) -> serde_json::Value {
     json!({
         "id": id,

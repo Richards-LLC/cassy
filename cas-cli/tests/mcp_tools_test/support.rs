@@ -188,6 +188,35 @@ mod tests {
     use super::{ScopedFactoryEnv, TestEnvGuard, extract_skill_id, setup_cas};
 
     #[test]
+    fn setup_cas_owns_its_repository_under_a_nested_temp_root() {
+        let mut env = TestEnvGuard::temp_home();
+        let outer = tempfile::tempdir().unwrap();
+        let initialized = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(outer.path())
+            .output()
+            .unwrap();
+        assert!(initialized.status.success(), "{initialized:?}");
+        for key in ["TMPDIR", "TMP", "TEMP"] {
+            env.set(key, outer.path());
+        }
+
+        let (fixture, _core) = setup_cas(&mut env);
+        let root = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert!(root.status.success(), "{root:?}");
+        assert_eq!(
+            std::path::Path::new(String::from_utf8_lossy(&root.stdout).trim())
+                .canonicalize()
+                .unwrap(),
+            fixture.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn setup_owner_restores_environment_and_removes_home_on_unwind() {
         use crate::test_env_guard::{AmbientEnvRestore, test_env_lock};
 

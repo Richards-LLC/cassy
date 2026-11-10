@@ -35724,6 +35724,21 @@ esac
     }
 
     #[test]
+    fn release_view_requires_transformation_proof_cas_9c84f() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".claude")).unwrap();
+        std::fs::write(p.join(".claude/CODEMAP.md"), "delivered module\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop view"]);
+        assert_eq!(delivery_content_presence_on_target_for_task(p, &delivery, "main", "cas-test1"),
+            DeliveryContentPresence::Dropped { paths: vec![".claude/CODEMAP.md".into()] });
+    }
+
+    #[test]
     fn unrelated_edit_cannot_explain_a_missing_line_cas_0930() {
         let dir = init_factory_repo("worker");
         let p = dir.path();

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  stopped-catalog-journal-arrival:
+    title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
+    tasks: [cas-c724]
+    invariants: [HUB-J14-STOPPED-DRAFT-REACHABLE]
+    journeys: [HUB-J14]
   task-start-preserves-supervisor-notes:
     title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
     tasks: [cas-3045]

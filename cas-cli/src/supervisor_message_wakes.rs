@@ -836,6 +836,76 @@ mod tests {
         );
     }
     #[test]
+    fn peer_cap_reports_eta_and_releases_linked_answer_cas_0e49() {
+        use crate::cloud::peer_mailbox::{PeerEnvelope, PeerMessageKind, PeerScope, PeerSend, render_envelope};
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_root, cas, _) = setup();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "local-sup".into(), "wake-sup".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("wake-session".into());
+        crate::store::open_agent_store(&cas).unwrap().register(&supervisor).unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: "http://127.0.0.1:1".into(), token: Some("fixture-token".into()),
+            ..Default::default()
+        }.save_to_cas_dir(&cas).unwrap();
+        let now = DateTime::parse_from_rfc3339("2026-11-08T20:00:00Z").unwrap().with_timezone(&Utc);
+        let spent = now - chrono::Duration::minutes(10);
+        let eta = spent + chrono::Duration::hours(1);
+        let pair = "cloud:github.com/acme/project:remote-sup".to_string();
+        for lead in 1..=6 {
+            record(&cas, -lead, "wake-sup", std::slice::from_ref(&pair), spent, spent).unwrap();
+        }
+        let mut envelope = PeerEnvelope {
+            id: "pm-release-go".into(), sender_name: "peer".into(),
+            sender_agent_id: "remote-sup".into(), machine: "other-box".into(),
+            session: Some("peer-session".into()), repo: "github.com/acme/project".into(),
+            in_reply_to: None, kind: Some(PeerMessageKind::Status), scope: PeerScope::Project,
+        };
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let enqueue_peer = |envelope: &PeerEnvelope| {
+            let id = queue.enqueue_urgent_with_outcome(
+                "peer:peer@other-box", "wake-sup",
+                &format!("{}\nWindow open, start the run.", render_envelope(envelope)),
+                Some("wake-session"), None, None, false, Some(&QueueOrigin::Daemon),
+            ).unwrap().id();
+            let mut row = queue.queued_prompt(id).unwrap().unwrap();
+            row.created_at = now - chrono::Duration::minutes(1);
+            row
+        };
+        let held = enqueue_peer(&envelope);
+        let mut rows = vec![held.clone()];
+        let mut facts = HashMap::from([(held.id, RowFacts::default())]);
+        let agents = crate::store::open_agent_store(&cas).unwrap().list(None).unwrap();
+        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+        assert!(rows.is_empty());
+        let conn = Connection::open(cas.join("cas.db")).unwrap();
+        let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(notices, 1, "a held peer send needs feedback to its sender");
+        let payload: String = conn.query_row("SELECT payload FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        let notice: PeerSend = serde_json::from_str(&payload).unwrap();
+        assert_eq!(notice.recipient_agent_id, envelope.sender_agent_id);
+        assert_eq!(notice.in_reply_to.as_deref(), Some(envelope.id.as_str()));
+        assert!(notice.body.contains(&eta.to_rfc3339()));
+        let retry: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1", [held.id], |r| r.get(0)).unwrap();
+        assert_eq!(DateTime::parse_from_rfc3339(&retry).unwrap().with_timezone(&Utc), eta);
+        rows = vec![held];
+        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+        let notices: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(notices, 1, "a scheduler retry must not repeat the notice");
+
+        // A peer may use kind=status to answer an open release ask. The reply
+        // link still makes this conversation rather than capped status traffic.
+        envelope.id = "pm-release-answer".into();
+        envelope.in_reply_to = Some("pm-open-release-ask".into());
+        let reply = enqueue_peer(&envelope);
+        rows = vec![reply.clone()];
+        facts.insert(reply.id, RowFacts::default());
+        schedule(&cas, "wake-session", "wake-sup", &agents, &mut rows, &mut facts, now).unwrap();
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![reply.id]);
+    }
+
+    #[test]
     fn cas_1e7e2_pair_cap_holds_messages_and_surfaces_a_notice() {
         let (_root, cas, peer) = setup();
         let now = Utc::now();

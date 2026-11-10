@@ -79,10 +79,7 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined,
 /** The worker card's reported task, with identity kept available. */
 export function workerTaskLine(document: Document, worker: { readonly work: string; readonly currentTask?: string }): HTMLElement {
   const work = document.createElement("p"); work.className = "status-activity";
-  if (worker.currentTask) {
-    const id = document.createElement("span"); id.className = "status-identifier"; id.textContent = worker.currentTask;
-    work.append(id, " · ");
-  }
-  work.append(document.createTextNode(worker.work));
+  work.textContent = worker.work;
+  if (worker.currentTask) work.title = worker.currentTask;
   return work;
 }

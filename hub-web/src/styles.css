@@ -3333,7 +3333,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .work-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); margin: 0; padding: 0 var(--space-2); list-style: none; }
 .work-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--space-2); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-pill); background: var(--bg-raised); color: var(--ink-mid); font-size: var(--fs-xs); }
 .work-chip-dot { width: 6px; height: 6px; border-radius: var(--radius-pill); background: currentColor; flex: none; }
-.work-chip-id { font-family: var(--font-mono); color: var(--ink); }
+.work-chip-title { color: var(--ink); }
 .work-chip--ok { color: var(--state-ok); }
 .work-chip--warn { color: var(--warn-text); }
 .work-chip--crit { color: var(--state-crit); }

@@ -437,6 +437,11 @@ bug_families:
     title: Configured artifact symlinks and canonical cwd writes share containment while refusals identify both roots
     tasks: [cas-a767]
     journeys: [FACTORY-CLOSE, FACTORY-SUPERVISE]
+  operator-task-title-first:
+    title: Worker cards, task chips, timeline subjects and write-access options lead with task titles while preserving task identities
+    tasks: [cas-943b]
+    journeys: [HUB-J17, HUB-J20, HUB-J25]
+    invariants: [HUB-TASK-TITLE-FIRST]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -475,6 +480,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-TASK-TITLE-FIRST:
+    statement: Worker card task text, Show work task chips, worker timeline subjects and write-access options lead with the reported task title; task IDs remain secondary metadata and option values retain exact routing IDs.
+    check: Run work-picture.test.ts and write-grant.test.ts through the real DOM renderers. In batch QA inspect the four surfaces on desktop and phone with long titles and unavailable titles; preserve state badges, escaped text, event detail and write-access routing.
+    bug: {task: cas-943b}
   FACTORY-ARTIFACT-METADATA:
     statement: A cold peer fetches committed proof in its configured personal/team project scope regardless of account size, validates task/project identity, and verifies the downloaded bytes before caching.
     check: Run cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c and proof_note_publishes_and_resolves_on_another_machine_cas_4bb2 through MCP; cover both scope kinds with an 87-project account and the singular task endpoint, retaining cross-project conflict, denied scope, forged owner and checksum controls.
@@ -2645,6 +2654,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-TASK-TITLE-FIRST
   - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
@@ -2888,6 +2898,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J20-GOAL
+  - HUB-TASK-TITLE-FIRST
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -3060,6 +3071,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-TASK-TITLE-FIRST
   - HUB-J25-PHONE-TIMELINE-TEXT
   - HUB-J25-TYPED-TOOL-EVIDENCE
   - HUB-J25-SOURCE-RETRIEVAL

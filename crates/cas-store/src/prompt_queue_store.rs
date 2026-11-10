@@ -10203,10 +10203,48 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
+            // cas-c568: a current status reply can carry an operator decision.
+            // Only warn for copies authored during the live supervisor's own
+            // registration window; a successor must not inherit replay alarms.
+            let supervisor = if agents_table_exists(&tx)? {
+                tx.query_row(
+                    "SELECT name, factory_session, registered_at FROM agents
+                     WHERE role = 'supervisor' AND status IN ('active', 'idle')
+                     ORDER BY last_heartbeat DESC, id LIMIT 1",
+                    [],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?)),
+                ).optional()?
+            } else {
+                None
+            };
+            if let Some((sender, Some(session), registered_at)) = supervisor {
+                let undelivered = tx.query_row(
+                    &format!(
+                        "SELECT MIN(id), GROUP_CONCAT(id, ', ') FROM prompt_queue
+                         WHERE processed_at IS NULL AND created_at < ?1 AND {TRANSCRIPT_MIRROR}
+                           AND transport_delivered_at IS NULL AND acked_at IS NULL
+                           AND factory_session = ?2 AND created_at >= ?3
+                         GROUP BY factory_session"
+                    ),
+                    params![cutoff, session, registered_at],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                ).optional()?;
+                if let Some((first_id, ids)) = undelivered {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO prompt_queue
+                            (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, dedupe_key)
+                         VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', ?6)",
+                        params![sender,
+                            format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
+                            now, session, "Operator messages not delivered before transcript expiry",
+                            format!("operator-mirror-undelivered:{first_id}")],
+                    )?;
+                }
+            }
+
             // Retire aged transcript duplicates without fabricating a device
-            // receipt or altering their durable operator outbox retry. These
-            // completed pane copies need no operator response, so expiry must
-            // not raise a delivery blocker to the current supervisor (cas-0afdd).
+            // receipt or altering their durable operator outbox retry. Previous
+            // or ended supervisor-session copies retire quietly (cas-0afdd).
             tx.execute(
                 &format!(
                     "UPDATE prompt_queue

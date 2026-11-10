@@ -105,3 +105,14 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   for (const detail of body.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")) detail.scrollTop = scroll.get(detail.dataset.focusKey) ?? 0;
   if (active) refocus(dialog, active);
 }
+
+/** A worker's timeline opener, shared with its rail row. */
+export function workerTimelineButton(document: Document, worker: string, open: () => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button"; button.className = "status-timeline"; button.dataset.worker = worker;
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-label", `${worker} timeline`);
+  button.textContent = "Activity";
+  button.onclick = open;
+  return button;
+}

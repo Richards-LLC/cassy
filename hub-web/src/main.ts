@@ -100,7 +100,7 @@ import { operatorOrigin } from "./inbox/wire";
 import { bindRichInspectionUsage, countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { livePhase } from "./live-phase";
-import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
+import { renderWorkerTimeline, workerTimelineDialog, workerTimelineButton } from "./worker-timeline";
 import type { ArtifactRef, AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -5860,13 +5860,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
       const machineId = selectedMachineId, sessionName = selectedSession;
-      const open = document.createElement("button");
-      open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
-      open.setAttribute("aria-haspopup", "dialog");
-      open.setAttribute("aria-label", `${worker.name} timeline`);
-      open.textContent = "Activity";
-      open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
-      line.append(open);
+      line.append(workerTimelineButton(document, worker.name, () => openWorkerTimeline(machineId, sessionName, worker.name)));
     }
     const work = document.createElement("p"); work.className = "status-activity";
     if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");

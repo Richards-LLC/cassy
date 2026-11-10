@@ -334,7 +334,9 @@ pub(super) fn has_unreleased_section_at_head(repo: &Path, head: &str) -> bool {
 /// merge and drop target-sync and other tasks' merges (cas-2a65). Without
 /// them, first-parent commits since the merge-base count. A merge can credit
 /// only this task's fragment newly authored in its result, absent from every
-/// parent, so entries imported from another branch cannot count.
+/// parent, so entries imported from another branch cannot count. A fragment
+/// already changed by this task's segments retains that provenance when a
+/// target-sync merge revises it; validate its current entry against that base.
 fn has_titled_unreleased_delta(
     repo: &Path,
     head: &str,
@@ -407,6 +409,19 @@ fn has_titled_unreleased_delta(
         } else {
             changelog.clone()
         };
+        // A returned delivery's target-sync merge is deliberately outside
+        // its attributed segments. Credit the tip's own fragment when a
+        // segment changed that file, even if the merge replaced its entry.
+        // Imported fragments without that provenance cannot use this path.
+        let own_fragment = format!("{CHANGELOG_FRAGMENT_DIR}/{task_id}.md");
+        if fragments && paths.contains(&own_fragment) {
+            let owned = [own_fragment];
+            if let (Some(before), Some(final_entries)) = (entries_at(base, &owned), entries_at(head, &owned))
+                && final_entries.iter().any(|(key, entry)| before.get(key) != Some(entry))
+            {
+                return true;
+            }
+        }
         let (Some(after), Some(final_entries)) = (entries_at(tip, &paths), entries_at(head, &paths)) else {
             return false;
         };
@@ -1218,6 +1233,67 @@ mod tests {
         let stale = refusal(&original).unwrap();
         assert!(stale.contains(&original));
         assert!(stale.contains(&base));
+    }
+
+    #[test]
+    fn returned_delivery_merge_resolution_fragment_counts_cas_3623() {
+        use super::super::{TaskCommitIdentity, TaskCommitReceiptWindow, task_attribution};
+        let repo = changelog_fixture();
+        let task = Task::new("cas-c568".into(), "returned delivery".into());
+        let fragment = "changelog.d/cas-c568.md";
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        std::fs::create_dir_all(repo.path().join("changelog.d")).unwrap();
+        std::fs::write(repo.path().join("changelog.d/README.md"), "Per-task release notes.\n").unwrap();
+        let base = commit_changelog_fixture(repo.path(), "enable fragments");
+        git(&["branch", "-f", "main", &base]);
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 2;\n").unwrap();
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Quiet expiry of old transcript mirrors** — Previous sessions expire quietly.\n").unwrap();
+        let parked = commit_changelog_fixture(repo.path(), "fix: quiet old mirrors (cas-c568)");
+        git(&["checkout", "-q", "main"]);
+        std::fs::write(repo.path().join("changelog.d/cas-beef.md"),
+            "### Fixed — Factory\n\n- **Foreign release note** — Another task's delivery.\n").unwrap();
+        commit_changelog_fixture(repo.path(), "fix: target work (cas-beef)");
+        git(&["checkout", "-q", "delivery"]);
+        git(&["merge", "-q", "--no-ff", "--no-commit", "main"]);
+        std::fs::write(repo.path().join(fragment),
+            "### Fixed — Factory\n\n- **Preserve current-session delivery warnings** — Current mirrors still warn.\n").unwrap();
+        let merge = commit_changelog_fixture(repo.path(), "merge: preserve current-session warnings");
+        std::fs::write(repo.path().join("hub-web/src/app.ts"), "export const value = 3;\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "fix: retain decision warnings (cas-c568)");
+        let window = TaskCommitReceiptWindow {
+            supervisor_override_reason: None,
+            not_before: chrono::DateTime::UNIX_EPOCH,
+            task_floor: chrono::DateTime::UNIX_EPOCH,
+            basis: "fixture",
+            identity: TaskCommitIdentity {
+                start_base: Some(base.clone()), task_id: Some(task.id.clone()),
+                known_commits: vec![parked.clone()],
+            },
+        };
+        let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert_eq!(ranges, vec![(base, parked), (merge, head.clone())]);
+        let paths = task_attribution::paths(repo.path(), "main", &window, Some(&head)).unwrap();
+        assert!(!paths.iter().any(|path| path == "changelog.d/cas-beef.md"));
+        let imported = Task::new("cas-beef".into(), "imported fragment without delivery provenance".into());
+        assert!(changelog_refusal(repo.path(), &imported, &paths, &head, "main", Some(&ranges)).is_some());
+        assert!(changelog_refusal(repo.path(), &task, &paths, &head, "main", Some(&ranges)).is_none());
+
+        // The imported note cannot replace missing or malformed task evidence.
+        for contents in [None, Some("### Fixed — Factory\n\n- Untitled change.\n")] {
+            if let Some(contents) = contents {
+                std::fs::write(repo.path().join(fragment), contents).unwrap();
+            } else {
+                std::fs::remove_file(repo.path().join(fragment)).unwrap();
+            }
+            let invalid = commit_changelog_fixture(repo.path(), "invalid fragment control (cas-c568)");
+            let ranges = task_attribution::range_bounds(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            let paths = task_attribution::paths(repo.path(), "main", &window, Some(&invalid)).unwrap();
+            assert!(changelog_refusal(repo.path(), &task, &paths, &invalid, "main", Some(&ranges)).is_some());
+        }
     }
 
     #[test]

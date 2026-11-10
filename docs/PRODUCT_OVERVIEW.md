@@ -129,7 +129,7 @@ A new Claude supervisor confirms its startup only after the native transcript re
 
 ## Primary Journeys
 
-Completed native Claude, Codex and Grok turns mirror into durable Commander history, including answers to questions typed in the terminal. When an undelivered transcript replay expires, the current supervisor receives a notice; the durable operator outbox keeps retrying. Long key-shaped credentials are redacted while ordinary hyphenated words stay verbatim. Grok text streams appear only after native turn completion; thoughts, text before tool calls and cancelled turns stay out of the reply. Native synthetic prompts never become operator questions, and text/image chunks in one pasted prompt keep the answer linked to that question. OpenCode transcript mirroring remains unsupported.
+Completed native Claude, Codex and Grok turns mirror into durable Commander history, including answers to questions typed in the terminal. Expired transcript replays from previous or ended supervisor sessions retire quietly while the durable operator outbox keeps retrying. An undelivered replay authored during the current supervisor session still raises a delivery warning, including a decision carried in a status reply. Explicit undelivered operator asks and blockers retain delivery alerts. Long key-shaped credentials are redacted while ordinary hyphenated words stay verbatim. Grok text streams appear only after native turn completion; thoughts, text before tool calls and cancelled turns stay out of the reply. Native synthetic prompts never become operator questions, and text/image chunks in one pasted prompt keep the answer linked to that question. OpenCode transcript mirroring remains unsupported.
 
 A Commander history read that receives no answer within 15 seconds shows an error and Retry history. Retrying an older page preserves its cursor; cached turns remain readable without implying the history is complete.
 
@@ -230,7 +230,7 @@ instruction sentences do not decide whether a delivery or release can proceed.
 - Before/after evidence: `cas deliverable capture` captures masked merge-base/head shots or passing journey goals in one bounded run; `cas deliverable pairs` selects complete verified pairs by task or commit provenance. Project defaults live under `[qa.capture]`. New pair manifests use schema 2 and seal both PNG and JPG files. Close also accepts historical schema 1 PNG-sealed evidence without rewriting it or requesting new BEFORE captures; every supplied seal is verified, and unsupported versions require a compatible reader or an explicit migration.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md` inventories and stops the session's background tasks and registered servers, verifying none remain before handing back.
 - Test value audit: `cas-cli/src/builtins/skills/cas-test-audit/` is a read-only agent procedure (buckets, detector recipes, CI-timing recipes, ledger format); cuts need operator approval and each names a covering test.
-- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section.
+- Release history: `CHANGELOG.md`; unreleased per-delivery entries live in `changelog.d/<task-id>.md` fragments, which the close gate credits and the release cut folds into the version section. A returned task retains its own fragment's delivery provenance when a merge resolution revises the entry; its current tip must still contain a valid titled entry.
 
 
 

@@ -89,6 +89,7 @@
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` - exact-tip test receipts and changelog validation, including task-owned fragment provenance across returned-delivery merge resolutions.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation for canonical and legacy CI.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - authenticated supervisor import grants and linked-checkout WIP identity; empty checkpoints require explicit task attribution.
 - `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
@@ -108,7 +109,7 @@
 - `cas-cli/src/finding_triage.rs`, `cas-cli/src/mcp/tools/core/task/update.rs`, `cas-cli/src/mcp/tools/core/task/release_train.rs` - journey severity labels and default release-train assignment.
 - `cas-cli/src/store/`, `cas-cli/src/migration/migrations/`, `cas-cli/src/worktree/` - store decorators, numbered migrations and Git/worktree lifecycle.
 - `crates/cas-store/src/agent_store/continuity.rs`, `crates/cas-store/src/worker_task_queue_store.rs` - retirement snapshots and persistent queues.
-- `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - provenance repair, durable prompts and QA maintenance; conditional task sync lives in `crates/cas-store/src/task_store.rs` and `cas-cli/src/cloud/syncer/pull.rs`.
+- `crates/cas-store/src/history_store.rs`, `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/qa_pass_store.rs` - provenance repair, durable prompts and QA maintenance; mirror expiry warns for copies authored during the current supervisor session while previous or ended-session copies stay quiet. Conditional task sync lives in `crates/cas-store/src/task_store.rs` and `cas-cli/src/cloud/syncer/pull.rs`.
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas and memory/search primitives.
 - `cas-cli/src/mcp/tools/service/core.rs`, `cas-cli/src/mcp/tools/core/memory.rs`, `cas-cli/src/mcp/tools/core/rules.rs`, `cas-cli/src/mcp/tools/core/rule_drift.rs` - memory/rule dispatch, partial updates, provenance and drift.
 

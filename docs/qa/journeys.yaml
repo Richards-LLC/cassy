@@ -12,10 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  operator-mirror-expiry-notice:
-    title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
-    tasks: [cas-1a73]
-    journeys: [HUB-J5]
+  parallel-journey-registry-merge:
+    title: Parallel inline QA families and updated dates merge while competing family and policy edits remain conflicts
+    tasks: [cas-ded57]
+    journeys: [FACTORY-MERGE]
   operator-release-freeze-pairing:
     title: A verified default pairing can freeze and lift a release train without either worker-management scope; revoked and preview credentials cannot lift it
     tasks: [cas-16c0a]
@@ -332,6 +332,10 @@ bug_families:
     title: Consumed queued Claude inputs retain Commander message and paired-device reply binding
     tasks: [cas-33e6, cas-5e3a]
     invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
+    journeys: [HUB-J5]
+  operator-mirror-expiry-notice:
+    title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
+    tasks: [cas-1a73]
     journeys: [HUB-J5]
 ignore:
 - hub-web/dist/**
@@ -1033,6 +1037,9 @@ journeys:
   entry: {url: 'mcp:factory', trigger: worktree_merge}
   steps: [Select the parked delivery, Review the candidate, Merge and read the landing receipt]
   owners:
+  - cas-cli/src/worktree/git.rs
+  - scripts/cas-merge-drivers.py
+  - .gitattributes
   - cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs
   - cas-cli/src/cli/factory/worktree_ops.rs
   - cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs

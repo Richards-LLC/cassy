@@ -70,20 +70,6 @@ fn operation_key(project_id: &str, release_id: &str, final_release_sha: &str) ->
 
 // ---- One operation per release identity. ----
 
-/// Installed/backfill recovery: `Some(report)` when a primary trigger already
-/// completed this tag's operation at its local commit.
-pub(crate) fn recorded_closeout_for_tag(root: &Path, tag: &str) -> Option<String> {
-    recorded_closeout_with(root, tag, &LocalReconciler)
-}
-
-fn recorded_closeout_with(root: &Path, tag: &str, reconciler: &dyn Reconciler) -> Option<String> {
-    let project = crate::cloud::resolve_canonical_id(root)?;
-    let repo = root.parent()?;
-    let sha = git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")]).ok()?;
-    reconciler.completed(root, &operation_key(&project, tag, &sha)).ok()?
-        .map(|_| format!("{tag}: release operation already completed at {sha}; recovery trigger is a no-op"))
-}
-
 /// Run one trigger. The first trigger for a release identity reconciles once;
 /// any later trigger reuses #3's completed record. The notice is keyed by #3's
 /// notice intent, so a crash between reconcile and notice is repaired by the
@@ -256,41 +242,28 @@ fn tag_scope(
     })
 }
 
-/// The legacy closer's train hold. #3 removed its direct train write; the
-/// recovery trigger resolves this hold through the one reconciliation.
-pub(crate) const PARENT_HOLD: &str = "RELEASE_PARENT_RECONCILIATION_REQUIRED";
-
-/// Installed/backfill recovery after the legacy delivery closer has run.
-pub(crate) fn resolve_parent_hold(
-    root: &Path,
-    train_id: &str,
-    tag: &str,
-    report: String,
-    trigger: ReconcileTrigger,
-) -> Result<String> {
-    resolve_parent_hold_with(root, train_id, tag, report, trigger, &LocalReconciler)
+/// Installed/backfill recovery: the same operation as publish, with its own
+/// trigger. A release whose operation already completed is a no-op.
+pub(crate) fn recover(root: &Path, train_id: &str, tag: &str, trigger: ReconcileTrigger) -> Result<String> {
+    recover_with(root, train_id, tag, trigger, &LocalReconciler)
 }
 
-fn resolve_parent_hold_with(
+fn recover_with(
     root: &Path,
     train_id: &str,
     tag: &str,
-    report: String,
     trigger: ReconcileTrigger,
     reconciler: &dyn Reconciler,
 ) -> Result<String> {
-    if !report.contains(PARENT_HOLD) {
-        return Ok(report);
-    }
     let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("project checkout unavailable")?;
-    let tag_sha = git(&repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
+    let tag_sha = published_tag_sha(&repo, tag)?;
     let context: Option<ReleaseContext> = match receipt_path(root, tag.trim_start_matches('v')) {
         Ok(path) if path.exists() => Some(serde_json::from_slice(&fs::read(path)?)?),
         _ => None,
     };
     let scope = tag_scope(root, &repo, context.as_ref(), train_id, tag, &tag_sha)?;
-    Ok(format!("{report}\n{}", reconcile_once(root, &repo, &scope, trigger, reconciler)?))
+    reconcile_once(root, &repo, &scope, trigger, reconciler)
 }
 
 // ---- Publish adapter: the host's existing install-on-publish read. ----
@@ -598,27 +571,11 @@ mod tests {
             reconcile_once(&root, repo, &scope("pr-4396"), promotion.clone(), &reconciler).unwrap();
         }
         reconcile_once(&root, repo, &scope("v9.99.2"), ReconcileTrigger::Installed, &reconciler).unwrap();
-        assert_eq!(*reconciler.calls.borrow(), vec![publish.clone(), promotion.clone()]);
-
-        // The installed host's recovery closer sees Publish's completed record.
-        git(repo, &["tag", "v9.99.2", &sha]).unwrap();
-        assert!(recorded_closeout_with(&root, "v9.99.2", &reconciler).is_some());
-        assert!(recorded_closeout_with(&root, "v9.99.3", &reconciler).is_none());
-
-        // A recovery trigger resolves the legacy closer's train hold through one
-        // reconciliation; a report without that hold reconciles nothing.
-        git(repo, &["tag", "v9.99.4", &sha]).unwrap();
-        for report in ["closed 1 delivery(ies)".to_string(), format!("{}: {PARENT_HOLD}", train.id)] {
-            for _ in 0..2 {
-                resolve_parent_hold_with(&root, &train.id, "v9.99.4", report.clone(), ReconcileTrigger::Installed, &reconciler).unwrap();
-            }
-        }
-        assert_eq!(reconciler.calls.borrow().len(), 3);
-        assert_eq!(reconciler.calls.borrow()[2], ReconcileTrigger::Installed);
+        assert_eq!(*reconciler.calls.borrow(), vec![publish, promotion]);
 
         // One notice per release, naming each residual with owner and next action.
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.target == owner.name
             && crate::supervisor_notices::is_action_envelope(&row.prompt)
             && row.prompt.contains("cas-0002")
@@ -689,5 +646,60 @@ mod tests {
             ("cas-e000".to_string(), vec!["cas-d001".to_string(), "cas-d002".into(), "cas-e001".into()]),
             ("cas-e001".to_string(), vec!["cas-d001".to_string()]),
         ]));
+    }
+
+    /// Recovery runs the real shared operation even when a delivery is held:
+    /// the durable record, its notice intent and exactly one notice exist.
+    #[test]
+    fn recovery_with_a_held_delivery_records_the_shared_operation_and_notice() {
+        use cas_types::{Dependency, DependencyType, FactoryBranchStart, Task, TaskStatus, WorkTarget};
+        let (temp, root, mut train, _, _) = super::super::release_automation::tests::release_fixture();
+        let repo = temp.path();
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(repo.join("held.txt"), "held\n").unwrap();
+        git(repo, &["add", "held.txt"]).unwrap();
+        git(repo, &["commit", "-m", "held delivery"]).unwrap();
+        let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["tag", "-a", "v9.99.2", "-m", "release"]).unwrap();
+        // Publish the tag to a local origin while keeping the GitHub identity.
+        let bare = temp.path().join("origin.git");
+        git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
+        git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/Example/Repo.git"]).unwrap();
+        git(repo, &["push", "origin", "v9.99.2"]).unwrap();
+
+        let store = crate::store::open_task_store(&root).unwrap();
+        train.origin_project = Some("release-fixture".into());
+        store.update(&train).unwrap();
+        let mut held = Task::new("cas-b001".into(), "Held delivery".into());
+        held.origin_project = Some("release-fixture".into());
+        held.status = TaskStatus::AwaitingMerge;
+        held.deliverables.factory_branch_anchor = Some(anchor.clone());
+        held.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:release-fixture".into(), target_branch: "main".into() },
+            branch: "factory/held".into(),
+            assignee: "worker".into(),
+            base_sha: base,
+        });
+        store.add(&held).unwrap();
+        store.add_dependency(&Dependency::new(held.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let _cwd = env.enter_dir(repo);
+        for _ in 0..2 {
+            recover(&root, &train.id, "v9.99.2", ReconcileTrigger::Installed).unwrap();
+        }
+        let key = operation_key("release-fixture", "v9.99.2", &anchor);
+        let record: ReleaseReconcileReceipt = serde_json::from_value(
+            cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap(),
+        ).unwrap();
+        assert!(!record.complete);
+        assert!(matches!(record.members.get("cas-b001"), Some(CassyMergeClose::Held(_))));
+        assert_eq!(record.triggers.first(), Some(&ReconcileTrigger::Installed));
+        assert!(record.notice_intent.is_some());
+        assert_eq!(store.get("cas-b001").unwrap().status, TaskStatus::AwaitingMerge);
+        let notices: Vec<_> = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+            .into_iter().filter(|row| row.prompt.contains("kind=\"release_closeout\"")).collect();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].prompt.contains("cas-b001"));
     }
 }

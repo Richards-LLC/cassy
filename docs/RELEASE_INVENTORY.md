@@ -152,10 +152,9 @@ release identity, immutable final SHA and every referencing task. Already closed
 issues are skipped on replay. Partials and every read/write failure remain named
 outcomes; offline does not mean closed. Dry runs never contact GitHub.
 
-The current installed/backfill adapter invokes this function after closes and
-atomically saves `.cas/releases/<tag>-issues.json` with `scope` and `issues`, then
-includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
-exists for historical releases that have no tracked cut receipt. Publication
+The shared release operation invokes this function after closes and keeps the
+outcomes in its receipt's `issue_outcomes`; every trigger, including installed
+and backfill recovery, reaches it only through that operation. Publication
 verification precedes this stage; the issue helper never publishes a release.
 
 ## Durable reconciliation and parent acceptance
@@ -232,7 +231,7 @@ exceptions, and partial or failed GitHub issues.
 | --- | --- | --- |
 | `Publish{tag}` | `cas release published --receipt <release.json> --repo <slug>`, run by `scripts/install-on-publish.sh` once per newly seen publication, before installing | The timer's existing latest-release read; tag SHA verified on origin |
 | `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, run once after a staging-to-main promotion PR merges | One `gh pr view`: merged into the default branch, merge commit on origin |
-| `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: a no-op when the release's operation is already complete |
+| `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: the same operation with its own trigger, a no-op once complete. `cas release backfill --dry-run` is a read-only preview |
 
 The scope comes from the tracked cut receipt (cas-src) or the merged PR
 (promotion). The reviewed candidate is the newest recorded release review the

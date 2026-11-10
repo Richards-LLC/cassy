@@ -412,6 +412,10 @@ bug_families:
     tasks: [cas-0e49]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-CAP-FEEDBACK]
+  managed-thread-verified-file-replies:
+    title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
+    tasks: [cas-4deb]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

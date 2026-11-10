@@ -1585,7 +1585,8 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
     for (behind, pinned, refs) in [
         (true, false, "local"), (false, false, "local"), (true, true, "local"),
-        (true, false, "remote-only"), (false, false, "remote-newer"),
+        (true, false, "remote-only"), (false, false, "remote-only"),
+        (false, false, "remote-newer"),
     ] {
         git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind || refs == "remote-newer" { &epic_tip } else { "main" }]);
         if refs != "local" {

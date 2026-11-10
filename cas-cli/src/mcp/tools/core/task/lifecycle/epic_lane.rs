@@ -426,9 +426,14 @@ pub(crate) fn published_release_note(
         }
         let release = git_stdout(&repo, &["rev-parse", "--verify", &format!("refs/tags/{tag}^{{commit}}")])?;
         // Match spawning's fresher-origin choice without fetching or moving refs.
-        let remote = format!("origin/{branch}");
-        let base = if on_branch(&repo, branch, &remote) { remote.as_str() } else { branch };
-        let tip = git_stdout(&repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?;
+        let resolve = |reference: &str| git_stdout(&repo, &["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")]);
+        let tip = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
+            (Some(local), Some(remote)) => {
+                if git_ok(&repo, &["merge-base", "--is-ancestor", &local, &remote]) { remote } else { local }
+            }
+            (Some(tip), None) | (None, Some(tip)) => tip,
+            (None, None) => return None,
+        };
         let missing: usize = git_stdout(&repo, &["rev-list", "--count", &format!("{tip}..{release}"), "--"])?
             .parse().ok()?;
         if missing == 0 { return None; }

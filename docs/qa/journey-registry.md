@@ -91,6 +91,10 @@ does not satisfy the close gate for a new bug delivery. The registry header's
 `updated` date describes curation of the main file; adding a family file does
 not require editing that header.
 
+### Parallel registry edits
+
+Cassy's merge driver combines disjoint entries in the registry's block maps and `journeys` list by key or ID. It preserves the ancestor's entry order, appends new IDs in sorted order and takes the newest `updated` date. Changes to the same entry still conflict when both differ from the ancestor. Policy fields and YAML layouts outside the driver's supported block format use Git's ordinary merge. Use `cas qa journeys --check` on the resulting registry to verify references and ownership. Registry readers continue to use the same YAML file and bug family sidecars.
+
 ## Journeys
 
 | Field | Contract |

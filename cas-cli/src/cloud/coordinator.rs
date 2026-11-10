@@ -164,7 +164,7 @@ const MAX_AGENT_PAGES: usize = 20;
 
 /// Diagnostic correlation, never an idempotency or ownership key. Keep the
 /// cross-repo header contract here so Cloud alignment is a one-line change.
-const ATTEMPT_ID_HEADER: &str = "X-Cassy-Attempt-Id";
+pub(crate) const ATTEMPT_ID_HEADER: &str = "X-Cassy-Attempt-Id";
 const RESPONSE_REQUEST_ID_HEADERS: [&str; 3] = ["X-Cas-Request-Id", "X-Request-Id", "cf-ray"];
 
 /// One explicit application dispatch, including any opaque ureq wire retries.
@@ -186,7 +186,7 @@ pub(crate) fn mutation_request(method: &str, url: &str) -> ureq::Request {
         .set(ATTEMPT_ID_HEADER, &uuid::Uuid::new_v4().to_string())
 }
 
-/// Also used by the embedding client's separately bounded connect agent.
+/// Also used by custom Cloud agents without changing their transport policies.
 pub(crate) struct TraceCloudMutation;
 
 impl ureq::Middleware for TraceCloudMutation {
@@ -195,6 +195,9 @@ impl ureq::Middleware for TraceCloudMutation {
         request: ureq::Request,
         next: ureq::MiddlewareNext,
     ) -> Result<ureq::Response, ureq::Error> {
+        if !matches!(request.method(), "POST" | "PUT" | "PATCH" | "DELETE") {
+            return next.handle(request);
+        }
         let attempt = RequestAttempt {
             id: request.header(ATTEMPT_ID_HEADER)
                 .map(str::to_owned)

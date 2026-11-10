@@ -106,7 +106,7 @@ pub use project_aliases::{
 pub use coordinator::{
     AgentInfo, CloudCoordinator, HeartbeatError, PROJECT_QUERY_KEY, PROJECT_SCOPE_KEY,
 };
-pub(crate) use coordinator::mutation_request;
+pub(crate) use coordinator::{ATTEMPT_ID_HEADER, TraceCloudMutation, mutation_request};
 pub use device::DeviceConfig;
 pub use embed_drain::{
     CodeVectorDrain, DRAIN_BATCH, DrainReport, drain_all_pending, embed_pending_history,

@@ -46,9 +46,14 @@ fn presence_http_transport_preserves_server_retry_after() {
     });
     let result = UreqHttp::default().send("POST", &url, &[], &[]).unwrap();
     let headers = server.join().unwrap();
-    let attempt = headers.lines().find_map(|line| line.split_once(": ")
-        .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cassy-Attempt-Id"))
-        .map(|(_, value)| value)).expect("Cloud mutation attempt header");
+    let attempt = headers
+        .lines()
+        .find_map(|line| {
+            line.split_once(": ")
+                .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cassy-Attempt-Id"))
+                .map(|(_, value)| value)
+        })
+        .expect("Cloud mutation attempt header");
     assert_eq!(uuid::Uuid::parse_str(attempt).unwrap().get_version_num(), 4);
     assert_eq!(result.status, 429);
     assert_eq!(result.retry_after_s, Some(600));

@@ -2181,8 +2181,11 @@ Cloud mutation clients attach `X-Cassy-Attempt-Id` (Cloud #256), a random v4
 UUID for one logical operation. `mutation_request` in `cloud/coordinator.rs`
 owns the shared transport: build the request outside retry loops and clone it
 for each send, keeping the ID across 5xx, timeout and 429 retries. A later
-operation gets a new ID. The embedding client uses the same tracing middleware
-with its explicit connect deadline. Signed object-storage uploads and separate
+operation gets a new ID. The embedding, ordinary binding and operator clients
+use the same tracing middleware with their existing deadlines and redirects.
+Signed operator mutations retain the ID across clock/generation recovery;
+the diagnostic header is outside the PoP signature, and reads pass through.
+Signed object-storage uploads and separate
 Violet/Hub service requests keep their own contracts. This ID is diagnostic,
 with no idempotency, replay or ownership meaning.
 

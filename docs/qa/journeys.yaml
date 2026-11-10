@@ -337,6 +337,10 @@ bug_families:
     title: Expired prior supervisor-session mirrors stay quiet; current-session status replies and explicit undelivered operator asks retain delivery alerts
     tasks: [cas-1a73, cas-0afdd, cas-c568]
     journeys: [HUB-J5]
+  returned-delivery-merge-fragment:
+    title: Returned deliveries retain task-owned fragment provenance across merge resolutions while missing or invalid fragments refuse
+    tasks: [cas-3623]
+    journeys: [FACTORY-CLOSE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

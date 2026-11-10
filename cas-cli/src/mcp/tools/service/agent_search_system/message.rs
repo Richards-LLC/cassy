@@ -6772,7 +6772,7 @@ mod cas_89e1_post_merge_message_type_tests {
         worker.role = AgentRole::Worker;
         worker.factory_session = Some("factory-a".into());
         for (key, value) in [("worker_cli", "codex"), ("worker_model", "gpt-6.1-sol"),
-            ("worker_effort", "high"), ("worker_config_dir", "/fixture/.codex-work")] {
+            ("worker_effort", "high"), ("worker_account_dir", "/fixture/.codex-work")] {
             worker.metadata.insert(key.into(), value.into());
         }
         agents.register(&worker).unwrap();
@@ -6811,7 +6811,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(recipe.effort, Some(cas_mux::Effort::High));
         assert_eq!(recipe.config_dir.as_deref(), Some("/fixture/.codex-work"));
         // Consume the lifecycle row: rate limiting must survive dequeue and a new service.
-        spawns.dequeue().unwrap();
+        spawns.mark_processed(queued[0].id).unwrap();
         let restarted = gh_1171_service(&core);
         restarted.message_send(request).await.unwrap();
         assert!(spawns.peek(10).unwrap().is_empty());

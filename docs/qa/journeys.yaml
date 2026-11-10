@@ -460,6 +460,10 @@ bug_families:
     title: Memory edits retain writer-assigned machine and owner stamps and authenticated writers stamp new handoff conversions
     tasks: [cas-6733]
     journeys: [HUB-J26, FACTORY-SUPERVISE]
+  dead-holder-slack-reply-readback:
+    title: Expired dead-owner Slack claims recover only after matching reply settlement; uncertain outcomes and live owners stay held without reposting
+    tasks: [cas-f039]
+    journeys: [FACTORY-SPAWN]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

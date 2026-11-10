@@ -323,11 +323,13 @@ pub(crate) fn page_operator_for_stalled_message(
     }
     let summary = format!("Message from {} to {} unread", row.source, row.target);
     let message = format!(
-        "{} has not started a turn with message #{} from {} (sent {}). Its sender has been told. Type in {}'s pane to wake it, or take the work over.\n\n{}",
-        row.target,
+        // cas-c1598: claim only what Cassy observed. A missing read receipt
+        // is not proof that the recipient never started a turn.
+        "Cassy has no read, acknowledgement or observed turn for message #{} from {} (sent {}) to {}. Its sender has been told. If {} has not acted on it, type in its pane to wake it, or take the work over.\n\n{}",
         row.id,
         row.source,
         row.created_at.to_rfc3339(),
+        row.target,
         row.target,
         candidate.notice
     );

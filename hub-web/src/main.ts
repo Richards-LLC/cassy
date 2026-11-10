@@ -9,7 +9,7 @@ import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
 import { statusClass, statusLabel, workerProgress, workerState, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
-import { releaseHeader } from "./progress-view";
+import { releaseHeader, workerTaskLine } from "./progress-view";
 import { deliveryPreview, displayCounts, projectEpics, projectStatusLine, type EpicSessionProgress } from "./progress-model";
 import { liveEpicsSection, projectSessions } from "./epic-progress";
 import { presentFleetSheet } from "./fleet-sheet";
@@ -5872,9 +5872,7 @@ function renderStatus(status?: Record<string, unknown>): void {
       open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
       line.append(open);
     }
-    const work = document.createElement("p"); work.className = "status-activity";
-    if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
-    work.append(document.createTextNode(worker.work)); row.append(work);
+    row.append(workerTaskLine(document, worker));
     const activity = document.createElement("small"); activity.className = "status-last-activity";
     const at = metadata?.latest_activity?.created_at_rfc3339 ? Date.parse(metadata.latest_activity.created_at_rfc3339) : NaN;
     activity.textContent = Number.isFinite(at) ? `Last activity ${new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last activity not reported";

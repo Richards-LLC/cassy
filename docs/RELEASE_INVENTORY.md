@@ -157,3 +157,30 @@ atomically saves `.cas/releases/<tag>-issues.json` with `scope` and `issues`, th
 includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
 exists for historical releases that have no tracked cut receipt. Publication
 verification precedes this stage; the issue helper never publishes a release.
+
+## Publish and promotion adapters
+
+Every trigger calls the one release reconciliation,
+`release_reconcile::reconcile_release(root, scope, inventory, trigger)`, keyed by
+(project, release, final SHA). A trigger whose key already has a completed
+operation does not reconcile again. Each release gets one `release_closeout`
+supervisor notice, deduplicated by the operation's notice intent. It names every
+residual and held or pending parent with owner and next action, inventory
+exceptions, and partial or failed GitHub issues.
+
+| Trigger | Adapter | Evidence read |
+| --- | --- | --- |
+| `Publish{tag}` | `cas release published --receipt <release.json> --repo <slug>`, run by `scripts/install-on-publish.sh` once per newly seen publication, before installing | The timer's existing latest-release read; tag SHA verified on origin |
+| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, run once after a staging-to-main promotion PR merges | One `gh pr view`: merged into the default branch, merge commit on origin |
+| `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: a no-op when the release's operation is already complete |
+
+The scope comes from the tracked cut receipt (cas-src) or the merged PR
+(promotion). The reviewed candidate is the newest recorded release review the
+final commit contains, plus every QA/review receipt at that candidate. With no
+review, closes hold as named residuals; publication never stands in for review.
+No CI job, poller or test rerun is added, and GitHub is read only as evidence.
+
+`cas release review-blocks --scope scope.json` prints the release review's
+`cassy-release-transformations` and `cassy-release-epics` fenced blocks for that
+scope. The reviewer includes them in the published ledger. Remove any epic
+whose acceptance was not verified before publishing.

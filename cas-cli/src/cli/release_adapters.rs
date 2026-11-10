@@ -26,7 +26,8 @@ use std::{
 // ---- Seam to close-at-release #3. ----
 
 /// Stand-in for `crate::release_reconcile` (#3), with its exact names and
-/// signatures. Swap: delete this module and `use crate::release_reconcile;`.
+/// signatures. Swap: delete this module, `use crate::release_reconcile;` and
+/// take `ReleaseOperationKey` from `cas_store::release_reconcile_store`.
 pub(crate) mod release_reconcile {
     use super::*;
 
@@ -46,7 +47,7 @@ pub(crate) mod release_reconcile {
         pub final_release_sha: String,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Default)]
     pub(crate) struct ReleaseReconcileReceipt {
         pub members: BTreeMap<String, CassyMergeClose>,
         pub issue_outcomes: Vec<IssueOutcome>,

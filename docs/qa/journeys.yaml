@@ -420,6 +420,10 @@ bug_families:
     title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
     tasks: [cas-919d]
     journeys: [FACTORY-SPAWN, HUB-J26]
+  composer-digits-text-face:
+    title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
+    tasks: [cas-f47a]
+    journeys: [HUB-J6]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

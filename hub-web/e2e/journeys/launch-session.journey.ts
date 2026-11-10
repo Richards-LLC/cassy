@@ -475,8 +475,10 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
   }
   await journey.stage("Typed confirmation removes the intended profile and New session refreshes", async () => {
     const row = dialog.locator("li").filter({ hasText: "hello@example.test" });
-    // Set default stays on the card; Rename, Disable and Remove live in its ⋯ menu.
-    await expect(row.getByRole("button", { name: "Set default", exact: true })).toBeVisible();
+    // cas-eae3: the default account shows its Default badge, never Set default;
+    // Rename, Disable and Remove live in its ⋯ menu.
+    await expect(row.getByText("Default", { exact: true })).toBeVisible();
+    await expect(row.getByRole("button", { name: "Set default", exact: true })).toHaveCount(0);
     await expect(row.getByRole("button", { name: "Remove", exact: true })).toBeHidden();
     await row.locator(".accounts-more > summary").click();
     await row.getByRole("button", { name: "Remove", exact: true }).focus();

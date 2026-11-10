@@ -10203,19 +10203,20 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
 
-            // cas-1a73: even a status mirror can contain an operator decision.
-            // Capture undelivered copies before retiring them, and notify the
-            // sender in this transaction. The pane copy is not a device receipt.
+            // Capture undelivered copies before retiring them. Separate asks
+            // from completed status so a previous session's backlog cannot
+            // page the successor alongside an actionable decision (cas-c568).
+            // The pane copy is not a device receipt.
             let undelivered = {
                 let mut stmt = tx.prepare(&format!(
-                    "SELECT factory_session, MIN(id), GROUP_CONCAT(id, ', ')
+                    "SELECT factory_session, MIN(id), GROUP_CONCAT(id, ', '), COALESCE(kind = 'ask', 0)
                      FROM prompt_queue
                      WHERE processed_at IS NULL AND created_at < ?1 AND {TRANSCRIPT_MIRROR}
                        AND transport_delivered_at IS NULL AND acked_at IS NULL
-                     GROUP BY factory_session"
+                     GROUP BY factory_session, COALESCE(kind = 'ask', 0)"
                 ))?;
                 stmt.query_map(params![cutoff], |row| {
-                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+                    Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, bool>(3)?))
                 })?.collect::<std::result::Result<Vec<_>, _>>()?
             };
 
@@ -10232,17 +10233,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 ),
                 params![now, cutoff],
             )?;
-            for (session, first_id, ids) in undelivered {
-                let (sender, session, _) = Self::abandonment_recipient_in_tx(
+            for (session, first_id, ids, decision_ask) in undelivered {
+                let (sender, recipient_session, _) = Self::abandonment_recipient_in_tx(
                     &tx, None, "supervisor", session.as_deref(),
                 )?;
+                // Completed mirrors from previous or ended sessions are
+                // obsolete. Current-session mirrors retain cas-1a73's warning;
+                // decision asks must still reach a successor or future inbox.
+                if !decision_ask && (session.is_none() || session != recipient_session) {
+                    continue;
+                }
                 tx.execute(
                     "INSERT OR IGNORE INTO prompt_queue
                         (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, dedupe_key)
                      VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', ?6)",
                     params![sender,
                         format!("Messages {ids} to operator were not delivered: no Commander device receipt before the transcript replay expired (superseded_stale). The durable outbox still retries. Review the original messages with message_status before relying on an operator decision.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
-                        now, session, "Operator messages not delivered before transcript expiry",
+                        now, recipient_session, "Operator messages not delivered before transcript expiry",
                         format!("operator-mirror-undelivered:{first_id}")],
                 )?;
             }
@@ -16476,6 +16483,10 @@ mod tests {
     fn ct2_p3_operator_row_survives_24h_expiry() {
         let (_temp, store) = create_test_store();
         register_bounce_sender(&store, "retired-worker", "factory-a");
+        register_bounce_sender(&store, "supervisor", "factory-a");
+        store.conn.lock().unwrap().execute(
+            "UPDATE agents SET role = 'supervisor' WHERE name = 'supervisor'", [],
+        ).unwrap();
         let operator = store
             .enqueue_with_session("lead-sup", "operator", "status: green", "factory-a")
             .unwrap();
@@ -16544,16 +16555,15 @@ mod tests {
         ).unwrap();
         assert!(outbox_pending, "the independent durable delivery snapshot still retries");
         // cas-1a73: an automatic status mirror can carry an operator decision.
-        // Queue expiry must notify the current supervisor even after the
-        // original session ends, without claiming the outbox stopped retrying.
+        // Queue expiry must notify the current session's supervisor without
+        // claiming the outbox stopped retrying.
         let notice: (String, Option<String>, String) = conn.query_row(
             "SELECT target, factory_session, prompt FROM prompt_queue
              WHERE source = 'delivery-watchdog' AND dedupe_key = ?",
             [format!("operator-mirror-undelivered:{}", mirrors[0])],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", None));
-        assert!(notice.2.contains(PendingReason::SupersededStale.as_str()));
+        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", Some("factory-a")));
         // FactoryDaemon::supervisor_wake_class consumes this protocol suffix
         // on daemon-origin notices; plain watchdog prose cannot wake an idle sender.
         assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));

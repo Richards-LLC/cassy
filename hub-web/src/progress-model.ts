@@ -237,7 +237,7 @@ export function projectEpics(sources: readonly EpicSessionProgress[], project: s
   const epics = new Map<string, { epic: ReleaseEpic; machines: Set<string>; workers: Map<string, ProjectEpic["workers"][number]>; rows: Map<string, EpicTaskRow>; stale: boolean }>();
   const latest = new Map<string, ReleaseEpic>();
   // Prefer the newest authoritative task/progress snapshot when sessions overlap.
-  for (const source of releaseSnapshots(sources).filter(source => source.project === project).sort((a, b) => Number(a.stale) - Number(b.stale) || b.received - a.received)) {
+  for (const source of releaseSnapshots(sources).filter(source => source.project === project).sort((a, b) => Number(a.stale) - Number(b.stale) || Number(b.authoritative === true) - Number(a.authoritative === true) || b.received - a.received)) {
     const workers = workerProgress(source.roster, source.agents, source.tasks, source.supervisor);
     for (const epic of source.epics) {
       if (!latest.has(epic.id)) latest.set(epic.id, epic);

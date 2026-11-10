@@ -146,6 +146,7 @@ it("keeps terminal navigation empty despite a newer stale peer, retains planned 
   const result = projectEpics([fresh, { ...peer, stale: true }], "cassy");
   expect(result.live.map(item => item.key)).toEqual(["paused", "planned"]);
   expect(result.quiet).toBe(0);
+  expect(projectEpics([fresh, { ...peer, release_scope: scope }], "cassy").live.map(item => item.key)).toEqual(["paused", "planned"]);
   expect(projectEpics([fresh, { ...peer, received: 1 }], "cassy").live.map(item => item.key)).toEqual(["paused", "planned"]);
   expect(releaseSnapshots([fresh, { ...peer, release_scope: undefined }]).map(source => source.stale)).toEqual([false, false]);
   expect(releaseSnapshots([fresh, { ...peer, release_scope: scope }]).map(source => source.stale)).toEqual([false, false]);

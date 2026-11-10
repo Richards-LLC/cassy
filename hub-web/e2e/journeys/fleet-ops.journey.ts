@@ -176,10 +176,18 @@ for (const colorScheme of ["light", "dark"] as const) {
       world.epics = catalog;
       const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: world } });
       const sheet = page.locator("dialog.fleet-action-sheet");
+      const namedWorkers = async () => {
+        const rail = page.locator("#status-view");
+        await expect(rail.locator(".status-agent")).toHaveCount(world.agents.length);
+        for (const agent of world.agents) {
+          await expect(rail.locator(".status-agent", { hasText: agent.name }).locator(".status-line").getByText(agent.name, { exact: true })).toBeVisible();
+        }
+      };
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        await namedWorkers();
         await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
         await expect(sheet.getByRole("heading", { name: "Assign cas-2001 to", exact: true })).toBeVisible();
@@ -205,6 +213,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(page.locator("#status-view").getByRole("button", { name: "Focus epic…" })).toBeFocused();
         await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
         await page.setViewportSize({ width: 1280, height: 800 });
+        await namedWorkers();
         const rail = page.locator("#status-view");
         await rail.getByRole("button", { name: "Focus epic…", exact: true }).click();
         const menu = rail.locator(".fleet-ops-epics");

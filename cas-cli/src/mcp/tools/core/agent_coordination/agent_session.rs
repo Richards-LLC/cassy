@@ -392,7 +392,7 @@ impl CasCore {
 
         // Ensure the agent is registered immediately for subsequent MCP calls (whoami/task/...).
         // In Codex no-hooks mode, relying on PID/session mapping can race.
-        self.register_agent_with_hints(
+        let canonical_id = self.register_agent_with_hints(
             session_id.clone(),
             agent_name.clone(),
             req.parent_id,
@@ -400,7 +400,7 @@ impl CasCore {
             requested_role,
             crate::mcp::server::AgentIdentitySource::PublicRegistration,
         )?;
-        let _ = self.ensure_agent_active(&session_id);
+        let _ = self.ensure_agent_active(&canonical_id);
 
         let mut response = format!("Session: {session_id}");
         if !context.is_empty() {

@@ -494,6 +494,8 @@ impl CasService {
             .and_then(|args| args.get("action"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        let registration = tool_name == "coordination" && matches!(action, "register" | "session_start");
+        let continuation_id = registration.then(|| uuid::Uuid::new_v4().to_string());
         let grace = if tool_name == "verification" && action == "batch_receipt" {
             grace.min(BATCH_RECEIPT_POST_COMMIT_GRACE)
         } else {
@@ -513,7 +515,18 @@ impl CasService {
             let _tool_work = tool_work;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             let _memory_call = crate::mcp::server::memory::Call::started();
-            future.await
+            if registration {
+                // Aborting an async task cannot cancel synchronous startup or
+                // SQLite work. Keep runtime workers free to answer on time.
+                super::mutation_receipt::run_on_blocking_pool(future).await
+                    .unwrap_or_else(|error| Err(rmcp::ErrorData {
+                        code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                        message: format!("Registration handler ended abnormally: {error}").into(),
+                        data: None,
+                    }))
+            } else {
+                future.await
+            }
         }));
         let deadline = tokio::time::Instant::from_std(start + budget);
         let post_commit_grace = {
@@ -573,6 +586,16 @@ impl CasService {
                     .map(|commit| commit.description.clone()))
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
+                if let Some(id) = &continuation_id {
+                    self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
+                    let mut answer = rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                        "COMMITTED: {description}. Registration follow-up continues; its final outcome will appear in your inbox. Continuation: {id}. Do not retry."
+                    ))]);
+                    answer.structured_content = Some(serde_json::json!({
+                        "mutation_outcome": "COMMITTED", "continuation_id": id,
+                    }));
+                    return Ok(answer);
+                }
                 if !matches!(
                     (tool_name, receipt.action()),
                     ("factory", "worktree_merge")
@@ -623,7 +646,9 @@ impl CasService {
                     && receipt.action() == "close"
                     && receipt.terminal.get().is_none()
                     && receipt.task_id().is_some();
-                if close_unfinished {
+                if let Some(id) = &continuation_id {
+                    self.record_registration_outcome(handle, receipt.clone(), arguments, id.clone());
+                } else if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
                 } else if commit.is_some()
                     && matches!(
@@ -639,7 +664,10 @@ impl CasService {
                     // is not followed by a late write the caller never sees.
                     handle.abort();
                 }
-                let outcome = if close_unfinished && commit.is_some() {
+                let outcome = if let Some(id) = &continuation_id {
+                    format!("{} (registration keeps running; its final outcome will appear in your inbox with continuation_id={id}; do not retry)",
+                        if commit.is_some() { "COMMITTED" } else { "IN_PROGRESS" })
+                } else if close_unfinished && commit.is_some() {
                     format!(
                         "IN_PROGRESS (the close has not committed: only intermediate writes have, so the task's status is unchanged so far; the close keeps running in the background and records its final outcome as a {LATE_CLOSE_NOTE_MARKER} task note — re-query with task action=show before retrying)"
                     )
@@ -663,7 +691,8 @@ impl CasService {
                     code: rmcp::model::ErrorCode::INTERNAL_ERROR,
                     message: format!("Tool '{tool_name}' response deadline elapsed after {:.3}s (budget {:.3}s). Mutation outcome: {outcome}.{timing_suffix}", elapsed.as_secs_f64(), budget.as_secs_f64()).into(),
                     data: Some(serde_json::json!({
-                        "mutation_outcome": if close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "mutation_outcome": if registration && commit.is_none() || close_unfinished { "IN_PROGRESS" } else if commit.is_some() { "COMMITTED" } else if potentially_mutating_call(tool_name, action) { "UNKNOWN" } else { "NOT_APPLICABLE" },
+                        "continuation_id": continuation_id,
                         "notification_id": commit.and_then(|commit| commit.notification_id),
                         "elapsed_ms": elapsed.as_millis() as u64,
                         "budget_ms": budget.as_millis() as u64,
@@ -823,6 +852,61 @@ impl CasService {
     /// a gate refused, or that failed, after the early answer is visible.
     /// Batch receipts record the continuation on every listed task; individual
     /// close results are also persisted as BATCH_CLOSE_OUTCOME notes.
+    fn record_registration_outcome(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        continuation_id: String,
+    ) {
+        let session_id = arguments.and_then(|args| args.get("session_id"))
+            .and_then(serde_json::Value::as_str).map(str::to_string);
+        let name = arguments.and_then(|args| args.get("name"))
+            .and_then(serde_json::Value::as_str).map(str::to_string)
+            .or_else(|| std::env::var("CAS_AGENT_NAME").ok());
+        let session = std::env::var("CAS_FACTORY_SESSION").ok();
+        let service = self.clone();
+        // Backend replacement must also wait for the durable outcome, rather
+        // than dropping the watcher just after its registration completed.
+        let work = self.tool_work.permit();
+        tokio::spawn(async move {
+            let _work = work;
+            let joined = handle.await;
+            let summary = late_close_summary(&joined);
+            let outcome = if receipt.commit.get().is_some() { "COMMITTED" } else { "UNKNOWN" };
+            let result_status = if matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true)) { "ok" } else { "error" };
+            let recorded = tokio::task::spawn_blocking(move || {
+                let agents = service.inner.open_agent_store().map_err(|error| error.message.to_string())?;
+                let id = service.inner.agent_id.get().and_then(Option::as_deref)
+                    .or(session_id.as_deref());
+                let agent = id.and_then(|id| agents.get(id).ok());
+                let recipient = match agent {
+                    Some(agent) => crate::supervisor_notices::Recipient::agent(&agent),
+                    None => crate::supervisor_notices::Recipient {
+                        id: id.map(str::to_string).or_else(|| name.clone()).unwrap_or_else(|| "operator".into()),
+                        name: name.unwrap_or_else(|| "operator".into()),
+                        session,
+                    },
+                };
+                let detail = format!(
+                    "coordination action={} finished after its response. Mutation outcome: {outcome}. Continuation: {continuation_id}. Result: {summary}",
+                    receipt.action(),
+                );
+                crate::supervisor_notices::enqueue_with_context(
+                    &service.inner.cas_root, &recipient, "registration_outcome", &detail,
+                    &continuation_id, Some(serde_json::json!({
+                        "continuation_id": continuation_id, "action": receipt.action(),
+                        "session_id": session_id, "agent_id": recipient.id,
+                        "mutation_outcome": outcome, "result_status": result_status,
+                    })),
+                ).map_err(|error| error.to_string())
+            }).await;
+            if !matches!(&recorded, Ok(Ok(()))) {
+                warn!(?recorded, "MCP registration outcome could not be queued");
+            }
+        });
+    }
+
     fn record_post_commit_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
@@ -1460,6 +1544,9 @@ mod tests {
             assert_eq!(payload["context"]["continuation_id"], data["continuation_id"]);
             assert_eq!(payload["context"]["mutation_outcome"], "COMMITTED");
             assert_eq!(payload["context"]["session_id"], "late-harness");
+            let prompts = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+            assert_eq!(prompts.len(), 1);
+            assert!(crate::supervisor_notices::is_action_envelope(&prompts[0].prompt));
             assert_eq!(service.inner.open_agent_store().unwrap().list(None).unwrap().len(), 1);
         }
     }

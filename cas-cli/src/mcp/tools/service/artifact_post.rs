@@ -164,7 +164,7 @@ fn post_error(error: PostError) -> McpError {
     McpError {
         code,
         message: std::borrow::Cow::Owned(error.to_string()),
-        data: Some(json!({ "error_code": error.code, "file_id": error.file_id })),
+        data: Some(json!({ "error_code": error.code, "file_id": error.file_id, "retryable": error.retryable })),
     }
 }
 
@@ -225,6 +225,9 @@ mod tests {
         let data = mcp.data.unwrap();
         assert_eq!(data["error_code"], "file_integrity_mismatch");
         assert_eq!(data["file_id"], "F1");
+        assert_eq!(data["retryable"], false);
+        let unavailable = post_error(PostError::new("authority_unavailable", "preflight unavailable"));
+        assert_eq!(unavailable.data.unwrap()["retryable"], true);
         assert_eq!(
             post_error(PostError::new("artifact_not_found", "x")).code,
             ErrorCode::INVALID_PARAMS

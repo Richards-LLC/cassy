@@ -343,6 +343,21 @@ fn factory_write_under_harness_session_scratchpad_is_allowed() {
         allow_reason(&out).is_some(),
         "the harness-advertised per-session scratchpad must be sanctioned"
     );
+
+    // GH #1780 part 2: Bash stages notes by ensuring the scratchpad exists
+    // before redirecting into it. Judge the directory and its files alike.
+    set_role_env(&mut env, Some("supervisor"));
+    let scratchpad = std::path::Path::new(path).parent().unwrap().display();
+    for command in [
+        format!("cat > {path} <<'EOF'\nx\nEOF"),
+        format!("printf x | tee {path}"),
+        format!("mkdir -p {scratchpad} && echo x > {path}"),
+    ] {
+        let mut input = bash_input(&command);
+        input.session_id = "f54c4e08-831c-4cb6-ae05-5bd663ec1fed".into();
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+        assert!(allow_reason(&out).is_some(), "{command}: {out:?}");
+    }
 }
 
 #[test]
@@ -355,8 +370,12 @@ fn harness_session_scratchpad_accepts_macos_private_tmp_alias() {
         "f54c4e08-831c-4cb6-ae05-5bd663ec1fed"
     ));
     assert!(!is_harness_session_scratchpad(path, "another-session"));
-    assert!(!is_harness_session_scratchpad(
+    assert!(is_harness_session_scratchpad(
         std::path::Path::new("/private/tmp/claude-501/project/session/scratchpad"),
+        "session"
+    ));
+    assert!(!is_harness_session_scratchpad(
+        std::path::Path::new("/private/tmp/claude-501/project/session/scratchpad/../escape"),
         "session"
     ));
 }
@@ -371,6 +390,14 @@ fn factory_write_under_another_session_scratchpad_is_denied() {
     let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
     let reason = deny_reason(&out).expect("another session's scratchpad is bare /tmp");
     assert!(reason.contains(path), "{reason}");
+
+    set_role_env(&mut env, Some("supervisor"));
+    let scratchpad = std::path::Path::new(path).parent().unwrap().display();
+    for command in [format!("echo x > {path}"), format!("mkdir -p {scratchpad}")] {
+        let input = bash_input(&command);
+        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
+        assert!(deny_reason(&out).is_some(), "{command}: {out:?}");
+    }
 }
 
 #[test]

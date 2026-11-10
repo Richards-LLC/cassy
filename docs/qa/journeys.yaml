@@ -414,7 +414,7 @@ bug_families:
     invariants: [FACTORY-PEER-CAP-FEEDBACK]
   managed-thread-verified-file-replies:
     title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
-    tasks: [cas-4deb]
+    tasks: [cas-4deb, cas-0288]
     journeys: [FACTORY-SUPERVISE]
   leaderless-registry-holder-lifetime:
     title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
@@ -482,8 +482,8 @@ bug_families:
     journeys: [HUB-J17, HUB-J20, HUB-J25]
     invariants: [HUB-TASK-TITLE-FIRST]
   violet-transport-request-recovery:
-    title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
-    tasks: [cas-a0c5]
+    title: Violet post permission includes same-caller outcome lookup; reconnects reconcile the original request ID, while definitive rejections and unsubmitted posts retain their failures
+    tasks: [cas-a0c5, cas-c802]
     journeys: [FACTORY-SUPERVISE]
   supervisor-registration-rebind-and-late-commit:
     title: Same-pane live supervisors retain one identity on register and session_start; delayed registration writes report their final outcome to the caller
@@ -533,6 +533,15 @@ bug_families:
     tasks: [cas-57df]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
+  managed-mention-claim-failures:
+    title: Identity-only claims avoid full-thread size caps; a refused mentioned claim records one owner blocker and owner-routed wakes do not reach peers
+    tasks: [cas-0288]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-MANAGED-MENTION-CLAIMS]
+  requested-worker-reply-wake:
+    title: The first worker answer to an explicit supervisor ask wakes over the cap while instruction replies and repeated answers stay held
+    tasks: [cas-6c32]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -575,6 +584,10 @@ invariants:
     statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, observed takeover revokes the former owner's status-only authority even after claim expiry, confirmed terminal sources quiesce until task changes or explicit retry, and a shared five-second pass budget cannot delay mention admission.
     check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences plus source_reaction_deadline_defers_remaining_calls against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
     bug: {task: cas-c610}
+  FACTORY-MANAGED-MENTION-CLAIMS:
+    statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker that wakes that owner without claiming proactively.
+    check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay, exact owner destination and Blocker classification of the actual queued prompt through daemon wake admission; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
+    bug: {task: cas-0288}
   FACTORY-QUEUED-SOURCE-BOUNDARY:
     statement: A queued first-delivery successor records its fresh branch and target base atomically with start while retaining the former branch and refusing to replace pending, unknown or unrelated work.
     check: Run queued_blocked_successor_records_fresh_start_cas_57df through supervisor unblock/reassignment, predecessor close and queue/start; verify same-target and migrated-target adoption, old local and remote delivery tips, anchors/history/receipt, dirty and prepared work, missing refs and repository mismatch.
@@ -693,8 +706,8 @@ invariants:
     statement: Codex workers use factory.codex_home when config_dir is omitted; explicit account overrides win and spawn receipts identify the configured source.
     check: Run configured_worker_account_overrides_recommendation_cas_8c58 for local config persistence, direct and lane spawns, inherited and explicit accounts, other harnesses and cleared preferences; run recommended_spawn_accounts_preserve_explicit_and_override_inherited for unconfigured recommendation behavior. Walk actual worker startup on the batch candidate.
   FACTORY-FINDING-PRIORITY:
-    statement: Reproduced primary factory and CLI findings retain severity times main reach priority; correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
-    check: Run independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
+    statement: Reproduced primary factory and CLI findings retain severity times main reach priority; conflicting explicit priority updates return finding_priority_derived before any fields save. Correcting axes replaces stale values and clearing labels preserves finding provenance with theoretical reach.
+    check: Run finding_priority_stays_derived_and_the_reply_says_why_gh1636 for typed atomic refusal and independent_qa::factory_main_findings_retain_derived_priority_cas_7129 and finding_label_corrections_replace_axes_without_priority_override_cas_7129 through MCP create/update; read stored priority and canonical axes. The gabber replay keeps theoretical findings in backlog without a manual override.
   HUB-J13-COMPATIBLE-CLAUDE:
     statement: Commander and factory launches prefer a verified native Claude over stale PATH clients, or refuse with an actionable version error. Hub readiness keeps missing, outdated and unverifiable clients visible with their own repair action.
     check: Run pty::tests::claude_spawn_prefers_native_and_refuses_stale_path_cas_d8e0 and hub_clean_home_test::hub_claude_readiness_keeps_binary_repairs_visible_cas_d8e0 with fixture-owned HOME and CAS_TEST_HUB_PATH; verify native selection, newest-version fallback, named binary repairs, doctor missing-client classification and the profile envelope.

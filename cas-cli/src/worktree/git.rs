@@ -2049,6 +2049,7 @@ impl GitOperations {
 
     /// Checkout a branch in the main repo
     pub fn checkout(&self, branch: &str) -> Result<()> {
+        self.clear_clean_codemap_skip_worktree(&self.repo_root)?;
         let output = Command::new("git")
             .args(["checkout", branch])
             .current_dir(&self.repo_root)

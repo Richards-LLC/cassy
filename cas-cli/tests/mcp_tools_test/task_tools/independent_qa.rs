@@ -861,7 +861,6 @@ async fn finding_label_corrections_replace_axes_without_priority_override_cas_71
     ] {
         let result = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "update", "id": id, "labels": labels,
-            "priority": if labels.contains("journey:") { None } else { Some(0) },
         })).unwrap())).await.unwrap();
         let task = tasks.get(id).unwrap();
         assert_eq!(result.structured_content.as_ref().and_then(|receipt| receipt.get("id")), Some(&serde_json::json!(id)));

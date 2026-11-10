@@ -184,7 +184,6 @@ fn validate_receipt(
         || task.is_terminal()
         || task.deliverables.factory_branch_anchor.as_deref() != Some(receipt.source_sha.as_str())
         || task.deliverables.parked_branch.as_deref() != Some(receipt.source_branch.as_str())
-        || portable_plan_digest(root, task).map_err(ReceiptFailure::retry)? != receipt.plan_digest
         || task
             .deliverables
             .work_target
@@ -385,6 +384,14 @@ fn import_receipt(
     let repo = root
         .parent()
         .ok_or_else(|| ReceiptFailure::retry("repository root missing"))?;
+    // Bind the current plan when admitting new authority. After admission,
+    // release bookkeeping can change it without undoing the published review,
+    // just as for a local promotion. Close still rechecks the task and Git proof.
+    if portable_plan_digest(root, &task).map_err(ReceiptFailure::retry)? != receipt.plan_digest {
+        return Err(ReceiptFailure::reject(
+            "peer approval does not match the current task and delivery",
+        ));
+    }
     let mut proof = validate_receipt(root, &task, repo, &receipt)?;
     proof.peer_premerge = Some(PeerPremergeAttestation {
         receipt: receipt.clone(),

@@ -1,0 +1,5 @@
+title: Published peer approval survives later plan bookkeeping while retaining task and Git identity
+found: '2026-11-09'
+tasks: [cas-9839c]
+invariants: []
+journeys: [FACTORY-MERGE, FACTORY-CLOSE]

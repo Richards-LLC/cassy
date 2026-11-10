@@ -807,14 +807,12 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
         ids.sort();
         ids
     };
-    // A pin is an assignment boundary, including when it has no ready work
-    // or no longer resolves. Only an explicit no-focus state offers the
-    // existing project-wide ready queue (cas-0c98 / GH #1302).
+    // Focus is the assignment boundary. An idle worker does not authorize
+    // the historical project backlog; explicit worker queues advance separately.
     let task_ids = match focused_epic_id {
         Some(epic_id) if focused_open_epic == Some(epic_id) =>
             ready_ids(&|task| task.epic.as_deref() == Some(epic_id)),
-        Some(_) => Vec::new(),
-        None => ready_ids(&|_| true),
+        _ => Vec::new(),
     };
     if task_ids.is_empty() {
         return None;

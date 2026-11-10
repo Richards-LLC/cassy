@@ -1457,6 +1457,28 @@ impl GitOperations {
         notes.push(note);
     }
 
+    /// Run the real merge's regeneration step in an isolated checkout before
+    /// sealing a review candidate. A stale or uncommitted result cannot be reviewed.
+    pub(crate) fn regenerated_candidate_tree(
+        &self,
+        merged_head: &str,
+        pre_merge_head: &str,
+    ) -> Result<String> {
+        let worktree = self.add_temp_worktree(merged_head)?;
+        let operations = Self::new(worktree.path().to_path_buf());
+        operations.regenerate_generated_artifacts(worktree.path(), pre_merge_head);
+        let failures = operations.take_stale_checkout_notes();
+        if !failures.is_empty() {
+            return Err(GitError::CommandFailed(failures.join("\n")));
+        }
+        if operations.has_uncommitted_changes(worktree.path())? {
+            return Err(GitError::CommandFailed(
+                "candidate regeneration left uncommitted output".into(),
+            ));
+        }
+        operations.ref_sha("HEAD^{tree}")
+    }
+
     /// Paths a merge of `source` into `target` would actually touch
     /// (cas-4702 / GH #73).
     ///

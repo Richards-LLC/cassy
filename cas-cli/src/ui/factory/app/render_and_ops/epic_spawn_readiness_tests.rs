@@ -766,7 +766,11 @@ fn cas_bfa1_spawn_network_observation_is_reused() {
                         entry["event"] == "start"
                             && args.get(1).and_then(|value| value.as_str()) == Some(command)
                             && branch.is_none_or(|branch| {
-                                args.iter().any(|value| value.as_str() == Some(branch))
+                                // cas-307e fetches name an explicit tracking refspec.
+                                let refspec = format!("+refs/heads/{branch}:");
+                                args.iter().filter_map(|value| value.as_str()).any(|value| {
+                                    value == branch || value.starts_with(&refspec)
+                                })
                             })
                     })
                     .count()

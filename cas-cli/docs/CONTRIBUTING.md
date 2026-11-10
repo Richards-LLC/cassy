@@ -313,6 +313,8 @@ cross-session and suspended waits. Supervisor-owned cross-session event watches
 retain their completion semantics. A supervisor-stalled prompt requires the
 configured interval of observed actionable idle time, readable worker holds,
 current open tasks, and the existing pinned-epic assignment boundary.
+With no focused epic it does not propose the project's open backlog. Explicit
+worker queues continue independently; idle workers do not authorize new scope.
 
 Authenticated messages directed to a supervisor wake its idle pane, including
 peer field reports with no `kind`. The first message opens a fixed burst window

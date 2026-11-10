@@ -1663,7 +1663,10 @@ export class HubConnectionSupervisor {
         void this.handleMachineMessage(event.data, frameFence).catch(error => {
           if (!this.desired || this.machineSocket !== socket) return;
           if (error instanceof AuthenticationError) this.blockAuthentication(error.kind, error.message);
-          else this.connectionLostNow(error instanceof Error ? error.message : "machine event failed");
+          // cas-327d: everything else is the page failing on one frame, not
+          // the transport. Abandoning the socket made the replayed frame
+          // throw again on every reconnect. Report it and keep the socket.
+          else console.error("Commander could not handle a machine frame; the connection stays up", error);
         });
       };
       socket.onclose = (event) => {

@@ -1954,11 +1954,23 @@ mod tests {
             None,
         );
         let arguments = serde_json::json!({"action":"close", "id":"cas-late"});
-        let refusal_payload = "⚠️ MERGE REQUIRED\n\ntask close rejected: factory/x has 1 commit(s) from this task not on staging.";
+        let gates = [
+            ("G3", "Fix docs/qa/journeys.yaml"),
+            ("G5", "Fix .claude/CODEMAP.md"),
+            ("G6", "Fix docs/PRODUCT_OVERVIEW.md"),
+        ];
+        let refusal_payload = format!(
+            "PARK REFUSED: more than one close gate failed.\n\n{}",
+            gates.map(|(code, action)| format!(
+                "⚠️ UPKEEP {code}\n\n{}\n\n{action} in this branch. Then retry `task action=close id=cas-late`.",
+                "é".repeat(400),
+            )).join("\n\n"),
+        );
+        let supplied = refusal_payload.clone();
         let close = async move {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             Ok(rmcp::model::CallToolResult::error(vec![
-                rmcp::model::Content::text(refusal_payload),
+                rmcp::model::Content::text(supplied),
             ]))
         };
         let error = service
@@ -1986,9 +1998,14 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         };
         assert_eq!(tasks.get("cas-late").unwrap().status, crate::types::TaskStatus::Open);
-        // The whole refusal body survives, whitespace-joined, not only its heading.
-        let body = refusal_payload.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(notes.contains(&body), "{notes}");
+        for (code, action) in gates {
+            assert!(notes.lines().any(|line| line.contains(code) && line.contains(action)), "{notes}");
+        }
+        assert!(notes.len() < refusal_payload.len(), "{notes}");
+        let detail = notes.split_whitespace()
+            .find(|part| part.ends_with(".txt") && part.contains("/cas-late/receipts/"))
+            .expect("a task-scoped receipt path");
+        assert_eq!(std::fs::read_to_string(detail).unwrap(), refusal_payload);
         assert_eq!(notes.matches("CLOSE_OUTCOME").count(), 1, "{notes}");
     }
 

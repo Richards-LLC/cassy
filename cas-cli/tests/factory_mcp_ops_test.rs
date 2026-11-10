@@ -1553,11 +1553,17 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
     let env = FactoryTestEnv::with_server_supervisor();
     std::fs::write(env.cas_root.join("config.toml"), "[project]\ncanonical_id = \"cas-a3c3-fixture\"\n").unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
     let worker = "release-gap-worker";
     let worker_path = init_sync_repo(&env, worker);
     let repo = env.cas_root.parent().unwrap();
     let epic_tip = git_stdout(repo, &["rev-parse", "epic/requested"]);
     add_epic_with_id(&env, "cas-release-gap", TaskStatus::Open, "epic/requested");
+    let mut epic = env.task_store().get("cas-release-gap").unwrap();
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "epic/requested".into(),
+    });
+    env.task_store().update(&epic).unwrap();
     env.register_worker_with_metadata(worker, HashMap::from([
         ("clone_path".into(), worker_path.display().to_string()),
     ]));

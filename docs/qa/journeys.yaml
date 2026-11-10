@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  task-start-preserves-supervisor-notes:
+    title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
+    tasks: [cas-3045]
+    journeys: [FACTORY-SPAWN, HUB-J26]
   parallel-journey-registry-merge:
     title: Parallel inline QA families and updated dates merge while competing family and policy edits remain conflicts
     tasks: [cas-ded57]

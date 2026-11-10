@@ -736,6 +736,10 @@ pub trait TaskStore: Send + Sync {
     /// and the caller's `task.updated_at` is ignored on this path. The stamp
     /// that was actually persisted is returned so callers never have to guess
     /// it with a second clock read.
+    /// Unconditional local writes with a different clock preserve stored note
+    /// blocks and append missing incoming blocks. Read the current row before
+    /// intentionally replacing notes; guarded and replicated writes use their
+    /// existing compare-and-swap contract.
     ///
     /// cas-ec74: deriving a lifecycle-notification occurrence from
     /// `task.updated_at` after calling `update()` compares two different clock

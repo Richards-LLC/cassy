@@ -231,6 +231,19 @@ Paths, shell commands and arbitrary filesystem reads are not accepted.
 
 ## Coordination messages and reminders
 
+An authenticated worker sends `coordination action=message target=supervisor
+kind=respawn task_id=<task> summary="Context checkpoint" message="<return contract>"`
+after committing/pushing and writing `HANDOFF.md` in its task artifact directory.
+This typed status queues the existing `recycle_worker` path with the worker's
+recorded recipe and task bindings. The director processes the recycle; its
+supervisor copy is a quiet receipt. Requests are limited to one per worker and
+factory session every ten minutes, persisted across replacement and daemon
+restart. Recycle's existing unsaved-work and recipe refusals still apply.
+The replacement's resume brief links its saved `HANDOFF.md` when present.
+Ordinary `kind=status` messages, including prose saying `need: respawn`, retain
+their action-wake behavior. This authenticated worker contract is MCP-only;
+the external `cas factory message --kind` CLI remains for Commander turns.
+
 Supervisor follow-ups about a worker's current InProgress or Blocked task remain
 conversation, including `kind=answer` and messages with an explicit `task_id`.
 They do not assign work again or replace the recorded delivery start. Ownership

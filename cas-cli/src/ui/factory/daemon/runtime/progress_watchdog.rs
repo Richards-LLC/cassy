@@ -2,7 +2,7 @@
 //! with locally actionable work and no task, lane or message change for 45 minutes wakes
 //! its supervisor once with what is waiting on whom; still nothing after
 //! another 45, it pages the operator once. Heartbeats and liveness never
-//! count, nor do the daemon's own rows (relays, fired reminders).
+//! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
 //! lift, not on anyone here: it is reported once per freeze, never chased.
 
@@ -111,6 +111,16 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     }).collect();
     let latest = crate::store::open_prompt_queue_store(cas_dir).ok()?.latest_agent_message_id(&names, session).ok()?;
     fingerprint.push(format!("message {}", latest.unwrap_or(0)));
+    // Long non-Rust gates can advance only their child logs. Reuse status's
+    // worker/session/PID fences; unchanged counters never reset the episode.
+    for agent in agents.iter().filter(|agent| agent.role == AgentRole::Worker
+        && tasks.iter().any(|task| task.status == TaskStatus::InProgress
+            && task.assignee.as_ref().is_some_and(|who| who == &agent.id || who == &agent.name)))
+    {
+        if let Some(at) = crate::mcp::tools::service::worker_liveness::child_progress(agent, now) {
+            fingerprint.push(format!("child {} {}", agent.id, at.to_rfc3339()));
+        }
+    }
     // Worker lane tips; a repo git cannot read contributes nothing.
     // cas-e239: a release commit pushed to a train is progress too.
     let mut lanes: Vec<String> = agents.iter().filter(|agent| agent.role == AgentRole::Worker)

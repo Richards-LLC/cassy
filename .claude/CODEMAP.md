@@ -65,9 +65,9 @@
 - `cas-cli/src/ui/factory/daemon/runtime/gui_client.rs`, `crates/cas-pty/src/input_queue.rs` - attach input draining and PTY byte diagnostics.
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session/`, `cas-cli/src/ui/factory/server_registry.rs` - attach guards, socket cleanup and owned-server checks.
 - `cas-cli/src/ui/factory/supervisor_commands.rs`, `cas-cli/src/ui/factory/daemon/runtime/supervisor_commands.rs` - allowlists, Finish queues and native execution/reconnect evidence.
-- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs` - progress watchdog (frozen-train deliveries reported once) and wedged-loop monitoring.
+- `cas-cli/src/ui/factory/daemon/runtime/progress_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs` - progress watchdog (owned child CPU/output advancement counts; frozen-train deliveries reported once) and wedged-loop monitoring.
 - `cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs`, `cas-cli/src/mcp/tools/service/factory_remind.rs` - reminder deadlines, queue admission and supervisor wake tests.
-- `cas-cli/src/cli/factory/wedged.rs`, `crates/cas-store/src/spawn_queue_store.rs` - worker diagnostics and retained failed-boot records by worker or spawn request.
+- `cas-cli/src/cli/factory/wedged.rs`, `crates/cas-store/src/spawn_queue_store.rs` - worker diagnostics, fingerprinted descendant CPU/output samples and retained failed-boot records by worker or spawn request.
 - `cas-cli/src/ui/factory/daemon/runtime/commander_mirror.rs`, `cas-cli/src/ui/factory/daemon/runtime/quality_turns.rs` - transcript mirrors, redaction and typed turn/cost accounting.
 - `crates/cas-pty/src/pty.rs`, `crates/cas-pty/src/claude_binary.rs` - startup briefs, harness argv, native Claude selection and version probes.
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - binding and ordered backlogs, including pre-registration assignment admission.
@@ -90,7 +90,7 @@
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` - exact-tip test receipts and changelog validation, including task-owned fragment provenance across returned-delivery merge resolutions.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs` - exact-tip test receipts, committed repo-root handoff exclusion and changelog validation, including task-owned fragment provenance across returned-delivery merge resolutions.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - reviewed landing, recorded train merges carried on release second parents, typed filesystem refusals and queue-proof validation for canonical and legacy CI.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs` - authenticated supervisor import grants and linked-checkout WIP identity; empty checkpoints require explicit task attribution.
 - `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
@@ -100,7 +100,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs` - account-aware automatic verifier launch, sealed child authority, exact-child crash recovery, late verdict submission and separate attempt diagnostics.
 - `cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs`, `cas-cli/src/mcp/tools/core/agent_coordination/agent_management.rs`, `cas-cli/src/mcp/server/mod.rs` - connection-bound identity and child registration admission; native Codex reviewer guidance in `cas-cli/src/prompt_revalidation.rs`.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs`, `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - peer approvals, durable portable proof boundaries and bounded host-path span sanitization preserving verifier questions.
-- `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - guarded delivery publication, unpublished-merge restoration and exact-source protected default-branch PR routing.
+- `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - single/queued candidate conflict recovery, guarded delivery publication, unpublished-merge restoration and exact-source protected default-branch PR routing.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` - ordered train merges, explicit MCP freeze confirmation and automatic cut admission.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` - audited branch/delivery recovery and empty retargeted-lane replacement.
 - `cas-cli/src/mcp/tools/core/task/block_hold.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` - task-scoped blocker answers, supervisor decision receipts and fresh-question deadlines.
@@ -123,7 +123,7 @@
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.
-- `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing and durable operator input.
+- `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing, durable operator input and explicit hub-stop intent respected by updates.
 - `cas-cli/src/cli/hub_preview.rs`, `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs` - time-boxed candidate previews and authorized media.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversations and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts`, `hub-web/src/status-refresh.ts` - authenticated streams, history read deadlines and ordered publication.

@@ -5008,19 +5008,19 @@ impl CasCore {
             });
         }
 
-        // A queued content conflict must return its worker before candidate
-        // preparation can fail on that same conflict and strand the queue.
-        if train_queue.is_some() {
+        // Return conflicting deliveries before candidate preparation can hide
+        // merge-tree's exit 1 behind a verification refusal (cas-225b).
+        if train_queue.is_some() || scoped_task.is_some() {
             let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
                 Ok(None)
             } else { manager.git().fetch_merge_target(&worktree.parent_branch) }
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
             let local = manager.git().resolve_commit(&worktree.parent_branch)
-                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train target missing"))?;
+                .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "merge target missing"))?;
             let target_tip = match remote {
                 Some(remote) if manager.git().is_ancestor(&local, &remote) => remote,
                 Some(remote) if !manager.git().is_ancestor(&remote, &local) => {
-                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "train target diverged from origin; reconcile before resuming train_merge"));
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target diverged from origin; reconcile before retrying the merge"));
                 }
                 _ => local,
             };
@@ -5031,7 +5031,11 @@ impl CasCore {
                 let recovery = self.return_conflicted_parked_delivery(
                     scoped_task.as_deref(), &error, &worktree, Some(&target_tip),
                 );
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("{error}{recovery}")));
+                let mut error = worktree_merge_mcp_error(
+                    error, &worktree.branch, &worktree.parent_branch,
+                );
+                error.message = Cow::Owned(format!("{}{recovery}", error.message));
+                return Err(error);
             }
         }
 

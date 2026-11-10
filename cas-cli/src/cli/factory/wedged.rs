@@ -2057,6 +2057,104 @@ fn process_cpu_sample(pid: u32) -> Option<(String, u64)> {
     Some((fingerprint, utime.saturating_add(stime)))
 }
 
+/// Per-descendant CPU and output counters. Counter changes prove work even
+/// when a quiet harness is waiting on a non-Rust child that only writes logs.
+/// Never include the harness's own timers or persistent service subtrees.
+/// Each counter is fenced by the kernel's parent and start-time identities.
+pub(crate) fn worker_child_samples(root: u32) -> Option<Vec<(u32, u64, u64, u64)>> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let root_start = crate::mcp::daemon::read_pid_starttime(root)?;
+        let mut queue = VecDeque::from([(root, root_start)]);
+        let mut visited = HashSet::from([root]);
+        let mut samples = Vec::new();
+        while let Some((parent, parent_start)) = queue.pop_front() {
+            #[cfg(target_os = "linux")]
+            let children = descendant_pids(parent);
+            #[cfg(target_os = "macos")]
+            let children = macos_descendant_pids(parent);
+            let Some(children) = children else { continue };
+            for pid in children {
+                if visited.len() >= 1024 { return None; }
+                if !visited.insert(pid) { continue; }
+                let Some(start) = crate::mcp::daemon::read_pid_starttime(pid) else { continue };
+                let Some(raw) = process_commandline(pid).filter(|raw| !raw.is_empty()) else { continue };
+                let command = raw.split(|byte| *byte == 0).next()
+                    .and_then(|arg| std::str::from_utf8(arg).ok())
+                    .and_then(|arg| Path::new(arg).file_name()?.to_str()).unwrap_or_default();
+                let sidecar = is_known_sidecar_commandline(command, &raw);
+                // Code-mode hosts launch real tool children. The host itself
+                // cannot prove work; daemon/MCP service subtrees cannot either.
+                if sidecar && command != "codex-code-mode-host" { continue; }
+                if process_parent(pid) != Some(parent)
+                    || crate::mcp::daemon::read_pid_starttime(parent) != Some(parent_start) { continue; }
+                queue.push_back((pid, start));
+                if sidecar { continue; }
+                if let Some((cpu, written)) = child_counters(pid)
+                    && crate::mcp::daemon::read_pid_starttime(pid) == Some(start)
+                    && process_parent(pid) == Some(parent)
+                {
+                    samples.push((pid, start, cpu, written));
+                }
+            }
+        }
+        (crate::mcp::daemon::read_pid_starttime(root) == Some(root_start)).then_some(samples)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = root; None }
+}
+
+pub(crate) fn process_commandline(pid: u32) -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    { std::fs::read(format!("/proc/{pid}/cmdline")).ok() }
+    #[cfg(target_os = "macos")]
+    { macos_process_cmdline(pid) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = pid; None }
+}
+
+pub(crate) fn process_parent(pid: u32) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    { parent_pid_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?) }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>();
+        // SAFETY: libproc writes at most the allocated structure and keeps no pointer.
+        let read = unsafe { libc::proc_pidinfo(pid.try_into().ok()?, libc::PROC_PIDTBSDINFO,
+            0, info.as_mut_ptr().cast(), size as libc::c_int) };
+        if read != size as libc::c_int { return None; }
+        // SAFETY: exact-size success initializes all fields.
+        Some(unsafe { info.assume_init() }.pbi_ppid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = pid; None }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn child_counters(pid: u32) -> Option<(u64, u64)> {
+    #[cfg(target_os = "linux")]
+    {
+        let cpu = process_cpu_sample(pid)?.1;
+        // wchar includes buffered log and pipe writes, unlike write_bytes
+        // which counts only physical disk IO. Unreadable IO is unknown.
+        let written = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?
+            .lines().find_map(|line| line.strip_prefix("wchar:")?.trim().parse().ok())?;
+        Some((cpu, written))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage_info_v2>::uninit();
+        // SAFETY: RUSAGE_INFO_V2 initializes exactly this allocated layout.
+        let result = unsafe { libc::proc_pid_rusage(pid.try_into().ok()?, libc::RUSAGE_INFO_V2,
+            usage.as_mut_ptr().cast()) };
+        if result != 0 { return None; }
+        // SAFETY: libproc returned success for the complete v2 structure.
+        let usage = unsafe { usage.assume_init() };
+        Some((usage.ri_user_time.saturating_add(usage.ri_system_time), usage.ri_diskio_byteswritten))
+    }
+}
+
 /// True when `pid` consumed CPU between two short samples — the mid-
 /// inference signal for codex workers whose rollout path is unresolved
 /// (cas-c655). 50 ms ceiling keeps `is-wedged` snappy.

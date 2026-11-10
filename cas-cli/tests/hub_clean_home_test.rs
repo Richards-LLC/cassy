@@ -413,7 +413,7 @@ fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
 
 #[cfg(unix)]
 #[test]
-fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful() {
+fn post_swap_preserves_operator_stop_but_recovers_a_crashed_hub() {
     let home = private_home();
     let path = system_path();
     let start = cas_command(home.path(), &path)
@@ -461,6 +461,26 @@ fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful(
         String::from_utf8_lossy(&update.stderr)
     );
     let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
+    assert_eq!(receipt["hub_restart"]["prior_state"], "operator_stopped", "{receipt}");
+    assert_eq!(receipt["hub_restart"]["action"], "skipped", "{receipt}");
+    assert!(!home.path().join(".cas/hub/process.json").exists());
+
+    // An explicit start reverses the stop intent. An abrupt death after it
+    // must still be recovered by the same update entrypoint used by the timer.
+    let start = cas_command(home.path(), &path)
+        .args(["--json", "hub", "start", "--port", "0", "--no-tailscale-serve"])
+        .output().unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let crashed = paths.read_process_record().unwrap();
+    assert_eq!(unsafe { libc::kill(crashed.pid as i32, libc::SIGKILL) }, 0);
+    assert!(hub_fixture::wait_for_hub_exit(crashed.pid, CHILD_PROGRESS_TIMEOUT));
+    let update = cas_command(home.path(), &path)
+        .args(["--json", "update", "--post-swap", "--from", "old",
+            "--refresh-receipt", receipt_path.to_str().unwrap()])
+        .output().unwrap();
+    assert!(update.status.success(), "{}", String::from_utf8_lossy(&update.stderr));
+    let receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
     let hub = &receipt["hub_restart"];
     assert_eq!(hub["action"], "started", "{receipt}");
     assert_eq!(hub["verified"], true, "{receipt}");
@@ -468,10 +488,8 @@ fn post_swap_starts_known_stopped_hub_and_serve_failure_keeps_update_successful(
     assert_eq!(hub["transport_verified"], false, "{receipt}");
     assert_eq!(hub["recovery_attempted"], false, "{receipt}");
     assert!(hub["failure"].is_null(), "{receipt}");
-    let warning = hub["transport_warning"].as_str().unwrap();
-
-    assert!(hub["remedy"].as_str().unwrap().contains("automatically"),
-        "Auto update must describe background recovery: {receipt}");
+    assert!(hub["transport_warning"].is_string(), "{receipt}");
+    assert_ne!(paths.read_process_record().unwrap().pid, crashed.pid);
 }
 
 #[cfg(target_os = "linux")]
@@ -567,15 +585,8 @@ esac
         200,
         "the allocated listener must serve the hub"
     );
-    let stop = cas_command(home.path(), bin.as_os_str())
-        .args(["--json", "hub", "stop"])
-        .output()
-        .unwrap();
-    assert!(
-        stop.status.success(),
-        "{}",
-        String::from_utf8_lossy(&stop.stderr)
-    );
+    // A service that exits without a CLI stop remains eligible for recovery.
+    hub_fixture::cleanup_detached_hub_test_home(home.path());
     let failed_start = cas_command(home.path(), bin.as_os_str())
         .env("CAS_HUB_SYSTEMCTL", &manager)
         .env("TEST_START_FAIL", "1")
@@ -1699,6 +1710,23 @@ fn clean_home_process_start_health_status_stop_needs_no_init() {
     assert_eq!(stop["tailscale_serve_removed"], false);
     assert!(home.path().join(".cas/hub/machine-id").exists());
     assert!(home.path().join(".cas/hub/auth.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_restart_bind_keeps_the_running_hub_serving() {
+    let home = private_home();
+    let path = system_path();
+    let record = start_hub(home.path(), &path, false);
+
+    let restart = cas_command(home.path(), &path)
+        .args(["--json", "hub", "restart", "--bind", "0.0.0.0"])
+        .output()
+        .expect("restart with a forbidden plaintext bind");
+    assert!(!restart.status.success());
+
+    // This checks real health and the original PID before cleaning up the hub.
+    assert_health_status_and_stop(home.path(), &path, &record);
 }
 
 #[cfg(unix)]

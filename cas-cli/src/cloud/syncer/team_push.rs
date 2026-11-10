@@ -174,6 +174,16 @@ impl CloudSyncer {
         // published under it, whatever local write enqueued it.
         self.drop_unauthored_queued_pushes()?;
 
+        // A project-level link authorizes recovery; inheriting a user default
+        // does not. Reuse the explicit migration's sharing/origin checks and
+        // preserve deletes, foreign rows and existing team intents.
+        let explicitly_linked = self.cloud_config.team_id.as_deref() == Some(team_id);
+        if explicitly_linked {
+            let project_id = self.personal_push_project_id()?;
+            self.queue.neutralize_team_only_personal(team_id, &project_id)?;
+            self.queue.migrate_personal_to_team(team_id, &project_id, true)?;
+        }
+
         // Fetch (but do NOT delete) pending team items so we can
         // mark_failed / mark_synced per item after the HTTP call completes.
         // Using drain_by_team here would delete items up-front and then
@@ -185,10 +195,6 @@ impl CloudSyncer {
             .pending_for_team(team_id, usize::MAX, self.config.max_retries)?;
 
         if queued.is_empty() {
-            if self.cloud_config.team_only {
-                self.queue
-                    .neutralize_team_only_personal(team_id, &self.personal_push_project_id()?)?;
-            }
             result.duration_ms = start.elapsed().as_millis() as u64;
             return Ok(result);
         }
@@ -338,7 +344,7 @@ impl CloudSyncer {
 
         // Retire personal copies only after durable, itemized delivery proof.
         // Both explicit CLI sync and background sync drain through this path.
-        if self.cloud_config.team_only {
+        if explicitly_linked {
             self.queue
                 .neutralize_team_only_personal(team_id, &project_id)?;
         }

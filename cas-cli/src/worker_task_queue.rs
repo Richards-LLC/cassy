@@ -251,6 +251,21 @@ impl CasCore {
                 source_notices.push_str(&admission.notice);
                 source_admissions.push(admission);
             }
+            // Open work without a live lease is pending, even when an old
+            // execution left it as the durable cursor (cas-6184).
+            if let Some(id) = queue.current_task.as_deref()
+                && tasks.get(id).map_err(error)?.status == TaskStatus::Open
+                && self.open_agent_store()?.get_lease(id).map_err(error)?
+                    .is_none_or(|lease| lease.status != cas_types::LeaseStatus::Active
+                        || lease.expires_at <= chrono::Utc::now())
+            {
+                queue.current_task = None;
+                queue.current_started = false;
+                queue.starting = false;
+                queue.dispatch_from = None;
+                queue.context_reset_from = None;
+                queue.context_reset_request = None;
+            }
             if queue.current_task.is_none() {
                 queue.current_task = tasks
                     .list(Some(TaskStatus::InProgress))
@@ -356,6 +371,18 @@ impl CasCore {
         id: &str,
         worker: &str,
     ) -> Result<Option<String>, McpError> {
+        let Some((registration, lock)) = self.lock_assignment_queue(worker).await? else {
+            return Ok(None);
+        };
+        self.drop_from_locked_queue(id, registration, lock, "released").await
+    }
+
+    /// Hold the queue across assignment persistence and lease cleanup so repair
+    /// cannot reclaim the old cursor between unassignment and removal.
+    pub(crate) async fn lock_assignment_queue(
+        &self,
+        worker: &str,
+    ) -> Result<Option<(Agent, File)>, McpError> {
         let Some(registration) = self
             .open_agent_store()?
             .list(None)
@@ -366,13 +393,30 @@ impl CasCore {
         else {
             return Ok(None);
         };
-        let Some(session) = registration.factory_session.clone() else {
+        if registration.factory_session.is_none() {
             return Ok(None);
-        };
-        let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
+        }
         let lock = wait_for_worker_lock(&self.cas_root, &registration, "queue").await?;
-        let mut queue = queues.get(&session, &registration.name).map_err(error)?;
+        Ok(Some((registration, lock)))
+    }
+
+    pub(crate) async fn drop_from_locked_queue(
+        &self,
+        id: &str,
+        registration: Agent,
+        lock: File,
+        reason: &str,
+    ) -> Result<Option<String>, McpError> {
+        let session = registration.factory_session.as_deref().expect("validated session");
+        let queues = SqliteWorkerTaskQueueStore::open(&self.cas_root).map_err(error)?;
+        let mut queue = queues.get(session, &registration.name).map_err(error)?;
         let current = queue.current_task.as_deref() == Some(id);
+        if current && self.open_agent_store()?.get_lease(id).map_err(error)?
+            .is_some_and(|lease| lease.status == cas_types::LeaseStatus::Active
+                && lease.expires_at > chrono::Utc::now())
+        {
+            return Ok(None);
+        }
         if queue.revision == 0 || (!current && !queue.pending.iter().any(|p| p == id)) {
             return Ok(None);
         }
@@ -382,8 +426,10 @@ impl CasCore {
             queue.current_started = false;
             queue.starting = false;
             queue.dispatch_from = None;
+            queue.context_reset_from = None;
+            queue.context_reset_request = None;
         }
-        let note = format!("Task queue dropped {id}: released");
+        let note = format!("Task queue dropped {id}: {reason}");
         queue.notes.push(note.clone());
         queues.save(&session, &registration.name, &mut queue).map_err(error)?;
         drop(lock);

@@ -2432,6 +2432,15 @@ child read the bytes. Older payloads decode with zero counts. A one-shot
 attach sender may close immediately after sending: outbound write failure
 must leave its inbound frames available for the daemon's input phase to drain.
 
+## Explicit hub stops during updates
+
+`cas hub stop` records stop intent in `~/.cas/hub/operator-stopped` before
+stopping the hub. `cas update`, including the update invoked by
+`scripts/install-on-publish.sh`, leaves that hub stopped. An explicit
+`cas hub start`, `cas hub restart` or non-dry-run `cas hub service install`
+clears the intent. Foreground service launches and crash recovery do not clear it.
+A hub that crashes without an explicit stop remains eligible for update recovery.
+
 ## Build, assembly and CI policy
 
 While a release train is open in the target repository, `worktree_merge` refuses
@@ -2467,6 +2476,10 @@ that its follow-up, release publication, or installation on another host complet
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.
 
 ### Commands
+
+`cas hub restart` validates its plaintext bind address before restarting a
+supervised service or stopping a detached hub. A refused `--bind` keeps the
+existing hub's PID and listener available.
 
 ```bash
 # Supervisor/operator only — factory workers never run these

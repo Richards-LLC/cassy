@@ -2341,8 +2341,60 @@ pub(crate) fn team_only_held_personal_rows(cas_root: &Path) -> Option<usize> {
     queue.migratable_personal_row_count(&team, &project).ok()
 }
 
+/// Local queue facts, independent of credentials and migration eligibility.
+/// An inherited team is not an explicit project link; inspection never links it.
+#[derive(serde::Serialize)]
+pub(crate) struct UnlinkedPersonalBacklog {
+    pub count: usize,
+    pub oldest_created_at: Option<String>,
+    pub oldest_age_secs: Option<i64>,
+    pub next_step: &'static str,
+}
+
+impl UnlinkedPersonalBacklog {
+    pub(crate) fn notice(&self) -> String {
+        let age = self.oldest_age_secs.map_or_else(
+            || "unknown".to_string(),
+            |secs| format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+        );
+        format!(
+            "{} row(s) in personal backlog awaiting team link; oldest age {age}. {}",
+            self.count, self.next_step
+        )
+    }
+}
+
+pub(crate) fn unlinked_personal_backlog(cas_root: &Path) -> Option<UnlinkedPersonalBacklog> {
+    let config = CloudConfig::load_from_cas_dir(cas_root).ok()?;
+    if config.team_id.is_some() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        cas_root.join("cas.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).ok()?;
+    let (count, oldest_created_at): (i64, Option<String>) = conn.query_row(
+        "SELECT COUNT(*), MIN(created_at) FROM sync_queue WHERE team_id = ''",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).ok()?;
+    if count == 0 {
+        return None;
+    }
+    let oldest_age_secs = oldest_created_at.as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|created| (chrono::Utc::now() - created.with_timezone(&chrono::Utc)).num_seconds().max(0));
+    Some(UnlinkedPersonalBacklog {
+        count: count as usize,
+        oldest_created_at,
+        oldest_age_secs,
+        next_step: "For team delivery, run `cas cloud team set <team>`, then review `cas cloud queue migrate-to-team`. Apply only after explicitly declaring the project team-only with `cas config set cloud.team_only true`: `cas cloud queue migrate-to-team --apply`, then `cas cloud sync`.",
+    })
+}
+
 fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
     let config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
+    let personal_backlog = unlinked_personal_backlog(cas_root);
     let held = config
         .team_only
         .then(|| team_only_held_personal_rows(cas_root))
@@ -2363,6 +2415,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 serde_json::json!({
                     "status": "not_logged_in", "team_only": config.team_only,
                     "personal_rows_held_team_only": held,
+                    "personal_backlog_awaiting_team_link": personal_backlog,
                     "unauthored_skipped": unauthored_skipped,
                     "memory_fold_conflicts": memory_fold_conflicts
                 })
@@ -2377,6 +2430,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             fmt.newline()?;
             if let Some(count) = held {
                 fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
+                fmt.newline()?;
+            }
+            if let Some(backlog) = &personal_backlog {
+                fmt.write_raw(&format!("  {}", backlog.notice()))?;
                 fmt.newline()?;
             }
             fmt.write_raw("  Run ")?;
@@ -2413,6 +2470,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                 if cli.json {
                     let mut body = body.clone();
                     body["team_only"] = serde_json::json!(config.team_only);
+                    body["personal_backlog_awaiting_team_link"] = serde_json::json!(personal_backlog);
                     body["unauthored_skipped"] = serde_json::json!(unauthored_skipped);
                     body["memory_fold_conflicts"] = serde_json::json!(memory_fold_conflicts);
                     if let Some(count) = held {
@@ -2476,6 +2534,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.newline()?;
                     if let Some(count) = held {
                         fmt.write_raw(&format!("  {count} migratable personal rows held (team_only)"))?;
+                        fmt.newline()?;
+                    }
+                    if let Some(backlog) = &personal_backlog {
+                        fmt.write_raw(&format!("  {}", backlog.notice()))?;
                         fmt.newline()?;
                     }
 
@@ -2550,7 +2612,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     if let Ok(queue) = crate::cloud::SyncQueue::open(cas_root) {
                         if queue.init().is_ok() {
                             if let Ok(stats) = queue.stats(5) {
-                                fmt.write_muted("  Queue:  ")?;
+                                fmt.write_muted("  Queue (all scopes):  ")?;
                                 fmt.write_raw(&format!(
                                     "{} pending, {} failed",
                                     stats.pending, stats.failed
@@ -2573,7 +2635,7 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                                 if stats.total > 0 {
                                     fmt.newline()?;
                                     fmt.write_colored("  \u{25CF} ", warning_color)?;
-                                    fmt.write_raw("Sync Queue")?;
+                                    fmt.write_raw("Sync Queue (all scopes)")?;
                                     fmt.newline()?;
                                     fmt.write_raw(&format!(
                                         "    {} pending, {} failed",
@@ -2593,7 +2655,10 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
             }
             Err(ureq::Error::Status(401, _)) => {
                 if cli.json {
-                    println!(r#"{{"status":"error","message":"Invalid token"}}"#);
+                    println!("{}", serde_json::json!({
+                        "status": "error", "message": "Invalid token",
+                        "personal_backlog_awaiting_team_link": personal_backlog,
+                    }));
                 } else {
                     let theme = ActiveTheme::default();
                     let mut err = io::stderr();
@@ -2606,10 +2671,17 @@ fn execute_status(cli: &Cli, cas_root: &Path) -> anyhow::Result<()> {
                     fmt.write_accent("cas login")?;
                     fmt.write_raw(" to re-authenticate")?;
                     fmt.newline()?;
+                    if let Some(backlog) = &personal_backlog {
+                        fmt.write_raw(&format!("  {}", backlog.notice()))?;
+                        fmt.newline()?;
+                    }
                 }
             }
             Err(e) => {
-                anyhow::bail!("Failed to connect: {e}");
+                let notice = personal_backlog.as_ref()
+                    .map(|backlog| format!("\n{}", backlog.notice()))
+                    .unwrap_or_default();
+                anyhow::bail!("Failed to connect: {e}{notice}");
             }
         }
     }

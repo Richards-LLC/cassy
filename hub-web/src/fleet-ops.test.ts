@@ -246,8 +246,29 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     state.assignFor = "task:cas-2001";
     const view = taskControls(document, context([...CONTROL, "factory-operate"], state), ready)!;
     expect([...view.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining(owl.name)]);
-    const header = headerControls(document, context([...CONTROL, "factory-operate"]), "focus");
-    expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual([expect.stringContaining("cas-f29b")]);
+    const catalog = [
+      { id: "current", title: "Current work", status: "open", assignee: "lead", priority: 0 },
+      { id: "low", title: "Small fixes", status: "open", epic_verification_owner: "lead-id", priority: 2 },
+      { id: "foreign", title: "Other project", status: "open", assignee: "other", priority: 0 },
+      { id: "closed", title: "Old release", status: "closed", assignee: "lead", priority: 0 },
+      { id: "cancelled", title: "Abandoned", status: "cancelled", assignee: "lead", priority: 0 },
+      { id: "high", title: "Launch repair", status: "in_progress", assignee: "lead", priority: 0 },
+      { id: "train", title: "Release train next", status: "open", assignee: "lead", priority: 1, auto_cut_paused: false },
+    ];
+    const choose = vi.fn();
+    const header = headerControls(document, { ...context([...CONTROL, "factory-operate"], state, { choose }), epics: catalog as any, currentEpic: "current", supervisors: ["lead", "lead-id"] }, "focus");
+    const items = [...header.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    for (const item of items) item.click();
+    const actions = choose.mock.calls.map(call => call[1]);
+    expect(actions.map(action => action.request.op.epic_id)).toEqual(["train", "high", "low"]);
+    for (const [index, id] of ["train", "high", "low"].entries()) {
+      const title = catalog.find(epic => epic.id === id)!.title;
+      expect(items[index]!.textContent).toContain(title);
+      expect(actions[index].progress).toContain(title);
+      expect(actions[index].done).toContain(title);
+    }
+    expect(actions[0].inverse().request.op.epic_id).toBe("current");
+    expect(actions[0].inverse().done).toContain(catalog[0]!.title);
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
     expect(readOnly.querySelector(".fleet-ops-add")).toBeNull();
     expect(readOnly.querySelector("summary")?.textContent).toBeTruthy();

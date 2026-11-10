@@ -36651,7 +36651,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "-b", "epic/release", "main"]);
             git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
             match removal {
-                "release" => {
+                "release" | "source drop" => {
                     let promoted = std::process::Command::new("python3")
                         .args(["scripts/release_changelog.py", "promote", "CHANGELOG.md", "1.0.1", "2026-11-04", "1.0.0"])
                         .current_dir(&p)
@@ -36680,6 +36680,9 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["merge", "--no-ff", "--no-commit", "-q", "epic/release"]);
             // Regeneration in the integrating resolution replaces the lane map.
             write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
+            if removal == "source drop" {
+                write("src/feature.rs", "// lost feature\n");
+            }
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "merge released train; regenerate codemap"]);
             let mut task = worker_task("worker");
@@ -36715,16 +36718,13 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "the parked close path accepts the released tree"
         );
         let p = dir.path();
-        std::fs::write(p.join("src/feature.rs"), "// lost feature\n").unwrap();
-        git(p, &["commit", "-q", "-am", "drop delivered source"]);
-        refused(&dir, &task, "src/feature.rs", "a real source drop beside promoted metadata");
-        std::fs::write(p.join("src/feature.rs"), "pub fn feature() {}\n").unwrap();
-        git(p, &["commit", "-q", "-am", "restore delivered source"]);
         let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
         std::fs::write(p.join("CHANGELOG.md"), changelog.replace(&format!("{ENTRY}\n"), "")).unwrap();
         git(p, &["commit", "-q", "-am", "lose the promoted entry"]);
         refused(&dir, &task, &fragment, "a target that later loses the promoted entry");
 
+        let (dir, task, _, _, _) = build("cas-test1", "source drop");
+        refused(&dir, &task, "src/feature.rs", "a real source drop beside promoted metadata");
         let (dir, task, _, fragment, _) = build("cas-test1", "chore");
         refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
         let (dir, task, _, fragment, _) = build("cas-test1", "older section");

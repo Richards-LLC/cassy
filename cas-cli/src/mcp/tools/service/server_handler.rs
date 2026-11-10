@@ -1404,6 +1404,66 @@ mod tests {
         assert_eq!(error.data.as_ref().unwrap()["notification_id"], row.id);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registration_deadline_surfaces_blocked_late_commit_cas_1550() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        use crate::test_support::TestEnvGuard;
+        use rmcp::handler::server::wrapper::Parameters;
+        let mut env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "late-registration-owner");
+        for action in ["register", "session_start"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            core.register_agent("durable-owner".into(), "late-registration-owner".into(), None).unwrap();
+            let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+            let arguments = serde_json::json!({
+                "action": action, "name": "late-registration-owner", "agent_type": "supervisor",
+                "session_id": "late-harness",
+            });
+            let request = serde_json::from_value(arguments.clone()).unwrap();
+            let (resume, blocked) = std::sync::mpsc::channel();
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let (finished, committed) = tokio::sync::oneshot::channel();
+            let sender = service.clone();
+            let future = async move {
+                mutation_receipt::run_on_blocking_pool(async move {
+                    let _ = started.send(());
+                    blocked.recv().unwrap();
+                    let result = sender.coordination(Parameters(request)).await;
+                    let _ = finished.send(());
+                    result
+                }).await.unwrap()
+            };
+            let caller = service.clone();
+            let call = tokio::spawn(async move {
+                caller.call_with_deadline("coordination", arguments.as_object(),
+                    std::time::Duration::from_millis(20), future).await
+            });
+            waiting.await.unwrap();
+            let error = call.await.unwrap().unwrap_err();
+            // Release the owned blocking handler before assertions, including
+            // on the red path where abort cannot stop its pending write.
+            resume.send(()).unwrap();
+            committed.await.unwrap();
+            service.tool_work.wait_idle().await;
+            let data = error.data.unwrap();
+            assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+            let rows = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .poll("durable-owner", 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            let payload: serde_json::Value = serde_json::from_str(&rows[0].payload).unwrap();
+            assert_eq!(payload["kind"], "registration_outcome");
+            assert_eq!(payload["context"]["continuation_id"], data["continuation_id"]);
+            assert_eq!(payload["context"]["mutation_outcome"], "COMMITTED");
+            assert_eq!(payload["context"]["session_id"], "late-harness");
+            assert_eq!(service.inner.open_agent_store().unwrap().list(None).unwrap().len(), 1);
+        }
+    }
+
     #[tokio::test]
     async fn task_create_and_notes_timeouts_confirm_only_their_write_cas_e4a8() {
         use crate::mcp::server::CasCore;

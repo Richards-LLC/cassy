@@ -57,6 +57,45 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn registration_rebinds_live_supervisor_for_both_entries_cas_1550() {
+        use crate::mcp::tools::service::CasService;
+        let mut env = TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        env.set("CAS_AGENT_NAME", "registration-owner");
+        env.set("CAS_FACTORY_SESSION", "registration-pane");
+        for action in ["register", "session_start"] {
+            for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Director, AgentRole::Standard] {
+                env.set("CAS_AGENT_ROLE", &role.to_string());
+                let old_id = format!("durable-{action}-{role}");
+                env.set("CAS_SESSION_ID", &old_id);
+                let temp = tempfile::tempdir().unwrap();
+                let root = crate::store::init_cas_dir(temp.path()).unwrap();
+                let core = crate::mcp::CasCore::with_daemon(root, None, None);
+                core.register_agent(old_id.clone(), "registration-owner".into(), None).unwrap();
+                let agents = core.open_agent_store().unwrap();
+                let before = agents.get(&old_id).unwrap();
+                let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+                let new_id = format!("harness-{action}-{role}");
+                service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+                    "action": action, "name": "registration-owner", "agent_type": role.to_string(),
+                    "session_id": new_id,
+                })).unwrap())).await.unwrap();
+                let reuses = role == AgentRole::Supervisor || (role == AgentRole::Worker && action == "session_start");
+                assert_eq!(agents.list(None).unwrap().len(), if reuses { 1 } else { 2 }, "{action}/{role}");
+                assert_eq!(service.inner.get_agent_id().unwrap(), old_id);
+                let id = if reuses { &old_id } else { &new_id };
+                let registered = agents.get(id).unwrap();
+                assert_eq!(registered.cc_session_id.as_deref(), Some(new_id.as_str()));
+                assert_eq!(registered.role, role);
+                if reuses {
+                    assert_eq!(registered.registered_at, before.registered_at);
+                    assert_eq!(registered.factory_session, before.factory_session);
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn public_registration_persists_explicit_worker_role_over_ambient_supervisor() {
         let mut env = TestEnvGuard::new();
         env.set("CAS_AGENT_ROLE", "supervisor");

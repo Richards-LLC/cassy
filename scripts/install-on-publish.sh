@@ -20,7 +20,9 @@
 # the release timer in the GitHub release notes: release.yml writes
 # "PR #N opened -> published" with a marker; the first host to install adds
 # "-> installed", the one timer from PR opened to installed. A failed install
-# is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600).
+# is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600). Each newly seen
+# publication first runs `cas release published` once (the release's one
+# reconciliation); `cas release installed` after it is recovery only.
 #
 # Environment: CAS_RELEASE_REPO (default Richards-LLC/cassy), CAS_BIN (cas),
 # GH_BIN (gh), XDG_STATE_HOME, RELEASE_INSTALL_NOW (epoch, tests),
@@ -173,6 +175,22 @@ update_release() {
     fi
 }
 
+# Close-at-release: the publication itself triggers the one release
+# reconciliation, before any install. Stamped on success; retried each tick.
+notify_published() {
+    local tag="$1"
+    if [[ -r "$state_dir/install-on-publish.published" ]] &&
+       [[ "$(cat "$state_dir/install-on-publish.published")" == "$tag" ]]; then
+        return 0
+    fi
+    if "$cas_bin" release published --receipt "$state_dir/install-on-publish.pending.json" --repo "$repo"; then
+        printf '%s\n' "$tag" >"$state_dir/install-on-publish.published.tmp"
+        mv "$state_dir/install-on-publish.published.tmp" "$state_dir/install-on-publish.published"
+    else
+        log "publish reconciliation pending for $tag; retrying on the next tick"
+    fi
+}
+
 # Publication metadata survives an update that replaces this process's binary.
 # A successful adapter call is stamped; failure retries on an already-current tick.
 notify_installed() {
@@ -204,6 +222,7 @@ run_once() {
     current="$(installed_version || true)"
     printf '%s\n' "$publication" >"$state_dir/install-on-publish.pending.json.tmp"
     mv "$state_dir/install-on-publish.pending.json.tmp" "$state_dir/install-on-publish.pending.json"
+    notify_published "$tag"
     if [[ -n "$current" ]] && ! version_greater "$latest" "$current"; then
         [[ "$current" != "$latest" ]] || notify_installed "$tag"
         return 0
@@ -251,6 +270,6 @@ case "${1:---once}" in
         fi
         run_once
         ;;
-    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' ;;
+    -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) printf 'usage: %s [--install | --uninstall | --once]\n' "$0" >&2; exit 2 ;;
 esac

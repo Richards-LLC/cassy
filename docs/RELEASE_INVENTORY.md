@@ -152,10 +152,9 @@ release identity, immutable final SHA and every referencing task. Already closed
 issues are skipped on replay. Partials and every read/write failure remain named
 outcomes; offline does not mean closed. Dry runs never contact GitHub.
 
-The current installed/backfill adapter invokes this function after closes and
-atomically saves `.cas/releases/<tag>-issues.json` with `scope` and `issues`, then
-includes `issue_outcomes=<JSON>` in its returned receipt text. This sidecar also
-exists for historical releases that have no tracked cut receipt. Publication
+The shared release operation invokes this function after closes and keeps the
+outcomes in its receipt's `issue_outcomes`; every trigger, including installed
+and backfill recovery, reaches it only through that operation. Publication
 verification precedes this stage; the issue helper never publishes a release.
 
 ## Durable reconciliation and parent acceptance
@@ -217,3 +216,31 @@ containers remain held for an evidenced operator disposition. Accepted parents
 close bottom-up through the ordinary lifecycle gate at the immutable release
 SHA, including epics whose old branch is gone. Release authority can adopt
 positively dead ownership without impersonating the review author.
+
+## Publish and promotion adapters
+
+Every trigger calls the one release reconciliation,
+`release_reconcile::reconcile_release(root, scope, inventory, trigger)`, keyed by
+(project, release, final SHA). A trigger whose key already has a completed
+operation does not reconcile again. Each release gets one `release_closeout`
+supervisor notice, deduplicated by the operation's notice intent. It names every
+residual and held or pending parent with owner and next action, inventory
+exceptions, and partial or failed GitHub issues.
+
+| Trigger | Adapter | Evidence read |
+| --- | --- | --- |
+| `Publish{tag}` | `cas release published --receipt <release.json> --repo <slug>`, run by `scripts/install-on-publish.sh` once per newly seen publication, before installing | The timer's existing latest-release read; tag SHA verified on origin |
+| `Promotion{pr, merge_sha}` | `cas release promoted --pr <N>`, started in the background by the supervisor's PostToolUse hook after its successful raw PR merge into the default branch of a staging-promotion project (log: `.cas/release-reconcile/promotion.log`). A queued or auto-merge PR records a pending promotion under `.cas/release-reconcile/pending-promotions/` and arms the daemon's existing `branch_contained_in` landing observation of its head; when that fires, the same command runs once and the intent is retired | One `gh pr view`: merged into the default branch, merge commit on origin |
+| `Installed`, `Backfill` | `cas release installed`, `cas release backfill` | Recovery only: the same operation with its own trigger, a no-op once complete. `cas release backfill --dry-run` is a read-only preview |
+
+The scope comes from the tracked cut receipt (cas-src) or the merged PR
+(promotion). The reviewed candidate is the newest recorded release review the
+final commit contains, plus every QA/review receipt at that candidate. With no
+review, closes hold as named residuals; publication never stands in for review.
+No CI job, poller or test rerun is added, and GitHub is read only as evidence.
+
+`cas qa ledger init --task <id> --release-scope scope.json` scaffolds the release
+review ledger with the `cassy-release-transformations` and `cassy-release-epics`
+fenced blocks for that scope, so the published RELEASE_VERDICT bytes carry them.
+Each epic's `child_ids` is its full recursive subtree, nested epics' descendants
+included. Remove any epic whose acceptance was not verified before publishing.

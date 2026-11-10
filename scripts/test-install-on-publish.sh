@@ -36,6 +36,7 @@ cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
 if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10-15)"; exit 0; fi
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
+[[ "$1 $2" == "release published" ]] && exit 0
 if [[ "$1 $2" == "release installed" ]]; then
     [[ "${FAKE_NOTICE_FAILS:-}" == 1 ]] && exit 1
     exit 0
@@ -99,11 +100,13 @@ check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$publish
 check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
 
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 1 ]]' 'cas-61e0: fake publication and verified install notify the owning supervisor once'
+check '[[ "$(grep -c "^cas release published --receipt " "$FAKE_LOG")" == 1 ]] && [[ "$(grep -n "^cas release published" "$FAKE_LOG" | cut -d: -f1)" -lt "$(grep -n "^cas update" "$FAKE_LOG" | cut -d: -f1)" ]]' 'cas-6429: the publication triggers one reconciliation, before the install'
 
 # 2. An installed release is a no-op: no update, no notes edit.
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
 check 'grep -q "^api repos/example/repo/releases/latest$" "$FAKE_LOG" && ! grep -q "update\|release edit" "$FAKE_LOG"' 'an installed release does nothing'
+check '! grep -q "release published" "$FAKE_LOG"' 'cas-6429: a reconciled publication is not triggered again'
 
 # Failed notice delivery is retried on the current-version path, without reinstall.
 FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null

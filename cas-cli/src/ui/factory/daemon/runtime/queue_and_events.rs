@@ -13465,6 +13465,10 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             }
             continue;
         }
+        if let Err(error) = crate::cli::release_adapters::promotion_from_reminder(&cas_dir, reminder) {
+            tracing::warn!(%error, "pending promotion closeout did not start; reminder remains pending");
+            continue;
+        }
         fire_reminder(
             reminder,
             &reminder_store,

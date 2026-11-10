@@ -221,7 +221,7 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         }
         world.status(status);
         let mut calls = Vec::new();
-        reconcile(&world.root, "sup", "session", world.now + chrono::Duration::minutes(step), &mut |tool, args| {
+        reconcile(&world.root, "sup", "session", world.now + chrono::Duration::minutes(step * 20), &mut |tool, args| {
             calls.push((tool.to_string(), args.clone()));
             if tool == "violet_read" {
                 return Ok(json!({"ok":true,"channel":{"id":"C123"},"complete":true,"messages":[{
@@ -247,6 +247,24 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
             expected.into_iter().map(str::to_string).collect::<Vec<_>>(),
             "step {step}"
         );
+        if matches!(step, 4 | 6 | 8) {
+            // Terminal confirmations survive refresh age and a new reconciler
+            // invocation. A changed related task above must still re-enter.
+            let quiet_at = world.now + chrono::Duration::minutes(step * 20 + 10);
+            reconcile(&world.root, "sup", "session", quiet_at, &mut |_, _| {
+                panic!("terminal-confirmed source was polled again")
+            }).unwrap();
+            assert!(!audit_at(&world.root, false, quiet_at).unwrap()[0].pending);
+            audit_at(&world.root, true, quiet_at).unwrap();
+            let mut reads = 0;
+            reconcile(&world.root, "sup", "session", quiet_at, &mut |tool, _| {
+                assert_eq!(tool, "violet_read");
+                reads += 1;
+                Ok(read(&expected.into_iter().collect::<Vec<_>>()))
+            }).unwrap();
+            assert_eq!(reads, 1);
+        }
+
     }
     // A later observed owner takeover immediately stops the former owner,
     // including a retry that was authorized under its expired claim.
@@ -262,7 +280,7 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::minutes(9),
+        world.now + chrono::Duration::minutes(180),
         &mut |_, _| panic!("former source owner called Violet after observed takeover"),
     )
     .unwrap();
@@ -291,7 +309,7 @@ fn source_reaction_lifecycle_reconciles_source_posts() {
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::minutes(10),
+        world.now + chrono::Duration::minutes(200),
         &mut |_, _| panic!("stale generation revived prior owner"),
     )
     .unwrap();
@@ -527,7 +545,7 @@ fn source_reaction_authority_and_identity_fences() {
             &world.root,
             "sup",
             "session",
-            world.now + chrono::Duration::minutes(step),
+            world.now + chrono::Duration::minutes(step * 20),
             &mut |tool, _| {
                 calls += 1;
                 assert_eq!(tool, "violet_read");
@@ -535,7 +553,7 @@ fn source_reaction_authority_and_identity_fences() {
                     &world.root,
                     "sup",
                     "session",
-                    world.now + chrono::Duration::minutes(step),
+                    world.now + chrono::Duration::minutes(step * 20),
                     &mut |_, _| panic!("concurrent reconciler bypassed the source lease"),
                 )
                 .unwrap();
@@ -561,7 +579,7 @@ fn source_reaction_authority_and_identity_fences() {
         &world.root,
         "sup",
         "session",
-        world.now + chrono::Duration::minutes(9),
+        world.now + chrono::Duration::minutes(180),
         &mut |tool, _| {
             assert_eq!(tool, "violet_read");
             world.owner(
@@ -581,4 +599,29 @@ fn source_reaction_authority_and_identity_fences() {
             .as_deref(),
         Some("peer")
     );
+}
+
+#[test]
+fn source_reaction_deadline_defers_remaining_calls() {
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let world = World::new();
+    world.status(TaskStatus::InProgress);
+    let clock = std::cell::Cell::new(world.now);
+    let mut calls = Vec::new();
+    reconcile_with_clock(&world.root, "sup", "session", &|| clock.get(), &mut |tool, args| {
+        calls.push(tool.to_string());
+        if tool == "violet_read" {
+            clock.set(world.now + chrono::Duration::seconds(6));
+            Ok(read(&["eyes", "white_check_mark"]))
+        } else {
+            Ok(posted(&args))
+        }
+    }).unwrap();
+    assert_eq!(calls, vec!["violet_read"]);
+    assert!(audit_at(&world.root, false, clock.get()).unwrap()[0].pending);
+    // The deferred operations are still due on a later pass.
+    reconcile(&world.root, "sup", "session", world.now + chrono::Duration::seconds(66), &mut |tool, args| {
+        if tool == "violet_read" { Ok(read(&["eyes"])) } else { Ok(posted(&args)) }
+    }).unwrap();
+    assert!(!audit_at(&world.root, false, world.now).unwrap()[0].pending);
 }

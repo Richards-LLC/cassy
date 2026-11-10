@@ -27,6 +27,12 @@ independent reviewer authority. `coordination whoami` shows the caller's type,
 role and parent. A shared-connection child registration fails before mutation
 with `rule_id=shared_mcp_child_identity`.
 
+For an already-registered live supervisor in the same pane, `coordination
+action=register` and `action=session_start` bind a new harness `session_id`
+to the existing agent's `cc_session_id`. The durable agent ID and factory
+ownership stay the same. A different name, process or role keeps its own
+registration semantics.
+
 Use the daemon-owned candidate verifier or a separately registered reviewer
 with a sealed handoff for the exact dispatch. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
@@ -90,6 +96,17 @@ escalation and supervisor action kinds remain unavailable. Explicit `wake=false`
 stays quiet. Replies bind to a peer message delivered to that worker and recheck
 the current scope. This uses the existing MCP coordination dispatch; the factory
 message CLI retains its local queue behavior.
+
+## Repaired peer approvals
+
+The authenticated peer receipt path can supersede a stale admitted peer approval
+when the same source supervisor and machine supplies a later, independently
+approved dispatch for the current repaired delivery. Admission rechecks project,
+plan, candidate tree and published Git identity. One store transaction invalidates
+only the stale peer dispatch, inserts the new approval and records
+`peer_premerge_approval_replaced`; both verdicts and the old proof remain readable.
+Local verification cycles cannot be replaced by peer mail. Replaying old approval
+with a changed source SHA does not grant authority.
 
 ## Automatic supervisor replies
 
@@ -181,6 +198,13 @@ session provenance are audit stamps, never selection keys. Registry restart
 reconciliation cannot replace a same-name supervisor on another machine.
 Legacy handoffs without a machine stamp remain readable through memory tools
 but cannot inject approvals into startup.
+
+Memory updates discard caller-supplied `handoff-machine:` and `handoff-owner:`
+values and retain existing stamps when replacing ordinary tags. Removing and
+restoring the `handoff` tag cannot change that lineage. When an ordinary entry
+without existing stamps becomes a handoff, its authenticated writer supplies
+the machine, owner and default role; editing an unstamped legacy handoff does
+not mint new provenance.
 
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry
 ownership. The next local supervisor receives its tasks, worker registrations,
@@ -852,6 +876,34 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
 
+### Retained dependency failures
+
+Use `cas cloud queue --verbose` (or `--json --verbose`) to inspect the item ID,
+team, route, endpoint payload and `last_reason`. A
+`dependency_endpoint_foreign`, `dependency_endpoint_moved`,
+`dependency_endpoint_deleted` or `dependency_endpoint_unavailable` park retains
+the local dependency; a low pending count does not mean that graph was delivered.
+Compare endpoint `origin_project` and scope with the project's canonical ID and
+registered aliases. Never relabel a genuinely foreign task to make sync pass.
+Repair provenance only when ownership is established; restore a missing endpoint
+only when it is valid to do so. Scoped pulls revalidate these parks against a
+complete task and dependency inventory on the normal reconciliation interval.
+To request another inventory immediately after a repair, use
+`cas cloud queue --retry --ids <item-id>`, then `cas cloud pull` and
+`cas cloud push`.
+`--retry-reason <code>` can additionally restrict those selected items. Retrying
+preserves the payload and last diagnostic and does not reset neighboring items.
+Pending local task edits, deletes, moves, quarantines and remote tombstones
+continue to prevent unsafe repair.
+
+Conflict retention deduplicates an exact entity/state/verdict/revision replay
+atomically across restarts and connections, keeping its original observation
+time. Distinct discarded states and revisions remain available for review;
+existing history is not purged by sync. Lifecycle guards retain each change of
+state so latest-guard consumers keep the current decision, while consecutive
+identical guard observations deduplicate. Legacy personal rows skipped by a
+team-linked route require separate delivery-backed recovery, not dependency retry.
+
 ## Cloud cleanup and rate limits
 
 SessionEnd writes an atomic intent under `.cas/cloud_shutdown/` before deleting
@@ -1060,6 +1112,9 @@ A task with no epic can be its own split scope: its owner offers
 `factory action=epic_split id=<task> target=<builder> theirs=<task>`, and the
 builder accepts the returned split. No parent task or dependency is created.
 For a Slack source, only the current thread claim owner may offer the work.
+The receiver checks the authenticated issuer against its own current source-owner
+receipt before accepting or claiming work, and again before an accepted split
+bypasses source admission. Missing, expired or mismatched receipts grant no bypass.
 After acceptance the builder can assign and start that task with `external_ref`
 intact; the accepted local share grants work without claiming the thread.
 Pending offers and another supervisor's shares grant no work authority. Reply
@@ -1237,8 +1292,14 @@ task's scoped artifacts directory. It imports the record into the existing
 artifact ledger, making `show`, `list` and close citations usable there too.
 `--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
 or bearer is included in the note, output or saved record. Fetch requires the
-synced task and Cloud credentials; proof interpretation remains the verifier's
-responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
+Cloud credentials. If the task note is not cached locally, fetch first reads
+the task in the configured personal/team project scope, so unrelated account
+projects do not block a same-project proof. Scoped entity reads use
+`/api[/teams/<team>]/sync/task/<task>?project_id=<project>`. Missing scoped proof
+can use bounded cross-project discovery; both paths share one fifteen-second
+metadata deadline and validate the returned task/project before reading proof.
+Proof interpretation remains the verifier's responsibility. Task note mutation
+remains MCP-only; CLI publish is unchanged.
 
 ### Artifact revocation
 
@@ -2007,6 +2068,14 @@ canonical tasks and reconcile the task index before lookup, with a full task
 rewrite on the first request in each server process. `include_source` applies
 to code search, not this context search action.
 
+Registration handlers run on the blocking pool because synchronous startup
+and store work cannot be cancelled by aborting an async task. When `register`
+or `session_start` outlives the response budget, the answer reports
+`IN_PROGRESS` (or `COMMITTED` when its write was observed), with a
+`continuation_id`. The handler continues and records a durable
+`registration_outcome` notice in the caller's inbox, carrying the same ID,
+requested session and final mutation outcome. Do not retry while it is running.
+
 Factory merge and task-close handlers run synchronous Git/store work on the
 blocking pool. Once publication or the checked Closed/AwaitingMerge disposition
 commits, the response adds no post-commit grace: it names that outcome while
@@ -2252,10 +2321,13 @@ previous incidents or establish deployed Cloud instrumentation.
 
 `cas qa ledger init --task <id>` writes an honest scaffold in the project's task
 artifact directory, with predicted live journeys and no-code route exclusions.
-The build is the recorded task source branch tip (start binding first, then a
-legacy parked branch); an unreadable source fails before creating evidence.
-Tasks without a recorded source use the resolved repository's HEAD. Journey
-selection still uses the target repository. It preserves existing evidence.
+The build uses the local recorded source branch tip first (start binding,
+then legacy parked branch). If that local branch was cleaned, it uses the
+recorded immutable active delivery anchor, or the latest historical anchor.
+An invalid recorded anchor fails instead of borrowing another ref. Only tasks
+without a recorded source or delivery identity use the resolved repository's
+HEAD. Journey selection still uses the target repository. Existing evidence
+and task bindings remain unchanged; valid ledgers resume byte for byte.
 Edit rows after exercising the named build,
 then run `cas qa ledger check <path> --task <id>` (or `--json`). The shared
 parser checks structure, counts, labels, defect ownership and readable PASS

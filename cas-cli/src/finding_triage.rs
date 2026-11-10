@@ -26,6 +26,12 @@ fn label_value(labels: &[String], key: &str) -> Option<String> {
     labels.iter().rev().find_map(|label| label.strip_prefix(key).map(str::to_owned))
 }
 
+/// Validate merged axes before normalization could discard requested main reach.
+pub(crate) fn has_undeclared_main_reach(root: &Path, labels: &[String]) -> bool {
+    label_value(labels, "reach:").as_deref() == Some("main")
+        && label_value(labels, "journey:").is_none_or(|id| !main_journeys(root).contains(&id))
+}
+
 pub(crate) fn finding_labels(labels: &mut Vec<String>, triage: &FindingTriage) {
     labels.retain(|l| !l.starts_with("severity:") && !l.starts_with("reach:") && !l.starts_with("journey:"));
     let severity = serde_json::to_value(triage.severity).expect("severity serializes");

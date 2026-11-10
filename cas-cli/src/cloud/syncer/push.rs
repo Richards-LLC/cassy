@@ -236,6 +236,14 @@ impl CloudSyncer {
         to: &str,
         team: &str,
     ) -> Result<bool, CasError> {
+        // An explicit retry requests revalidation, not permission to bypass a
+        // known ownership/tombstone refusal. Pull clears it after scoped proof.
+        if let Some(reason @ ("dependency_endpoint_foreign" | "dependency_endpoint_moved" | "dependency_endpoint_deleted")) = item.last_reason.as_deref() {
+            if let Some(error) = item.last_error.as_deref().filter(|error| error.contains(reason)) {
+                self.queue.park_intentionally_with_error(item.id, reason, error, self.config.max_retries)?;
+                return Ok(false);
+            }
+        }
         match self.queue.dependency_endpoint_state(from, to, team, self.config.max_retries)? {
             crate::cloud::DependencyEndpointState::Clear => Ok(true),
             crate::cloud::DependencyEndpointState::Pending => {

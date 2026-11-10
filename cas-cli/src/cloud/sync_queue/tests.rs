@@ -551,6 +551,14 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
         )
         .unwrap();
 
+    // Replayed after a restart: the same discarded state is one snapshot.
+    let reopened = SyncQueue::open(_temp.path()).unwrap();
+    reopened.record_conflict(
+        "task", "cas-conflict",
+        r#"{\"id\":\"cas-conflict\",\"notes\":\"local note\"}"#,
+        "remote", "timestamp_lww", None, None,
+    ).unwrap();
+
     let conflicts = queue.list_conflicts(10).unwrap();
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].entity_type, "task");
@@ -562,7 +570,31 @@ fn conflict_journal_retains_the_discarded_row_and_prunes_by_age() {
     assert_eq!(conflicts[0].winner_side, "remote");
     assert_eq!(conflicts[0].strategy, "timestamp_lww");
     assert_eq!(queue.unreviewed_conflict_count().unwrap(), 1);
-    assert_eq!(queue.prune_conflicts(0).unwrap(), 1);
+    // Different revision and state remain distinct evidence.
+    for (payload, revision) in [(r#"{"state":"changed"}"#, None),
+        (r#"{"state":"changed"}"#, Some(7))] {
+        queue.record_conflict("task", "cas-conflict", payload, "remote",
+            "timestamp_lww", revision, None).unwrap();
+    }
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 3);
+    // Concurrent replay across independent connections is still one snapshot.
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let root = _temp.path();
+            scope.spawn(move || {
+                SyncQueue::open(root).unwrap().record_conflict("task", "cas-conflict",
+                    r#"{"state":"changed"}"#, "remote", "timestamp_lww", Some(7), None).unwrap();
+            });
+        }
+    });
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 3);
+    for state in ["A", "A", "B", "A", "A"] {
+        queue.record_conflict("task", "guarded", state, "local",
+            "task_lifecycle_guard", None, None).unwrap();
+    }
+    assert_eq!(queue.latest_task_lifecycle_conflicts().unwrap(), [("guarded".into(), "A".into())]);
+    assert_eq!(queue.unreviewed_conflict_count().unwrap(), 6);
+    assert_eq!(queue.prune_conflicts(0).unwrap(), 6);
     assert!(queue.list_conflicts(10).unwrap().is_empty());
 }
 

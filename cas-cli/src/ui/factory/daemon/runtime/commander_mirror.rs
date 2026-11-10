@@ -712,6 +712,28 @@ pub(super) fn codex_rollout_owns_recipient(
     })
 }
 
+/// cas-c1598: the rollout an eagerly registered (unbound) Codex supervisor is
+/// writing, chosen by the same cwd and envelope-ownership rule the mirror uses.
+pub(super) fn unbound_codex_supervisor_rollout(
+    project_path: &Path,
+    queue: &dyn PromptQueueStore,
+    session: &str,
+    agent: &cas_types::Agent,
+) -> Option<PathBuf> {
+    let startup_id = queue
+        .latest_from_source_to_targets(super::queue_and_events::SUPERVISOR_STARTUP_SOURCE, &[&agent.name], Some(session))
+        .ok()
+        .flatten()
+        .filter(|row| matches!(row.origin, Some(cas_store::QueueOrigin::Daemon)))
+        .map(|row| row.id);
+    let ownership = RefCell::new(HashMap::new());
+    crate::mcp::tools::service::factory_ops::resolve_codex_mirror_transcript(
+        project_path.to_str()?,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+        &|path| codex_rollout_owns_recipient(path, queue, session, &agent.name, startup_id, true, &ownership),
+    )
+}
+
 pub(super) fn scan_supervisor_replies(
     root: &Path,
     project_path: &Path,

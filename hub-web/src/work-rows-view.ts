@@ -219,8 +219,8 @@ function chips(document: Document, events: readonly WorkEvent[]): HTMLElement | 
     item.className = `work-chip work-chip--${chip.tone}`;
     item.title = chip.label;
     const dot = document.createElement("span"); dot.className = "work-chip-dot"; dot.setAttribute("aria-hidden", "true");
-    const subject = document.createElement("span"); subject.className = "work-chip-id"; subject.textContent = chip.subject;
-    item.append(dot, subject, document.createTextNode(` ${chip.verb}`));
+    const subject = document.createElement("span"); subject.className = "work-chip-title"; subject.textContent = chip.subject;
+    item.append(dot, document.createTextNode(`${chip.verb.charAt(0).toUpperCase()}${chip.verb.slice(1)}: `), subject);
     list.append(item);
   }
   return list;

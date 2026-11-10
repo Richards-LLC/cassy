@@ -1158,6 +1158,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_project_config_set_redirects_without_mutation_cas_7e73() {
+        use clap::Parser;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let original = "[project]\ncanonical_id = \"cas-src\"\n";
+        std::fs::write(root.join("config.toml"), original).unwrap();
+        let cli = Cli::parse_from(["cas", "config", "set", "project.canonical_id", "other-project"]);
+        let error = execute_set(&ConfigSetArgs {
+            key: "project.canonical_id".into(), value: "other-project".into(), store: Default::default(),
+        }, &cli, &root).unwrap_err();
+        assert!(error.to_string().contains("PROJECT_CANONICAL_ID_REDIRECT"), "{error:#}");
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
+    }
+
+    #[test]
     fn draft_rule_ttl_round_trips_and_resets() {
         let env = crate::test_support::TestEnvGuard::temp_home();
         let root = env.home().join(".cas");

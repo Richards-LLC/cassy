@@ -533,6 +533,11 @@ bug_families:
     tasks: [cas-bcf0]
     journeys: [HUB-J14, HUB-J15, HUB-J17, HUB-J25]
     invariants: [HUB-CONVERSATION-HEADER-ROW]
+  queued-blocked-successor-source:
+    title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
+    tasks: [cas-57df]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -575,6 +580,10 @@ invariants:
     statement: A claim reads only verified identity; owner-routed activity reaches its registration, and a failed claim on a consumed managed mention persists one coded blocker that wakes that owner without claiming proactively.
     check: Run identity_claim_read_avoids_digest_size_cap_cas_0288, owner_routed_mention_wakes_only_its_registration_cas_0288 and failed_mention_claim_records_one_owner_blocker_cas_0288. Verify owner and unclaimed_fanout cases, a consumed mention, refusal replay, exact owner destination and Blocker classification of the actual queued prompt through daemon wake admission; artifact and CLI upload tests retain authority_unavailable retryability and managed_reply_required refusal before allocation.
     bug: {task: cas-0288}
+  FACTORY-QUEUED-SOURCE-BOUNDARY:
+    statement: A queued first-delivery successor records its fresh branch and target base atomically with start while retaining the former branch and refusing to replace pending, unknown or unrelated work.
+    check: Run queued_blocked_successor_records_fresh_start_cas_57df through supervisor unblock/reassignment, predecessor close and queue/start; verify same-target and migrated-target adoption, old local and remote delivery tips, anchors/history/receipt, dirty and prepared work, missing refs and repository mismatch.
+    bug: {task: cas-57df}
   HUB-CONVERSATION-HEADER-ROW:
     statement: Conversation identity and actions share one row, even with the context rail open. The observed state is a pill beside the project title; phone headers keep direct Raw output and Interrupt controls while secondary actions remain reachable through one native overflow menu with return focus and attention count.
     check: Run the cas-bcf0 installed-safe-area fixture case at 1280/390 in light/dark, conversation-shell/conversations/session-thread-identity Vitest and the named phone fleet-picker and Show work parts. In batch QA include warning, reconnecting, ended, long identity, rotation and installed safe-area states.
@@ -633,6 +642,10 @@ invariants:
     statement: Successful canonical or legacy merge-group CI evidence can prove an exact landed delivery, including punctuated run citations, while unrelated or failed runs remain refused.
     check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
     bug: {task: cas-f448}
+  FACTORY-MACHINE-COMMAND-SHAPE:
+    statement: Exact structured executable-command redirects are admitted as machine identifiers while equivalent rendered error narrative remains refused.
+    check: Run test_human_message_assertions_use_behavior_or_machine_ids in scripts/test-check-test-shape.py; accept redirect_command equality for cas cloud project set and reject the equivalent error.message sentence.
+    bug: {task: cas-8edf}
   FACTORY-CLI-PAYLOAD-SHAPE:
     statement: Exact CLI flag payload round trips are data-integrity checks; generated prose and unrelated fields remain rejected by the test-shape gate.
     check: Run scripts/test-check-test-shape.py, including test_cli_parser_payload_round_trip_cas_5442; pass exact parser argv values through immutable let-else command routing in both equality orders and changed-line mode, while rejecting different values, unrelated fields, unknown transformations, expired inner bindings, inequalities and substrings. Replay the changed-lane guard with a caller payload and a generated-prose control.
@@ -1333,8 +1346,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
-  owners: [cas-cli/src/mcp/tools/service/server_handler.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs]
-  invariants: [FACTORY-CLOSE-LATE-PARK, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY]
+  owners: [cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/mcp/tools/core/task/rebind.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/mcp/tools/service/server_handler.rs]
+  invariants: [FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE

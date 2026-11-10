@@ -9,6 +9,7 @@ const ROUTE_MARKER: &str = "BUILD_ROUTE: ";
 const FRESH_SECS: i64 = 90;
 const ROUTE_LIFETIME_SECS: i64 = 15 * 60;
 const EXPIRED_MARKER: &str = "BUILD_ROUTE_EXPIRED: ";
+const SPAWN_BRIEF_MARKER: &str = "📌 SPAWN BRIEF ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct BuildCapacity {
@@ -69,13 +70,7 @@ impl RoutePlan {
     ) -> Result<String, crate::cloud::peer_mailbox::PeerSendError> {
         let project_id = crate::cloud::resolve_canonical_id(root)
             .ok_or_else(|| send_error("build routing needs a canonical repository identity"))?;
-        let brief = format!(
-            "Build capacity overflow: please staff task {} locally, or wait for local admission. \
-             Retain its BUILD_ROUTE note; never auto-route it again. Full task and supervisor brief:\n{}",
-            task.id,
-            serde_json::to_string_pretty(task).map_err(send_error)?
-        );
-        let body = crate::cloud::peer_mailbox::attach_message_intent(&brief, Some("ask"), false)
+        let body = crate::cloud::peer_mailbox::attach_message_intent(&route_brief(task), Some("ask"), false)
             .map_err(send_error)?;
         let message = crate::cloud::peer_mailbox::PeerSend {
             project_id,
@@ -91,6 +86,54 @@ impl RoutePlan {
         crate::cloud::peer_mailbox::send_build_route(root, message, &self.recipient)
             .map(|_| self.receipt())
     }
+}
+
+/// Character budgets for the routed ask. The peer shares the project and
+/// reads the full task by id; the whole task can exceed Cloud's body cap.
+const BRIEF_CHARS: usize = 12_000;
+const DESCRIPTION_CHARS: usize = 12_000;
+const CRITERIA_CHARS: usize = 6_000;
+
+fn clip(text: &str, max: usize) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}… (clipped; read the full task)", &text[..end]),
+        None => text.to_string(),
+    }
+}
+
+/// A bounded staffing ask: identity, target, the supervisor's spawn brief,
+/// and clipped description and acceptance criteria.
+fn route_brief(task: &cas_types::Task) -> String {
+    let spawn_brief = task.notes.rfind(SPAWN_BRIEF_MARKER).map(|start| {
+        let rest = &task.notes[start + SPAWN_BRIEF_MARKER.len()..];
+        rest.split(&format!("\n{ROUTE_MARKER}")).next().unwrap_or(rest)
+    });
+    let target = task
+        .deliverables
+        .work_target
+        .as_ref()
+        .map(|target| target.target_branch.as_str())
+        .unwrap_or("unset");
+    let mut brief = format!(
+        "Build capacity overflow: please staff task {id} locally, or wait for local admission. \
+         Retain its BUILD_ROUTE note; never auto-route it again. Read the full task with \
+         `task action=show id={id}`.\n\nTask: {id} — {title}\nType: {kind} {priority}; target: {target}\n",
+        id = task.id,
+        title = task.title,
+        kind = task.task_type,
+        priority = task.priority,
+    );
+    for (label, text, max) in [
+        ("Supervisor brief", spawn_brief.unwrap_or(""), BRIEF_CHARS),
+        ("Description", task.description.as_str(), DESCRIPTION_CHARS),
+        ("Acceptance criteria", task.acceptance_criteria.as_str(), CRITERIA_CHARS),
+    ] {
+        if !text.trim().is_empty() {
+            brief.push_str(&format!("\n{label}:\n{}\n", clip(text, max)));
+        }
+    }
+    brief
 }
 
 fn machine_id(sender: &cas_types::Agent) -> String {
@@ -331,7 +374,7 @@ fn prepare(
         created_at: Some(now),
     };
     if let Some(brief) = brief {
-        task.notes.push_str(&format!("\n📌 SPAWN BRIEF {brief}\n"));
+        task.notes.push_str(&format!("\n{SPAWN_BRIEF_MARKER}{brief}\n"));
     }
     task.notes.push_str(&format!(
         "\n{ROUTE_MARKER}{}\n",
@@ -562,6 +605,8 @@ mod tests {
         teammate["user_id"] = "other-owner".into();
         let mut unknown_owner = peer("best", 3, 4.0, 0);
         unknown_owner.as_object_mut().unwrap().remove("user_id");
+        // cas-23a6: the routed task's notes alone exceed Cloud's body cap.
+        let long_notes = "qa impact row\n".repeat(5_000);
         for (case, peers, off, note, expect_route) in [
             (
                 "fresh",
@@ -571,7 +616,7 @@ mod tests {
                     peer("best", 3, 4.0, 0),
                 ],
                 false,
-                "",
+                long_notes.as_str(),
                 true,
             ),
             ("absent", vec![], false, "", false),
@@ -672,6 +717,9 @@ mod tests {
             if expect_route {
                 let body: serde_json::Value = serde_json::from_slice(&sends[0].body).unwrap();
                 assert_eq!(body["recipient_agent_id"], "best");
+                let text = body["body"].as_str().unwrap();
+                assert!(text.chars().count() <= crate::cloud::peer_mailbox::CLOUD_BODY_MAX_CHARS);
+                assert!(text.contains(&task.id));
                 assert!(
                     body["body"]
                         .as_str()

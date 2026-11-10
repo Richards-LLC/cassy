@@ -437,6 +437,11 @@ bug_families:
     title: Configured artifact symlinks and canonical cwd writes share containment while refusals identify both roots
     tasks: [cas-a767]
     journeys: [FACTORY-CLOSE, FACTORY-SUPERVISE]
+  missing-release-evidence:
+    title: Missing release trains and unavailable merge counts render as quiet evidence rather than headline or bold count text
+    tasks: [cas-504e9]
+    journeys: [HUB-J17, HUB-J26]
+    invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -475,6 +480,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-RELEASE-UNKNOWN-EVIDENCE:
+    statement: Without a reported release train, the shared rail and Team release renderer emits one evidence paragraph with no heading or emphasized count; known releases retain their titles while unavailable counts stay evidence.
+    check: Run fleet-ops.test.ts through releaseHeader with absent and partial release data. In batch QA inspect the empty rail and Team at phone and desktop widths in light and dark, using the regular ink-mid meta style.
+    bug: {task: cas-504e9}
   FACTORY-ARTIFACT-METADATA:
     statement: A cold peer fetches committed proof in its configured personal/team project scope regardless of account size, validates task/project identity, and verifies the downloaded bytes before caching.
     check: Run cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c and proof_note_publishes_and_resolves_on_another_machine_cas_4bb2 through MCP; cover both scope kinds with an 87-project account and the singular task endpoint, retaining cross-project conflict, denied scope, forged owner and checksum controls.
@@ -2645,6 +2654,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-RELEASE-UNKNOWN-EVIDENCE
   - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
@@ -3136,7 +3146,7 @@ journeys:
   - cas-cli/src/bridge/server/types.rs
   - crates/cas-pty/src/pty.rs
   - hub-web/e2e/journeys/team.journey.ts
-  invariants: [HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
+  invariants: [HUB-RELEASE-UNKNOWN-EVIDENCE, HUB-J26-PROJECT-EPICS, HUB-J26-READONLY-OWNER, HUB-J26-GOAL, HUB-J26-ACTIVE-EPIC-BUDGET, HUB-J26-WAITING-OFFLINE, HUB-J26-BACKGROUND-BOUND, HUB-J26-REGISTERED-RUN-STALL, HUB-J26-WORKER-BRIEF-PRIVATE, HUB-J26-DETACHED-RECYCLE]
   traffic:
     share_pct: null
     basis: No per-journey usage instrumentation.

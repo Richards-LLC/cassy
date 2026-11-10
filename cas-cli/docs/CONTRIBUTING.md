@@ -27,6 +27,12 @@ independent reviewer authority. `coordination whoami` shows the caller's type,
 role and parent. A shared-connection child registration fails before mutation
 with `rule_id=shared_mcp_child_identity`.
 
+For an already-registered live supervisor in the same pane, `coordination
+action=register` and `action=session_start` bind a new harness `session_id`
+to the existing agent's `cc_session_id`. The durable agent ID and factory
+ownership stay the same. A different name, process or role keeps its own
+registration semantics.
+
 Use the daemon-owned candidate verifier or a separately registered reviewer
 with a sealed handoff for the exact dispatch. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
@@ -860,6 +866,34 @@ the alias first, then run `cas cloud project --adopt-aliases`,
 `cas cloud sync`. Otherwise, retire the local duplicate. Retrying alone cannot
 repair remote ownership; alias adoption rewrites local task provenance and
 does not move Cloud rows.
+
+### Retained dependency failures
+
+Use `cas cloud queue --verbose` (or `--json --verbose`) to inspect the item ID,
+team, route, endpoint payload and `last_reason`. A
+`dependency_endpoint_foreign`, `dependency_endpoint_moved`,
+`dependency_endpoint_deleted` or `dependency_endpoint_unavailable` park retains
+the local dependency; a low pending count does not mean that graph was delivered.
+Compare endpoint `origin_project` and scope with the project's canonical ID and
+registered aliases. Never relabel a genuinely foreign task to make sync pass.
+Repair provenance only when ownership is established; restore a missing endpoint
+only when it is valid to do so. Scoped pulls revalidate these parks against a
+complete task and dependency inventory on the normal reconciliation interval.
+To request another inventory immediately after a repair, use
+`cas cloud queue --retry --ids <item-id>`, then `cas cloud pull` and
+`cas cloud push`.
+`--retry-reason <code>` can additionally restrict those selected items. Retrying
+preserves the payload and last diagnostic and does not reset neighboring items.
+Pending local task edits, deletes, moves, quarantines and remote tombstones
+continue to prevent unsafe repair.
+
+Conflict retention deduplicates an exact entity/state/verdict/revision replay
+atomically across restarts and connections, keeping its original observation
+time. Distinct discarded states and revisions remain available for review;
+existing history is not purged by sync. Lifecycle guards retain each change of
+state so latest-guard consumers keep the current decision, while consecutive
+identical guard observations deduplicate. Legacy personal rows skipped by a
+team-linked route require separate delivery-backed recovery, not dependency retry.
 
 ## Cloud cleanup and rate limits
 
@@ -2024,6 +2058,14 @@ Its `timings` field and tracing retain inclusive `search_index_open`,
 canonical tasks and reconcile the task index before lookup, with a full task
 rewrite on the first request in each server process. `include_source` applies
 to code search, not this context search action.
+
+Registration handlers run on the blocking pool because synchronous startup
+and store work cannot be cancelled by aborting an async task. When `register`
+or `session_start` outlives the response budget, the answer reports
+`IN_PROGRESS` (or `COMMITTED` when its write was observed), with a
+`continuation_id`. The handler continues and records a durable
+`registration_outcome` notice in the caller's inbox, carrying the same ID,
+requested session and final mutation outcome. Do not retry while it is running.
 
 Factory merge and task-close handlers run synchronous Git/store work on the
 blocking pool. Once publication or the checked Closed/AwaitingMerge disposition

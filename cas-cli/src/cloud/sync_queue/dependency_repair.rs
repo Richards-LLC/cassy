@@ -1,4 +1,4 @@
-//! Atomic outbox repair for historical edges whose endpoint tasks never synced.
+//! Atomic outbox repair and scoped revalidation of retained dependency edges.
 use crate::cloud::sync_queue::queue_ops::{insert_task_upsert_if_absent, upsert_queue_row};
 use crate::cloud::{EntityType, SyncOperation, SyncQueue};
 use crate::error::CasError;
@@ -8,6 +8,14 @@ use rusqlite::{OptionalExtension, params};
 // Only these explicit safety decisions are intentional parks. Unknown verdicts
 // and registration conflicts remain failures, so reporting cannot hide them.
 pub(super) const INTENTIONAL_PARK: &str = "COALESCE(last_outcome = 'parked' AND last_reason IN ('unattributed_origin', 'dependency_endpoint_unavailable', 'dependency_endpoint_deleted', 'dependency_endpoint_moved', 'dependency_endpoint_foreign'), 0)";
+
+/// These verdicts can recover only after a fresh scoped inventory and local
+/// ownership check. Unknown/permanent server refusals keep their explicit retry.
+pub(crate) fn dependency_repair_reason(reason: &str) -> bool {
+    matches!(reason, "orphan_dependency" | "dependency_endpoint_unavailable"
+        | "dependency_endpoint_deleted" | "dependency_endpoint_moved"
+        | "dependency_endpoint_foreign")
+}
 
 /// SQL predicate over a `sync_queue AS q` row: a dependency edge whose
 /// endpoint task still has a pending row in the same scope (cas-9b5d). Push
@@ -120,12 +128,12 @@ impl SyncQueue {
             WHERE entity_type='task_dependency' AND entity_id=?1 AND team_id=?2 AND project_id IS NULL",
             params![id,team.unwrap_or("")],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?,row.get::<_,Option<String>>(2)?))).optional()?;
         // A local edit/delete arriving after the pull read the queue wins.
-        if prior.is_some_and(|(operation, reason, error)| {
+        if prior.as_ref().is_some_and(|(operation, reason, error)| {
             operation != "upsert"
-                || reason.as_deref() != Some("orphan_dependency")
-                || !error
-                    .as_deref()
-                    .is_some_and(|error| error.contains("orphan_dependency"))
+                || !reason.as_deref().is_some_and(|reason| {
+                    dependency_repair_reason(reason)
+                        && error.as_deref().is_some_and(|error| error.contains(reason))
+                })
         }) {
             return Ok(false);
         }
@@ -148,6 +156,11 @@ impl SyncQueue {
             } else if moved {
                 refusal = Some("dependency_endpoint_moved".into());
             }
+        }
+        // Repeated syncs of an unchanged refusal keep the same payload, item
+        // ID and creation time. Do not make a stuck item look newly queued.
+        if refusal.is_some() && refusal.as_ref() == prior.as_ref().and_then(|(_, reason, _)| reason.as_ref()) {
+            return Ok(false);
         }
         if refusal.is_none() {
             for task in missing {

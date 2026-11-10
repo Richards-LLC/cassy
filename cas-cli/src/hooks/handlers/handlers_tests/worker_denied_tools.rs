@@ -252,6 +252,8 @@ fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
         "python3 <<'PY'\nimport os\nfrom pathlib import Path\nPath(os.path.join(os.environ['HOME'], '.config', 'neonctl', 'credentials.json')).read_text()\nPY",
         "ssh own-peer python3 - <<'PY'\nimport os\nprint(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())\nPY",
         "ssh own-peer python3 - <<'PY'\nimport os\nprint(open(os.path.expanduser('~/.local/share/com.vercel.cli/auth.json')).read())\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport glob, os\nprint(glob.glob(os.path.expanduser('~/.config/neon*/credentials.json')))\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport glob, os\nprint(glob.glob(os.path.expanduser('~/*/*/credentials.json'), include_hidden=True))\nPY",
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);
@@ -271,7 +273,8 @@ print(db.execute('SELECT id FROM tasks LIMIT 1').fetchall())
 print(glob.glob(os.path.expanduser('~/*/*/gabber')))
 PY"#;
     let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
-    assert!(denial(output).is_none());
+    let reason = denial(output);
+    assert!(reason.is_none(), "{reason:?}");
 }
 
 #[test]

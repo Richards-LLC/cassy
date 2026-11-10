@@ -63,6 +63,25 @@ impl NormalProbeJobs {
         }
     }
 }
+/// A probe is about its original notification, never merely a quiet pane.
+/// Read/ack receipts can retire it even when no authored reply or native turn
+/// is observable. None means retry the read, never guess that mail is waiting.
+fn normal_probe_still_unread(
+    queue: &dyn cas_store::PromptQueueStore,
+    session: &str,
+    row_id: i64,
+    probe: &NormalDeliveryProbe,
+) -> Option<bool> {
+    let Some(row) = queue.queued_prompt(row_id).ok()? else { return Some(false) };
+    if row.target != probe.target || row.prompt != probe.prompt
+        || row.factory_session.as_deref().is_some_and(|owner| owner != session)
+        || row.created_at > probe.delivered_at_utc
+    {
+        return Some(false);
+    }
+    super::poison_sweep_jobs::still_unread(queue, &row)
+}
+
 pub(crate) fn read_normal_probe(
     cas_dir: &std::path::Path,
     session: &str,
@@ -73,6 +92,15 @@ pub(crate) fn read_normal_probe(
 ) -> NormalPrepared {
     let activity = crate::store::open_prompt_queue_store(cas_dir)
         .map(|queue| {
+            // Native startup has its own pane/turn observation lifetime. An
+            // ordinary probe must stop once its notification leaves the inbox.
+            if probe.startup_pane.is_none() {
+                match normal_probe_still_unread(queue.as_ref(), session, row_id, &probe) {
+                    Some(false) => return RecipientActivity::Found,
+                    None => return RecipientActivity::Unknown,
+                    Some(true) => {}
+                }
+            }
             authored_activity_io(
                 cas_dir,
                 session,
@@ -139,17 +167,7 @@ pub(crate) fn write_normal_flag(
     let Ok(queue) = crate::store::open_prompt_queue_store(cas_dir) else {
         return false;
     };
-    let Ok(current) = queue.queued_prompt(row_id) else {
-        return false;
-    };
-    // An acknowledged, removed or replaced original needs no health incident.
-    let Some(row) = current else {
-        return true;
-    };
-    if row.prompt != probe.prompt || row.target != probe.target {
-        return true;
-    }
-    match super::poison_sweep_jobs::still_unread(queue.as_ref(), &row) {
+    match normal_probe_still_unread(queue.as_ref(), session, row_id, probe) {
         Some(false) => return true,
         None => return false,
         Some(true) => {}

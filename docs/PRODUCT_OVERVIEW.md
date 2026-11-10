@@ -177,6 +177,8 @@ queueing, so lifting the hold releases no stale READY backlog.
    Measured CPU or output writes from owned children keep quiet workers executing
    and reset factory progress; sleeping or exited children do not. Worker/session
    and process-start identities fence this evidence.
+   Delivery-watchdog nudges name their notification and stop after it is read or
+   acknowledged; fresh unread directed mail keeps its wake.
    The progress watchdog wakes the supervisor after 45 quiet minutes of local work
    and pages the operator after 90. Parked delivery anchors already contained in
    their recorded local or origin target, and work or target epics assigned to a

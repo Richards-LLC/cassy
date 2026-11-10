@@ -398,6 +398,10 @@ bug_families:
     title: Superseded batch QA offers return once per ownership episode when the same supervisor session regains the outstanding set
     tasks: [cas-b26e]
     journeys: [FACTORY-QA-RECEIPT]
+  drained-inbox-delivery-watchdog:
+    title: Drained worker and supervisor inboxes retire delivery wakes while fresh unread notifications still wake
+    tasks: [cas-40ed]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

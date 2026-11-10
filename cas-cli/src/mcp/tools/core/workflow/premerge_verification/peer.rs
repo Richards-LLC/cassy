@@ -333,29 +333,18 @@ fn import_receipt(
             "peer approval task is already complete",
         ));
     }
-    // A newer local cycle or an existing local verdict permanently owns this
-    // slot. Do not keep an old receipt leased while waiting on the network.
+    // Existing dispatch ownership is checked atomically after authenticating
+    // and validating this receipt. A stale admitted peer approval may be
+    // superseded by its source's fresh review, never by rebinding old proof.
     let existing = cas_store::get_latest_verification_dispatch(root, &task.id)
         .map_err(ReceiptFailure::retry)?;
-    if let Some(existing) = existing {
-        let same = existing.state == VerificationDispatchState::Resolved
-            && existing
-                .repository
-                .as_ref()
-                .and_then(|proof| proof.peer_premerge.as_ref())
-                .is_some_and(|attestation| {
-                    attestation.receipt == receipt
-                        && attestation.message_id == message.id
-                        && Some(&attestation.sender_machine_id)
-                            == message.sender_machine_id.as_ref()
-                        && Some(&attestation.sender_session) == message.sender_session.as_ref()
-                });
-        if !same {
-            return Err(ReceiptFailure::reject(
-                "an existing local verification cycle owns this task",
-            ));
-        }
-    } else if crate::store::open_verification_store(root)
+    if existing.as_ref().is_some_and(|dispatch| {
+        dispatch.repository.as_ref().and_then(|proof| proof.peer_premerge.as_ref()).is_none()
+            || !matches!(dispatch.state, VerificationDispatchState::Resolved | VerificationDispatchState::Invalidated)
+    }) {
+        return Err(ReceiptFailure::reject("an existing local verification cycle owns this task"));
+    }
+    if existing.is_none() && crate::store::open_verification_store(root)
         .map_err(ReceiptFailure::retry)?
         .get_latest_for_task(&task.id)
         .map_err(ReceiptFailure::retry)?
@@ -425,8 +414,8 @@ fn import_receipt(
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
     cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
         |error| {
-            // Payload and existing-cycle refusals were checked before Git work.
-            // A store Parse here can be its updated_at compare losing a race;
+            // Ownership conflicts are permanent. A store Parse here can be
+            // its updated_at compare losing a race;
             // retry so the next pass can classify the now-current local cycle.
             let permanent = matches!(&error, cas_store::StoreError::VerificationDispatchConflict { .. })
                 || matches!(&error, cas_store::StoreError::Database(rusqlite::Error::SqliteFailure(cause, _))
@@ -494,6 +483,10 @@ mod tests {
                 "id":"source-supervisor", "name":"source", "agent_type":"primary", "status":"active",
                 "machine_id":"source-machine", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0,
                 "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"source-session"}
+            }, {
+                "id":"other-supervisor", "name":"other", "agent_type":"primary", "status":"active",
+                "machine_id":"other-machine", "last_heartbeat":chrono::Utc::now().to_rfc3339(), "active_tasks":0,
+                "metadata":{"role":"supervisor", "canonical_id":PROJECT, "factory_session":"other-session"}
             }]}))).mount(&server).await;
         let endpoint = server.uri();
         tokio::task::spawn_blocking(move || {
@@ -571,17 +564,34 @@ mod tests {
             rejected.status = VerificationStatus::Rejected;
             let mut foreign = fresh_message.clone();
             foreign.sender_machine_id = Some("foreign-machine".into());
-            for invalid in [message(&rejected, 1), foreign, old_message.clone()] {
+            let mut rebound = fresh.clone();
+            rebound.dispatch_id = old.dispatch_id.clone();
+            rebound.verdict_id = old.verdict_id.clone();
+            let mut other = fresh.clone();
+            other.supervisor_id = "other-supervisor".into();
+            let mut other_message = message(&other, 1);
+            other_message.sender_agent_id = other.supervisor_id.clone();
+            other_message.sender_machine_id = Some("other-machine".into());
+            other_message.sender_session = Some("other-session".into());
+            for invalid in [message(&rejected, 1), foreign, old_message.clone(), message(&rebound, 1), other_message] {
                 assert!(matches!(ingest_peer_receipt(&root, &recipient, &invalid).unwrap(), PeerReceiptIngested::Rejected(_)));
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, old.dispatch_id);
             }
-            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
+            let admitted = ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap();
+            assert!(matches!(admitted, PeerReceiptIngested::Imported), "{admitted:?}");
             let current = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
             assert_eq!(current.id, fresh.dispatch_id);
             assert!(verify_peer_promotion(&root, &task, &current, &fresh.verdict_id).unwrap());
             assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap().state, VerificationDispatchState::Invalidated);
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
+            let events = crate::store::open_event_store(&root).unwrap()
+                .list_for_entity(cas_types::EventEntityType::Task, &task.id, 100).unwrap();
+            let replacements: Vec<_> = events.iter().filter_map(|event| event.metadata.as_ref())
+                .filter(|metadata| metadata["code"] == "peer_premerge_approval_replaced").collect();
+            assert_eq!(replacements.len(), 1);
+            assert_eq!(replacements[0]["old_dispatch_id"], old.dispatch_id);
+            assert_eq!(replacements[0]["new_dispatch_id"], fresh.dispatch_id);
             assert_eq!(cas_store::get_verification_for_dispatch(&root, &old.dispatch_id).unwrap().unwrap().id, old.verdict_id);
             assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap()
                 .repository.unwrap().peer_premerge.unwrap().receipt.source_sha, old_sha);

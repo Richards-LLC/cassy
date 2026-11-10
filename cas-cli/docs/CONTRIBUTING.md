@@ -91,6 +91,17 @@ stays quiet. Replies bind to a peer message delivered to that worker and recheck
 the current scope. This uses the existing MCP coordination dispatch; the factory
 message CLI retains its local queue behavior.
 
+## Repaired peer approvals
+
+The authenticated peer receipt path can supersede a stale admitted peer approval
+when the same source supervisor and machine supplies a later, independently
+approved dispatch for the current repaired delivery. Admission rechecks project,
+plan, candidate tree and published Git identity. One store transaction invalidates
+only the stale peer dispatch, inserts the new approval and records
+`peer_premerge_approval_replaced`; both verdicts and the old proof remain readable.
+Local verification cycles cannot be replaced by peer mail. Replaying old approval
+with a changed source SHA does not grant authority.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history

@@ -650,6 +650,11 @@ pub trait VioletThreadResolver: Send + Sync {
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError>;
 }
 
+/// Arguments shared by both thread identity resolvers.
+pub(crate) fn violet_identity_read_args(external_ref: &str) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([("external_ref".into(), json!(external_ref))])
+}
+
 /// cas-85c1 (GH #1292): the one mapping from a proxied `violet_read` call to
 /// the resolver result, shared by the MCP and daemon resolvers so both mark
 /// a dropped, reconnecting upstream the same way (via the proxy's structural
@@ -1907,6 +1912,18 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result.lock().unwrap().clone()
         }
+    }
+
+    #[test]
+    fn identity_claim_read_avoids_digest_size_cap_cas_0288() {
+        let args = violet_identity_read_args("https://example.slack.com/archives/C08COORD01/p1760616000123456");
+        let receipt = if args.get("include_threads") == Some(&json!(false)) {
+            json!({"ok":true,"schema_version":1,"identity":{
+                "workspace_id":"T07ABCDEF","channel_id":"C08COORD01","root_thread_ts":"1760616000.123456"}})
+        } else { json!({"ok":false,"error":{"code":"size_cap_exceeded"}}) };
+        let result = decode_violet_result(json!({"structuredContent":receipt})).unwrap();
+        assert_eq!(result["code"], "completed");
+        assert_eq!(result["thread_identity"]["root_ts"], "1760616000.123456");
     }
 
     fn acquired_response(request_id: &str) -> Value {

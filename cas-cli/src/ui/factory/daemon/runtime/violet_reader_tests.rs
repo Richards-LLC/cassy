@@ -946,3 +946,19 @@ fn managed_claims_leave_bounded_receipts_without_bodies() {
     assert!(report.is_some_and(|report| report.errors.is_empty()));
     assert!(claim_receipts_summary(blocked.path(), at(200)).is_none());
 }
+
+#[test]
+fn owner_routed_mention_wakes_only_its_registration_cas_0288() {
+    let temp = tempfile::tempdir().unwrap();
+    let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap(); queue.init().unwrap();
+    let mut cloud = FixtureCloud::new("leases this reader's deliveries");
+    cloud.claim["deliveries"][0]["delivery"]["event_kind"] = json!("app_mention");
+    for (registration, session) in [("reg-supervisor-beta-07", "other-session"), (REGISTRATION, "owner-session")] {
+        cloud.registration_id = registration;
+        let io = ReaderIo { body: &violet_body(None), typer: &PromptQueueTyper(&queue), quarantine: &Quarantined(&cloud) };
+        VioletReader::new(session).tick(&cloud, registration, &io, Utc::now());
+    }
+    let rows = queue.peek_all(10).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].factory_session.as_deref(), Some("owner-session"));
+}

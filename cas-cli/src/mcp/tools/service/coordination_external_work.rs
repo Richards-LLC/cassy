@@ -27,7 +27,7 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
             ));
         };
         let caller = self.caller.clone();
-        let args = serde_json::Map::from_iter([("external_ref".to_string(), json!(external_ref))]);
+        let args = crate::coordination::external_work::violet_identity_read_args(external_ref);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -192,7 +192,7 @@ impl CasService {
         let context = OperationContext {
             project_id,
             // Cloud's registration identifier is the authenticated agent row ID.
-            registration_id: agent.id,
+            registration_id: agent.id.clone(),
         };
         let service = ExternalWorkService::new(
             journal,
@@ -210,6 +210,11 @@ impl CasService {
                 )
             })?
             .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+
+        if request.action == "claim" && let Some(external_ref) = request.external_ref.as_deref() {
+            surface_claim_refusal(&self.inner.cas_root, &agent, external_ref, &result)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
 
         if matches!(
             result.get("code").and_then(Value::as_str),
@@ -295,5 +300,37 @@ fn command_from_request(request: &CoordinationRequest) -> Result<ExternalWorkCom
             "unsupported external-work action {}",
             request.action
         )),
+    }
+}
+
+fn surface_claim_refusal(
+    _root: &std::path::Path, _agent: &cas_types::Agent, _external_ref: &str, _result: &Value,
+) -> Result<(), crate::error::CasError> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod mention_claim_tests {
+    use super::*;
+    use cas_store::{PromptQueueStore, QueueOrigin};
+    #[test]
+    fn failed_mention_claim_records_one_owner_blocker_cas_0288() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut owner = cas_types::Agent::new_with_role("owner-id".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        let agents = crate::store::open_agent_store(temp.path()).unwrap(); agents.init().unwrap(); agents.register(&owner).unwrap();
+        let queue = crate::store::open_prompt_queue_store(temp.path()).unwrap(); queue.init().unwrap();
+        queue.enqueue_idempotent("violet-activity:C08COORD01", "supervisor",
+            "<cas-violet-activity v=\"1\" channel=\"C08COORD01\" kind=\"mention\" addressed=\"mention\" thread_ts=\"1760616000.123456\">\nClaimed delivery_id=0000de2a-1111-4111-8111-00000000de2a\n</cas-violet-activity>",
+            Some("owner-session"), None, None, "mention-fixture", Some(&QueueOrigin::Daemon)).unwrap();
+        let result = json!({"code":"size_cap_exceeded","receipt":{"request_id":"request-fixture"}});
+        let link = "https://example.slack.com/archives/C08COORD01/p1760616000123456";
+        for _ in 0..2 { surface_claim_refusal(temp.path(), &owner, link, &result).unwrap(); }
+        let notices = crate::store::open_supervisor_queue_store(temp.path()).unwrap().peek(&owner.id, 10).unwrap();
+        assert_eq!(notices.len(), 1);
+        let payload: Value = serde_json::from_str(&notices[0].payload).unwrap();
+        assert_eq!(payload["kind"], "blocker");
+        assert_eq!(payload["context"]["code"], "size_cap_exceeded");
+        assert_eq!(payload["context"]["external_ref"], link);
     }
 }

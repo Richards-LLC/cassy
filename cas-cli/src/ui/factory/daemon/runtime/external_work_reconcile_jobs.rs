@@ -73,7 +73,7 @@ struct DaemonVioletResolver {
 #[cfg(feature = "mcp-proxy")]
 impl VioletThreadResolver for DaemonVioletResolver {
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError> {
-        let args = serde_json::Map::from_iter([("external_ref".to_string(), json!(external_ref))]);
+        let args = crate::coordination::external_work::violet_identity_read_args(external_ref);
         let runtime = self
             .runtime
             .lock()

@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.12.0] - 2026-11-10
+
+### Fixed — Commander
+
+- **Quiet expired transcript mirrors** — Expiring completed supervisor reply mirrors no longer raises false delivery blockers, including after supervisor succession. Explicit undelivered operator asks keep their delivery alerts, and durable reply delivery continues retrying.
+
+### Fixed — Factory
+
+- **Keep returned delivery release notes** — Closing a returned task accepts its valid task-owned changelog fragment after a target merge revises the entry. Missing or malformed fragments and merged-in notes from other tasks still cannot satisfy the gate.
+- **Preserve current-session delivery warnings** — Undelivered transcript mirrors authored during the current supervisor session still raise a delivery warning, including decisions carried in status replies. Mirrors captured before a replacement supervisor registered stay quiet even when the factory session name is reused. Prior or ended supervisor-session mirrors expire quietly, while explicit operator asks retain their watchdog alerts and durable operator delivery keeps retrying.
+
 ## [4.11.0] - 2026-11-10
 
 ### Fixed — Commander

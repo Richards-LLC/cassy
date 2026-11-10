@@ -168,7 +168,9 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
       replies: [{ notification_id: 999, reply_to: null, message: "The bank feed for October is ready. Should I reconcile it against the statement now?", summary: "", device_id: "journey-device", kind: "answer", attachments: [], session: PELICAN, at: journeyStamp(-1_000) }],
     }],
   };
-  const hub = await journey.hub({ machines: [atlas, STUDIO, FORGE], paired: ["atlas", "studio", "forge"], history });
+  // cas-36cb: gabber-studio reports its harness, so its empty card wears the same mark as its header.
+  const studio: Machine = { ...STUDIO, sessions: STUDIO.sessions.map((session) => ({ ...session, harness: "claude" })) };
+  const hub = await journey.hub({ machines: [atlas, studio, FORGE], paired: ["atlas", "studio", "forge"], history });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
   /** "Conversations" and its New session control sit on one line (cas-865c). */
@@ -346,6 +348,8 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(card.locator("b")).not.toHaveClass(/codename/);
     await expect(card.locator(".proj2")).toHaveText(`Studio Mac · macOS · ${OTTER}`);
     await expect(card.locator(".proj2 > .codename")).toHaveText(OTTER);
+    await expect(page.locator(".conversation-identity .conversation-avatar")).toHaveAttribute("data-harness", "claude");
+    await expect(card.locator(".mono")).toHaveAttribute("data-harness", "claude");
   });
 
   await journey.stage("Find the conversation from the keyboard", async () => {

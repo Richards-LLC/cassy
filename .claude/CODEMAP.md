@@ -26,7 +26,7 @@
 - `crates/cas-search/` - Tantivy indexes, LMDB vectors, scoring and retrieval primitives.
 - `crates/cas-core/` - hooks, extraction, memory hygiene, temporal search and sync.
 - `crates/cas-code/` - tree-sitter parsing, symbol extraction and code chunks.
-- `crates/cas-mcp/`, `crates/cas-mcp-proxy/` - protocol/action registry and upstream MCP policy/connections.
+- `crates/cas-mcp/`, `crates/cas-mcp-proxy/` - protocol/action registry and upstream MCP policy/connections, including Violet posting authority with scoped outcome lookup and caller-aware request-ID recovery.
 - `crates/cas-factory/`, `crates/cas-factory-protocol/` - sessions, probes, routing, spec resolution and transport.
 - `crates/cas-mux/`, `crates/cas-pty/` - panes, input routing, terminal rendering and harness/account isolation.
 - `crates/cas-recording/`, `crates/cas-diffs/` - recording exports and diff parsing/highlighting.

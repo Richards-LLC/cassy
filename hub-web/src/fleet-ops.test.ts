@@ -167,6 +167,19 @@ function context(scopes: Scope[], state = new FleetOpsState(), on: Partial<Fleet
 }
 
 describe("the rail's controls draw that state (cas-a474)", () => {
+  it("keeps unavailable release facts in evidence text instead of headings or count emphasis (cas-504e9)", () => {
+    for (const epic of [undefined, { id: "train", title: "Release with missing counts" }]) {
+      const header = releaseHeader(document, epic);
+      expect(header.querySelector(".release-count, strong, b, .status-chip")).toBeNull();
+      const evidence = header.querySelector("p.release-meta");
+      expect(evidence?.textContent?.trim()).toBeTruthy();
+      expect(header.querySelector("h3")?.textContent).toBe(epic?.title);
+      if (!epic) {
+        expect(header.children).toHaveLength(1);
+        expect(header.querySelector("h1, h2, h3, h4, h5, h6, [role=heading]")).toBeNull();
+      }
+    }
+  });
   it("shows a frozen train's measured ETA and offers the operator one-tap Lift, Freeze otherwise (cas-2f4d)", () => {
     const choose = vi.fn();
     const frozen = { id: "cas-tr", title: "Release train vNEXT", freeze: { frozen_at: "2026-11-07T19:05:00Z", eta: "2026-11-07T19:50:00Z", summary: "Frozen 2:05 PM ET · ETA 2:50 PM ET" } };

@@ -1,5 +1,5 @@
 import type { Locator } from "@playwright/test";
-import { test, expect, journeyPart } from "./journey";
+import { clickConversationHeaderAction, test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { journeyNow } from "./clock";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -193,7 +193,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         })).toEqual([]);
         const tabs = (await page.locator(".conversation-tabs").boundingBox())!;
         expect(tabs.y + tabs.height).toBeLessThanOrEqual((await page.locator("#conversation-pane-slot").boundingBox())!.y);
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expect(epics.getByRole("heading", { name: "Live epics · 2" })).toBeVisible();
         expect(await status.evaluate(root => Boolean(root.querySelector(".release-progress")!.compareDocumentPosition(root.querySelector(".live-epics")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
         await expectRun(status.locator(".release-progress"), [1, 5]);
@@ -262,12 +262,12 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         if (process.env.EPIC_PROGRESS_QA) await page.screenshot({ path: `${process.env.EPIC_PROGRESS_QA}/epic-progress-${width}-${colorScheme}-expanded.png` });
         if (width === 390) {
           await page.keyboard.press("Escape");
-          await expect(page.locator("#conversation-fleet")).toBeFocused();
+          await expect(page.locator("#conversation-more")).toBeFocused();
         }
       });
       await journey.stage("Read Live epics with forced colors and reduced motion", async () => {
         await page.emulateMedia({ forcedColors: "active", reducedMotion: "reduce" });
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
         await expect(epics.getByRole("button", { name: /Follow-ups/ })).toBeVisible();
         const opening = epics.locator(".live-epic").filter({ hasText: "Follow-ups" });
         await opening.evaluate(node => node.classList.add("is-opening"));

@@ -5,6 +5,16 @@ use serde_json::json;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+fn active_ready_epic(stores: &DirectorStores, task_id: &str) {
+    let mut epic = Task::new("cas-active".into(), "Active work".into());
+    epic.task_type = TaskType::Epic;
+    epic.status = TaskStatus::InProgress;
+    stores.task_store.add(&epic).unwrap();
+    stores.task_store.add_dependency(&Dependency::new(
+        task_id.into(), epic.id, DependencyType::ParentChild,
+    )).unwrap();
+}
+
 #[tokio::test]
 async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
     let server = MockServer::start().await;
@@ -170,8 +180,8 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
         assert_eq!(classify(&mut app), None,
             "with no ready children, a pinned epic must not wake for unrelated fallback tasks");
         app.current_epic_id = None;
-        assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
-            "without focus, production evidence must still cover ready tasks and filter the live peer claim");
+        assert_eq!(classify(&mut app), None,
+            "no focused scope cannot recruit from the historical backlog");
         let request = assignment_evidence::AssignmentRequest::new(
             cas.clone(),
             &app.unfiltered_director_data,
@@ -243,8 +253,10 @@ fn operator_ask_does_not_count_workers_holding_blocked_tasks_as_idle() {
         )
         .unwrap();
 
+    active_ready_epic(&stores, "cas-ready");
     let mut app = FactoryApp::for_test();
     app.cas_dir = cas.clone();
+    app.current_epic_id = Some("cas-active".into());
     app.factory_session = Some("operator-ask-stall".into());
     app.supervisor_name = "supervisor".into();
     let data = DirectorData::load_fast(&cas).unwrap();
@@ -315,6 +327,7 @@ fn failed_harness_is_not_idle_staffing_capacity_cas_8f40() {
     let cas = crate::store::init_cas_dir(project.path()).unwrap();
     let stores = DirectorStores::open(&cas).unwrap();
     stores.task_store.add(&Task::new("cas-ready".into(), "Ready work".into())).unwrap();
+    active_ready_epic(&stores, "cas-ready");
     let now = Utc::now();
     let clone = cas.join("worktrees/failed-worker");
     std::fs::create_dir_all(&clone).unwrap();
@@ -336,6 +349,7 @@ fn failed_harness_is_not_idle_staffing_capacity_cas_8f40() {
         "codex_error_info":"other", "message":"The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account"}}}).to_string();
     let mut app = FactoryApp::for_test();
     app.cas_dir = cas.clone();
+    app.current_epic_id = Some("cas-active".into());
     app.factory_session = Some("failed-staffing".into());
     app.supervisor_name = "supervisor".into();
     for (terminal, eligible) in [(&healthy, true), (&failed, false), (&healthy, true)] {

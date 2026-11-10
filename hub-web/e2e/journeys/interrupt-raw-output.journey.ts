@@ -243,18 +243,15 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
           await expect(reason).toBeVisible();
           await expect(send).toHaveAccessibleDescription(await reason.innerText());
         }
-        // Both stay whole in the header at every width: Interrupt keeps its
-        // word, Raw output its icon under its full name, each a full target.
-        await expect(interrupt.locator(".action-label")).toBeVisible();
+        // Both stay reachable in the one-row header at every width, each a
+        // full target under its full name; a narrow header draws them as
+        // icons (cas-bcf0, DESIGN.md phone layout invariants).
         for (const action of [interrupt, raw]) {
           await expect(action).toBeInViewport({ ratio: 1 });
           const box = (await action.boundingBox())!;
           expect(box.height, "a full-size target").toBeGreaterThanOrEqual(phone ? 44 : 36);
         }
-        // cas-d043 G02: with the identity on its own row, a phone has room
-        // for Raw output's word too; the bare ">_" glyph read as nothing.
-        await expect(raw.locator(".action-label")).toBeVisible();
-        await expect(raw.locator(".action-label")).toContainText(/\S/);
+        await expect(interrupt).toHaveAccessibleName(/\S/);
         await expect(raw).toHaveAccessibleName(/\S/);
         // The two read apart in either scheme: Interrupt in the critical tone.
         const colours = await Promise.all([interrupt, raw].map((action) => action.evaluate((node) => getComputedStyle(node).color)));

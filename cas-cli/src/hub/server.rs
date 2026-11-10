@@ -4184,17 +4184,26 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     let (mut wire_sink, mut wire_source) = socket.split();
     let (sink, mut writes) = tokio::sync::mpsc::channel::<Message>(64);
     let (reads, mut source) = tokio::sync::mpsc::channel(64);
+    // cas-327d: why the transport ended, so a dropped Commander socket is
+    // never silent in the hub log.
+    let transport_exit = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+    let transport_exit_writer = transport_exit.clone();
     // The transport has no catalog, daemon attach, store or command work.
     // A subscription can wait seconds on those without preventing this
     // already-authenticated socket from answering its liveness probe.
     let transport = tokio::spawn(async move {
+        let exit = |reason: String| {
+            if let Ok(mut slot) = transport_exit_writer.lock() {
+                slot.get_or_insert(reason);
+            }
+        };
         loop {
             tokio::select! {
                 incoming = wire_source.next() => {
-                    let Some(incoming) = incoming else { break; };
+                    let Some(incoming) = incoming else { exit("client_gone".into()); break; };
                     match &incoming {
                         Ok(Message::Ping(payload)) => {
-                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { break; }
+                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { exit("write_failed".into()); break; }
                             continue;
                         }
                         Ok(Message::Text(text)) => {
@@ -4203,21 +4212,32 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                             {
                                 if let Some(ping) = envelope.ping {
                                     let pong = serde_json::json!({"channel":"health","pong":ping});
-                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
+                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { exit("write_failed".into()); break; }
                                 }
                                 continue;
                             }
                         }
                         _ => {}
                     }
-                    let ended = matches!(&incoming, Ok(Message::Close(_)) | Err(_));
+                    let ended = match &incoming {
+                        Ok(Message::Close(frame)) => Some(format!(
+                            "client_close code={}",
+                            frame.as_ref().map(|frame| u16::from(frame.code).to_string()).unwrap_or_else(|| "none".into())
+                        )),
+                        Err(error) => Some(format!("read_error: {error}")),
+                        _ => None,
+                    };
                     // Bound command backlog independently of health. Closing
                     // on overflow preserves command order without silent loss.
-                    if reads.try_send(incoming).is_err() || ended { break; }
+                    if reads.try_send(incoming).is_err() {
+                        exit(ended.unwrap_or_else(|| "command_backlog_full".into()));
+                        break;
+                    }
+                    if let Some(reason) = ended { exit(reason); break; }
                 }
                 outgoing = writes.recv() => {
-                    let Some(outgoing) = outgoing else { break; };
-                    if wire_sink.send(outgoing).await.is_err() { break; }
+                    let Some(outgoing) = outgoing else { exit("hub_closed".into()); break; };
+                    if wire_sink.send(outgoing).await.is_err() { exit("write_failed".into()); break; }
                 }
             }
         }
@@ -4238,6 +4258,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         revalidation_period,
     );
     revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut hub_exit = "send_failed";
 
     loop {
         tokio::select! {
@@ -4261,11 +4282,11 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     let result = match machine_binary_frame(&session, &frame) {
                         Ok(Some(bytes)) => sink.send(Message::Binary(bytes.into())).await,
                         Ok(None) => {
-                            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else { break };
+                            let Ok(message) = serde_json::from_slice::<serde_json::Value>(&frame.bytes) else { hub_exit = "frame_not_json"; break };
                             let envelope = serde_json::json!({"channel":format!("pty:{session}"),"message":message});
                             sink.send(Message::Text(envelope.to_string().into())).await
                         }
-                        Err(_) => break,
+                        Err(_) => { hub_exit = "frame_encode_failed"; break }
                     };
                     if result.is_err() { break; }
 
@@ -4282,14 +4303,14 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     let envelope = serde_json::json!({"channel":format!("pty:{session}"),"closed":true});
                     if sink.send(Message::Text(envelope.to_string().into())).await.is_err() { break; }
                 }
-                None => break,
+                None => { hub_exit = "outbound_closed"; break }
             },
             incoming = source.recv() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
                     if sink.send(Message::Pong(payload)).await.is_err() { break; }
                 }
                 Some(Ok(Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => { hub_exit = "transport_ended"; break }
                 Some(Ok(Message::Binary(_))) => {
                     let error = serde_json::json!({"error":{"code":"binary_client_frame","message":"Commander controls must be JSON"}});
                     if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
@@ -4420,6 +4441,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }
             } => {
                 if revoked.as_deref() == auth.as_ref().map(|(_, context)| context.device_id.as_str()) {
+                    hub_exit = "device_revoked";
                     let _ = sink.send(Message::Close(None)).await;
                     break;
                 }
@@ -4436,6 +4458,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }).await.unwrap_or(true)
             } => {
                 if revoked_on_disk {
+                    hub_exit = "authorization_recheck_failed";
                     let _ = sink.send(Message::Close(None)).await;
                     break;
                 }
@@ -4446,6 +4469,17 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         handle.abort();
     }
     transport.abort();
+    let transport_reason = transport_exit.lock().ok().and_then(|slot| slot.clone());
+    let reason = match (hub_exit, transport_reason) {
+        ("transport_ended", Some(transport)) => transport,
+        (hub, _) => hub.to_string(),
+    };
+    let device = auth.as_ref().map(|(_, context)| context.device_id.as_str()).unwrap_or("-");
+    if reason.starts_with("client_close") || reason == "client_gone" {
+        tracing::info!(%reason, device, "Commander machine socket closed");
+    } else {
+        tracing::warn!(%reason, device, "Commander machine socket closed");
+    }
 }
 
 async fn acquire_lease<R: SessionReadModel>(

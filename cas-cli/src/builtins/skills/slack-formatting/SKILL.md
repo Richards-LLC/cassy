@@ -5,15 +5,32 @@ description: Use when writing any Slack message body (a violet_post message, thr
 
 # Format Slack messages for humans
 
-People scan; they do not read. In NN/g eyetracking studies 79% of users scanned a new page and 16% read word by word, and a concise, scannable rewrite scored 58% higher in usability. Unbroken text produces the F-pattern: readers catch the first words of the first lines and skip the rest. Slack makes this worse. A notification or mobile preview shows only the first line, and long messages collapse behind "Show more". Your job is to make the first line carry the point and everything else easy to skip.
+Use `violet_post` with **blocks plus fallback text** by default for status
+updates, release-note threads and decisions. Fill one of the three templates
+below; the project's release rubric still owns audiences, wording, order and
+reply count. The layouts follow violet_ps `apps/violet/DESIGN.md` “Slack posts”.
+
+`blocks` contains Violet layout objects, not raw Slack Block Kit: `header{text}`,
+`section{text}`, `fields{fields:[{label,value}]}`, `bullets{items,ordered?}`,
+`divider`, `context{text}`, or `table{rows}`. Put `type` on each object. Use one
+header first, short fields for figures, tight bullets for steps, and context
+last. Tables have a header row and equal-width rows; at most one per message.
+See [the contract](../violet/references/contract.md#layout-blocks-default) for
+all limits (header ≤100 characters; ≤10 fields; 1–50 blocks). Readability limits
+apply to all visible strings as well as the separate fallback.
+
+Always supply meaningful `text`: the one-part notification and screen-reader
+fallback. Text-only thread replies carry their own `blocks` and `text`.
+File replies keep the file workflow. Do not invent `kind: "blocks"`, a
+`template` parameter, or raw Slack `rich_text` objects.
 
 ## The ten rules
 
-1. **First line = the answer.** One plain sentence of at most ~100 characters: the verdict, decision or ask. It is not a title, and it carries no second clause. A reader who stops here still knows the one thing that matters.
+1. **Verdict first.** The header or fallback gives the verdict, decision or ask in at most ~100 characters. A short title is fine when the next section supplies the answer. A reader who stops here still knows the one thing that matters.
 2. **Top-level is short; detail goes in the thread.** Keep the channel message to ≤ 8 lines and ≤ ~600 characters. Put evidence, breakdowns, per-item numbers and caveats in threaded replies, one reply per topic. Use `kind: "thread"` with `replies[]`.
 3. **One idea per line, one line per bullet.** A bullet should fit on one rendered line (≤ ~90 characters). If it needs a second clause, split it into two bullets or move it to the thread.
-4. **Blank line between blocks.** Separate the headline, each section and the closing ask with an empty line. Never stack more than 5 bullets without a break or a label.
-5. **Hierarchy through structure, not bold.** Bold only short labels (2–4 words) and the few numbers that matter. Never bold a whole sentence or the headline. Show sub-points as an indented `◦` under a `•`, at most two levels deep.
+4. **Keep lists tight.** Use a `bullets` block without blank lines between items. In plain text, separate paragraphs and sections with a blank line, not individual bullets. Use a label when a list changes subject.
+5. **Hierarchy through layout.** Use a header for the title, fields for figures and a divider only when the subject changes. In plain text a wholly bold first-line title up to 100 characters is allowed; bold body text only for short labels and key figures. Plain-text sub-points use indented `◦` under `•`, at most two levels deep.
 6. **End with the ask or the next step**, on its own line: who does what, by when. If nothing is needed, say so in three words or say nothing.
 7. **Meaning before data.** Every section opens with a one-line takeaway in words ("All post types on time except 2 deleted reels"), then the figures. A list of bare numbers is a spreadsheet, not a message. Short is not the goal; easy to understand is.
 8. **Numbers must reconcile on sight.** If 253 were due and 251 were on time, the reader must see where the other 2 went in the same line. Never print "0 missed" beside a gap you explain somewhere else.
@@ -40,19 +57,13 @@ The operator set these two, and they are never traded for brevity or tone. They 
 
 ## Tables
 
-Slack uses a proportional font and mrkdwn has no tables, so space-padded columns never line up. Pick one:
+Use a native `table` block for a small comparison: `rows` is a rectangular
+array of strings and its first row is the header. Keep wide/long tables in a
+reply. Use `fields` for a few label/value pairs. Never space-pad columns in
+proportional text. In the plain-text fallback use one bullet per row, or a
+monospace fenced table with the takeaway above it.
 
-- **≤ 5 rows:** one bullet per row, label first, then the figure: `• Reels — 143 of 145 (2 deleted)`.
-- **> 5 rows or several numeric columns:** put a monospace table in a code block, padded so columns align, with a header row. Put the takeaway sentence above the block, never inside it.
-
-```text
-Type        On time  Due
-Reels           143  145   2 deleted
-Carousels        40   40
-YouTube          48   48
-```
-
-## Slack mrkdwn (what the hub sends)
+## Slack mrkdwn (sections and plain-text fallback)
 
 | Want | Write | Never |
 | --- | --- | --- |
@@ -75,44 +86,92 @@ Use emoji only as status markers that also carry a word: `✅ fixed`, `⚠️ ne
 
 ## Shape templates
 
-### Status or investigation result
+These complete example payloads target the sandbox. Replace their example
+facts, channel and times with verified content before posting. Send through
+`violet.violet_post`; the local CLI text flags remain a plain-text fallback.
 
-```text
-<verdict in one sentence>
+### Status
 
-*What happened*
-• <cause 1 — one line>
-• <cause 2 — one line>
+Verdict header, key figures, done/next/waiting bullets, then context.
 
-*What's next*
-• <action> — <owner/when, time in CT>
-
-Details are in the thread.
+```json
+{
+  "channel": "cas-scratch", "kind": "message",
+  "text": "Imports are ready; one review is pending.",
+  "blocks": [
+    {"type": "header", "text": "Imports are ready for review"},
+    {"type": "fields", "fields": [{"label": "Ready", "value": "4 of 5"}, {"label": "Waiting", "value": "1 review"}]},
+    {"type": "bullets", "items": ["*Done:* import and validation", "*Next:* review the preview", "*Waiting:* approval for the final item"]},
+    {"type": "context", "text": "Preview · Tue 10 Nov, 10:30 AM ET"}
+  ]
+}
 ```
 
-Thread replies: one per cause, each with a `*label*` line, then ≤ 5 one-line bullets.
+### Release-note thread
 
-### Answer to a question
+One thread per audience. Root: deploy target and audience, then one punch.
+Reply: Was → Now table, or bullets with both Was and Now for each item.
+Keep the rubric's exact logical reply count and ordered-thread retry rules.
 
-The direct answer first (yes / no / the value), then at most 3 supporting bullets. Nothing else.
+```json
+{
+  "channel": "cas-scratch", "kind": "thread",
+  "idempotency_key": "example-staging-layout-user",
+  "text": "Staging · User: posts now have clear titles and compact lists.",
+  "blocks": [
+    {"type": "header", "text": "Staging · User"},
+    {"type": "section", "text": "Posts now have clear titles, key figures and compact lists."}
+  ],
+  "replies": [{
+    "text": "Was: plain text. Now: titles, figures and compact lists.",
+    "blocks": [{"type": "table", "rows": [["Item", "Was", "Now"], ["Status posts", "A wall of text", "Title, figures and tight bullets"], ["Comparisons", "Space-padded columns", "Native tables"]]}]
+  }]
+}
+```
 
-### Release notes
+### Decision
 
-Follow the project's `docs/release-notes/RUBRIC.md`; these rules govern the layout inside it.
+Question header, options in fields, recommendation, then owner/deadline.
+
+```json
+{
+  "channel": "cas-scratch", "kind": "message",
+  "text": "Decision needed by Wed 5 PM ET: ship the table layout?",
+  "blocks": [
+    {"type": "header", "text": "Decision: ship the table layout?"},
+    {"type": "fields", "fields": [{"label": "A. Ship now", "value": "Native tables are ready"}, {"label": "B. Wait", "value": "Gather more mobile feedback"}]},
+    {"type": "section", "text": "*Recommendation:* A, after the preview is approved."},
+    {"type": "context", "text": "Daniel · Reply A or B by Wed 11 Nov, 5 PM ET"}
+  ]
+}
+```
+
+### Plain-text fallback
+
+If the client is text-only or a confirmed older hub cannot accept blocks,
+omit `blocks` and put the complete message in `text`: verdict, short labelled
+sections and tight `•` lists. A release-note reply still includes Was → Now
+for every item. Use CT or labelled ET. Keep the same audiences, thread shape,
+idempotency key and receipts; do not replay an uncertain structured write as
+plain text. Resolve its receipt first. A normal structured post keeps its
+fallback to one meaningful part rather than duplicating the entire layout.
+
+For a direct answer, the value or yes/no first, then at most three supporting
+points; use a section or a short plain-text reply when a layout adds nothing.
 
 ## Before you post — self-check
 
-The rules above are the target. The Violet hub refuses a post outright, with `format_unreadable`, when it breaks any of these nine limits. Fenced code blocks and URLs are exempt from all of them; thread replies are exempt from `first_line` and `long_top_level`.
+The rules above are the target. The Violet hub refuses a post outright, with `format_unreadable`, when it breaks any of these nine limits. Check both fallback text and every visible block string. Fenced code and URLs retain their exemptions; thread replies are exempt from `first_line` and `long_top_level`. Layout roots have a combined 900-character visible-text ceiling.
 
 | Hub rule | Refused when |
 | --- | --- |
-| `first_line` | the top-level message's first line is over 160 characters, or is wholly bold and over 60 |
+| `first_line` | the top-level message's first line is over 160 characters, or is wholly bold and over 100 (including its `*` markers) |
 | `long_line` | any line is over 300 characters |
-| `no_breathing_room` | more than 6 non-blank lines run together without a blank line |
+| `no_breathing_room` | more than 6 prose lines run together without a blank line; tight bullet items do not add to that count |
 | `long_top_level` | the top-level message is over 900 characters |
 | `markdown_syntax` | a line has `**`, starts with a heading (`#` to `######` then a space; `#channel` is fine), or starts with a `-` or `*` bullet |
 | `fake_table` | 3 or more consecutive non-blank lines each have 2 or more gaps of 3+ spaces between words (a blank or non-matching line ends the run) |
-| `bold_sentence` | a bold span is over 80 characters |
+| `bold_sentence` | a body bold span is over 80 characters; a whole-bold first-line title ≤100 characters is allowed in fallback text |
 | `unattached_file` | rule 9: a path, filename or artifact id is named and no file of that name is attached |
 | `utc_time` | rule 10: a time shows UTC, GMT, `HH:MMZ`, or an ISO timestamp ending in `Z` or `+00:00` |
 

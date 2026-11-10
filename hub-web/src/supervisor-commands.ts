@@ -63,7 +63,7 @@ export class SlashCommands {
       }
     }, { capture: true, signal: this.events.signal });
     this.panel.addEventListener("keydown", event => {
-      if (event.key === "Escape") { event.preventDefault(); const target = this.anchor ?? input; this.close(); target.focus(); return; }
+      if (event.key === "Escape") { event.preventDefault(); const target = this.visibleAnchor() ?? input; this.close(); target.focus(); return; }
       // cas-c009: the confirmation's actions are one roving group; Tab and
       // every arrow cycle inside it while it is open.
       const actions = [...this.panel.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button:not(:disabled)')];
@@ -99,9 +99,17 @@ export class SlashCommands {
     this.panel.classList.remove("supervisor-command-dropdown"); this.panel.removeAttribute("style");
     this.input.parentElement!.insertBefore(this.panel, this.input);
   }
+  /** An anchor inside a closed overflow menu stands in for its visible invoker (cas-e1db). */
+  private visibleAnchor(): HTMLElement | undefined {
+    if (!this.anchor || this.anchor.getClientRects().length) return this.anchor;
+    const menu = this.anchor.closest<HTMLElement>("[popover]");
+    const invoker = menu?.id ? document.querySelector<HTMLElement>(`[popovertarget="${menu.id}"]`) : null;
+    return invoker?.getClientRects().length ? invoker : this.anchor;
+  }
   private positionDropdown(): void {
-    if (!this.anchor || this.panel.hidden) return;
-    const edge = this.anchor.getBoundingClientRect();
+    const anchor = this.visibleAnchor();
+    if (!anchor || this.panel.hidden) return;
+    const edge = anchor.getBoundingClientRect();
     const gap = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-2")) || 0;
     const width = this.panel.getBoundingClientRect().width;
     const top = edge.bottom + gap;

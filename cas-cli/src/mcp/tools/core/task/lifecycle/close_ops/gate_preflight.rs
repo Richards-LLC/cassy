@@ -24,7 +24,7 @@ pub(super) fn refusal_reply(mut refusals: Vec<String>, refusal: impl Into<String
     park_reply(refusals)
 }
 
-pub(super) fn is_merge_handoff(refusal: &str) -> bool {
+pub(crate) fn is_merge_handoff(refusal: &str) -> bool {
     refusal.trim_start_matches("⚠️").trim_start().starts_with("MERGE REQUIRED")
 }
 

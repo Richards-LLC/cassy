@@ -7,6 +7,13 @@ use crate::cloud::{CloudConfig, TeamRegistration};
 /// (cas-cc74). Aligned with claim/close assignee liveness (~5 min).
 const EPIC_OWNER_TARGET_STALE_SECS: i64 = 300;
 
+fn update_result(task: &Task, message: String) -> CallToolResult {
+    CallToolResult {
+        structured_content: Some(serde_json::json!({"id": task.id, "priority": task.priority.0})),
+        ..CasCore::success(format!("{message}\nPriority: P{}", task.priority.0))
+    }
+}
+
 // Branch-only retargeting preserves a declared repository, but legacy
 // targetless tasks default to the project exactly as public creation does.
 fn branch_update_work_target(
@@ -1175,7 +1182,7 @@ impl CasCore {
                         message: Cow::from(format!("Failed to widen proof targets: {error}")),
                         data: None,
                     })?;
-                    return Ok(Self::success(format!(
+                    return Ok(update_result(&task, format!(
                         "Widened proof targets for task {} to {}. The added modules are covered by worker test receipts at {anchor}, so its verification and {} status are kept.",
                         task.id, task.proof_targets.join(", "), task.status,
                     )));
@@ -1393,7 +1400,7 @@ impl CasCore {
                     })
                     .unwrap_or_else(|| "The stale code work target was cleared.".to_string())
             };
-            return Ok(Self::success(format!(
+            return Ok(update_result(&task, format!(
                 "Corrected proof scope for task {}. The task is Open with assignee {} preserved; the stale proof cycle was invalidated without recording review failure. {}",
                 task.id,
                 task.assignee.as_deref().unwrap_or("unassigned"),
@@ -1585,6 +1592,20 @@ impl CasCore {
                 }
                 triaged_labels.extend(additions.into_iter().map(str::to_owned));
             }
+        }
+        if req.labels.is_some()
+            && crate::finding_triage::has_undeclared_main_reach(&self.cas_root, &triaged_labels)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "FINDING UPDATE REJECTED: reach:main requires journey:<id> naming a declared live main journey in the project's QA registry. Add the journey axis before retrying; no task fields were changed. Priority remains P{}.",
+                    task.priority.0,
+                )),
+                data: Some(serde_json::json!({
+                    "rule_id": "finding_main_journey_required", "axis": "journey", "priority": task.priority.0,
+                })),
+            });
         }
         let derived_priority = if req.priority.is_some() || req.labels.is_some() {
             crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
@@ -2570,7 +2591,7 @@ impl CasCore {
         }
 
         if changes.is_empty() {
-            return Ok(Self::success(priority_notice.unwrap_or_else(|| "No changes specified".into())));
+            return Ok(update_result(&task, priority_notice.unwrap_or_else(|| "No changes specified".into())));
         }
 
         if let Some(evidence) = direct_close_hook_evidence {
@@ -2613,6 +2634,16 @@ impl CasCore {
                 status != TaskStatus::InProgress)
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
+        // Fence queue repair until the old assignment and its lease have been
+        // removed. Otherwise repair can start the just-unassigned cursor again.
+        let prior_queue = if task.assignee != prior_assignee {
+            match prior_assignee.as_deref() {
+                Some(worker) => self.lock_assignment_queue(worker).await?,
+                None => None,
+            }
+        } else {
+            None
+        };
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
@@ -2661,6 +2692,8 @@ impl CasCore {
             crate::github_issue_attach::spawn_attach_cited_issues(&self.cas_root, &task);
             let notice = crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id));
             if !notice.is_empty() { warnings.push(notice.trim().to_string()); }
+            let release = super::lifecycle::epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task);
+            if !release.is_empty() { warnings.push(release.trim().to_string()); }
         }
 
         let qa_withdraw_reason = if demo_statement_cleared {
@@ -2757,6 +2790,16 @@ impl CasCore {
             }
         }
 
+        if let Some((worker, lock)) = prior_queue.filter(|(worker, _)| {
+            task.assignee.as_deref().is_none_or(|assignee| assignee != worker.name && assignee != worker.id)
+        }) {
+            match self.drop_from_locked_queue(&req.id, worker, lock, "assignment removed").await {
+                Ok(Some(note)) => warnings.push(note),
+                Ok(None) => {},
+                Err(error) => warnings.push(format!("Assignment persisted but task queue cleanup failed: {}", error.message)),
+            }
+        }
+
         if task.assignee.is_some() && task.assignee != prior_assignee {
             if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
                 warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
@@ -2829,7 +2872,7 @@ impl CasCore {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
 
-        Ok(Self::success(response))
+        Ok(update_result(&task, response))
     }
 }
 

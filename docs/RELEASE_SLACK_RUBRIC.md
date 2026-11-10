@@ -304,6 +304,8 @@ applies to diary replies recorded manually.
 
 `release-report.receipt` must additionally retain `PDF_MESSAGE_ID` and
 `PDF_MESSAGE_PERMALINK`, separate from `PDF_FILE_ID` and `PDF_FILE_PERMALINK`.
+The message permalink must open the upload message in its Slack thread and
+retain the exact URL returned by the upload response, including thread context.
 The report is incomplete without its upload message identity. The receipts
 stage refreshes `## POSTED` from the saved receipts, adding the PDF upload's
 message ID, message permalink and file ID after report delivery. Report uploads

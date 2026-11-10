@@ -845,7 +845,7 @@ async fn finding_label_corrections_replace_axes_without_priority_override_cas_71
         "action": "create", "title": "Supervisor clears on cumulative cache reads", "risk": "none",
         "task_type": "bug", "priority": 0, "finding_origin": "review:operator",
         "labels": "severity:broken,reach:main,incident",
-        "repro": "78 cached calls, 117K peak, 7.6M cumulative; supervisor auto-clears every turn",
+        "repro": "CI run 42569373740: 26 tests fail in the factory merge workflow",
         "affected": "Every factory supervisor",
     })).unwrap())).await.unwrap());
     let id = extract_task_id(&created).unwrap();
@@ -859,10 +859,13 @@ async fn finding_label_corrections_replace_axes_without_priority_override_cas_71
         ("severity:broken,reach:theoretical", 4, ["severity:broken", "reach:theoretical"]),
         ("", 4, ["severity:broken", "reach:theoretical"]),
     ] {
-        service.task(Parameters(serde_json::from_value(serde_json::json!({
-            "action": "update", "id": id, "labels": labels, "priority": 0,
+        let result = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "update", "id": id, "labels": labels,
+            "priority": if labels.contains("journey:") { None } else { Some(0) },
         })).unwrap())).await.unwrap();
         let task = tasks.get(id).unwrap();
+        assert_eq!(result.structured_content.as_ref().and_then(|receipt| receipt.get("id")), Some(&serde_json::json!(id)));
+        assert_eq!(result.structured_content.as_ref().and_then(|receipt| receipt.get("priority")), Some(&serde_json::json!(expected)));
         assert_eq!(task.priority.0, expected, "{labels:?}: {:?}", task.labels);
         assert!(task.labels.contains(&"from-finding".into()));
         for axis in axes {
@@ -875,6 +878,51 @@ async fn finding_label_corrections_replace_axes_without_priority_override_cas_71
         } else {
             assert!(task.labels.contains(&"corrected".into()));
         }
+    }
+    // Even unchanged and ordinary updates report their resulting priority.
+    for (update, expected) in [
+        (serde_json::json!({"action":"update","id":id}), 4),
+        (serde_json::json!({"action":"update","id":"cas-ui01","notes":"progress"}), 2),
+    ] {
+        let result = service.task(Parameters(serde_json::from_value(update).unwrap())).await.unwrap();
+        assert_eq!(result.structured_content.unwrap()["priority"], expected);
+    }
+
+}
+
+/// cas-2c35: incomplete main reach cannot silently demote a reproduced P2.
+#[tokio::test]
+async fn main_finding_relabel_requires_declared_journey_before_any_mutation_cas_2c35() {
+    let mut test_env = TestEnvGuard::temp_home();
+    let (_temp, _, repo, _) = fixture(&mut test_env);
+    let cas_dir = repo.join(".cas");
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"),
+        "version: 1\nmain_journeys: [FACTORY-MERGE]\njourneys:\n- id: FACTORY-MERGE\n  status: live\n").unwrap();
+    let _role = SupervisorRole::enter(&mut test_env);
+    let service = CasService::new(supervisor_core(&cas_dir), None);
+    let created = extract_text(service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"create", "title":"CI factory merge failures", "task_type":"bug", "risk":"none",
+        "finding_origin":"review:lively-stork-7", "labels":"severity:broken,reach:secondary",
+        "repro":"CI run 42569373740: 26 failing tests", "affected":"factory supervisors",
+    })).unwrap())).await.unwrap());
+    let id = extract_task_id(&created).unwrap();
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let before = tasks.get(id).unwrap();
+    assert_eq!(before.priority.0, 2);
+    for labels in ["severity:broken,reach:main", "reach:main,journey:", "reach:main,journey:undeclared"] {
+        let error = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"update", "id":id, "labels":labels, "title":"must not persist", "notes":"must not persist",
+        })).unwrap())).await.expect_err("main reach needs a declared journey");
+        let data = error.data.unwrap();
+        assert_eq!(data["rule_id"], "finding_main_journey_required");
+        assert_eq!(data["axis"], "journey");
+        let after = tasks.get(id).unwrap();
+        assert_eq!(after.priority, before.priority);
+        assert_eq!(after.labels, before.labels);
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.notes, before.notes);
+        assert_eq!(after.updated_at, before.updated_at);
     }
 }
 

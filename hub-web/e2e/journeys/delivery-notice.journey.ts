@@ -1,4 +1,4 @@
-import { test, expect, expectWholeFocusRing, RECEIPTS, settle, journeyPart } from "./journey";
+import { openConversationActions, test, expect, expectWholeFocusRing, RECEIPTS, settle, journeyPart } from "./journey";
 import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
@@ -86,9 +86,10 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
   const desktop = page.viewportSize()!;
   await journey.stage("On a phone, the delivery problem is one tap from the conversation", async () => {
     await page.setViewportSize({ width: 390, height: 844 });
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    const badge = page.locator("#conversation-attention");
+    await openConversationActions(page);
     await expect(badge).toBeVisible();
-    await expect(badge).toHaveText("1");
+    await expect(badge.locator(".conversation-attention-count")).toHaveText("1");
     // cas-a929: a visible warning must not push any header control off-screen.
     for (const colorScheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme });
@@ -104,17 +105,12 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
       await expect(page.getByRole("button", { name: "Show work", exact: true })).toBeVisible();
     }
     await page.emulateMedia({ colorScheme: "light" });
-    // cas-97d58 F07: with the attention chip, Raw output and Interrupt on the
-    // row, the identity takes its own line; title and machine read whole.
-    const identity = page.locator(".conversation-identity");
-    const whole = await identity.evaluate((node) => {
-      const clipped = (selector: string) => { const element = node.querySelector<HTMLElement>(selector); return element ? element.scrollWidth > element.clientWidth + 1 : false; };
-      return { title: !clipped("h1 b"), machine: !clipped(".host-machine") && !clipped(".host-where"), row: getComputedStyle(node).gridRowStart };
-    });
-    expect(whole).toEqual({ title: true, machine: true, row: "2" });
+    const headerHeight = await page.locator(".conversation-heading").evaluate(node => node.getBoundingClientRect().height);
+    expect(headerHeight).toBeLessThanOrEqual(64);
+    await expect(page.locator(".conversation-title-line > #conversation-connection")).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
     await page.screenshot({ path: join(RECEIPTS, "phone-header-attention-390.png") });
-    await badge.click();
+    await openConversationActions(page); await badge.click();
     const sheet = page.getByRole("dialog", { name: "Attention for this session" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close attention" })).toBeFocused();
@@ -225,8 +221,8 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
-    await expect(badge).toBeFocused();
+    const badge = page.locator("#conversation-attention");
+    await expect(page.locator("#conversation-more")).toBeFocused();
     // A catalog change rebuilds the shell, and the fresh badge starts hidden
     // until its region shows it: focus must still land back on it.
     const sessions = hub.machine("atlas").sessions;
@@ -234,12 +230,17 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await hub.announceCatalog("atlas");
     await expect(page.getByRole("navigation", { name: "Choose a supervisor", includeHidden: true }).locator(".conversation-row")).toHaveCount(2);
     sessions[sessions.length - 1]!.liveness = "stale_metadata";
-    await expect(badge).toBeFocused();
+    await expect(page.locator("#conversation-more")).toBeFocused();
     await expect(log).toContainText("The ledger import is red");
   });
 
   await journey.stage("A sheet left open on a phone is a plain rail on a desktop", async () => {
-    const badge = page.getByRole("button", { name: "Attention: 1 item for this session" });
+    const badge = page.locator("#conversation-attention");
+    await openConversationActions(page);
+    hub.machine("atlas").sessions[0]!.project_dir = "/projects/Accounting-refreshed";
+    await hub.announceCatalog("atlas");
+    await expect(page.locator(".conversation-identity h1 b")).toHaveText("Accounting-refreshed");
+    await expect(page.locator("#conversation-more-menu")).toBeVisible();
     await badge.click();
     await expect(page.getByRole("dialog", { name: "Attention for this session" })).toBeVisible();
     // cas-a5c6: the phone turns into a desktop (rotation, or a window resize).

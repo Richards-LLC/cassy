@@ -340,12 +340,12 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     const recovered = events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: event.sequence <= 2, enriched: false }));
     await expect.poll(stored, { message: "Live resolves only its outage notices, retaining all four rows" }).toEqual(recovered);
 
-    await expect(page.locator("#conversation-attention")).toHaveText("1");
+    await expect(page.locator("#conversation-attention .conversation-attention-count")).toHaveText("1");
     // A later enrichment revision of the retained outage must stay history.
     await emit(events.slice(0, 2).map(event => ({ ...event, revision: 1,
       enrichment: { severity: "warning", action: "none", summary: "Recovered outage diagnostic", fingerprint: `outage:${event.sequence}` },
     })));
     await expect.poll(stored).toEqual(recovered.map(row => ({ ...row, enriched: row.resolved })));
-    await expect(page.locator("#conversation-attention")).toHaveText("1");
+    await expect(page.locator("#conversation-attention .conversation-attention-count")).toHaveText("1");
   });
 });

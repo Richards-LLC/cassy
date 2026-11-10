@@ -1,0 +1,4 @@
+title: An account removal confirms inside the card it acts on, with Confirm disabled until the typed text matches and no browser validation bubble; duplicate lines name the other account for people, and protected main accounts are never offered for cleanup
+tasks: [cas-b2e9]
+invariants: [HUB-J13-ACCOUNT-MANAGEMENT]
+journeys: [HUB-J13]

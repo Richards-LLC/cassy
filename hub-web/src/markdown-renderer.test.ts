@@ -192,6 +192,17 @@ describe("supervisor markdown subset", () => {
     expect(root.querySelector("a")?.textContent).toBe("safe");
   });
 
+  it("links bare https URLs without trailing punctuation, outside code", () => {
+    const root = document.createElement("div");
+    const issue = "https://github.com/Richards-LLC/violet_ps/issues/110";
+    root.append(...renderMarkdown(document, `See ${issue}. (https://example.com/a_(b)) \`https://example.com/code\` http://example.com/plain`));
+
+    const links = [...root.querySelectorAll<HTMLAnchorElement>("a.markdown-link")];
+    expect(links.map((link) => link.getAttribute("href"))).toEqual([issue, "https://example.com/a_(b)"]);
+    expect(links[0]!.target).toBe("_blank");
+    expect(links[0]!.rel).toBe("noopener");
+  });
+
   it("strips supported markers from conversation previews", () => {
     expect(plainTextMarkdown("# **Ready**\n\n- one\n- `cargo check`\n\n[receipt](https://example.com)"))
       .toBe("Ready one cargo check receipt");

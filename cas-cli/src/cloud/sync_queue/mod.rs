@@ -32,7 +32,7 @@ mod unauthored;
 /// A consumed memory pull preserved in the conflict journal, not a pull error.
 pub(crate) const MEMORY_FOLD_CONFLICT: &str = "fold_conflict";
 
-pub(crate) use dependency_repair::DependencyEndpointState;
+pub(crate) use dependency_repair::{DependencyEndpointState, dependency_repair_reason};
 pub(crate) use task_intents::{
     TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
     TaskSyncRecoveryRecord,

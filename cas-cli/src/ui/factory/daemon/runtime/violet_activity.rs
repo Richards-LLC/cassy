@@ -174,7 +174,7 @@ impl CloudActivityRelay {
         body: serde_json::Value,
     ) -> Result<R, RelayError> {
         let url = format!("{}{path}", self.endpoint);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(RELAY_TIMEOUT)
             .send_json(body)

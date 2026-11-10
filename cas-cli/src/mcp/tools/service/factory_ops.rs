@@ -3616,6 +3616,16 @@ impl CasService {
                     })
                 })
             });
+        let release_subject = req.task_id.as_deref()
+            .and_then(|id| task_store.get(id).ok())
+            .or_else(|| ctx.factory_session.as_deref()
+                .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
+                .and_then(|id| task_store.get(&id).ok()));
+        let release_notice = release_subject.as_ref().map(|subject| {
+            crate::mcp::tools::core::task::lifecycle::epic_lane::published_release_note(
+                &self.inner.cas_root, task_store.as_ref(), subject,
+            )
+        }).unwrap_or_default();
         let related_context = recall_subject
             .and_then(|subject| {
                 self.inner.related_recall_excluding(
@@ -3631,11 +3641,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{release_notice}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{triage_notice}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{release_notice}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -4391,6 +4401,39 @@ impl CasService {
         // WorkerSpec consumers ignore this compatible metadata field.
         spec_payload["dead_worker_recovery"] = serde_json::Value::Bool(recovering_dead_worker);
         let spec_json = spec_payload.to_string();
+        // Keep a fallback checkpoint outside the checkout before replacing a
+        // harness. An authored handoff wins; never truncate or overwrite it.
+        let handoffs = (|| -> anyhow::Result<()> {
+            use std::io::Write;
+            let config = crate::config::Config::load(&self.inner.cas_root)?;
+            let artifacts = crate::config::resolved_factory_artifact_paths(
+                &self.inner.cas_root, config.factory().artifacts_root.as_deref(),
+            );
+            for task in tasks.iter().filter(|task| {
+                task.assignee.as_deref().is_some_and(|name| name == worker.name || name == worker.id)
+                    && matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked)
+            }) {
+                let dir = artifacts.project_root.join(&task.id);
+                std::fs::create_dir_all(&dir)?;
+                let path = dir.join("HANDOFF.md");
+                if path.try_exists()? {
+                    continue;
+                }
+                let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+                write!(file, "# Worker handoff: {}\n\n{}\n\n## Task\n{}\n\n{}\n\n## Notes\n{}\n",
+                    task.id, snapshot.render_state(), task.title, task.description, task.notes)?;
+                match file.persist_noclobber(&path) {
+                    Ok(_) => {},
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+            Ok(())
+        })();
+        handoffs.map_err(|error| Self::error(
+            ErrorCode::INTERNAL_ERROR,
+            format!("recycle_worker refused: could not save task-artifact handoff: {error}. Nothing was queued."),
+        ))?;
         let request_id = queue
             .enqueue_recycle(worker_name, Some(&spec_json), factory_session.as_deref())
             .map_err(|error| {
@@ -12504,7 +12547,13 @@ pub(crate) fn worker_liveness_for_agent(
         .resolution,
         cli,
     );
-    let process = super::worker_liveness::process_evidence(agent);
+    let mut process = super::worker_liveness::process_evidence(agent);
+    if super::worker_liveness::child_progress(agent, now)
+        .is_some_and(|at| (now - at).num_seconds() < stall_secs.max(0))
+    {
+        process.cpu_busy = Some(true);
+        process.detail.push_str("; owned child CPU/output advanced within the stall window");
+    }
     if cli == cas_mux::SupervisorCli::OpenCode {
         if let Some(mapped) = super::opencode_liveness::observe(
             cas_root,

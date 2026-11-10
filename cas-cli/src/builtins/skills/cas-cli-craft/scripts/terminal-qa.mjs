@@ -285,10 +285,10 @@ const CONTROL_FINALS = new Set(["A", "B", "C", "D", "G", "H", "J", "K", "f", "S"
  *
  * Each line: { cells: [{ch, w, style}], redraws, controls: [seq] }. A carriage
  * return resets the cursor to column 0 without clearing existing cells; later
- * text overwrites them in place. A backspace removes the last cell; a tab pads
- * to the next multiple of 8. OSC/DCS strings are dropped. Non-SGR CSI
- * sequences are recorded on the line (for the piped check) and dropped from
- * the text.
+ * text overwrites them in place. A backspace moves the cursor left one column
+ * without deleting cells; a tab pads to the next multiple of 8. OSC/DCS strings
+ * are dropped. Non-SGR CSI sequences are recorded on the line (for the piped
+ * check) and dropped from the text.
  */
 export function parseAnsi(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);

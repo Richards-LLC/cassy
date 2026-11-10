@@ -1,0 +1,4 @@
+title: An error while Commander handles one machine frame (a UI callback or render) is reported and never tears down the live machine socket, so a replayed frame cannot loop every supervisor into Reconnecting
+tasks: [cas-327d]
+invariants: [HUB-J11-GOAL]
+journeys: [HUB-J11]

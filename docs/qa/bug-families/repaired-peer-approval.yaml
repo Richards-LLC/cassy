@@ -1,0 +1,3 @@
+title: A fresh exact-delivery approval from the same source replaces stale peer proof without rebinding history or displacing local review
+tasks: [cas-d7f9]
+journeys: [FACTORY-MERGE, FACTORY-CLOSE]

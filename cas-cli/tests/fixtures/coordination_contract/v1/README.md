@@ -8,8 +8,8 @@ wakes. Cloud, Violet and Cassy implement and test against the same files.
 ## What is here
 
 Cloud owns 15 files, vendored byte for byte from `Richards-LLC/petra-stella-cloud`
-`tests/contracts/coordination/v1/` at `00d0675af` (petra-stella-cloud#161, PR #164; PR #179 added the
-`strict_activation_required` claim refusal).
+`tests/contracts/coordination/v1/` at `9f8d49e8c` (petra-stella-cloud#161, PR #164; PR #179 added the
+`strict_activation_required` claim refusal; PR #225 adds dead-holder reply readback and reclaim).
 Cloud authored them and deployed the routes to production first, as §11
 requires. Per Cloud's recorded decision, Cassy and Violet adopt them as they
 are. [MANIFEST.json](MANIFEST.json) pins each file's sha256, and the Cassy test

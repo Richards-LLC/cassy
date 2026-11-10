@@ -22,7 +22,8 @@ export interface WrappedTerminalLinkLine {
   segments: ReadonlyArray<WrappedTerminalLinkLineSegment>;
 }
 
-const URL_PATTERN = /https?:\/\/[^\s"'`<>]+/g;
+/** URL shape shared by terminal links and Commander message autolinks. */
+export const URL_PATTERN = /https?:\/\/[^\s"'`<>]+/g;
 const PATH_PATTERN = /(?:~\/|\.{1,2}\/|\/)[^\s"'`<>]+/g;
 
 export function extractTerminalLinks(line: string): TerminalLinkMatch[] {

@@ -199,6 +199,7 @@ impl Default for UreqHttp {
     fn default() -> Self {
         Self {
             agent: ureq::AgentBuilder::new()
+                .middleware(crate::cloud::TraceCloudMutation)
                 .timeout(HTTP_DEADLINE)
                 .redirects(0)
                 .build(),
@@ -359,6 +360,7 @@ impl TransportInner {
         path: &str,
         body: &[u8],
         body_digest: &str,
+        attempt_id: Option<&str>,
     ) -> Result<HttpResponse, Failure> {
         let now = unix_now() + self.skew.lock().map(|skew| *skew).unwrap_or(0);
         let proof = self.key.proof(&ProofRequest {
@@ -376,6 +378,10 @@ impl TransportInner {
             ("Authorization", format!("PSC-PoP {}", principal.grant_id)),
             ("PSC-PoP-Proof", proof),
         ];
+        if let Some(attempt_id) = attempt_id {
+            // Diagnostic headers are outside the signed PoP claims.
+            headers.push((crate::cloud::ATTEMPT_ID_HEADER, attempt_id.to_owned()));
+        }
         if !body.is_empty() {
             headers.push(("Content-Type", "application/json".to_owned()));
         }
@@ -388,6 +394,8 @@ impl TransportInner {
     }
 
     fn exchange(&self, method: &str, path: &str, body: &[u8]) -> Result<HttpResponse, Failure> {
+        let attempt_id = matches!(method, "POST" | "PUT" | "PATCH" | "DELETE")
+            .then(|| uuid::Uuid::new_v4().to_string());
         let body_digest = if body.is_empty() {
             EMPTY_BODY_DIGEST.to_owned()
         } else {
@@ -398,7 +406,14 @@ impl TransportInner {
         let mut generation_retried = false;
         loop {
             let principal = self.snapshot();
-            let response = self.signed(&principal, method, path, body, &body_digest)?;
+            let response = self.signed(
+                &principal,
+                method,
+                path,
+                body,
+                &body_digest,
+                attempt_id.as_deref(),
+            )?;
             if response.status != 401 {
                 return Ok(response);
             }
@@ -431,6 +446,7 @@ impl TransportInner {
             "/api/operator/grants/me",
             &[],
             EMPTY_BODY_DIGEST,
+            None,
         )?;
         if response.status != 200 {
             return Err(Failure::Http {

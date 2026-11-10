@@ -1,0 +1,4 @@
+title: A bare https URL in a Commander message or work row must render as a link that opens in a new tab, with trailing punctuation outside it and code spans left as text
+tasks: [cas-ae69]
+invariants: [HUB-J4-READABLE-PROSE-TABLES]
+journeys: [HUB-J4]

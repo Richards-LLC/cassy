@@ -1203,7 +1203,6 @@ mod large_artifact_staging_tests {
             "Scope is frozen",
             "Honor non-goals and layer boundaries",
             "Never block the pane",
-            "Checkpoint, never compact",
             "cas qa ledger init",
             "cas qa ledger check",
             "MERGE REQUIRED",

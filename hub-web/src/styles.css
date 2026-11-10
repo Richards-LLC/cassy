@@ -1963,7 +1963,7 @@ dialog form > *,
 /* The popover UA sheet adds overflow: auto; inline, the menu is not a scroller. */
 .conversation-more-menu { display: contents; overflow: visible; }
 .conversation-topline .conversation-action.conversation-more-toggle { display: none; }
-.conversation-title-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.conversation-title-line { display: flex; align-items: center; gap: var(--space-2); min-width: 0; block-size: var(--space-6); }
 .conversation-title-line h1 { min-width: 0; }
 .conversation-more-count { color: var(--state-warn); }
 .conversation-state { flex: none; font-weight: var(--weight-regular); }
@@ -2007,7 +2007,12 @@ dialog form > *,
    technique), never display:none, so the line is heard whole at any width. */
 .conversation-identity .host-where.codename-squeezed > :is(.codename, .host-sep) { position: absolute; width: var(--line-width); height: var(--line-width); min-width: 0; overflow: hidden; clip: rect(0, 0, 0, 0); clip-path: inset(50%); white-space: nowrap; }
 .conversation-identity .host-where.codename-squeezed > .host-machine { min-width: 0; }
-#conversation-connection, #conversation-control { flex: none; white-space: pre; }
+#conversation-control { flex: none; white-space: pre; }
+/* cas-e1db: the state chip is one fixed-height line in any font, so swapping
+   Live for a reconnecting state cannot change the header's height and move
+   the reader's thread. */
+#conversation-connection { flex: none; display: inline-block; block-size: var(--space-6); line-height: var(--space-6); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#conversation-connection[hidden] { display: none; }
 .conversation-pane-slot { flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
 .conversation-pane-slot .conversation-stage { display: block; position: relative; padding: 0; height: 100%; min-height: 0; background: var(--bg-root); color: var(--text-hi); }
 /* The thread's own slot beside the hidden pane host (cas-0546). */
@@ -2665,7 +2670,7 @@ button.chip:disabled { cursor: default; }
   .conversation-identity h1 b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 22px; }
   .conversation-identity .conversation-host { display: flex; font-size: 12px; white-space: nowrap; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #conversation-connection { flex: none; white-space: pre; }
+  #conversation-connection { flex: none; white-space: nowrap; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
   .conversation-composer { column-gap: 2px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
   .conversation-composer textarea { padding: 12px 10px; }

@@ -1611,10 +1611,25 @@ impl CasCore {
             crate::finding_triage::normalize_labels(&self.cas_root, &mut triaged_labels,
                 &format!("{}\n{}", task.notes, req.notes.as_deref().unwrap_or_default()))
         } else { None };
-        let priority_notice = req.priority.zip(derived_priority).and_then(|(requested, derived)| {
-            crate::finding_triage::priority_not_applied(
+        if let Some((requested, derived)) = req.priority.zip(derived_priority)
+            && let Some(notice) = crate::finding_triage::priority_not_applied(
                 &triaged_labels, Priority(requested.min(4) as i32), derived, task.priority)
-        });
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(format!(
+                    "TASK PRIORITY UPDATE REJECTED: {notice}. No task fields were changed. Omit priority to apply the other fields, or update severity:, reach: and journey: labels to change the derived priority."
+                )),
+                data: Some(serde_json::json!({
+                    "rule_id": "finding_priority_derived",
+                    "requested_priority": requested,
+                    "derived_priority": derived.0,
+                    "priority": task.priority.0,
+                    "labels": triaged_labels,
+                    "applied_fields": [],
+                })),
+            });
+        }
         let requested_priority = derived_priority.or_else(|| req.priority.map(|priority| Priority(priority.min(4) as i32)));
         let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);
         let requested_status_is_nonterminal = req
@@ -2591,7 +2606,7 @@ impl CasCore {
         }
 
         if changes.is_empty() {
-            return Ok(update_result(&task, priority_notice.unwrap_or_else(|| "No changes specified".into())));
+            return Ok(update_result(&task, "No changes specified".into()));
         }
 
         if let Some(evidence) = direct_close_hook_evidence {
@@ -2867,7 +2882,6 @@ impl CasCore {
 
         // Build response message with warnings if any
         let mut response = format!("Updated task {}: {}", req.id, changes.join(", "));
-        if let Some(notice) = priority_notice { warnings.insert(0, notice); }
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }

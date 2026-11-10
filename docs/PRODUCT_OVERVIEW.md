@@ -18,6 +18,7 @@ disabled MCP server, listing record IDs and file locations for review while
 preserving the original rules, skills, memories and brief templates.
 
 Projects declare their main journeys in the existing QA registry. Finding priority comes from severity × reach: reproduced broken main journeys precede theoretical code-read findings, which go to P4 backlog. The theoretical exception is money/data loss on a declared main journey (P2). Staffing theoretical work while a main-journey FAIL is unowned produces an advisory nudge. `factory.focus_mode` follows every worker/reviewer brief; see [triage](qa/triage.md).
+An update requesting a priority that conflicts with finding labels returns a typed refusal before saving any accompanying fields; changing the labels reclassifies the finding.
 
 Cassy declares supervision, merge, close, release, spawn and QA receipt as primary factory/CLI journeys alongside Commander. Correcting a finding's severity, reach or journey label replaces that axis; clearing user labels retains finding provenance and resets triage to theoretical, preserving the derived-priority policy.
 

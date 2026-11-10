@@ -123,6 +123,21 @@ pub(super) fn park_refusals(
     let short = &head[..head.len().min(12)];
     let mut refusals: Vec<_> =
         changelog_refusal(proof_repo, task, changed_paths, head, target, delivery_ranges).into_iter().collect();
+    // Inspect the immutable delivery tree: a retained handoff may be absent
+    // from the latest diff, and the checkout can already have removed it.
+    if std::process::Command::new("git")
+        .args(["ls-tree", "--name-only", head, "--", "HANDOFF.md"])
+        .current_dir(proof_repo)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| !output.stdout.is_empty())
+    {
+        refusals.push(format!(
+            "ROOT_HANDOFF_COMMITTED: task {} delivers repo-root HANDOFF.md at {short}. Move checkpoint notes to this task's artifacts directory (HANDOFF.md) or task notes, remove the root file from the delivery, commit and push the correction, then retry park.",
+            task.id,
+        ));
+    }
     if let Some(refusal) = message_assertion_refusal(proof_repo, target, task.delivery_mode) {
         refusals.push(refusal);
     }

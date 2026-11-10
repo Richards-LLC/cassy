@@ -51,7 +51,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
   use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write `HANDOFF.md` under the task artifacts directory printed in the assignment brief (never the repo root), send one `kind=status` with `need: respawn`.
   See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 
 ## Phase references

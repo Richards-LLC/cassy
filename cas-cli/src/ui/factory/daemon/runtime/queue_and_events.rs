@@ -1160,8 +1160,8 @@ fn append_workspace_contract_brief(
     let artifacts_root = crate::config::project_factory_artifacts_root(cas_dir, &artifacts_root);
     let task_artifacts = artifacts_root.join(task_id);
     message.push_str(&format!(
-        "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree.",
-        task_artifacts.display()
+        "\n\nDurable artifacts for this task belong under `{}/`. Source and build output belong in the worktree. Write respawn notes to `{}/HANDOFF.md`; read that checkpoint first when resuming. Never commit a repo-root HANDOFF.md.",
+        task_artifacts.display(), task_artifacts.display()
     ));
 
     let Some(task) = crate::store::open_task_store_cached(cas_dir)

@@ -36634,10 +36634,12 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             git(&p, &["checkout", "-q", "-B", "factory/worker", "main"]);
             write(&fragment, &format!("### Fixed — Factory\n\n{ENTRY}\n"));
             write("src/feature.rs", "pub fn feature() {}\n");
+            write(".claude/CODEMAP.md", "# Map\n- src/feature.rs: delivered feature\n");
             git(&p, &["add", "-A"]);
             git(&p, &["commit", "-q", "-m", "cas-test1: feature and changelog fragment"]);
             let anchor = head_sha(&p);
-            git(&p, &["checkout", "-q", "main"]);
+            // The release happens on the train before main ever has the fragment.
+            git(&p, &["checkout", "-q", "-b", "epic/release", "main"]);
             git(&p, &["merge", "--no-ff", "-q", "factory/worker", "-m", "merge factory/worker cas-test1"]);
             match removal {
                 "release" => {
@@ -36664,10 +36666,15 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                     git(&p, &["commit", "-q", "-am", "release: v1.0.1"]);
                 }
             }
+            let release = head_sha(&p);
+            write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
+            git(&p, &["commit", "-q", "-am", "regenerate codemap"]);
+            git(&p, &["checkout", "-q", "main"]);
+            git(&p, &["merge", "--no-ff", "-q", "epic/release", "-m", "merge released train"]);
             let mut task = worker_task("worker");
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
-            (dir, task, anchor, fragment)
+            (dir, task, anchor, fragment, release)
         };
         let refused = |dir: &TempDir, task: &Task, fragment: &str, case: &str| {
             match run_factory_branch_merge_gate(task, &base_req(&task.id), "main", dir.path()) {
@@ -36679,10 +36686,10 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             }
         };
 
-        let (dir, task, _, fragment) = build("cas-test1", "release");
+        let (dir, task, _, fragment, release) = build("cas-test1", "release");
         match run_factory_branch_merge_gate(&task, &base_req(&task.id), "main", dir.path()) {
             MergeStateGateOutcome::ProceedWithNote(note) => {
-                assert!(note.contains(&task.id) && note.contains(&fragment), "{note}")
+                assert!(note.contains(&task.id) && note.contains(&fragment) && note.contains(&release[..12]), "{note}")
             }
             other => panic!("a release-promoted fragment is delivered: {other:?}"),
         }
@@ -36697,14 +36704,19 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "the parked close path accepts the released tree"
         );
         let p = dir.path();
+        std::fs::write(p.join("src/feature.rs"), "// lost feature\n").unwrap();
+        git(p, &["commit", "-q", "-am", "drop delivered source"]);
+        refused(&dir, &task, "src/feature.rs", "a real source drop beside promoted metadata");
+        std::fs::write(p.join("src/feature.rs"), "pub fn feature() {}\n").unwrap();
+        git(p, &["commit", "-q", "-am", "restore delivered source"]);
         let changelog = std::fs::read_to_string(p.join("CHANGELOG.md")).unwrap();
         std::fs::write(p.join("CHANGELOG.md"), changelog.replace(&format!("{ENTRY}\n"), "")).unwrap();
         git(p, &["commit", "-q", "-am", "lose the promoted entry"]);
         refused(&dir, &task, &fragment, "a target that later loses the promoted entry");
 
-        let (dir, task, _, fragment) = build("cas-test1", "chore");
+        let (dir, task, _, fragment, _) = build("cas-test1", "chore");
         refused(&dir, &task, &fragment, "a non-release commit that deletes the fragment");
-        let (dir, task, _, fragment) = build("cas-test1", "older section");
+        let (dir, task, _, fragment, _) = build("cas-test1", "older section");
         refused(&dir, &task, &fragment, "a release that did not add the fragment's lines");
         assert!(
             matches!(
@@ -36717,7 +36729,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             "a release tag without the fragment's changelog lines stays dropped"
         );
 
-        let (dir, task, anchor, fragment) = build("cas-other", "release");
+        let (dir, task, anchor, fragment, release) = build("cas-other", "release");
         refused(&dir, &task, &fragment, "another task's fragment");
         let sibling = Task { id: "cas-other".into(), ..task.clone() };
         let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");

@@ -118,7 +118,7 @@
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - journey selection, registry validation, ledger parsing and declared coverage.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.
-- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - release verdicts, authorship rules and owner-scoped receipt notices.
+- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership and typed proof contract, release verdicts, authorship rules and owner-scoped receipt notices.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.
@@ -140,7 +140,7 @@
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.
-- `cas-cli/src/cli/release_automation.rs` - train context, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation.
+- `cas-cli/src/cli/release_automation.rs` - train context and read-only release inventory CLI, historical backfill admission and close outcomes, frozen-successor guards and later-tag reconciliation.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py`, `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
 - **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.

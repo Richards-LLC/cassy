@@ -10,6 +10,376 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Immutable release identity and declared membership, shared by all adapters.
+/// Proof references identify bytes, not approval; the proof consumer validates
+/// author, coverage, content and candidate-to-release mapping separately.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseScope {
+    pub project_id: String,
+    pub repository: String,
+    pub release_id: String,
+    pub reviewed_sha: String,
+    pub final_release_sha: String,
+    pub promotion_pr: Option<u64>,
+    pub release_tag: Option<String>,
+    #[serde(default)]
+    pub constituent_epic_ids: Vec<String>,
+    #[serde(default)]
+    pub included_task_ids: Vec<String>,
+    #[serde(default)]
+    pub no_code_members: BTreeMap<String, Vec<ReleaseProofRef>>,
+    #[serde(default)]
+    pub proof_refs: Vec<ReleaseProofRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReleaseProofKind {
+    Qa,
+    Review,
+    Report,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseProofRef {
+    pub kind: ReleaseProofKind,
+    pub artifact_id: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub reviewed_sha: String,
+    pub receipt_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseInventory {
+    pub scope: ReleaseScope,
+    pub deliveries: Vec<ReleaseDelivery>,
+    pub exceptions: Vec<ReleaseInventoryException>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseDelivery {
+    pub task_id: String,
+    /// Conservative task snapshot token. ANY intervening task mutation means
+    /// the consumer must re-evaluate; this is not a lease generation number.
+    pub generation: String,
+    pub anchor: Option<String>,
+    pub base_sha: Option<String>,
+    pub shipped_commit: Option<String>,
+    pub membership: ReleaseMembership,
+    pub proof_refs: Vec<ReleaseProofRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReleaseMembership {
+    Ancestry,
+    SquashTree,
+    ExplicitNoCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReleaseInventoryCode {
+    MissingTask,
+    ForeignScope,
+    NotEpic,
+    Cancelled,
+    MissingAnchor,
+    RetiredAnchor,
+    MissingBase,
+    InvalidBase,
+    MissingMapping,
+    MissingNoCodeProof,
+    Quarantined,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ReleaseInventoryException {
+    pub task_id: String,
+    pub code: ReleaseInventoryCode,
+}
+
+/// Read-only, deterministic inventory at an exact commit. No network, branch
+/// discovery, commit-subject parsing, proof approval or lifecycle writes.
+/// Declared epics include terminal descendants; outside that scope only live
+/// recorded deliveries are considered, so earlier shipped close debt is kept.
+pub(crate) fn resolve_release_inventory(
+    root: &Path,
+    repo: &Path,
+    scope: &ReleaseScope,
+) -> Result<ReleaseInventory, String> {
+    use crate::mcp::tools::core::task::{self, lifecycle::close_ops, repo_context};
+    use cas_types::{DependencyType, TaskStatus, TaskType};
+    use std::collections::BTreeSet;
+    let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
+    if scope.project_id != project || scope.release_id.trim().is_empty() {
+        return Err("release scope does not identify this project and release".into());
+    }
+    let slug = crate::github_repo::origin_slug(repo, std::time::Duration::from_secs(3))?
+        .ok_or("release repository has no origin")?;
+    if !slug.eq_ignore_ascii_case(&scope.repository)
+        || crate::worktree::GitOperations::new(repo.to_path_buf())
+            .canonical_repo_key()
+            .map_err(|e| e.to_string())?
+            != crate::worktree::GitOperations::new(
+                root.parent()
+                    .ok_or("project checkout unavailable")?
+                    .to_path_buf(),
+            )
+            .canonical_repo_key()
+            .map_err(|e| e.to_string())?
+    {
+        return Err("release repository does not match project scope".into());
+    }
+    for sha in [&scope.reviewed_sha, &scope.final_release_sha] {
+        if sha.len() != 40 || commit(repo, sha).as_deref() != Some(sha.as_str()) {
+            return Err("release scope needs resolvable full commit SHAs".into());
+        }
+    }
+    if let Some(tag) = &scope.release_tag {
+        if commit(repo, &format!("refs/tags/{tag}")).as_deref()
+            != Some(scope.final_release_sha.as_str())
+        {
+            return Err("release tag does not identify final_release_sha".into());
+        }
+    }
+    // Structured identities must be immutable commits, never a branch alias.
+    let recorded_commit =
+        |sha: &str| commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha));
+    let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let mut tasks: BTreeMap<_, _> = store
+        .list(None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|t| (t.id.clone(), t))
+        .collect();
+    // Board suppression cannot erase a shipped fact. `get` intentionally
+    // permits quarantine inspection; the marker remains an explicit hold.
+    let quarantined = crate::cloud::SyncQueue::open_read_only(root)
+        .and_then(|queue| queue.quarantined_ids(crate::cloud::QUARANTINE_TASK))
+        .unwrap_or_default();
+    for id in &quarantined {
+        if let Ok(task) = store.get(id) {
+            tasks.insert(id.clone(), task);
+        }
+    }
+    let dependencies = store
+        .list_dependencies(Some(DependencyType::ParentChild))
+        .map_err(|e| e.to_string())?;
+    let receipts = cas_store::list_qa_batch_receipts(root, &project).map_err(|e| e.to_string())?;
+    let mut inventory = ReleaseInventory {
+        scope: scope.clone(),
+        deliveries: Vec::new(),
+        exceptions: Vec::new(),
+    };
+    let mut expected: BTreeSet<String> = scope
+        .included_task_ids
+        .iter()
+        .cloned()
+        .chain(scope.no_code_members.keys().cloned())
+        .collect();
+    let mut pending = scope.constituent_epic_ids.clone();
+    let mut epics = BTreeSet::new();
+    while let Some(id) = pending.pop() {
+        if !epics.insert(id.clone()) {
+            continue;
+        }
+        if quarantined.contains(&id) {
+            inventory.exceptions.push(ReleaseInventoryException {
+                task_id: id.clone(),
+                code: ReleaseInventoryCode::Quarantined,
+            });
+        }
+        let code = match tasks.get(&id) {
+            None => Some(ReleaseInventoryCode::MissingTask),
+            Some(t) if !task::task_owned_by_project(t, root, Some(&project)) => {
+                Some(ReleaseInventoryCode::ForeignScope)
+            }
+            Some(t) if t.task_type != TaskType::Epic => Some(ReleaseInventoryCode::NotEpic),
+            _ => None,
+        };
+        if let Some(code) = code {
+            inventory
+                .exceptions
+                .push(ReleaseInventoryException { task_id: id, code });
+            continue;
+        }
+        for edge in dependencies.iter().filter(|d| d.to_id == id) {
+            if tasks
+                .get(&edge.from_id)
+                .is_some_and(|t| t.task_type == TaskType::Epic)
+            {
+                pending.push(edge.from_id.clone());
+            } else {
+                expected.insert(edge.from_id.clone());
+            }
+        }
+    }
+    let mut candidates = expected.clone();
+    candidates.extend(
+        tasks
+            .values()
+            .filter(|t| {
+                !t.is_terminal()
+                    && t.task_type != TaskType::Epic
+                    && task::task_owned_by_project(t, root, Some(&project))
+                    && (t.deliverables.factory_branch_anchor.is_some()
+                        || !t.deliverables.historical_factory_branch_anchors.is_empty()
+                        || t.deliverables.green_merge_commit.is_some()
+                        || t.deliverables.delivery_pr_merge_commit.is_some()
+                        || t.deliverables.merge_commit.is_some())
+            })
+            .map(|t| t.id.clone()),
+    );
+    for id in candidates {
+        let mut issue = |code| {
+            inventory.exceptions.push(ReleaseInventoryException {
+                task_id: id.clone(),
+                code,
+            })
+        };
+        let Some(t) = tasks.get(&id) else {
+            issue(ReleaseInventoryCode::MissingTask);
+            continue;
+        };
+        if !task::task_owned_by_project(t, root, Some(&project)) || t.task_type == TaskType::Epic {
+            issue(ReleaseInventoryCode::ForeignScope);
+            continue;
+        }
+        if t.status == TaskStatus::Cancelled {
+            issue(ReleaseInventoryCode::Cancelled);
+            continue;
+        }
+        if quarantined.contains(&id) {
+            issue(ReleaseInventoryCode::Quarantined);
+        }
+        let parent = dependencies
+            .iter()
+            .find(|d| d.from_id == id)
+            .and_then(|d| tasks.get(&d.to_id));
+        if let Some(target) = close_ops::effective_close_work_target(t, parent) {
+            if !repo_context::repo_answers_to(repo, &target.repo_selector) {
+                issue(ReleaseInventoryCode::ForeignScope);
+                continue;
+            }
+        }
+        let d = &t.deliverables;
+        let base = d
+            .factory_branch_start
+            .as_ref()
+            .and_then(|s| recorded_commit(&s.base_sha));
+        let explicit = scope.no_code_members.get(&id);
+        let (anchor, shipped_commit, membership, proofs) = if crate::qa_pass::is_no_code(t)
+            || t.deliverables.evidence_only.is_some()
+        {
+            let Some(proofs) = explicit.filter(|proofs| {
+                !proofs.is_empty()
+                    && proofs.iter().all(|p| {
+                        !p.artifact_id.is_empty()
+                            && p.sha256.len() == 64
+                            && p.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+                            && p.size_bytes > 0
+                            && p.reviewed_sha == scope.reviewed_sha
+                    })
+            }) else {
+                if expected.contains(&id) {
+                    issue(ReleaseInventoryCode::MissingNoCodeProof);
+                }
+                continue;
+            };
+            (
+                None,
+                None,
+                ReleaseMembership::ExplicitNoCode,
+                proofs.clone(),
+            )
+        } else {
+            if d.factory_branch_anchor.is_none() && !d.historical_factory_branch_anchors.is_empty()
+            {
+                issue(ReleaseInventoryCode::RetiredAnchor);
+                continue;
+            }
+            let recorded = d
+                .factory_branch_anchor
+                .as_ref()
+                .or(d.green_merge_commit.as_ref())
+                .or(d.delivery_pr_merge_commit.as_ref())
+                .or(d.merge_commit.as_ref());
+            let Some(anchor) = recorded.and_then(|sha| recorded_commit(sha)) else {
+                issue(ReleaseInventoryCode::MissingAnchor);
+                continue;
+            };
+            let base_valid = base
+                .as_ref()
+                .is_some_and(|base| ancestor(repo, base, &anchor) == Some(true) && base != &anchor);
+            if base.is_none() {
+                issue(ReleaseInventoryCode::MissingBase);
+            } else if !base_valid {
+                issue(ReleaseInventoryCode::InvalidBase);
+            }
+            let (shipped, membership) = if ancestor(repo, &anchor, &scope.final_release_sha)
+                == Some(true)
+            {
+                (anchor.clone(), ReleaseMembership::Ancestry)
+            } else if let Some(mapped) = base_valid
+                .then(|| close_ops::find_squash_tree_match(repo, &anchor, &scope.final_release_sha))
+                .flatten()
+                .filter(|mapped| ancestor(repo, mapped, &scope.final_release_sha) == Some(true))
+            {
+                (mapped, ReleaseMembership::SquashTree)
+            } else {
+                issue(ReleaseInventoryCode::MissingMapping);
+                continue;
+            };
+            let proofs = release_proof_refs(&receipts, &id, &anchor);
+            (Some(anchor), Some(shipped), membership, proofs)
+        };
+        inventory.deliveries.push(ReleaseDelivery {
+            task_id: id,
+            generation: t.updated_at.to_rfc3339(),
+            anchor,
+            base_sha: base,
+            shipped_commit,
+            membership,
+            proof_refs: proofs,
+        });
+    }
+    inventory
+        .exceptions
+        .sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    Ok(inventory)
+}
+
+fn release_proof_refs(
+    receipts: &[QaBatchReceipt],
+    task_id: &str,
+    anchor: &str,
+) -> Vec<ReleaseProofRef> {
+    let mut proofs: Vec<_> = receipts
+        .iter()
+        .filter_map(|r| {
+            let kind = match r.schema_version {
+                cas_store::QA_BATCH_RECEIPT_SCHEMA => ReleaseProofKind::Qa,
+                cas_store::RELEASE_VERDICT_SCHEMA => ReleaseProofKind::Review,
+                _ => return None, // a published tag never becomes QA or code review
+            };
+            (r.task_heads.get(task_id).is_some_and(|head| head == anchor)).then(|| {
+                ReleaseProofRef {
+                    kind,
+                    artifact_id: r.ledger_artifact_id.clone(),
+                    sha256: r.ledger_sha256.clone(),
+                    size_bytes: r.ledger_size_bytes,
+                    reviewed_sha: r.staging_sha.clone(),
+                    receipt_id: Some(r.id.clone()),
+                }
+            })
+        })
+        .collect();
+    proofs.sort_by(|a, b| a.receipt_id.cmp(&b.receipt_id));
+    proofs
+}
+
 pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
     let out = Command::new("git")
         .args([

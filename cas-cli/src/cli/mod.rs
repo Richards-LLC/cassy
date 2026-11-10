@@ -473,6 +473,8 @@ pub enum ReleaseCommands {
     Context(release_automation::ContextArgs),
     /// Arm durable release landing and publication reminders
     Track(release_automation::TrackArgs),
+    /// Resolve shipped deliveries and portable proof references at an exact SHA
+    Inventory(release_automation::InventoryArgs),
     /// Notify the owning supervisor after a published release is installed
     Installed(release_automation::InstalledArgs),
     /// Backfill shipped release trains from their published tags
@@ -1033,6 +1035,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
         Commands::Release(ReleaseCommands::Backfill(args)) => release_automation::backfill(args, require_cas_root(cas_root)?),

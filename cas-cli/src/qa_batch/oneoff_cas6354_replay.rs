@@ -28,8 +28,17 @@ async fn optin_real_cas6354_release_replay() {
     task.pending_verification = false; task.pending_worktree_merge = false;
     // Replay before the hand-reviewed override. Preserve original park intent,
     // source/start identity and existing independent/test receipt evidence.
-    task.notes = task.notes.split("[2026-11-10").next().unwrap().to_string();
+    task.notes = task.notes.lines().filter(|line|
+        !line.contains("reviewed-drop:") && !line.contains("reviewed delivery content supersession accepted")
+    ).collect::<Vec<_>>().join("\n");
     task.notes.push_str("\nBUILD PROOF deferred to fixture assembly; exact original worker tests retained in copied store.\n");
+    let original_deliverables = task.deliverables.clone();
+    tasks.update(&task).unwrap();
+    // Reopening a terminal row correctly retires its park. This fixture rolls
+    // back the historic close, so restore its original pre-close park snapshot
+    // in a second fixture-only update; production retirement rules are retained.
+    let mut task = tasks.get("cas-6354").unwrap();
+    task.deliverables = original_deliverables;
     tasks.update(&task).unwrap();
     let task = tasks.get("cas-6354").unwrap();
     let agents = crate::store::open_agent_store(&root).unwrap();

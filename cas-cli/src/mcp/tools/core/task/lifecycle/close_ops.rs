@@ -29903,6 +29903,9 @@ mod merge_state_gate_tests {
                     let bad = core.close_release_inventory_outcomes(&invalid).await;
                     assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
                     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+                    let mut missing = inventory.clone(); missing.deliveries.clear();
+                    let bad = core.close_release_inventory_outcomes(&missing).await;
+                    assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
                     let mut stale = inventory.clone(); stale.deliveries[0].generation = "retired-cycle".into();
                     let bad = core.close_release_inventory_outcomes(&stale).await;
                     assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));

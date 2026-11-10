@@ -107,7 +107,11 @@ impl ReleaseClose {
             let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
             for id in receipt.task_heads.keys() {
                 let task = tasks.get(id).map_err(|e| e.to_string())?;
-                if !author_is_independent(root, &task, repo, author)? {
+                if !author_is_independent(root, &task, repo, author)?
+                    && !receipt.author_overrides.contains_key(id)
+                    && author_override(root, &task).is_none()
+                    && release_author_waiver(root, &task, repo, &receipt.task_heads[id])?.is_none()
+                {
                     return Err(format!("RELEASE_REVIEW_NOT_INDEPENDENT: {id}"));
                 }
             }

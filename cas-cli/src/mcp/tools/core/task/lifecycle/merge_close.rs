@@ -640,14 +640,28 @@ impl CasCore {
         &self, inventory: &crate::qa_batch::ReleaseInventory,
     ) -> std::collections::BTreeMap<String, CassyMergeClose> {
         use crate::qa_batch::{self, release_close::ReleaseClose};
+        let initial_outcomes = || {
+            let mut outcomes: std::collections::BTreeMap<_, _> = inventory.exceptions.iter().map(|e|
+                (e.task_id.clone(), CassyMergeClose::Held(format!("RELEASE_MEMBER_HELD: {:?}", e.code)))).collect();
+            for id in inventory.scope.included_task_ids.iter().chain(inventory.scope.no_code_members.keys()) {
+                if !inventory.deliveries.iter().any(|d| &d.task_id == id) {
+                    outcomes.entry(id.clone()).or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
+                }
+            }
+            outcomes
+        };
         let repo = self.cas_root.parent().unwrap_or(&self.cas_root);
         let context = match ReleaseClose::prepare(&self.cas_root, repo, inventory) {
             Ok(context) => context,
-            Err(error) => return inventory.deliveries.iter().map(|d|
-                (d.task_id.clone(), CassyMergeClose::Held(error.clone()))).collect(),
+            Err(error) => {
+                let mut outcomes = initial_outcomes();
+                outcomes.extend(inventory.deliveries.iter().map(|d|
+                    (d.task_id.clone(), CassyMergeClose::Held(error.clone()))));
+                return outcomes;
+            }
         };
         context.clone().scope(async {
-            let mut outcomes = std::collections::BTreeMap::new();
+            let mut outcomes = initial_outcomes();
             let store = match self.open_task_store() {
                 Ok(store) => store,
                 Err(error) => return inventory.deliveries.iter().map(|d|

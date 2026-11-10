@@ -175,6 +175,10 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         age(&daemon, unsolicited, 21);
         assert_eq!(wake_attempt(&mut daemon, unsolicited).await, cas_store::WakeAttempt::NotAttempted,
             "unsolicited {kind:?} traffic stays capped");
+        worker.coordination(Parameters(request(Some(unsolicited)))).await.unwrap();
+        let thread_reference = last_row(evidence);
+        assert_eq!(wake_attempt(&mut daemon, thread_reference).await, cas_store::WakeAttempt::NotAttempted,
+            "citing the worker's own {kind:?} message grants no answer authority");
 
         let ask = serde_json::from_value(serde_json::json!({
             "action": "message", "target": WORKER, "kind": "ask",
@@ -182,6 +186,19 @@ async fn a_capped_workers_linked_reply_wakes_the_supervisor_cas_6c32() {
         })).unwrap();
         service("local-sup").coordination(Parameters(ask)).await.unwrap();
         let asked = last_row("Which artifact contains the updated evidence?");
+        // Answer authority must not override an explicit delivery opt-out.
+        for receipt in [false, true] {
+            let mut quiet: cas_mcp::types::CoordinationRequest = request(Some(asked));
+            if receipt {
+                quiet.kind = Some("receipt".into());
+            } else {
+                quiet.wake = Some(false);
+            }
+            worker.coordination(Parameters(quiet)).await.unwrap();
+            let quiet_answer = last_row(evidence);
+            assert_eq!(wake_attempt(&mut daemon, quiet_answer).await, cas_store::WakeAttempt::NotAttempted,
+                "linked {kind:?} reply stays quiet with receipt={receipt}");
+        }
         worker.coordination(Parameters(request(Some(asked)))).await.unwrap();
         let answer = last_row(evidence);
         assert_eq!(wake_attempt(&mut daemon, answer).await, cas_store::WakeAttempt::Fired,

@@ -412,6 +412,10 @@ bug_families:
     tasks: [cas-0e49]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-CAP-FEEDBACK]
+  requested-worker-reply-wake:
+    title: A linked worker answer wakes its supervisor over the cap while unsolicited status stays held
+    tasks: [cas-6c32]
+    journeys: [FACTORY-SUPERVISE]
   managed-thread-verified-file-replies:
     title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
     tasks: [cas-4deb]

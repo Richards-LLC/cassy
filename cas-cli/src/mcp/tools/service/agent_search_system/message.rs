@@ -2321,8 +2321,16 @@ impl CasService {
         }
         // cas-922d: a worker's ask or answer is the conversation; keep its
         // kind on the row so the supervisor's wake cap and debounce skip it.
+        // cas-6c32 (GH #1780 part 1): a validated reply to the worker's own
+        // supervisor is an answer even with no kind or kind=status. Thread
+        // references to the worker's own earlier messages grant no exemption.
+        let worker_waking_kind = match req.kind.as_deref() {
+            Some(kind @ ("ask" | "answer")) => Some(kind),
+            _ if worker_to_own_supervisor && explicit_reply_settles => Some("answer"),
+            _ => None,
+        };
         if role == "worker"
-            && let Some(kind @ ("ask" | "answer")) = req.kind.as_deref()
+            && let Some(kind) = worker_waking_kind
         {
             message = crate::supervisor_message_wakes::attach_waking_kind(&message, kind);
         }

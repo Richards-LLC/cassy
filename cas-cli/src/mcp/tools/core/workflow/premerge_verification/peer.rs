@@ -583,6 +583,12 @@ mod tests {
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Rejected(_)));
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Imported));
             assert_eq!(cas_store::get_verification_for_dispatch(&root, &old.dispatch_id).unwrap().unwrap().id, old.verdict_id);
+            assert_eq!(cas_store::get_verification_dispatch(&root, &old.dispatch_id).unwrap()
+                .repository.unwrap().peer_premerge.unwrap().receipt.source_sha, old_sha);
+            let local = cas_store::create_verification_dispatch(&root, &task.id, &recipient.id, &recipient.id,
+                chrono::Utc::now() + chrono::Duration::minutes(10)).unwrap();
+            assert!(matches!(ingest_peer_receipt(&root, &recipient, &fresh_message).unwrap(), PeerReceiptIngested::Rejected(_)));
+            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, local.id);
         }).await.unwrap();
     }
 }

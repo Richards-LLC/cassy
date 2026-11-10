@@ -468,6 +468,10 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
+  dialog-action-bar-sheet-at-rest:
+    title: New session and Operator inbox action bars frost only while fields scroll beneath them and are otherwise the sheet with its hairline
+    tasks: [cas-6c0d]
+    journeys: [HUB-J13, HUB-J19]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

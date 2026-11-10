@@ -16411,6 +16411,61 @@ mod tests {
         assert!(!candidate_ids(&store).contains(&id));
     }
 
+    #[test]
+    fn cas_c568_mirror_expiry_only_wakes_for_current_session_or_decision_asks() {
+        for session_state in ["current", "previous", "ended"] {
+            for kind in ["status", "ask"] {
+                let (_temp, store) = create_test_store();
+                register_bounce_sender(&store, "old-supervisor", "factory-old");
+                {
+                    let conn = store.conn.lock().unwrap();
+                    conn.execute(
+                        "UPDATE agents SET role = 'supervisor', status = 'shutdown'",
+                        [],
+                    ).unwrap();
+                }
+                if session_state != "ended" {
+                    register_bounce_sender(&store, "current-supervisor", "factory-current");
+                    store.conn.lock().unwrap().execute(
+                        "UPDATE agents SET role = 'supervisor' WHERE name = 'current-supervisor'",
+                        [],
+                    ).unwrap();
+                }
+                let session = if session_state == "current" { "factory-current" } else { "factory-old" };
+                // Replay separate daemon ticks, as the old backlog ages out.
+                for tick in 0..2 {
+                    let now = Utc::now();
+                    let id = store.mirror_supervisor_turn(
+                        session, &format!("commander-mirror:{session}:{kind}:{tick}"), now, now,
+                        &format!(r#"{{"message":"completed turn {tick}","kind":"{kind}"}}"#),
+                        "completed turn", "*", kind,
+                    ).unwrap().unwrap();
+                    backdate(&store, id, PROMPT_QUEUE_STALE_TTL_SECS + 60);
+                    store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+                    assert_eq!(store.message_delivery_report(id).unwrap().unwrap().stage, DeliveryStage::Suppressed);
+                    let conn = store.conn.lock().unwrap();
+                    let notices: Vec<(String, Option<String>, String)> = conn.prepare(
+                        "SELECT target, factory_session, prompt FROM prompt_queue
+                         WHERE dedupe_key LIKE 'operator-mirror-undelivered:%' ORDER BY id",
+                    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                        .unwrap().collect::<std::result::Result<_, _>>().unwrap();
+                    let actionable = session_state == "current" || kind == "ask";
+                    assert_eq!(notices.len(), if actionable { tick + 1 } else { 0 }, "{session_state}/{kind}, tick {tick}");
+                    for (target, session, body) in notices {
+                        let expected = if session_state == "ended" {
+                            ("supervisor", None)
+                        } else {
+                            ("current-supervisor", Some("factory-current"))
+                        };
+                        assert_eq!((target.as_str(), session.as_deref()), expected);
+                        // FactoryDaemon::supervisor_wake_class consumes this protocol suffix.
+                        assert!(body.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));
+                    }
+                }
+            }
+        }
+    }
+
     /// Communication contract v2, P3.1/P1.3 (cas-f7b0): the 24 h stale
     /// expiry is a roster-independent sweep, and it too must leave the
     /// operator lane's rows alone. Aged operator and `commander:<label>` rows

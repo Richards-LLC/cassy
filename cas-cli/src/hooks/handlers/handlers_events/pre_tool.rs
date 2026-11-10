@@ -5054,53 +5054,40 @@ fn bash_write_targets(command: &str) -> Vec<String> {
     targets
 }
 
-/// Claude Code advertises this exact per-session ephemeral root to agents:
-/// `/tmp/claude-<uid>/<project-slug>/<session-id>/scratchpad/...` (or the
-/// macOS canonical spelling `/private/tmp/...`).
+/// Shared by scratchpad admission and its refusal guidance. The UID and project
+/// components are placeholders; the session component is always literal.
+fn harness_session_scratchpad_pattern(session_id: &str) -> [&str; 5] {
+    ["tmp", "claude-<uid>", "<project-slug>", session_id, "scratchpad"]
+}
+
+/// Claude Code's per-session ephemeral root, including its macOS canonical
+/// spelling `/private/tmp/...`. Allow creating the root as well as its files.
 /// Bind the exemption to the hook's own session ID and reject traversal so it
 /// cannot become a general `/tmp` escape hatch.
 pub(crate) fn is_harness_session_scratchpad(path: &std::path::Path, session_id: &str) -> bool {
     use std::path::Component;
 
+    let path = path.strip_prefix("/private").unwrap_or(path);
     let mut components = path.components();
     if components.next() != Some(Component::RootDir) {
         return false;
     }
-    match components.next() {
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("tmp") => {}
-        Some(Component::Normal(component)) if component == std::ffi::OsStr::new("private") => {
-            if components.next() != Some(Component::Normal(std::ffi::OsStr::new("tmp"))) {
-                return false;
-            }
+    for (index, expected) in harness_session_scratchpad_pattern(session_id).iter().enumerate() {
+        let Some(Component::Normal(actual)) = components.next() else {
+            return false;
+        };
+        let matches = match index {
+            1 => actual.to_str().and_then(|value| value.strip_prefix("claude-"))
+                .is_some_and(|uid| !uid.is_empty() && uid.bytes().all(|byte| byte.is_ascii_digit())),
+            2 => true,
+            _ => actual == std::ffi::OsStr::new(expected),
+        };
+        if !matches {
+            return false;
         }
-        _ => return false,
-    }
-    let Some(Component::Normal(claude_user)) = components.next() else {
-        return false;
-    };
-    let Some(uid) = claude_user
-        .to_str()
-        .and_then(|value| value.strip_prefix("claude-"))
-    else {
-        return false;
-    };
-    if uid.is_empty() || !uid.bytes().all(|byte| byte.is_ascii_digit()) {
-        return false;
-    }
-    if !matches!(components.next(), Some(Component::Normal(_)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new(session_id)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("scratchpad")))
-    {
-        return false;
     }
 
-    // The sanctioned root is for files below `scratchpad`, not the directory
-    // entry itself, and no `..` component may escape it.
-    let remaining: Vec<_> = components.collect();
-    !remaining.is_empty()
-        && remaining
-            .iter()
-            .all(|component| matches!(component, Component::Normal(_)))
+    components.all(|component| matches!(component, Component::Normal(_)))
 }
 
 #[cfg(test)]
@@ -7924,8 +7911,9 @@ fn factory_workspace_contract_denial(
             scratch,
         );
     }
+    let scratchpad = harness_session_scratchpad_pattern(&input.session_id).join("/");
     format!(
-        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; only this session's harness scratchpad is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
+        "{WORKSPACE_CONTRACT_DENIAL}: file creation outside the assigned worktree, durable artifacts root, configured scratch root, or harness exceptions is blocked: {}. Assigned worktree: `{}`. Use your worktree, `{}/<task-id>/` for durable proof{}; this session's harness scratchpad `/{scratchpad}` (also `/private/{scratchpad}`) is sanctioned for ephemeral notes. Bare /tmp and stray $HOME files are not sanctioned.",
         violation.resolved_path.display(),
         worktree.display(),
         artifacts,

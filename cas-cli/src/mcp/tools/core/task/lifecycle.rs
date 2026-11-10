@@ -1897,7 +1897,10 @@ impl CasCore {
                 format!("Task created, but epic design review trigger could not be evaluated: {error}")))?;
         crate::mcp::tools::service::mutation_receipt::task_committed(&id);
         let triage_notice = if task.assignee.is_some() {
-            crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
+            format!("{}{}",
+                crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id)),
+                epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task),
+            )
         } else { String::new() };
         let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),

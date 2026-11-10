@@ -1552,6 +1552,7 @@ async fn test_factory_focus_epic_routes_clear_field() {
 async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
     let env = FactoryTestEnv::with_server_supervisor();
+    std::fs::write(env.cas_root.join("config.toml"), "[project]\ncanonical_id = \"cas-a3c3-fixture\"\n").unwrap();
     let worker = "release-gap-worker";
     let worker_path = init_sync_repo(&env, worker);
     let repo = env.cas_root.parent().unwrap();
@@ -1588,7 +1589,12 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         req.isolate = Some(true);
         req.task_id = Some(spawn_task);
         let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
-        for response in [assignment, spawn] {
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"create", "title":format!("Create staffed work behind={behind}"),
+            "task_type":"task", "epic":"cas-release-gap", "assignee":worker,
+        })).unwrap();
+        let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
+        for response in [assignment, spawn, created] {
             assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind, "{response}");
             if behind {
                 assert!(response.contains("tag=v1.2.3"), "{response}");

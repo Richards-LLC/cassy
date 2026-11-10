@@ -55,6 +55,16 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Staffing behind a published release
+
+Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
+the subject epic lacks commits from the latest recorded published release.
+The advisory names the tag and missing commit count, and asks the supervisor
+to sync the integration branch into the epic first. It does not refuse work or
+move Git refs. Publication comes from the target repository's Release ledger;
+a tag alone is not publication evidence. Missing receipts or unavailable refs
+produce no warning. A fresher remote epic tip is considered before warning.
+
 ## Worker contracts across machines
 
 `coordination action=message target=<worker>@<machine>` can carry an advisory

@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  published-release-staffing-gap:
+    title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
+    tasks: [cas-a3c3]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

@@ -297,25 +297,28 @@ fn docs_upkeep_attributes_live_journeys_after_target_merge() {
     let mut f = Fixture::new();
     let repo = f.repo.path();
     let registry = crate::qa_registry::DEFAULT_PATH;
-    write(repo, registry, "version: 1\njourneys: []\n");
+    let historic_journeys = "journeys:\n  - {id: signup, status: dead}\n";
+    let historic = format!("version: 1\n{historic_journeys}");
+    write(repo, registry, &historic);
     let base = commit(repo);
     git(repo, &["checkout", "-qb", "factory/worker"]);
     let metadata = "version: 1\nupdated: '2026-10-21'\n";
-    write(repo, registry, &format!("{metadata}journeys: []\n"));
+    write(repo, registry, &format!("{metadata}{historic_journeys}"));
     let worker_commit = commit(repo);
     git(repo, &["checkout", "main"]);
-    let target_journey = "journeys:\n  - {id: signup, status: live}\n";
-    write(repo, registry, &format!("version: 1\n{target_journey}"));
+    let target_journeys =
+        "journeys:\n  - {id: signup, status: live}\n  - {id: help, status: live}\n";
+    write(repo, registry, &format!("version: 1\n{target_journeys}"));
     commit(repo);
     git(repo, &["checkout", "factory/worker"]);
     // Set the merge parents and install the resolved registry with both edits.
     git(repo, &["merge", "--no-commit", "-s", "ours", "main"]);
-    let resolved = format!("{metadata}{target_journey}");
+    let resolved = format!("{metadata}{target_journeys}");
     write(repo, registry, &resolved);
     let merged = commit(repo);
 
     git(repo, &["checkout", "main"]);
-    write(repo, registry, "version: 1\njourneys: []\n");
+    write(repo, registry, &historic);
     commit(repo);
     git(repo, &["checkout", "factory/worker"]);
     let window = TaskCommitReceiptWindow {
@@ -351,6 +354,12 @@ fn docs_upkeep_attributes_live_journeys_after_target_merge() {
     );
     let authored = commit(repo);
     assert!(park(&authored).is_err());
+
+    // Retiring signup changes its status relative to the merged target even
+    // though this registry is byte-identical to the historic base.
+    write(repo, registry, &historic);
+    let retired = commit(repo);
+    assert!(park(&retired).is_err());
 }
 
 #[test]

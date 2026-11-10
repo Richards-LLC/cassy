@@ -604,7 +604,7 @@ fn source_reaction_authority_and_identity_fences() {
 
 #[test]
 fn source_reaction_deadline_defers_remaining_calls() {
-    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let _env = crate::test_support::TestEnvGuard::temp_home();
     let world = World::new();
     world.status(TaskStatus::InProgress);
     let clock = std::cell::Cell::new(world.now);
@@ -668,25 +668,19 @@ fn source_reaction_deadline_defers_remaining_calls() {
                 marker.display()
             ),
         );
-        let old_path = std::env::var_os("PATH").unwrap();
-        let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(&old_path));
-        env.set("PATH", std::env::join_paths(paths).unwrap());
+        let task = crate::store::open_task_store(&slow.root)
+            .unwrap()
+            .get("cas-source")
+            .unwrap();
         let started = Instant::now();
-        reconcile_until(
-            &slow.root,
-            "sup",
-            "session",
-            &|| slow.now,
-            Deadline::after(Duration::from_millis(250)),
-            &mut |_, _| panic!("Violet called after repository resolution used the pass budget"),
-        )
-        .unwrap();
+        let deadline = Deadline::after(Duration::from_millis(250));
+        let probe =
+            BoundedRepoProbe::new(deadline, PASS_BUDGET, 256).with_git_program(bin.join("git"));
+        assert!(!staged(&slow.root, &task, deadline, &probe));
         assert!(marker.exists());
+        assert!(deadline.remaining().is_zero());
         assert!(started.elapsed() < Duration::from_millis(1500));
-        env.set("PATH", old_path);
-        assert!(audit_at(&slow.root, false, slow.now).unwrap()[0].pending);
-        // The deferred source remains eligible with the normal resolver.
+        // A later pass with a fresh deadline can prove staging and reconcile.
         let mut reads = 0;
         reconcile(
             &slow.root,

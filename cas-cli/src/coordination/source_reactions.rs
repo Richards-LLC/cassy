@@ -1,6 +1,7 @@
 //! Receipted source-post status, reconciled by the owning supervisor.
 use super::external_work::SqliteRequestJournal;
 use crate::cli::violet_hub::{VioletError, decode_tool_result};
+use crate::mcp::tools::core::task::repo_context::{BoundedRepoProbe, resolve_repo_context_bounded};
 use cas_types::{AgentRole, AgentStatus, MergeCiAdmission, Task, TaskStatus};
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
@@ -71,7 +72,12 @@ impl Target {
 
 /// A green task merge must actually be contained in the remote staging/main
 /// history. Closing or landing on an epic branch alone is insufficient.
-fn staged(root: &Path, task: &Task, deadline: crate::bounded_process::Deadline) -> bool {
+fn staged(
+    root: &Path,
+    task: &Task,
+    deadline: crate::bounded_process::Deadline,
+    probe: &BoundedRepoProbe,
+) -> bool {
     if task.status != TaskStatus::Closed
         || task.deliverables.merge_ci_admission.unwrap_or_default() != MergeCiAdmission::Green
     {
@@ -86,8 +92,7 @@ fn staged(root: &Path, task: &Task, deadline: crate::bounded_process::Deadline) 
     };
     // Resolve the task's own repository; never use the daemon's checkout for
     // another project's delivery or fall back after a stale binding refusal.
-    let Ok(repo) = crate::mcp::tools::core::task::repo_context::resolve_repo_context(root, target)
-    else {
+    let Ok(repo) = resolve_repo_context_bounded(root, target, probe) else {
         return false;
     };
     let contains = |ancestor: &str, descendant: &str| {
@@ -211,7 +216,12 @@ fn desired(
         return None;
     }
     Some(
-        if prove_staging && tasks.iter().all(|task| staged(root, task, deadline)) {
+        if prove_staging && {
+            let probe = BoundedRepoProbe::new(deadline, PASS_BUDGET, 256);
+            tasks
+                .iter()
+                .all(|task| staged(root, task, deadline, &probe))
+        } {
             "white_check_mark"
         } else if tasks.iter().all(|task| task.status == TaskStatus::Open) {
             "eyes"

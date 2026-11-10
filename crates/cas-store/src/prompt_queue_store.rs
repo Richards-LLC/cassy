@@ -16459,20 +16459,48 @@ mod tests {
     }
 
     #[test]
-    fn cas_c568_current_session_status_mirror_still_notifies() {
+    fn cas_31c9_current_session_mirrors_expire_without_watchdog_wake() {
         let (_temp, store) = create_test_store();
         register_agent_at(&store, "current-supervisor", "supervisor", 3 * PROMPT_QUEUE_STALE_TTL_SECS);
         for tick in 0..2 {
             let id = cas_c568_aged_status_mirror(&store, &format!("current-{tick}"));
             store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
-            let notice: (String, Option<String>, String) = store.conn.lock().unwrap().query_row(
-                "SELECT target, factory_session, prompt FROM prompt_queue WHERE dedupe_key = ?",
-                [format!("operator-mirror-undelivered:{id}")],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            let report = store.message_delivery_report(id).unwrap().unwrap();
+            assert_eq!(report.stage, DeliveryStage::Suppressed);
+            assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+            assert!(report.delivered_at.is_none());
+            let notices: i64 = store.conn.lock().unwrap().query_row(
+                "SELECT COUNT(*) FROM prompt_queue WHERE source = 'delivery-watchdog' AND target = 'current-supervisor'",
+                [], |row| row.get(0),
             ).unwrap();
-            assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("current-supervisor", Some("factory-a")));
-            // FactoryDaemon::supervisor_wake_class consumes this protocol suffix.
-            assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));
+            assert_eq!(notices, 0);
+            assert!(store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 10).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn cas_31c9_undelivered_operator_actions_still_raise_watchdog_wake() {
+        for kind in ["ask", "blocker"] {
+            let (_temp, store) = create_test_store();
+            register_agent_at(&store, "current-supervisor", "supervisor", 3 * PROMPT_QUEUE_STALE_TTL_SECS);
+            let id = store.enqueue_with_session(
+                "current-supervisor", "operator", "Approve the move?", "factory-a",
+            ).unwrap();
+            store.stamp_operator_reply(id, kind, &[]).unwrap();
+            backdate(&store, id, 31 * 60);
+            store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+            assert_eq!(store.message_delivery_report(id).unwrap().unwrap().stage, DeliveryStage::Enqueued);
+            assert_eq!(store.delivery_stalled_candidates("factory-a", 600, 1800, 50).unwrap()
+                .iter().map(|row| row.id).collect::<Vec<_>>(), vec![id]);
+            let notice = store.enqueue_delivery_stalled_bounce(
+                id, "factory-a", "delivery failure", "delivery failure",
+            ).unwrap().unwrap();
+            let rows = store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, notice);
+            assert_eq!(rows[0].source, "delivery-watchdog");
+            assert_eq!(rows[0].priority, NotificationPriority::High);
+            assert!(store.enqueue_delivery_stalled_bounce(id, "factory-a", "delivery failure", "delivery failure").unwrap().is_none());
         }
     }
 

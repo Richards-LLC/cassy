@@ -67,6 +67,16 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## Staffing behind a published release
+
+Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
+the subject epic lacks commits from the latest recorded published release.
+The advisory names the tag and missing commit count, and asks the supervisor
+to sync the integration branch into the epic first. It does not refuse work or
+move Git refs. Publication comes from the target repository's Release ledger;
+a tag alone is not publication evidence. Missing receipts or unavailable refs
+produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
+
 ## Worker contracts across machines
 
 `coordination action=message target=<worker>@<machine>` can carry an advisory
@@ -1227,8 +1237,14 @@ task's scoped artifacts directory. It imports the record into the existing
 artifact ledger, making `show`, `list` and close citations usable there too.
 `--json` returns `artifact_id`, `path`, `sha256` and `size_bytes`. No signed URL
 or bearer is included in the note, output or saved record. Fetch requires the
-synced task and Cloud credentials; proof interpretation remains the verifier's
-responsibility. Task note mutation remains MCP-only; CLI publish is unchanged.
+Cloud credentials. If the task note is not cached locally, fetch first reads
+the task in the configured personal/team project scope, so unrelated account
+projects do not block a same-project proof. Scoped entity reads use
+`/api[/teams/<team>]/sync/task/<task>?project_id=<project>`. Missing scoped proof
+can use bounded cross-project discovery; both paths share one fifteen-second
+metadata deadline and validate the returned task/project before reading proof.
+Proof interpretation remains the verifier's responsibility. Task note mutation
+remains MCP-only; CLI publish is unchanged.
 
 ### Artifact revocation
 

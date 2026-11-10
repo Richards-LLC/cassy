@@ -1,0 +1,4 @@
+title: Cold peers resolve committed artifact metadata within their configured project without failing on a large account's discovery cap or the wrong task endpoint
+tasks: [cas-e75c]
+invariants: [FACTORY-ARTIFACT-METADATA]
+journeys: [FACTORY-QA-RECEIPT]

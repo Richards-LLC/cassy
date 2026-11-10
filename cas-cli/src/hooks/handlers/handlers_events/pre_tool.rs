@@ -2757,6 +2757,7 @@ struct GitCommandTarget {
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
     is_detached_checkout: bool,
+    unresolved_directory: bool,
 }
 
 impl GitCommandTarget {
@@ -2771,6 +2772,7 @@ impl GitCommandTarget {
             git_dir: None,
             work_tree: None,
             is_detached_checkout: false,
+            unresolved_directory: false,
         }
     }
 
@@ -2836,17 +2838,36 @@ fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
     git_words.get(operation_index).map(|_| operation_index)
 }
 
-/// Resolve the small subset of shell variable forms used in worker guidance
-/// before applying the worktree containment check. Unknown variables remain
-/// literal, which fails closed if they would resolve outside the worktree.
-fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::PathBuf {
-    let value = match value {
-        "$CAS_CLONE_PATH" | "${CAS_CLONE_PATH}" => {
-            std::env::var_os("CAS_CLONE_PATH").map_or_else(|| value.to_string(), |v| v.to_string_lossy().into_owned())
-        }
-        _ => value.to_string(),
-    };
-    resolve_git_option_path(base, &value)
+#[derive(Clone, Copy)]
+struct WorkerPathWord {
+    literal: Option<bool>,
+    quoted: bool,
+}
+
+/// Only constants and whole, previously bound variables are known here. Never
+/// execute substitutions or infer a value from an argument that looks like an
+/// assignment. Mixed quoting of the same spelling remains uncertain.
+fn worker_path_value(
+    value: &str, word: WorkerPathWord,
+    bindings: &std::collections::HashMap<String, String>, allow_variables: bool,
+) -> Option<String> {
+    if word.literal == Some(true) {
+        return Some(value.to_string());
+    }
+    if !value.contains(['$', '`', '*', '?', '[']) {
+        return Some(value.to_string());
+    }
+    if !allow_variables || word.literal != Some(false) {
+        return None;
+    }
+    let name = value.strip_prefix("${").and_then(|v| v.strip_suffix('}'))
+        .or_else(|| value.strip_prefix('$'))?;
+    if !is_shell_variable_name(name) { return None; }
+    let value = bindings.get(name)?;
+    if value.is_empty() || (!word.quoted && value.chars().any(|ch| ch.is_whitespace() || "*?[".contains(ch))) {
+        return None;
+    }
+    Some(value.clone())
 }
 
 /// Extract every history-changing git invocation's repository target from a
@@ -2857,7 +2878,37 @@ fn resolve_worker_cd_path(base: &std::path::Path, value: &str) -> std::path::Pat
 fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     let default_target = GitCommandTarget::from_cwd(cwd);
     let mut targets = Vec::new();
-    let mut shell_cwd = default_target.cwd.clone();
+    let mut shell_cwd = Some(default_target.cwd.clone());
+    let projected = shell_command_without_heredoc_bodies(command);
+    let lexed = factory_shell_lex(&projected, false, 0);
+    let mut path_words = std::collections::HashMap::<String, WorkerPathWord>::new();
+    let mut previous_end = 0;
+    for ((token, literal), end) in lexed.tokens.iter().zip(&lexed.literals).zip(&lexed.ends) {
+        let raw = projected[previous_end..*end].trim();
+        previous_end = *end;
+        if let ShellToken::Word(value) = token {
+            let quoted = raw.starts_with('"') && raw.ends_with('"');
+            path_words.entry(value.clone()).and_modify(|prior| {
+                if prior.literal != Some(*literal) { prior.literal = None; }
+                prior.quoted &= quoted;
+            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted });
+        }
+    }
+    let path_word = |word: &str| path_words.get(word).copied()
+        .unwrap_or(WorkerPathWord { literal: None, quoted: false });
+    let allow_variables = lexed.unresolved_at.is_none() && !lexed.tokens.iter().enumerate().any(|(index, token)| match token {
+        ShellToken::Operator('(' | ')' | '|') => true,
+        ShellToken::Operator('&') => lexed.tokens.get(index.wrapping_sub(1)) != Some(&ShellToken::Operator('&'))
+            && lexed.tokens.get(index + 1) != Some(&ShellToken::Operator('&')),
+        ShellToken::Word(word) => matches!(word.as_str(), "if" | "then" | "else" | "elif" | "fi" | "for" | "while" | "until" | "case" | "esac" | "do" | "done"),
+        _ => false,
+    });
+    let conditional = lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('&')));
+    let mut prefix_bindings = true;
+    let mut bindings = std::collections::HashMap::new();
+    if let Ok(value) = std::env::var("CAS_CLONE_PATH") {
+        bindings.insert("CAS_CLONE_PATH".to_string(), value);
+    }
 
     // Strip only literal heredoc data for this allowance. Expanding bodies
     // can run $(git ...); retain the raw subprocess scopes in that case.
@@ -2871,8 +2922,43 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
     };
     let mut pending_statements = std::collections::VecDeque::from(statements);
     while let Some(words) = pending_statements.pop_front() {
+        let standalone_assignments = !words.is_empty() && words.iter().all(|word| {
+            word.split_once('=').is_some_and(|(name, _)| is_shell_variable_name(name))
+        });
+        if standalone_assignments {
+            for word in &words {
+                let (name, value) = word.split_once('=').expect("assignment checked");
+                let mut provenance = path_word(word);
+                // Assignment RHSs do not undergo word splitting or globbing.
+                provenance.quoted = true;
+                let value = (!conditional || prefix_bindings).then(|| {
+                    worker_path_value(value, provenance, &bindings, allow_variables)
+                }).flatten();
+                if let Some(value) = value { bindings.insert(name.into(), value); }
+                else { bindings.remove(name); }
+            }
+            continue;
+        }
+        // Array/append assignment forms are not literal bindings.
+        bindings.retain(|name, _| !words.iter().any(|word| {
+            word.starts_with(&format!("{name}+=")) || word.starts_with(&format!("{name}["))
+        }));
         let Some(command_index) = unwrapped_command_index(&words) else {
             continue;
+        };
+        prefix_bindings = false;
+        let name = shell_word_basename(&words[command_index]);
+        if matches!(name, "read" | "readarray" | "mapfile" | "getopts" | "declare" | "typeset" | "local" | "export" | "readonly" | "let" | "unset" | "eval" | "source" | ".")
+            || (name == "printf" && words[command_index + 1..].iter().any(|arg| arg.starts_with("-v")))
+        {
+            bindings.clear();
+            if matches!(name, "eval" | "source" | ".") { shell_cwd = None; }
+        }
+        let resolve_path = |base: Option<&std::path::Path>, value: &str, spelling: &str| {
+            let value = worker_path_value(value, path_word(spelling), &bindings, allow_variables)?;
+            let path = std::path::Path::new(&value);
+            if path.is_absolute() { Some(path.to_path_buf()) }
+            else { base.map(|base| resolve_git_option_path(base, &value)) }
         };
         if shell_word_basename(&words[command_index]) == "find" {
             // find runs each -exec/-execdir payload as a command. Inspect
@@ -2889,13 +2975,21 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
             continue;
         }
         if words[command_index] == "cd" {
-            if let Some(path) = words.get(command_index + 1).filter(|path| path.as_str() != "--") {
-                shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-            } else if words.get(command_index + 1).is_some_and(|path| path == "--") {
-                if let Some(path) = words.get(command_index + 2) {
-                    shell_cwd = resolve_worker_cd_path(&shell_cwd, path);
-                }
-            }
+            let path = words.get(command_index + 1).filter(|path| path.as_str() != "--")
+                .or_else(|| words.get(command_index + 2));
+            let cdpath = words[..command_index].iter().any(|word| word.starts_with("CDPATH=") && word != "CDPATH=")
+                || bindings.get("CDPATH").is_some_and(|value| !value.is_empty())
+                || std::env::var("CDPATH").is_ok_and(|value| !value.is_empty());
+            shell_cwd = path.and_then(|path| {
+                let value = worker_path_value(path, path_word(path), &bindings, allow_variables)?;
+                if cdpath && !std::path::Path::new(&value).is_absolute()
+                    && !value.starts_with("./") && !value.starts_with("../")
+                    && value != "." && value != ".."
+                { return None; }
+                resolve_path(shell_cwd.as_deref(), path, path)
+            });
+            bindings.remove("PWD");
+            bindings.remove("OLDPWD");
             continue;
         }
         if shell_word_basename(&words[command_index]) != "git" {
@@ -2907,7 +3001,8 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
         };
 
         let mut target = default_target.clone();
-        target.cwd = shell_cwd.clone();
+        target.unresolved_directory = shell_cwd.is_none();
+        target.cwd = shell_cwd.clone().unwrap_or_else(|| default_target.cwd.clone());
         target.is_detached_checkout = git_words[write_index] == "checkout"
             && git_words[write_index + 1..]
                 .iter()
@@ -2918,40 +3013,50 @@ fn git_write_targets(cwd: &str, command: &str) -> Vec<GitCommandTarget> {
             let word = &git_words[index];
             if word == "-C" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.cwd = resolve_git_option_path(&target.cwd, path);
+                    match resolve_path(Some(&target.cwd), path, path) {
+                        Some(path) => target.cwd = path,
+                        None => target.unresolved_directory = true,
+                    }
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("-C").filter(|path| !path.is_empty()) {
-                target.cwd = resolve_git_option_path(&target.cwd, path);
+                match resolve_path(Some(&target.cwd), path, word) {
+                    Some(path) => target.cwd = path,
+                    None => target.unresolved_directory = true,
+                }
                 index += 1;
                 continue;
             }
             if word == "--git-dir" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                    target.git_dir = resolve_path(Some(&target.cwd), path, path);
+                    target.unresolved_directory |= target.git_dir.is_none();
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("--git-dir=") {
-                target.git_dir = Some(resolve_git_option_path(&target.cwd, path));
+                target.git_dir = resolve_path(Some(&target.cwd), path, word);
+                target.unresolved_directory |= target.git_dir.is_none();
                 index += 1;
                 continue;
             }
             if word == "--work-tree" {
                 if let Some(path) = git_words.get(index + 1) {
-                    target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                    target.work_tree = resolve_path(Some(&target.cwd), path, path);
+                    target.unresolved_directory |= target.work_tree.is_none();
                     index += 2;
                     continue;
                 }
                 break;
             }
             if let Some(path) = word.strip_prefix("--work-tree=") {
-                target.work_tree = Some(resolve_git_option_path(&target.cwd, path));
+                target.work_tree = resolve_path(Some(&target.cwd), path, word);
+                target.unresolved_directory |= target.work_tree.is_none();
                 index += 1;
                 continue;
             }
@@ -3080,6 +3185,11 @@ fn check_worker_git_commit_scope_at_target(
     target: &GitCommandTarget,
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
+    let unresolved = || format!(
+        "WORKER_GIT_TARGET_UNRESOLVED: Cannot determine Git identity for the commit directory ({}). Branch state is unknown. Use a literal directory or a previously bound literal path, then retry.",
+        crate::worktree::GitOperations::visible_git_label(&target.cwd.to_string_lossy()),
+    );
+    if target.unresolved_directory { return Some(unresolved()); }
     let cwd = target.path_for_scope().display().to_string();
     let clone_path = registered_worktree_root
         .map(|path| path.to_string_lossy().into_owned())
@@ -3148,6 +3258,13 @@ fn check_worker_git_commit_scope_at_target(
         .or_else(|| get_branch_at_rebase_git_target(target))
     {
         None => {
+            // A failed lookup is not proof of detachment (cas-84ea). Missing
+            // directories, non-repositories and unreadable Git state stay unknown.
+            if !git_command_at_target(target).args(["rev-parse", "--verify", "HEAD"])
+                .output().is_ok_and(|output| output.status.success())
+            {
+                return Some(unresolved());
+            }
             let lane = format!("factory/{worker_name}");
             let [switch] = match crate::worktree::GitOperations::git_remedies([&["switch", &lane]])
             {
@@ -7446,6 +7563,11 @@ fn factory_workspace_contract_denial_with_roots(
         configured_scratch_root,
         worktree_root,
     );
+    let artifacts = crate::config::resolved_factory_artifacts_root(configured_artifacts_root);
+    let canonical_artifacts = canonicalize_for_containment(&artifacts)
+        .map(|path| format!("`{}`", path.display()))
+        .unwrap_or_else(|| "unresolved".to_string());
+    let measured = format!(" Artifact root: configured `{}`; canonical {canonical_artifacts}.", artifacts.display());
     let roots = policy.describe(task_ids);
     let roots = if roots.is_empty() {
         String::new()
@@ -7453,7 +7575,7 @@ fn factory_workspace_contract_denial_with_roots(
         format!(" Operator write roots in effect: {}.", roots.join("; "))
     };
     format!(
-        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
+        "{denial}{measured}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
     )
 }
 
@@ -11292,6 +11414,63 @@ EOF
         );
     }
 
+    /// GH #1603: an inline relative Python write from the real artifact cwd
+    /// must receive the same decision as its configured symlink spelling.
+    #[cfg(unix)]
+    #[test]
+    fn configured_artifact_symlink_and_realpath_writes_agree_cas_a767() {
+        use std::os::unix::fs::symlink;
+        let mut env = TestEnvGuard::temp_home();
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let cas_root = crate::store::init_cas_dir(&root.join("project")).unwrap();
+        let worktree = root.join("worktree");
+        let real_base = root.join("real-artifacts");
+        let logical_base = root.join("configured-artifacts");
+        let outside = root.join("outside");
+        for dir in [&worktree, &real_base, &outside] { std::fs::create_dir_all(dir).unwrap(); }
+        symlink(&real_base, &logical_base).unwrap();
+        std::fs::write(cas_root.join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", logical_base.display().to_string())).unwrap();
+        let logical_root = crate::config::resolved_factory_artifact_paths(&cas_root,
+            Some(logical_base.to_str().unwrap())).project_root;
+        let real_root = real_base.join(logical_root.strip_prefix(&logical_base).unwrap());
+        std::fs::create_dir_all(real_root.join("cas-a767")).unwrap();
+        symlink(&outside, real_root.join("cas-a767/escape")).unwrap();
+        std::fs::write(real_root.join("cas-a767/existing.json"), "{}").unwrap();
+        for (key, value) in [("CAS_AGENT_ROLE", "worker"), ("CAS_FACTORY_MODE", "1"),
+            ("CAS_HOOK_HARNESS", "codex"), ("CAS_AGENT_NAME", "worker-a767"),
+            ("CAS_FACTORY_SESSION", "artifact-root-a767")] { env.set(key, value); }
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_ROOT", &cas_root);
+        let run = |cwd: &Path, path: &str| {
+            // Codex projects exec_command as Bash/command plus workdir, while
+            // the hook's turn cwd remains the worker's assigned checkout.
+            let input = tool_input("Bash", serde_json::json!({
+                "command": format!("python3 -c \"from pathlib import Path; Path('{path}').write_text('{{}}')\""),
+                "workdir": cwd,
+            }), &worktree);
+            serde_json::to_value(handle_pre_tool_use(&input, Some(&cas_root)).unwrap()).unwrap()
+        };
+        let mut denials = Vec::new();
+        for cwd in [logical_root.join("cas-a767"), real_root.join("cas-a767")] {
+            for path in ["helper-audit.json", "new/nested.json", "existing.json"] {
+                let output = run(&cwd, path);
+                assert_ne!(output["hookSpecificOutput"]["permissionDecision"], "deny", "cwd={} target={path}: {output}", cwd.display());
+            }
+            let output = run(&cwd, "escape/helper-audit.json");
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny", "{output}");
+            let denial = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap().to_string();
+            assert!(denial.contains(&outside.join("helper-audit.json").display().to_string()), "{denial}");
+            denials.push(denial);
+        }
+        // Paths are diagnostic data, not pinned human-facing wording. Check
+        // these only after both spellings and their escape controls have run.
+        for denial in denials {
+            assert!(denial.contains(&logical_root.display().to_string()), "{denial}");
+            assert!(denial.contains(&real_root.display().to_string()), "{denial}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_worktree_subtree_that_escapes_is_denied() {
@@ -13006,28 +13185,54 @@ mod worker_commit_guard_tests {
     #[test]
     fn pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree() {
         let repo = make_git_repo();
-        let linked = tempfile::tempdir().expect("linked worktree path");
-        add_linked_worktree(repo.path(), linked.path(), "factory/cwd-worker");
-        let linked_path = linked.path().to_string_lossy().to_string();
+        let scratch = tempfile::tempdir().expect("linked worktree parent");
+        let linked = scratch.path().join("work tree");
+        std::fs::create_dir(&linked).unwrap();
+        add_linked_worktree(repo.path(), &linked, "factory/cwd-worker");
+        let linked_path = linked.to_string_lossy().to_string();
+        let backend = linked.join("apps/backend");
+        std::fs::create_dir_all(&backend).unwrap();
+        let backend_path = backend.to_string_lossy().to_string();
+        let reflog = || std::process::Command::new("git")
+            .args(["reflog", "show", "--format=%H"]).current_dir(&linked)
+            .output().unwrap().stdout;
+        let original = reflog();
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_FACTORY_MODE", Some("1")),
             ("CAS_CLONE_PATH", None),
             ("CAS_AGENT_NAME", Some("cwd-worker")),
+            ("TASK_WORKTREE_UNSET", None),
         ]);
 
-        let input = hook_git_write_input(&linked_path, "git commit -m work");
-        let out = handle_pre_tool_use(&input, None).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "linked cwd branch must be honored: {val}"
-        );
+        // cas-84ea: the guard inspects the directory of the actual commit,
+        // including relative traversal and a prior literal variable binding.
+        for (cwd, command, denied, unresolved) in [
+            (&linked_path, "git commit -m work".to_string(), false, false),
+            (&backend_path, "cd ../..; git commit -m work".into(), false, false),
+            (&linked_path, "cd apps/backend; cd ../..; git commit -m work".into(), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"$W\"; git commit -m work"), false, false),
+            (&backend_path, format!("W='{linked_path}'; cd \"${{W}}\"; git commit -m work"), false, false),
+            (&linked_path, format!("W='{}'; cd \"$W\"; git commit -m work", repo.path().display()), true, false),
+            (&linked_path, "cd \"$TASK_WORKTREE_UNSET\"; git commit -m work".into(), true, true),
+            (&linked_path, format!("cd '{linked_path}/missing'; git commit -m work"), true, true),
+            (&linked_path, format!("printf '%s' 'W={linked_path}'; cd \"$W\"; git commit -m work"), true, true),
+            (&linked_path, format!("if false; then W='{linked_path}'; fi; cd \"$W\"; git commit -m work"), true, true),
+            (&linked_path, format!("W='{linked_path}'; cd '$W'; git commit -m work"), true, true),
+            (&linked_path, "W=''; cd $W; git commit -m work".into(), true, true),
+            (&linked_path, format!("W='{linked_path}'; printf -v W '%s' '{}'; cd \"$W\"; git commit -m work", repo.path().display()), true, true),
+        ] {
+            let input = hook_git_write_input(cwd, &command);
+            let out = handle_pre_tool_use(&input, None).expect("handler ok");
+            let val = serde_json::to_value(&out).unwrap();
+            assert_eq!(val["hookSpecificOutput"]["permissionDecision"] == "deny", denied,
+                "cwd={cwd}, command={command}: {val}");
+            if unresolved {
+                assert!(val["hookSpecificOutput"]["permissionDecisionReason"].as_str()
+                    .unwrap_or_default().contains("WORKER_GIT_TARGET_UNRESOLVED"), "{val}");
+            }
+        }
+        assert_eq!(reflog(), original);
     }
 
     #[test]

@@ -4011,6 +4011,7 @@ pub(super) fn record_undelivered_relay_alerts(
             options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         }) {
             Ok(payload) => payload,
             Err(error) => {
@@ -8083,6 +8084,7 @@ impl FactoryDaemon {
                 attachments: payload.attachments,
                 notice,
                 reply_to_session: payload.reply_to_session,
+                task_id: payload.task_id,
             };
             self.ws_broadcast(&reply);
             tracing::info!(
@@ -13036,6 +13038,7 @@ fn commander_history_turns(
                 at: row.created_at.to_rfc3339(),
                 notice: notices.get(&row.id).cloned(),
                 reply_to_session: payload.reply_to_session,
+                task_id: payload.task_id,
             });
             continue;
         }
@@ -13481,6 +13484,10 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             if !crate::qa_post_release::lock_contention(&error) {
                 tracing::warn!(%error,"post-release fallback start failed; reminder remains pending");
             }
+            continue;
+        }
+        if let Err(error) = crate::cli::release_adapters::promotion_from_reminder(&cas_dir, reminder) {
+            tracing::warn!(%error, "pending promotion closeout did not start; reminder remains pending");
             continue;
         }
         fire_reminder(
@@ -17918,6 +17925,7 @@ mod tests {
             options: vec!["Fix in-train".into(), "Ship with allowlist".into()],
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: Some("cas-operator-decision".into()),
         })
         .unwrap();
         let ask_id = queue
@@ -17937,6 +17945,8 @@ mod tests {
         let (_, history) = super::commander_history_turns(
             queue.as_ref(), vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
         );
+        assert_eq!(history[0].notification_id, ask_id);
+        assert_eq!(history[0].task_id.as_deref(), Some("cas-operator-decision"));
         assert_eq!(history[0].options, ["Fix in-train", "Ship with allowlist"]);
 
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();

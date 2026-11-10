@@ -210,6 +210,13 @@ pub(crate) fn fetch_parent_branch_result(
         return BoundedFetch::NotStarted("unsafe branch".into());
     }
 
+    // A release close passes an immutable local object, not a remote branch.
+    if parent_branch.len() == 40 && parent_branch.bytes().all(|b| b.is_ascii_hexdigit())
+        && resolve_branch_sha(repo_path, &format!("{parent_branch}^{{commit}}")).as_deref() == Some(parent_branch)
+    {
+        return BoundedFetch::NotStarted("immutable commit already present".into());
+    }
+
     // Force-update the exact remote-tracking ref. The leading `+` is
     // intentional: a remote epic may have been rebased/force-pushed, and the
     // caller needs the authoritative remote state rather than a fetch rejected

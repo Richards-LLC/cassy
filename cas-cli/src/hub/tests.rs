@@ -374,6 +374,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         attachments: Vec::new(),
         notice: None,
         reply_to_session: None,
+        task_id: None,
     }).unwrap();
     assert!(super::server::operator_reply_allowed(&Some((auth, viewer)), &frame));
     assert!(!super::server::operator_reply_allowed(&None, &frame));
@@ -5009,6 +5010,7 @@ fn record_secret_request(cas_dir: &std::path::Path, kind: crate::ui::factory::Op
         attachments: Vec::new(),
         options: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     })
     .unwrap();
     crate::store::open_prompt_queue_store(cas_dir)

@@ -25,6 +25,7 @@ mod receipt_scope;
 mod merge_queue_proof;
 mod verified_delivery;
 mod epic_autoclose;
+mod release_parent;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
 // in `crate::git_evidence`; these re-exports keep every existing path valid.
 use crate::git_evidence::measurement as epic_measurement;
@@ -7738,6 +7739,10 @@ impl CasCore {
             data: None,
         })?;
 
+        if let Err(message) = crate::qa_batch::release_close::validate_task(&self.cas_root, &task) {
+            return Ok(Self::tool_error(message));
+        }
+
         if !task.is_terminal()
             && let Err(message) = crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id, true)
         {
@@ -7762,6 +7767,9 @@ impl CasCore {
         // Track only this request's unpersisted suffix. Stored history may be
         // rewritten (for example to correct provenance) while gates run.
         let mut close_notes = CloseNoteTracker::new(task_store.as_ref(), &task);
+        if let Some(note) = crate::qa_batch::release_close::binding_note(&self.cas_root, &task.id) {
+            close_notes.record(&mut task, &note);
+        }
 
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
@@ -8017,6 +8025,7 @@ impl CasCore {
         // This guard also protects internal post-merge re-close calls.
         if close_disposition != TaskCloseDisposition::Decision
             && superseding_release_verdict.is_none()
+            && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
@@ -8237,7 +8246,15 @@ impl CasCore {
         let mut deferred_epic_override_note = None;
         let mut epic_issue_warning = String::new();
         if task.task_type == TaskType::Epic {
-            if let Some(owner) = task.epic_verification_owner.clone() {
+            if let Some(authority) = crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id) {
+                if let Some(owner) = task.epic_verification_owner.clone()
+                    && let Ok(agents) = self.open_agent_store().and_then(|s| s.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string())))
+                    && let Some(evidence) = epic_autoclose::dead_owner_adoption(&owner, &agents, chrono::Utc::now(), epic_autoclose::owner_process)
+                {
+                    task.epic_verification_owner = Some(authority.clone());
+                    close_notes.record(&mut task, &format!("Release authority {authority} adopted orphaned epic ownership from {owner}: {evidence}. Review author identity is unchanged."));
+                }
+            } else if let Some(owner) = task.epic_verification_owner.clone() {
                 let caller_id = self.get_agent_id().ok();
                 let caller_name = std::env::var("CAS_AGENT_NAME").ok();
                 let caller_session = std::env::var("CAS_SESSION_ID").ok();
@@ -8310,7 +8327,7 @@ impl CasCore {
         // implicit epic target, so late epic association can retarget the
         // close guard to the live epic lane without overriding a distinct
         // supervisor-selected task target.
-        let declared_repo_context = match close_work_target.as_ref() {
+        let mut declared_repo_context = match close_work_target.as_ref() {
             Some(target) => {
                 match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
                     &self.cas_root,
@@ -8323,6 +8340,11 @@ impl CasCore {
             }
             None => None,
         };
+        if let Some(target) = crate::qa_batch::release_close::target(&self.cas_root, &task.id)
+            && let Some(context) = declared_repo_context.as_mut()
+        {
+            context.target_branch = target;
+        }
         let resolved_close_repo = declared_repo_context
             .as_ref()
             .map(|context| Ok(context.repo_root.clone()))
@@ -8586,6 +8608,8 @@ impl CasCore {
                 Some(default) => (default, Some(target_branch)),
                 None => (target_branch, None),
             };
+            let target_branch = crate::qa_batch::release_close::target(&self.cas_root, &task.id)
+                .unwrap_or(target_branch);
             let unmerged =
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
             if !unmerged.is_empty() {
@@ -8634,6 +8658,12 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            let subtasks = if crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id).is_some() {
+                subtasks.into_iter().map(|mut child| {
+                    if let Some(target) = child.deliverables.work_target.as_mut() { target.target_branch = target_branch.clone(); }
+                    child
+                }).collect()
+            } else { subtasks };
             let subtasks = match gone_epic_branch.as_deref() {
                 Some(gone) => epic_autoclose::retarget_children(&subtasks, gone, &target_branch),
                 None => subtasks,
@@ -8835,6 +8865,8 @@ impl CasCore {
                 &standalone_target_repo,
             )
         };
+        let parent_branch_resolution = crate::qa_batch::release_close::target(&self.cas_root, &task.id)
+            .map(Ok).unwrap_or(parent_branch_resolution);
         let resolved_parent_branch = match parent_branch_resolution {
             Ok(branch) => branch,
             // A repository-less, non-factory close has no worker checkout and
@@ -9807,11 +9839,12 @@ impl CasCore {
         // cas-ce5e: in release QA mode a Tier 1 delivery opens no verifier of its own;
         // one verdict of the assembled tip names it. A dispatch or verdict already on
         // record keeps its authority below, and Tier 2 never takes this path.
-        let release_verdict_covers = !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
+        let parent_release_review = crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id);
+        let release_verdict_covers = parent_release_review.is_some() || !fast_lane_receipt_passed && (superseding_release_verdict.is_some() || (!rapid_unsampled
             && no_verification_on_record
             && verification_tier.is_some()
             && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
-        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers) {
+        if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers && parent_release_review.is_none()) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,
                 &task,
@@ -10046,6 +10079,9 @@ impl CasCore {
                     }
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
+                        if crate::release_reconcile::active() && task.task_type != TaskType::Epic {
+                            return Ok(Self::tool_error("RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch."));
+                        }
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
                         // locking the task to the supervisor.
@@ -11246,7 +11282,9 @@ impl CasCore {
                 Ok(tip) => tip,
                 Err(message) => return Ok(Self::tool_error(message)),
             };
-            let epic_assembly_basis = if task.task_type == TaskType::Epic {
+            let epic_assembly_basis = if let Some(proof) = crate::qa_batch::release_close::parent_integration(&self.cas_root, &task.id) {
+                Some(proof)
+            } else if task.task_type == TaskType::Epic {
                 match epic_build_proof_basis(&task, delivered_tip.as_deref(), proof_repo) {
                     Ok(basis) => basis,
                     Err(message) if supervisor_override => {
@@ -11719,6 +11757,7 @@ impl CasCore {
         // cas-062d: capture pre-close status for durable lifecycle push identity.
         let old_status_for_lifecycle = task.status;
         task.status = TaskStatus::Closed;
+        if crate::qa_batch::release_close::parent_review(&self.cas_root, &task.id).is_some() { task.pending_verification = false; }
         task.deliverables.no_delivery_close_intent = None;
         task.terminal_outcome = Some(close_disposition.terminal_outcome());
         task.closed_at = Some(now);
@@ -11981,6 +12020,9 @@ impl CasCore {
         // writes, relays and notifies nothing.
         #[cfg(test)]
         lifecycle_race_hook::fire(&req.id);
+        if let Err(message) = crate::qa_batch::release_close::revalidate_parent_children(&self.cas_root, &task.id) {
+            return Ok(Self::tool_error(message));
+        }
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
         let close_refused = |change: &str| {
             let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -12439,7 +12481,7 @@ impl CasCore {
                                 .map(|r| r.to_lowercase() == "worker")
                                 .unwrap_or(false);
 
-                            if is_factory_worker {
+                            if is_factory_worker && !crate::release_reconcile::active() {
                                 // Send real notification to supervisor via daemon event
                                 if let Ok(agent_id) = self.get_agent_id() {
                                     let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
@@ -15752,7 +15794,8 @@ fn anchored_delivery_content_gate_unbounded(
     // exact snapshot; don't measure the rejected version inside its history.
     // Require the active anchor to be the live assigned tip, so serial work
     // cannot authorize an older task, and preserve unmerged/unknown failures.
-    if let Some(active) = task.deliverables.factory_branch_anchor.as_deref()
+    if crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch).is_none()
+        && let Some(active) = task.deliverables.factory_branch_anchor.as_deref()
         && let Some(assignee) = task.assignee.as_deref()
         && resolve_branch_sha(repo_path, anchor).as_deref() == Some(active)
         && resolve_branch_sha(
@@ -15790,7 +15833,11 @@ fn anchored_delivery_content_gate_unbounded(
     // task-attributed content remains Unknown and therefore fail-closed.
     // cas-01dc: an ordinary empty checkpoint also carries its preceding
     // task delivery. Prove that attributed range, never emptiness itself.
-    let presence = if git_commit_parent_count(repo_path, anchor) >= 2
+    let presence = if crate::qa_batch::release_close::delivery_base(repo_path, anchor, parent_branch).is_some() {
+        // Release membership owns the entire recorded start→anchor effect,
+        // including earlier commits and deletions, rather than just its tip.
+        delivery_content_presence_on_target_for_task(repo_path, anchor, parent_branch, task_id)
+    } else if git_commit_parent_count(repo_path, anchor) >= 2
         || task_attribution::has_first_parent_tree_effect(repo_path, anchor) == Some(false)
     {
         task_attribution::merge_tip_content_presence(
@@ -25877,13 +25924,9 @@ fn delivery_content_presence_on_target_for_paths(
     let DeliveryContentPresence::Dropped { paths } = presence else {
         return presence;
     };
-    // CODEMAP is generated for the integrated tree; its lane-specific text is
-    // never delivery content to preserve verbatim (cas-2fe8).
-    let remaining = paths
-        .iter()
-        .filter(|path| path.as_str() != ".claude/CODEMAP.md")
-        .cloned()
-        .collect();
+    let remaining = crate::qa_batch::release_close::transformed_paths(
+        repo_path, delivery_commit, target_ref, paths.clone(), owners,
+    );
     // A release cut consumes per-task fragments after promoting their entries
     // into CHANGELOG.md. Apply that content-equivalence rule at the shared
     // target seam so close, merge and epic callers cannot disagree.
@@ -25934,7 +25977,8 @@ fn delivery_content_presence_on_target_for_paths_raw(
     };
     let delivery_commit = delivery.as_str();
 
-    let Some(delivery_parent) = resolve_branch_sha(repo_path, &format!("{delivery_commit}^1"))
+    let Some(delivery_parent) = crate::qa_batch::release_close::delivery_base(repo_path, delivery_commit, target_ref)
+        .or_else(|| resolve_branch_sha(repo_path, &format!("{delivery_commit}^1")))
     else {
         return DeliveryContentPresence::Unknown {
             reason: format!("delivery commit `{delivery_commit}` has no resolvable first parent"),
@@ -29653,7 +29697,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "release-inventory-target", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29665,16 +29709,32 @@ mod merge_state_gate_tests {
             git(p, &["checkout", "-q", "main"]);
             std::fs::write(p.join("seed.txt"), "old\nmiddle\nbase\n").unwrap();
             git(p, &["commit", "-qam", "shared context before delivery"]);
+            if row == "release-inventory-target" {
+                let skill = p.join("cas-cli/src/builtins/skills/codemap/SKILL.md");
+                std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+                std::fs::write(skill, "fixture codemap instructions\n").unwrap();
+                git(p, &["add", "."]); git(p, &["commit", "-qm", "skill revision"]);
+            }
             if matches!(row, "released-train" | "partial-patch") {
                 git(p, &["branch", "release-parent"]);
             }
             git(p, &["checkout", "-q", "factory/worker"]);
             git(p, &["merge", "-q", "main", "--no-edit"]);
+            let release_start = head_sha(p);
+            if row == "release-inventory-target" {
+                std::fs::write(p.join("early.rs"), "early_delivery();\n").unwrap();
+                git(p, &["add", "early.rs"]); git(p, &["commit", "-qm", "fix(cas-fee3): earlier task effect"]);
+                std::fs::create_dir_all(p.join(".claude")).unwrap();
+                std::fs::write(p.join(".claude/CODEMAP.md"), "delivered view\n").unwrap();
+                std::fs::create_dir_all(p.join("changelog.d")).unwrap();
+                std::fs::write(p.join("changelog.d/cas-fee3.md"), "### Fixed\n- proof entry\n").unwrap();
+                git(p, &["add", ".claude/CODEMAP.md", "changelog.d/cas-fee3.md"]);
+            }
             std::fs::write(p.join("seed.txt"), "new\nmiddle\nbase\n").unwrap();
             git(p, &["add", "seed.txt"]);
             std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
             std::fs::write(p.join("second.rs"), "// second half of reviewed patch\n").unwrap();
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 let hook = p.join("cas-cli/src/hooks/probe.rs");
                 std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
                 std::fs::write(hook, "// reviewed enforcement change\n").unwrap();
@@ -29718,11 +29778,12 @@ mod merge_state_gate_tests {
             task.deliverables.parked_branch = Some("factory/worker".into());
             task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-192b0-fixture".into(), target_branch: "main".into() });
             tasks.add(&task).unwrap();
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
                     work_target: task.deliverables.work_target.clone().unwrap(),
                     assignee: "worker".into(), branch: "factory/worker".into(),
-                    base_sha: resolve_branch_sha(p, &format!("{source}^1")).unwrap(),
+                    base_sha: if row == "release-inventory-target" { release_start.clone() }
+                        else { resolve_branch_sha(p, &format!("{source}^1")).unwrap() },
                 });
                 task.deliverables.parked_close_reason = Some("Reviewed delivery; scoped proof deferred to fixture assembly".into());
                 tasks.update(&task).unwrap();
@@ -29776,7 +29837,7 @@ mod merge_state_gate_tests {
                 tasks.update(&task).unwrap();
             }
             assert_ne!(landed, candidate.proof.head_commit);
-            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             if row == "queue-target-progress" {
@@ -29786,7 +29847,7 @@ mod merge_state_gate_tests {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
-            if matches!(row, "released-train" | "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "released-train" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 // Publication records the reviewed mapping before sibling work
                 // evolves the same file. Close must reuse that immutable map.
                 git(p, &["push", "-q", "origin", "main"]);
@@ -29800,6 +29861,18 @@ mod merge_state_gate_tests {
                     task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed the landed target before later sibling work".into(), confidence: Some(1.0),
                     issues: None, files_reviewed: Some("delivery.rs".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(dispatch.id.clone()),
                 })).await.unwrap();
+            }
+            if row == "release-inventory-target" {
+                std::fs::write(p.join(".claude/CODEMAP.md"), "release view\n").unwrap();
+                std::fs::write(p.join("CHANGELOG.md"), "## [9.9.9] - 2026-11-10\n### Fixed\n- proof entry\n").unwrap();
+                git(p, &["rm", "-q", "changelog.d/cas-fee3.md"]);
+                git(p, &["add", ".claude/CODEMAP.md", "CHANGELOG.md"]);
+                git(p, &["commit", "-qm", "release: v9.9.9"]);
+            }
+            let frozen_release = head_sha(p);
+            if row == "release-inventory-target" {
+                git(p, &["rm", "-q", "early.rs"]);
+                git(p, &["commit", "-qm", "later target loses earlier task source"]);
             }
             if matches!(row, "same-line-evolved" | "batch-target-proof") {
                 std::fs::write(p.join("delivery.rs"), "// later main work replaces the delivered line\n").unwrap();
@@ -29831,14 +29904,28 @@ mod merge_state_gate_tests {
                     }
                     assert_eq!(
                         reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
+                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "containment guard: {row}",
                     );
                 },
                 _ => panic!("missing task-bound review: {row}"),
             }
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "same-line-evolved" | "batch-target-proof" | "release-inventory-target") {
                 let ledger = p.join("release-ledger.md");
-                std::fs::write(&ledger, "# Release review\ncas-fee3 PASS\n").unwrap();
+                let mut report = "# Release review\ncas-fee3 PASS\n".to_string();
+                if row == "release-inventory-target" {
+                    let blob = |rev: &str, path: &str| resolve_branch_sha(p, &format!("{rev}:{path}")).unwrap();
+                    let manifest = crate::qa_batch::release_close::ReleaseTransformations {
+                        project_id: "cas-192b0-fixture".into(), release_id: "v9.9.9".into(),
+                        reviewed_sha: frozen_release.clone(), final_release_sha: frozen_release.clone(),
+                        paths: vec![crate::qa_batch::release_close::ReleasePathTransformation {
+                            path: ".claude/CODEMAP.md".into(), input_blobs: vec![blob(&source, ".claude/CODEMAP.md")],
+                            output_blob: blob(&frozen_release, ".claude/CODEMAP.md"), producing_commit: frozen_release.clone(),
+                            producer: "codemap".into(), producer_blob: blob(&frozen_release, "cas-cli/src/builtins/skills/codemap/SKILL.md"),
+                        }],
+                    };
+                    report.push_str(&format!("\n```cassy-release-transformations\n{}\n```\n", serde_json::to_string(&manifest).unwrap()));
+                }
+                std::fs::write(&ledger, report).unwrap();
                 let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
                 let context = crate::artifacts::PublishContext {
                     store: &artifacts,
@@ -29846,9 +29933,46 @@ mod merge_state_gate_tests {
                     task_id: task.id.clone(), cloud: None,
                 };
                 let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
-                let receipt = crate::qa_batch::prepare_receipt(&root, &agents.get("supervisor-id").unwrap(), "supervisor-id", &[task.id.clone()], &head_sha(p), &artifact.id, &ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
+                let reviewed = if row == "release-inventory-target" { frozen_release.clone() } else { head_sha(p) };
+                let receipt = crate::qa_batch::prepare_receipt(&root, &agents.get("supervisor-id").unwrap(), "supervisor-id", &[task.id.clone()], &reviewed, &artifact.id, &ledger, cas_store::RELEASE_VERDICT_SCHEMA).unwrap();
                 cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
-                let report = core.close_release_covered_deliveries(&receipt).await;
+                let report = if row == "release-inventory-target" {
+                    use crate::qa_batch::{ReleaseScope, ReleaseProofRef, ReleaseProofKind};
+                    // Keep configured repository identity separate from local fixture transport.
+                    git(p, &["config", &format!("url.{}.insteadOf", _bare.path().to_str().unwrap()), "https://github.com/Example/Repo.git"]);
+                    git(p, &["remote", "set-url", "origin", "https://github.com/Example/Repo.git"]);
+                    let scope = ReleaseScope {
+                        project_id: "cas-192b0-fixture".into(), repository: "Example/Repo".into(), release_id: "v9.9.9".into(),
+                        reviewed_sha: frozen_release.clone(), final_release_sha: frozen_release.clone(),
+                        promotion_pr: None, release_tag: None, constituent_epic_ids: Vec::new(), included_task_ids: vec![task.id.clone()],
+                        no_code_members: Default::default(), proof_refs: vec![ReleaseProofRef {
+                            kind: ReleaseProofKind::Review, artifact_id: artifact.id.clone(), sha256: artifact.sha256.clone(),
+                            size_bytes: artifact.size_bytes, reviewed_sha: frozen_release.clone(), receipt_id: Some(receipt.id.clone()),
+                        }],
+                    };
+                    let inventory = crate::qa_batch::resolve_release_inventory(&root, p, &scope).unwrap();
+                    let mut invalid = inventory.clone(); invalid.scope.proof_refs[0].sha256 = "0".repeat(64);
+                    let bad = core.close_release_inventory_outcomes(&invalid).await;
+                    assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
+                    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+                    let mut missing = inventory.clone(); missing.deliveries.clear();
+                    let bad = core.close_release_inventory_outcomes(&missing).await;
+                    assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
+                    let mut stale = inventory.clone(); stale.deliveries[0].generation = "retired-cycle".into();
+                    let bad = core.close_release_inventory_outcomes(&stale).await;
+                    assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
+                    // The earlier source commit is absent from today's moving target.
+                    // Full-range release measurement must retain it at the cut.
+                    let mut later_receipt = receipt.clone(); later_receipt.staging_sha = head_sha(p);
+                    let snapshot = tasks.get(&task.id).unwrap();
+                    let later = crate::qa_batch::release_close::ReleaseClose::for_receipt(&root, p, &snapshot, &later_receipt);
+                    let loss = later.scope(async { delivery_content_presence_on_target_for_task(p, &source, &head_sha(p), &task.id) }).await;
+                    assert!(matches!(loss, DeliveryContentPresence::Dropped { ref paths } if paths.contains(&"early.rs".into())));
+                    let outcomes = core.close_release_inventory_outcomes(&inventory).await;
+                    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+                    super::release_parent::probe_deleted_parent_and_single_pending_cycle(&core, &root, p, &scope, &task.id).await;
+                    outcomes.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")
+                } else { core.close_release_covered_deliveries(&receipt).await };
                 assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{row}: {report}");
                 assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id);
                 continue;
@@ -29857,7 +29981,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof" | "release-inventory-target"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }
@@ -35745,6 +35869,21 @@ esac
         git(p, &["commit", "-qm", "replace delivered line"]);
         assert_eq!(delivery_content_presence_on_target(p, &delivery, "main"),
             DeliveryContentPresence::Dropped { paths: vec!["work.rs".into()] });
+    }
+
+    #[test]
+    fn release_view_requires_transformation_proof_cas_9c84f() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        std::fs::create_dir_all(p.join(".claude")).unwrap();
+        std::fs::write(p.join(".claude/CODEMAP.md"), "delivered module\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: delivery"]);
+        let delivery = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-s", "ours", "factory/worker", "-m", "drop view"]);
+        assert_eq!(delivery_content_presence_on_target_for_task(p, &delivery, "main", "cas-test1"),
+            DeliveryContentPresence::Dropped { paths: vec![".claude/CODEMAP.md".into()] });
     }
 
     #[test]

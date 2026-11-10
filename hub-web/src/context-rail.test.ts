@@ -53,11 +53,13 @@ describe("desktop context rail (P10)", () => {
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(true);
     expect(section(rail, "waiting").querySelectorAll("li")).toHaveLength(0);
-    history.reply(reply(1, "blocker", "Please fix the ledger."), at(9, 30));
+    history.reply({ ...reply(1, "blocker", "Please fix the ledger."), task_id: "cas-held" }, at(9, 30));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(false);
     expect(rail.querySelector("#context-waiting-heading")?.textContent).toBeTruthy();
     expect(section(rail, "waiting").querySelectorAll("li")).toHaveLength(1);
+    expect(section(rail, "progress").contains(section(rail, "waiting"))).toBe(true);
+    expect(rail.querySelector('[data-request-id="1"]')?.getAttribute("data-task-id")).toBe("cas-held");
     history.submit("handled", "patient-pelican-9", "Fixed.", at(9, 31));
     syncContextRail(document, { history, progress: true, attention: 0 });
     expect(section(rail, "waiting").hidden).toBe(true);

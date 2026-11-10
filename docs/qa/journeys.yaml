@@ -333,6 +333,10 @@ bug_families:
     tasks: [cas-33e6, cas-5e3a]
     invariants: [HUB-J5-CLAUDE-QUEUED-ANSWER]
     journeys: [HUB-J5]
+  operator-mirror-expiry-notice:
+    title: Expired undelivered supervisor transcript mirrors notify the current supervisor while durable operator delivery keeps retrying
+    tasks: [cas-1a73]
+    journeys: [HUB-J5]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

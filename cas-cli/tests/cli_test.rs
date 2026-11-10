@@ -3350,6 +3350,42 @@ fn qa_ledger_init_check_and_no_overwrite() {
     let unchanged_source = git(&["rev-parse", &format!("refs/heads/{source}")]);
     assert_eq!(unchanged_source, source_head);
 
+    // GH #1745: a cleaned local branch must not lose the immutable delivery
+    // or borrow the primary checkout, colliding tag, or advanced remote tip.
+    git(&["-C", worker.to_str().unwrap(), "checkout", "--detach", &source_head]);
+    git(&["update-ref", &format!("refs/remotes/origin/{source}"), &primary_head]);
+    git(&["update-ref", "-d", &format!("refs/heads/{source}")]);
+    let mut historical = task.clone();
+    historical.id = "cas-ledger-historical".into();
+    historical.status = cas::types::TaskStatus::Closed;
+    historical.deliverables.work_target = Some(target.clone());
+    historical.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target, assignee: "ledger-worker".into(), branch: source.into(), base_sha: primary_head.clone(),
+    });
+    historical.deliverables.factory_branch_anchor = Some(source_head.clone());
+    let store = cas::store::open_task_store_local(&cas_root).unwrap();
+    store.add(&historical).unwrap();
+    let before = serde_json::to_value(store.get(&historical.id).unwrap()).unwrap();
+    let historical_init = || cas_cmd(root).current_dir(root)
+        .args(["qa", "ledger", "init", "--task", &historical.id, "--json"]).output().unwrap();
+    let output = historical_init();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let init: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let path = std::path::Path::new(init["path"].as_str().unwrap());
+    let evidence = std::fs::read(path).unwrap();
+    let body = std::str::from_utf8(&evidence).unwrap();
+    assert_eq!(body.lines().find_map(|line| line.strip_prefix("build: ")), Some(source_head.as_str()));
+    let resumed = historical_init();
+    assert!(resumed.status.success(), "{}", String::from_utf8_lossy(&resumed.stderr));
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&resumed.stdout).unwrap()["resumed"], true);
+    assert_eq!(std::fs::read(path).unwrap(), evidence);
+    assert_eq!(serde_json::to_value(store.get(&historical.id).unwrap()).unwrap(), before);
+    historical.deliverables.factory_branch_anchor = Some("0".repeat(40));
+    store.update(&historical).unwrap();
+    assert!(!cas_cmd(root).current_dir(root)
+        .args(["qa", "ledger", "init", "--task", &historical.id]).output().unwrap().status.success());
+    assert_eq!(std::fs::read(path).unwrap(), evidence);
+
     #[cfg(unix)]
     {
         let aliased_base = root.join("aliased-artifacts");

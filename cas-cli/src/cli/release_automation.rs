@@ -1018,6 +1018,7 @@ mod tests {
             ("cas-b008", "no_code_missing"),
             ("cas-b009", "cancelled"),
             ("cas-b00a", "missing_mapping"),
+            ("cas-b00b", "symbolic_anchor"),
         ] {
             let mut t = code.clone();
             t.id = id.into();
@@ -1039,6 +1040,9 @@ mod tests {
                 }
                 "missing_anchor" => {
                     t.deliverables.factory_branch_anchor = Some("f".repeat(40));
+                }
+                "symbolic_anchor" => {
+                    t.deliverables.factory_branch_anchor = Some("main".into());
                 }
                 "foreign" => {
                     t.origin_project = Some("other-project".into());
@@ -1180,7 +1184,8 @@ mod tests {
                 ("cas-b006", Code::ForeignScope),
                 ("cas-b008", Code::MissingNoCodeProof),
                 ("cas-b009", Code::Cancelled),
-                ("cas-b00a", Code::MissingMapping)
+                ("cas-b00a", Code::MissingMapping),
+                ("cas-b00b", Code::MissingAnchor)
             ]
         );
         assert_eq!(

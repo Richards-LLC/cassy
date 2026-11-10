@@ -143,6 +143,10 @@ pub(crate) fn resolve_release_inventory(
             return Err("release tag does not identify final_release_sha".into());
         }
     }
+    // Structured identities must be immutable commits, never a branch alias.
+    let recorded_commit = |sha: &str| {
+        commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha))
+    };
     let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let tasks: BTreeMap<_, _> = store
         .list(None)
@@ -245,7 +249,7 @@ pub(crate) fn resolve_release_inventory(
         let base = d
             .factory_branch_start
             .as_ref()
-            .and_then(|s| commit(repo, &s.base_sha));
+            .and_then(|s| recorded_commit(&s.base_sha));
         let explicit = scope.no_code_members.get(&id);
         let (anchor, shipped_commit, membership, proofs) = if (crate::qa_pass::is_no_code(t)
             || t.deliverables.evidence_only.is_some())
@@ -283,7 +287,7 @@ pub(crate) fn resolve_release_inventory(
                 .or(d.green_merge_commit.as_ref())
                 .or(d.delivery_pr_merge_commit.as_ref())
                 .or(d.merge_commit.as_ref());
-            let Some(anchor) = recorded.and_then(|sha| commit(repo, sha)) else {
+            let Some(anchor) = recorded.and_then(|sha| recorded_commit(sha)) else {
                 issue(ReleaseInventoryCode::MissingAnchor);
                 continue;
             };

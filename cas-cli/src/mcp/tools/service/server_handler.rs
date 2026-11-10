@@ -624,7 +624,7 @@ impl CasService {
                     && receipt.terminal.get().is_none()
                     && receipt.task_id().is_some();
                 if close_unfinished {
-                    self.record_late_close_outcome(handle, receipt.clone(), start, budget);
+                    let _ = self.record_late_close_outcome(handle, receipt.clone(), start, budget);
                 } else if commit.is_some()
                     && matches!(
                         (tool_name, receipt.action()),
@@ -922,12 +922,10 @@ impl CasService {
         receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
         start: std::time::Instant,
         budget: std::time::Duration,
-    ) {
-        let Some(task_id) = receipt.task_id().map(str::to_string) else {
-            return;
-        };
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let task_id = receipt.task_id()?.to_string();
         let service = self.clone();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let joined = handle.await;
             let elapsed = start.elapsed();
             let summary = late_close_summary(&joined);
@@ -958,7 +956,7 @@ impl CasService {
                     warn!(error = %error, "MCP late close outcome recorder ended abnormally")
                 }
             }
-        });
+        }))
     }
 
     fn mutation_timeout_outcome(
@@ -1840,6 +1838,51 @@ mod tests {
         let body = refusal_payload.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(notes.contains(&body), "{notes}");
         assert_eq!(notes.matches("CLOSE_OUTCOME").count(), 1, "{notes}");
+    }
+
+    /// Replay GH #1757: a 55s deadline, then a committed park at 142.5s
+    /// returned in a legacy error-shaped result. A different request's old
+    /// parked row must not turn a genuine refusal into a committed outcome.
+    #[tokio::test]
+    async fn late_close_outcome_prefers_own_park_receipt_cas_fd21() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::{CasService, mutation_receipt};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+        for own_park in [true, false] {
+            let id = if own_park { "cas-own-park" } else { "cas-prior-park" };
+            let mut task = crate::types::Task::new(id.into(), "late close disposition".into());
+            if !own_park { task.status = crate::types::TaskStatus::AwaitingMerge; }
+            tasks.add(&task).unwrap();
+            let outcome = serde_json::json!({"task_id": id, "status": "awaiting_merge", "tip": "80330ed198c34a786be90a4348c2068ab2dd65cb"}).to_string();
+            let refusal = serde_json::json!({"code": "MERGE_REQUIRED", "task_id": id}).to_string();
+            let receipt = mutation_receipt::Receipt::new("task", "close", Some(id));
+            let store = tasks.clone();
+            let supplied_outcome = outcome.clone();
+            let supplied_refusal = refusal.clone();
+            let handle = tokio::spawn(mutation_receipt::scope(receipt.clone(), async move {
+                if own_park {
+                    let mut task = store.get(id).unwrap();
+                    task.status = crate::types::TaskStatus::AwaitingMerge;
+                    store.update(&task).unwrap();
+                    mutation_receipt::task_disposition_committed(id, &supplied_outcome);
+                }
+                Ok(rmcp::model::CallToolResult::error(vec![rmcp::model::Content::text(supplied_refusal)]))
+            }));
+            service.record_late_close_outcome(
+                handle, receipt, std::time::Instant::now() - std::time::Duration::from_millis(142_500),
+                std::time::Duration::from_secs(55),
+            ).unwrap().await.unwrap();
+            let task = tasks.get(id).unwrap();
+            assert_eq!(task.status, crate::types::TaskStatus::AwaitingMerge);
+            // These are exact caller payloads, not assertions on human wording.
+            assert!(task.notes.contains(if own_park { &outcome } else { &refusal }), "{}", task.notes);
+            if own_park { assert!(!task.notes.contains(&refusal), "{}", task.notes); }
+        }
     }
 
     #[test]

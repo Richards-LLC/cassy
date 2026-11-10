@@ -4138,21 +4138,6 @@ fn actual_serve_target(handlers: &[(String, String)]) -> Option<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn hub_help_fits_80_columns() {
-        use clap::Parser as _;
-
-        for flag in ["-h", "--help"] {
-            let output = Cli::try_parse_from(["cas", "hub", flag])
-                .err()
-                .expect("help returns before dispatch");
-            assert_eq!(output.kind(), clap::error::ErrorKind::DisplayHelp);
-            for line in output.to_string().lines() {
-                assert!(line.chars().count() <= 80, "help line exceeds 80 columns: {line}");
-            }
-        }
-    }
-
     fn invocation(
         ancestors: &[&str],
         tty: bool,

@@ -632,6 +632,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_candidate_conflict_returns_delivery_to_worker_cas_225b() {
+        let mut fixture = Fixture::new();
+        fixture._env.set("CAS_FACTORY_WORKER_CLI", "claude");
+        fixture._env.set("CAS_FACTORY_SUPERVISOR_CLI", "claude");
+        std::fs::write(
+            fixture.root.join("config.toml"),
+            "[verification]\nenabled=true\n[qa]\nmode='batch'\n",
+        ).unwrap();
+        let tasks = fixture.core.open_task_store().unwrap();
+        let mut task = tasks.get(&fixture.ids[1]).unwrap();
+        task.depth = TaskDepth::Deep;
+        tasks.update(&task).unwrap();
+        // A recorded approval requires candidate preparation even when the
+        // release would otherwise own review. No train queue is reserved.
+        let dispatch = cas_store::create_verification_dispatch(
+            &fixture.root, &task.id, "supervisor", "supervisor",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        ).unwrap();
+        let mut verdict = cas_types::Verification::new("ver-approved".into(), task.id.clone());
+        verdict.status = cas_types::VerificationStatus::Approved;
+        verdict.provenance = cas_types::VerificationProvenance::System;
+        verdict.dispatch_id = Some(dispatch.id);
+        cas_store::add_system_verification(&fixture.root, &verdict).unwrap();
+        git(fixture._repo.path(), &["switch", "-q", "epic/train"]);
+        let target = commit(fixture._repo.path(), "shared.md", "target changed after review\n");
+        git(fixture._repo.path(), &["push", "origin", "epic/train"]);
+
+        let error = fixture.core.worktree_merge(
+            "factory/worker-2", false, Some(&task.id), false, None, false, None,
+        ).await.unwrap_err();
+
+        let returned = tasks.get(&task.id).unwrap();
+        assert_eq!(returned.status, TaskStatus::Open, "{error}");
+        assert_eq!(returned.assignee, task.assignee);
+        assert!(returned.deliverables.factory_branch_anchor.is_none());
+        assert!(returned.notes.contains("shared.md"), "{}", returned.notes);
+        assert!(error.message.contains("shared.md"), "{error}");
+        assert_eq!(GitOperations::new(fixture._repo.path().to_path_buf())
+            .resolve_commit("epic/train").as_deref(), Some(target.as_str()));
+        assert!(git(fixture._repo.path(), &["status", "--porcelain"]).is_empty());
+        assert!(!fixture._repo.path().join(".git/MERGE_HEAD").exists());
+    }
+
+    #[tokio::test]
     async fn train_merge_returns_conflict_and_preserves_order_across_resume() {
         let fixture = Fixture::new();
         fixture.start().await;

@@ -468,6 +468,11 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
+  conversation-header-single-row:
+    title: Conversation identity and actions share one row with a state pill and reachable compact phone controls
+    tasks: [cas-bcf0]
+    journeys: [HUB-J14, HUB-J15, HUB-J17, HUB-J25]
+    invariants: [HUB-CONVERSATION-HEADER-ROW]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -506,6 +511,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-CONVERSATION-HEADER-ROW:
+    statement: Conversation identity and actions share one row, even with the context rail open. The observed state is a pill beside the project title; phone headers keep direct Raw output and Interrupt controls while secondary actions remain reachable through one native overflow menu with return focus and attention count.
+    check: Run the cas-bcf0 installed-safe-area fixture case at 1280/390 in light/dark, conversation-shell/conversations/session-thread-identity Vitest and the named phone fleet-picker and Show work parts. In batch QA include warning, reconnecting, ended, long identity, rotation and installed safe-area states.
+    bug: {task: cas-bcf0}
   FACTORY-ARTIFACT-METADATA:
     statement: A cold peer fetches committed proof in its configured personal/team project scope regardless of account size, validates task/project identity, and verifies the downloaded bytes before caching.
     check: Run cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c and proof_note_publishes_and_resolves_on_another_machine_cas_4bb2 through MCP; cover both scope kinds with an 87-project account and the singular task endpoint, retaining cross-project conflict, denied scope, forged owner and checksum controls.
@@ -985,8 +994,8 @@ invariants:
     check: Run the ProjectNavigation ordering regression and the four recency stages in HUB-J14. Observe data-most-recent with MutationObserver oldValue through eight alternating catalog frames at each width; require zero value changes, then advance one session to a later minute and verify its badge and accessible name move while every row rectangle remains equal.
     bug: {task: cas-b6ed}
   HUB-J15-WARNING-HEADER-FITS:
-    statement: At 390px a delivery-warning badge, identity and every header action fit inside the viewport in light and dark; Raw output retains its accessible name and uses its icon while the badge is visible.
-    check: Extend the existing HUB-J15 phone attention stage; verify every header action and identity bounding box stays inside 390px, then open the unchanged Attention sheet. Prove strict real-build polish in both themes.
+    statement: At 390px the one-row identity and direct controls fit inside the viewport in light and dark; the overflow control retains the attention count, and its menu exposes the warning action and secondary controls. Raw output retains its accessible name.
+    check: Extend the existing HUB-J15 phone attention stage; verify the one-row identity and direct controls stay inside 390px, open the overflow actions and then the unchanged Attention sheet, and restore focus to the visible overflow invoker. Prove strict real-build polish in both themes.
     bug: {task: cas-a929}
   HUB-J15-GOAL:
     statement: the session's thread is only its conversation; a delivery problem is one attention item that goes
@@ -2459,6 +2468,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J14-GOAL
+  - HUB-CONVERSATION-HEADER-ROW
   - HUB-J14-SUPERVISOR-ONLY-PROJECT-CARD
   - HUB-J14-RUNNING-ONLY
   - HUB-J14-STOPPED-DRAFT-REACHABLE
@@ -2563,6 +2573,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J15-GOAL
+  - HUB-CONVERSATION-HEADER-ROW
   - HUB-J15-WARNING-HEADER-FITS
   - HUB-J15-NOTICE-PERSISTENCE
   traffic:
@@ -2691,6 +2702,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-CONVERSATION-HEADER-ROW
   - HUB-J17-WORKER-NAME
   - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
@@ -3107,6 +3119,7 @@ journeys:
   - hub-web/e2e/journeys/whole-picture.journey.ts
   invariants:
   - HUB-J25-GOAL
+  - HUB-CONVERSATION-HEADER-ROW
   - HUB-J25-PHONE-TIMELINE-TEXT
   - HUB-J25-TYPED-TOOL-EVIDENCE
   - HUB-J25-SOURCE-RETRIEVAL

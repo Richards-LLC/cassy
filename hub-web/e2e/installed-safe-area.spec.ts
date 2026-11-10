@@ -85,19 +85,22 @@ test("conversation header shares one row with reachable actions (cas-bcf0)", asy
     await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
     await page.emulateMedia({ colorScheme });
     await page.goto("/?fixture=conversation");
+    await page.locator(".conversation-shell").evaluate(node => node.classList.add("context-open"));
     const header = page.locator(".conversation-heading");
     await expect(header).toBeVisible();
     await header.screenshot({ path: testInfo.outputPath(`header-${width}-${colorScheme}.png`) });
     const boxes = await header.evaluate(node => {
       const rect = (selector: string) => {
         const box = node.querySelector(selector)!.getBoundingClientRect();
-        return { x: box.x, y: box.y, width: box.width, height: box.height, middle: box.y + box.height / 2 };
+        return { x: box.x, right: box.right, y: box.y, width: box.width, height: box.height, middle: box.y + box.height / 2 };
       };
-      return { header: node.getBoundingClientRect().height, identity: rect(".conversation-identity"), raw: rect("#conversation-raw-output"), interrupt: rect("#conversation-interrupt") };
+      return { header: node.getBoundingClientRect().height, identity: rect(".conversation-identity"), raw: rect("#conversation-raw-output"), interrupt: rect("#conversation-interrupt"), title: rect("h1 b") };
     });
     expect(Math.abs(boxes.identity.middle - boxes.raw.middle)).toBeLessThanOrEqual(4);
     expect(Math.abs(boxes.identity.middle - boxes.interrupt.middle)).toBeLessThanOrEqual(4);
-    expect(boxes.raw.x).toBeGreaterThan(boxes.identity.x);
+    expect(boxes.raw.x).toBeGreaterThanOrEqual(boxes.identity.right - 1);
+    expect(boxes.title.width).toBeGreaterThan(16);
+    expect(boxes.title.right).toBeLessThanOrEqual(boxes.raw.x);
     if (width === 390) {
       expect(boxes.header).toBeLessThanOrEqual(64);
       const more = page.locator("#conversation-more");
@@ -108,7 +111,7 @@ test("conversation header shares one row with reachable actions (cas-bcf0)", asy
       await page.keyboard.press("Escape");
       await expect(more).toBeFocused();
     }
-    await expect(page.locator(".conversation-identity h1 #conversation-connection.status-chip")).toBeVisible();
+    await expect(page.locator(".conversation-title-line > #conversation-connection.status-chip")).toBeVisible();
     await expect(page.locator("#conversation-raw-output")).toBeVisible();
     await expect(page.locator("#conversation-interrupt")).toBeVisible();
   }

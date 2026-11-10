@@ -120,7 +120,7 @@ describe("conversation header identity (DESIGN.md Conversation header)", () => {
     const model = { selected: true, loaded: true, paired: true, projectDir: "/projects/cas-src", supervisor: "lively-fox-47", host: "prowl", connectionLabel: "Live" };
     const root = document.createElement("div"); root.innerHTML = conversationHeaderMarkup(model);
     const state = root.querySelector("#conversation-connection");
-    expect(state?.matches(".conversation-identity h1 .status-chip")).toBe(true);
+    expect(state?.matches(".conversation-title-line > .status-chip")).toBe(true);
     expect(state?.textContent).toBe(model.connectionLabel);
     expect(root.querySelector(".conversation-host #conversation-connection")).toBeNull();
   });

@@ -1,4 +1,4 @@
-import { test, expect, journeyPart, type Journey } from "./journey";
+import { openConversationActions, clickConversationHeaderAction, test, expect, journeyPart, type Journey } from "./journey";
 import type { Page, Route } from "@playwright/test";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
@@ -43,7 +43,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
   await journey.stage("Open the fleet", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+    if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
     await expect(row).toBeVisible();
   });
   return { row, panel, result };
@@ -124,7 +124,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const rail = page.locator("#status-view");
       const agent = rail.locator(".status-agent", { hasText: "swift-lark-3" });
       const notice = page.locator("#fleet-phone-undo");
-      const open = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+      const open = () => clickConversationHeaderAction(page, "#conversation-fleet");
       await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
@@ -160,7 +160,7 @@ for (const colorScheme of ["light", "dark"] as const) {
         await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src-refreshed");
         await expect(dismiss).toBeFocused(); await page.keyboard.press("Enter");
         await expect(notice).toHaveCount(0);
-        await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
+        await expect(page.locator("#conversation-more")).toBeFocused();
         await open(); await expect(agent.locator(".fleet-ops-note")).toBeVisible();
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         await expect(notice, "redrawing the same result does not undo Dismiss").toHaveCount(0);
@@ -186,7 +186,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       await journey.stage("cas-e466c: read every worker header on phone without opening Team", async () => {
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-        await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+        await clickConversationHeaderAction(page, "#conversation-fleet");
         await namedWorkers();
       });
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
@@ -414,7 +414,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   const task = (id: string) => rail.locator(".status-task", { hasText: id });
   const actions = () => page.locator("dialog.fleet-action-sheet");
   const result = page.locator("#fleet-ops-announcer");
-  const openFleet = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+  const openFleet = () => clickConversationHeaderAction(page, "#conversation-fleet");
   const target = async (control: ReturnType<typeof page.getByRole>) => {
     await expect(control).toBeVisible(); const box = await control.boundingBox();
     expect(box!.width).toBeGreaterThanOrEqual(44); expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -422,7 +422,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
     await journey.open();
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
-    await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
+    await openConversationActions(page); await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
     // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
     await expect(page.locator(".context-sheet-where")).toBeVisible();
@@ -476,7 +476,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         // cas-2796a F02: the refusal is in view in the open sheet, landscape included.
         await expect(page.locator("#fleet-phone-undo")).toBeVisible();
         await expect(page.locator("#fleet-phone-undo")).toBeInViewport();
-        await page.keyboard.press("Escape"); await expect(page.getByRole("button", { name: "Tasks & progress", exact: true })).toBeFocused();
+        await page.keyboard.press("Escape"); await expect(page.locator("#conversation-more")).toBeFocused();
       });
     });
     test(`HUB-J17 phone ${viewport.width}×${viewport.height}: Undo and searchable fleet pickers`, journeyPart, async ({ page, journey }) => {
@@ -540,7 +540,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         await journey.open();
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
-          await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+          await clickConversationHeaderAction(page, "#conversation-fleet");
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();
           await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Pause" }).click();
           await expect.poll(() => Boolean(request)).toBe(true);

@@ -2,6 +2,30 @@
 
 ## Managed Slack file replies
 
+### Source status reactions
+
+The factory's Slack tick reconciles tasks' source posts through authenticated
+Violet. An accepted source claim durably records the status owner in the
+existing request journal. That owner retains reaction-only authority after the
+reply claim expires or is released; a later observed takeover stops it. This
+does not authorize messages or replies. Related tasks share one post status:
+eyes while all work is acknowledged, pick while work remains, and
+white_check_mark only when every non-cancelled task is closed and its recorded
+green merge contains its delivery and is contained in `origin/staging` or
+`origin/main` in the task's own resolved repository. Local branch names and
+an epic merge alone never prove staging. The reconciler uses fetched remote
+tracking evidence; it does not fetch or deploy.
+
+`cas violet reactions --json` audits expected and observed status with owner,
+pending/error envelope, retry time and observation timestamp. This command
+does not read or write Slack. The running factory refreshes snapshots, at most
+two source posts per tick. SQLite leases prevent concurrent sends for a source;
+successful and failed mutation receipts persist independently of later retries.
+Retryable errors and rate limits wait for their recorded retry time; permanent
+refusals stay pending until repaired and rearmed with `cas violet reactions
+--retry`. Rearming never shortens a rate-limit wait. Violet removes only its
+own reactions; a foreign reaction refusal remains visible for manual review.
+
 `artifact action=post reply_to=...` and `cas violet post --reply-to ... --file ...`
 resolve the caller's live reply intent from the project's coordination journal.
 Both external-upload steps carry its operation ID, claim generation and one

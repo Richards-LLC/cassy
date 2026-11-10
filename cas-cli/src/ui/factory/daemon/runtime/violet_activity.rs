@@ -2059,6 +2059,25 @@ impl ProxyChannelReader {
             .await.map_err(|_| "Violet target read failed".to_string())
     }
 
+    /// Fixed reaction-only port; source status never gains message/reply access.
+    pub(crate) async fn source_status(&self, tool: &str, args: serde_json::Value) -> Result<serde_json::Value, crate::cli::violet_hub::VioletError> {
+        use crate::cli::violet_hub::VioletError;
+        if tool != "violet_read" && (tool != "violet_post" || args["kind"] != "reaction") {
+            return Err(VioletError::local("invalid_status_call", "Source status permits only reads and reactions"));
+        }
+        self.engine.call_tool(&self.caller, cmcp_core::config::VIOLET_SERVER, tool, args.as_object().cloned())
+            .await.map_err(|error| {
+                let description = cmcp_core::describe_upstream_call_error(&error);
+                if description.contains("proxy policy denied") {
+                    VioletError::local("denied_by_policy", "Violet source status is denied by proxy policy")
+                } else {
+                    let mut error = VioletError::local("violet_unavailable", "Violet source status call failed");
+                    error.retryable = true;
+                    error
+                }
+            })
+    }
+
     pub(crate) async fn read(&self, request: &SweepRequest) -> Result<SweepRead, String> {
         let mut slices = Vec::new();
         let mut cursor: Option<String> = None;
@@ -2218,12 +2237,15 @@ impl VioletWakeRuntime {
         let legacy_channel = |channel: &str| {
             intake.as_ref().is_ok_and(|intake| intake.channel_legacy_allowed(channel))
         };
+        let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
+        if let Some(supervisor) = presence.as_ref() {
+            super::violet_reactions::reconcile(&self.cas_dir, &supervisor.agent_id, &self.factory_session);
+        }
         let cloud = crate::cloud::CloudConfig::load_effective();
         let Some(relay) = CloudActivityRelay::from_cloud_config(&cloud) else {
             return (PollReport::default(), Vec::new(), None);
         };
         let now = Utc::now();
-        let presence = supervisor_presence(&self.cas_dir, &self.supervisor_name);
         let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_dir) else {
             let report = PollReport {
                 errors: vec!["could not open the prompt queue".into()],

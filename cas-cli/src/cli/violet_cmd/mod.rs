@@ -43,6 +43,12 @@ pub struct VioletArgs {
 pub enum VioletCommand {
     /// List this project's configured, Violet and Cloud channel bindings
     Channels(channels::ChannelsArgs),
+    /// Audit source-post status snapshots; optionally rearm failed updates
+    Reactions {
+        /// Let the owning supervisor retry failed updates on its next tick
+        #[arg(long)]
+        retry: bool,
+    },
     /// Post a message, or local files by path, to a channel
     Post(PostArgs),
     /// Post a top-level message and its ordered replies as one thread
@@ -211,6 +217,7 @@ pub fn run_violet(
     out: &mut dyn Write,
 ) -> Result<(), VioletError> {
     let result = match command {
+        VioletCommand::Reactions { retry } => run_reactions(*retry, context, out),
         VioletCommand::Channels(args) => {
             let report = match channels::inspect(context.cas_root, args) {
                 Ok(report) => report,
@@ -242,6 +249,27 @@ pub fn run_violet(
         }
     }
     result
+}
+
+fn run_reactions(retry: bool, context: &RunContext<'_>, out: &mut dyn Write) -> Result<(), VioletError> {
+    let root = context.cas_root.ok_or_else(|| VioletError::local("project_required", "Run in a Cassy project"))?;
+    let statuses = crate::coordination::source_reactions::audit(root, retry)
+        .map_err(|_| VioletError::local("source_audit_failed", "Cannot read source status; run cas doctor"))?;
+    if context.json {
+        print_json(out, &json!({"ok":true,"sources":statuses}));
+    } else {
+        let pending = statuses.iter().filter(|status| status.pending).count();
+        let _ = writeln!(out, "{} — {pending}/{} source posts pending", if pending == 0 { "PASS" } else { "ATTENTION" }, statuses.len());
+        for status in statuses {
+            let _ = writeln!(out, "{}  expected={}  observed={}  owner={}  observed_at={}  error={}",
+                status.source, status.desired.as_deref().unwrap_or("none"), status.observed.join(","),
+                status.owner.as_deref().unwrap_or("unclaimed"),
+                status.observed_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "never".into()),
+                status.error.as_ref().and_then(|e| e.pointer("/error/code")).and_then(Value::as_str).unwrap_or("none"));
+        }
+        let _ = writeln!(out, "-> Snapshots include Violet reaction receipts; the factory refreshes them while running. Use --retry after repairing a permanent refusal.");
+    }
+    Ok(())
 }
 
 fn print_json(out: &mut dyn Write, value: &Value) {

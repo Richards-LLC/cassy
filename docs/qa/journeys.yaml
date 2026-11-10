@@ -475,6 +475,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-SOURCE-REACTIONS:
+    statement: Source status follows all related tasks, checks require recorded deliveries on remote staging or main, retry receipts survive restart, and observed takeover revokes the former owner's status-only authority even after claim expiry.
+    check: Run source_reaction_lifecycle_reconciles_source_posts, source_reaction_retry_preserves_partial_receipts_and_reloads_state and source_reaction_authority_and_identity_fences against temporary Git/SQLite and scripted Violet; audit the source snapshots through the CLI without live Slack calls.
+    bug: {task: cas-c610}
   FACTORY-ARTIFACT-METADATA:
     statement: A cold peer fetches committed proof in its configured personal/team project scope regardless of account size, validates task/project identity, and verifies the downloaded bytes before caching.
     check: Run cold_artifact_fetch_uses_its_project_before_account_discovery_cas_e75c and proof_note_publishes_and_resolves_on_another_machine_cas_4bb2 through MCP; cover both scope kinds with an 87-project account and the singular task endpoint, retaining cross-project conflict, denied scope, forged owner and checksum controls.
@@ -1148,6 +1152,16 @@ invariants:
     bug: {task: cas-4cdd}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
+- id: FACTORY-SOURCE-REACTIONS
+  name: Keep source Slack status consistent with acknowledged work and staging delivery
+  status: live
+  kind: factory
+  entry: {url: 'cli:cas violet reactions', trigger: Audit the running factory's source status}
+  steps: [Accept source work, Start the task, Confirm its recorded delivery on staging, Audit reaction status and pending retries]
+  owners: [cas-cli/src/coordination/source_reactions.rs, cas-cli/src/coordination/source_reactions/tests.rs, cas-cli/src/ui/factory/daemon/runtime/violet_reactions.rs, cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs, cas-cli/src/cli/violet_cmd/mod.rs]
+  invariants: [FACTORY-SOURCE-REACTIONS]
+  spec: cas-cli/src/coordination/source_reactions/tests.rs
+  traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SUPERVISE
   name: Keep a factory supervisor running and accepting work
   status: live

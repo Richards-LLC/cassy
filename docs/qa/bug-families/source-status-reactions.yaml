@@ -1,0 +1,4 @@
+title: Source status reconciles eyes and pick, gates check on staging, retains rate-limit retries after restart and stops the former owner on observed takeover
+tasks: [cas-c610]
+invariants: [FACTORY-SOURCE-REACTIONS]
+journeys: [FACTORY-SOURCE-REACTIONS]

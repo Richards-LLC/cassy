@@ -1554,7 +1554,8 @@ else:
         let calls: Vec<Vec<String>> = fs::read_to_string(repo.join("gh-calls.jsonl")).unwrap().lines()
             .map(|line| serde_json::from_str(line).unwrap()).collect();
         let close = calls.iter().find(|args| args.get(2).is_some_and(|n| n == "101")).unwrap();
-        assert_eq!(close, &vec!["issue".into(), "close".into(), "101".into(), "--repo".into(), "example/repo".into(), "--reason".into(), "completed".into(), "--comment".into(), receipt["issues"][0]["comment_or_error"].as_str().unwrap().into()]);
+        let expected_close: Vec<String> = vec!["issue".into(), "close".into(), "101".into(), "--repo".into(), "example/repo".into(), "--reason".into(), "completed".into(), "--comment".into(), receipt["issues"][0]["comment_or_error"].as_str().unwrap().into()];
+        assert_eq!(close, &expected_close);
         assert!(!repo.join("closed-102").exists());
         assert!(!repo.join("closed-103").exists());
 

@@ -102,9 +102,19 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     // The running project offers Attach, not a second session.
     await expect(sheet.getByRole("button", { name: `Attach to cas-src (${PELICAN})` })).toBeVisible();
     await expect(sheet.getByRole("tab", { name: "Browse" })).toBeVisible();
+    // cas-59e5: every New session control is a full touch target on a phone.
+    for (const target of [sheet.getByRole("tab", { name: "Known projects" }), sheet.getByRole("tab", { name: "Browse" }), sheet.getByRole("button", { name: "Cancel", exact: true }), sheet.getByRole("button", { name: "Start", exact: true })]) {
+      expect((await target.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
     await sheet.getByRole("searchbox", { name: "Filter projects" }).fill("ledger");
     await expect(sheet.locator("#launch-panel-known .launch-row-name")).toHaveText(["ledger-api"]);
     await sheet.getByRole("radio", { name: /ledger-api/ }).check();
+    // cas-6c0d: the action bar frosts only while fields scroll beneath it; at the end it is the sheet, not a slab.
+    const frost = () => sheet.locator(".launch-actions").evaluate(node => getComputedStyle(node).backdropFilter);
+    await expect.poll(frost).not.toBe("none");
+    await sheet.locator(".launch-flow").evaluate(node => node.scrollTo({ top: node.scrollHeight }));
+    await expect.poll(frost).toBe("none");
+    await sheet.locator(".launch-flow").evaluate(node => node.scrollTo({ top: 0 }));
     await expect(sheet.getByRole("radio", { name: "Claude Default" })).toBeChecked();
     // Capture the same project/account state on phone and desktop, including
     // the failing base build where main remains selected.
@@ -274,11 +284,12 @@ test("HUB-J13 allow launch with a long machine name on a phone", journeyPart, as
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "no sideways scroll").toBe(true);
     // cas-84a2: on a loaded queue runner the tap's touch dispatch never came
     // back while the sheet was still settling after the reload. Tap only once
-    // every finite animation on the page has finished (the sheet's own state,
-    // not a wall-clock wait), and give the tap its own deadline so a stall
-    // names the tap instead of eating the whole test timeout.
+    // every finite time-based animation on the page has finished (the sheet's
+    // own state, not a wall-clock wait; a scroll-driven one never finishes,
+    // cas-6c0d), and give the tap its own deadline so a stall names the tap
+    // instead of eating the whole test timeout.
     await page.evaluate(() => Promise.all(document.getAnimations()
-      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .filter((animation) => animation.timeline === document.timeline && animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
     // The machine already runs ledger-api: consent must reveal its live
@@ -477,7 +488,7 @@ test("HUB-J13 inspect and remove an account from the shell", journeyPart, async 
     await row.locator(".accounts-more > summary").click();
     await row.getByRole("button", { name: "Remove", exact: true }).focus();
     await page.keyboard.press("Enter");
-    await expect(dialog.getByRole("textbox", { name: "Type claude:spare to confirm" })).toBeFocused();
+    await expect(dialog.getByRole("textbox", { name: /claude:spare/ })).toBeFocused();
     await dialog.getByRole("textbox").fill("cancelled confirmation");
     await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(dialog.locator(".accounts-editor")).toBeHidden();

@@ -250,10 +250,31 @@ fn worker_inline_scripts_cannot_read_operator_auth_stores_cas_da9a() {
         "node -e 'require(\"fs\").readFileSync(process.env.HOME + \"/.local/share/com.vercel.cli/auth.json\")'",
         "python3 -c 'import os; print(open(os.path.join(os.path.expanduser(\"~\"), \".config\", \"neonctl\", \"credentials.json\")).read())'",
         "python3 <<'PY'\nimport os\nfrom pathlib import Path\nPath(os.path.join(os.environ['HOME'], '.config', 'neonctl', 'credentials.json')).read_text()\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport os\nprint(open(os.path.expanduser('~/.config/neonctl/credentials.json')).read())\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport os\nprint(open(os.path.expanduser('~/.local/share/com.vercel.cli/auth.json')).read())\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport glob, os\nprint(glob.glob(os.path.expanduser('~/.config/neon*/credentials.json')))\nPY",
+        "ssh own-peer python3 - <<'PY'\nimport glob, os\nprint(glob.glob(os.path.expanduser('~/*/*/credentials.json'), include_hidden=True))\nPY",
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);
     }
+}
+
+#[test]
+fn worker_readonly_ssh_project_db_and_checkout_glob_are_allowed_cas_ce2f() {
+    let (_env, cwd) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    let command = r#"ssh own-peer python3 - <<'PY'
+import glob, os, sqlite3
+db = sqlite3.connect('file:'+os.path.expanduser('~/Petrastella/cassy/.cas/cas.db')+'?mode=ro', uri=True)
+print(db.execute('SELECT id FROM artifacts LIMIT 1').fetchall())
+print(db.execute('SELECT id FROM tasks LIMIT 1').fetchall())
+print(glob.glob(os.path.expanduser('~/*/*/gabber')))
+PY"#;
+    let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+    let reason = denial(output);
+    assert!(reason.is_none(), "{reason:?}");
 }
 
 #[test]

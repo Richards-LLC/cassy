@@ -94,6 +94,18 @@ impl VioletThreadResolver for DaemonVioletResolver {
         // retries a reconnecting drop exactly as a supervisor's claim does.
         crate::coordination::external_work::violet_proxy_outcome(result)
     }
+
+    fn reconcile_reply(&self, intent_id: &str, timeout: Duration) -> Result<Value, RemoteError> {
+        let args = serde_json::Map::from_iter([("coordination_operation_id".into(), json!(intent_id))]);
+        let runtime = self.runtime.lock()
+            .map_err(|_| RemoteError::unavailable("Violet runtime lock poisoned"))?;
+        let result = runtime.block_on(async {
+            tokio::time::timeout(timeout, self.proxy.call_tool(
+                &self.caller, cmcp_core::config::VIOLET_SERVER, "violet_reconcile_reply", Some(args),
+            )).await
+        });
+        crate::coordination::external_work::violet_proxy_payload(result)
+    }
 }
 
 #[cfg(feature = "mcp-proxy")]

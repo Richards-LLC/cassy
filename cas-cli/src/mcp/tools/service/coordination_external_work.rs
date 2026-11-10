@@ -48,6 +48,21 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
         });
         crate::coordination::external_work::violet_proxy_outcome(result)
     }
+
+    fn reconcile_reply(&self, intent_id: &str, timeout: Duration) -> Result<Value, RemoteError> {
+        let proxy = self.proxy.as_ref().map(Arc::clone)
+            .ok_or_else(|| RemoteError::unavailable("no MCP proxy is configured for Violet readback"))?;
+        let caller = self.caller.clone();
+        let args = serde_json::Map::from_iter([("coordination_operation_id".into(), json!(intent_id))]);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .map_err(|error| RemoteError::unavailable(format!("could not start Violet client: {error}")))?;
+        let result = runtime.block_on(async move {
+            tokio::time::timeout(timeout, proxy.call_tool(
+                &caller, cmcp_core::config::VIOLET_SERVER, "violet_reconcile_reply", Some(args),
+            )).await
+        });
+        crate::coordination::external_work::violet_proxy_payload(result)
+    }
 }
 
 #[cfg(not(feature = "mcp-proxy"))]

@@ -1681,6 +1681,12 @@ impl Config {
                     Some(value.to_string())
                 };
             }
+            "project.canonical_id" => {
+                return Err(MemError::Other(
+                    "PROJECT_CANONICAL_ID_REDIRECT: use `cas cloud project set <canonical-id>` to set project.canonical_id."
+                        .to_string(),
+                ));
+            }
             // GH #1182: operator-only. Stored in config.toml, but written only
             // by `cas config set factory.write_roots` through
             // `set_factory_write_roots`, which validates every path. This

@@ -2711,7 +2711,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .status-identifier { display: none; }
 /* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
    would otherwise be the only place the name appears. */
-.conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
+.conversation-context .status-agent .status-line > .status-identifier { display: inline; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -2727,7 +2727,10 @@ button.chip:disabled { cursor: default; }
 .pairing-dot.partial { background: var(--state-warn); }
 .hub-footer-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-2); font-size: var(--fs-xs); color: var(--text-mid); }
 .machines-dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-4); }
-.machines-dialog-heading button { min-width: var(--rail-item-min); min-height: var(--rail-item-min); }
+/* cas-5e8b: Close is an icon-only 40px circle; touch still reaches 44px. */
+.machines-dialog-heading button { position: relative; width: var(--button-height); min-width: var(--button-height); padding: 0; border-radius: var(--radius-pill); }
+.machines-dialog-heading button::after { content: ""; position: absolute; inset: calc((var(--button-height) - var(--rail-item-min)) / 2); }
+#paired-machine-filters { flex-wrap: wrap; margin-block: var(--space-3) var(--space-2); }
 /* Both axes scroll: dialog[open] hides x, and a hidden axis makes the strict
    visual-qa probe read a third paired machine below the fold as clipped. */
 #paired-machines-dialog { padding: var(--space-6); overflow: auto; }
@@ -2913,6 +2916,7 @@ button.chip:disabled { cursor: default; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+  .launch-sheet .dialog-actions button, .launch-tabs [role=tab] { min-height: var(--rail-item-min); }
   /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
   .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
 }
@@ -3633,7 +3637,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .conversation-composer:has(#message-emoji):has(.composer-uploads:not([hidden])) { grid-template-areas: "uploads uploads" "field field" "clip send" "status status"; }
   .conversation-composer:has(#message-emoji) .composer-actions { justify-content: flex-end; }
 }
-.conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; font-variant-emoji: emoji; }
+.conversation-composer textarea { font-family: Inter, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", ui-sans-serif, system-ui, sans-serif; }
 
 /* The running MCP belongs to the supervisor identity, below the project. */
 .supervisor-version { display: inline-flex; align-items: baseline; gap: var(--space-1); margin-inline-start: var(--space-1); padding-inline: var(--space-1); border: var(--line-width) solid var(--line-subtle); border-radius: var(--radius-card); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono); white-space: nowrap; }

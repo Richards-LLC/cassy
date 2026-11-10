@@ -114,7 +114,7 @@ impl RelayClient {
     ) -> Result<T> {
         let url = format!("{}{}{}", self.endpoint, RELAY_PREFIX, suffix);
         let diagnostic_body = relay_request_diagnostic(body);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(body)
@@ -170,7 +170,7 @@ impl PairingRelay for RelayClient {
             RELAY_PREFIX,
             format!("/authorizations/{authorization_id}/cancel")
         );
-        match ureq::post(&url)
+        match crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .send_json(CancelRequest {

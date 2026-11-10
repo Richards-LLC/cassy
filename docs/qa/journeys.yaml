@@ -468,6 +468,10 @@ bug_families:
     title: Digits, # and * typed in the reply box keep its text face while a typed emoji still renders in colour
     tasks: [cas-f47a]
     journeys: [HUB-J6]
+  installation-inventory-failure-retry:
+    title: A failed browser installations list names the machine and list in a capitalised sentence and offers Retry, which reloads it
+    tasks: [cas-0dcf]
+    journeys: [HUB-J2]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

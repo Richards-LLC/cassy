@@ -1583,8 +1583,17 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     published.release_version = Some("v1.2.3".into());
     cas_store::record_quality_event(&env.cas_root, &published).unwrap();
     let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
-    for (behind, pinned) in [(true, false), (false, false), (true, true)] {
-        git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind { &epic_tip } else { "main" }]);
+    for (behind, pinned, refs) in [
+        (true, false, "local"), (false, false, "local"), (true, true, "local"),
+        (true, false, "remote-only"), (false, false, "remote-newer"),
+    ] {
+        git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind || refs == "remote-newer" { &epic_tip } else { "main" }]);
+        if refs != "local" {
+            git_stdout(repo, &["update-ref", "refs/remotes/origin/epic/requested", if behind { &epic_tip } else { "main" }]);
+        }
+        if refs == "remote-only" {
+            git_stdout(repo, &["update-ref", "-d", "refs/heads/epic/requested"]);
+        }
         let pin = |id: &str| {
             if pinned {
                 let mut task = env.task_store().get(id).unwrap();
@@ -1607,7 +1616,7 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         req.task_id = Some(spawn_task);
         let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
-            "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned}"),
+            "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned} refs={refs}"),
             "task_type":"task", "risk":"none", "confirm_warning":true,
             "epic":"cas-release-gap", "assignee":worker,
             "target_branch":pinned.then_some("main"),

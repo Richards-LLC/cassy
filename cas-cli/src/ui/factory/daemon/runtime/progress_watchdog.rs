@@ -418,6 +418,63 @@ mod tests {
             .filter(|row| row.target == "operator" && row.prompt.contains("cas-c1fb-peer-handoff")).count(), 1);
     }
 
+    #[tokio::test]
+    async fn gate_refused_close_is_reported_without_a_stall_page_cas_098dd() {
+        const SESSION: &str = "gate-refused-098dd";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let repo = env.home().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let mut supervisor = Agent::new_with_role("supervisor-098dd".into(), "supervisor".into(), AgentRole::Supervisor);
+        supervisor.factory_session = Some(SESSION.into());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut epic = Task::new("cas-098dd-epic".into(), "Finished delivery awaiting close".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.assignee = Some(supervisor.name.clone());
+        epic.deliverables.phase_outcome = Some(serde_json::json!({
+            "target": {"completed": {"min": 1}}, "evidence": null
+        }));
+        tasks.add(&epic).unwrap();
+        let mut child = Task::new("cas-098dd-child".into(), "Delivered child".into());
+        child.status = TaskStatus::Closed;
+        tasks.add(&child).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(child.id, epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(supervisor.id);
+        let refused = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(serde_json::json!({"id":epic.id,"reason":"Delivered work is ready"})).unwrap()
+        )).await.unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 135] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 0, "{rows:?}");
+        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("task_close_refused")).collect();
+        assert_eq!(notices.len(), 1, "{rows:?}");
+        assert!(notices[0].prompt.contains("resolve_close_gate"));
+
+        // Timeline notes do not resolve the gate or start an escalation clock.
+        epic.notes.push_str("\nMore diagnostic evidence");
+        tasks.update(&epic).unwrap();
+        super::sweep(&root, SESSION, now + chrono::Duration::minutes(180));
+        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 0);
+        // A changed close input makes the old refusal stale; ordinary stalls
+        // must still page, without requiring a process restart.
+        epic.deliverables.phase_outcome = None;
+        tasks.update(&epic).unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 1);
+    }
+
     /// cas-1f65: the Nov 9 overnight. A train frozen for release (lift is
     /// operator-only) holds two parked children. The supervisor hears once
     /// that the freeze holds them and who lifts it; nothing is chased as a

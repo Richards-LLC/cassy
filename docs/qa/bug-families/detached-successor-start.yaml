@@ -1,0 +1,4 @@
+title: Detached successor startup prepares a named branch while preserving held deliveries and refusing unsafe checkouts
+tasks: [cas-ce0d]
+invariants: [FACTORY-DETACHED-SUCCESSOR]
+journeys: [FACTORY-SPAWN]

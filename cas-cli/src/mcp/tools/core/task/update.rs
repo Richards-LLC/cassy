@@ -2671,6 +2671,8 @@ impl CasCore {
             crate::github_issue_attach::spawn_attach_cited_issues(&self.cas_root, &task);
             let notice = crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id));
             if !notice.is_empty() { warnings.push(notice.trim().to_string()); }
+            let release = super::lifecycle::epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task);
+            if !release.is_empty() { warnings.push(release.trim().to_string()); }
         }
 
         let qa_withdraw_reason = if demo_statement_cleared {

@@ -7013,7 +7013,7 @@ enabled = false
 #[tokio::test]
 async fn test_task_close_passes_without_worktree_and_clean_cwd() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service) = setup_cas(&mut test_env);
+    let (temp, service) = setup_cas_without_git(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(
@@ -7093,7 +7093,7 @@ enabled = false
 #[tokio::test]
 async fn test_3894_halted_worker_can_close_own_in_progress_task() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (temp, service) = setup_cas(&mut test_env);
+    let (temp, service) = setup_cas_without_git(&mut test_env);
     let cas_dir = temp.path().join(".cas");
 
     std::fs::write(

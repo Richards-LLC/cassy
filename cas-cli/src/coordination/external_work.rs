@@ -788,7 +788,7 @@ impl HttpCloudCoordinationPort {
 impl CloudCoordinationPort for HttpCloudCoordinationPort {
     fn post(&self, path: &str, payload: &Value, timeout: Duration) -> Result<Value, RemoteError> {
         let url = format!("{}{}", self.endpoint, path);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .timeout(timeout)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")

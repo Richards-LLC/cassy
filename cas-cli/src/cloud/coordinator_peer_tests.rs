@@ -38,28 +38,20 @@ impl ReceiptLog {
 
 fn dispatch_receipt(log: ReceiptLog, response: ResponseTemplate) -> impl wiremock::Respond {
     move |request: &wiremock::Request| {
-        let scoped = request.url.path() == "/api/agents"
-            || request.url.path().ends_with("/claim")
-            || request.url.path().ends_with("/lock");
-        // pin: supervisor #4219767's cross-repo diagnostic header contract.
-        let id = request.headers.get("X-Cas-Attempt-Id");
-        if scoped {
-            let id = id
-                .expect("scoped dispatch needs an attempt ID")
-                .to_str()
-                .unwrap();
-            let uuid = uuid::Uuid::parse_str(id).unwrap();
-            assert_eq!(uuid.to_string(), id);
-            assert_eq!(uuid.get_version_num(), 4);
-            assert!(
-                log.text()
-                    .lines()
-                    .any(|line| line.contains("phase=\"pre_dispatch\"") && line.contains(id)),
-                "the local receipt must exist before the server receives the request"
-            );
-        } else {
-            assert!(id.is_none(), "unscoped route must keep its wire contract");
-        }
+        // Cloud #256 consumes this exact wire header.
+        let id = request.headers.get("X-Cassy-Attempt-Id")
+            .expect("Cloud dispatch needs an attempt ID")
+            .to_str()
+            .unwrap();
+        let uuid = uuid::Uuid::parse_str(id).unwrap();
+        assert_eq!(uuid.to_string(), id);
+        assert_eq!(uuid.get_version_num(), 4);
+        assert!(
+            log.text()
+                .lines()
+                .any(|line| line.contains("phase=\"pre_dispatch\"") && line.contains(id)),
+            "the local receipt must exist before the server receives the request"
+        );
         response.clone()
     }
 }
@@ -74,6 +66,65 @@ fn coordinator(endpoint: &str) -> CloudCoordinator {
     })
     .unwrap()
     .with_canonical_id(Some(REPO.to_string()))
+}
+
+#[tokio::test]
+async fn cas_9214_cloud_mutation_retries_keep_attempt_and_log_timeouts() {
+    use crate::cloud::{CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation, SyncQueue};
+    use std::sync::{Arc, Mutex};
+
+    let server = MockServer::start().await;
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let captured_attempts = attempts.clone();
+    Mock::given(method("POST")).and(path("/api/sync/push"))
+        .respond_with(move |request: &wiremock::Request| {
+            let mut attempts = captured_attempts.lock().unwrap();
+            attempts.push(request.headers.get("X-Cassy-Attempt-Id")
+                .map(|id| id.to_str().unwrap().to_owned()));
+            match attempts.len() {
+                1 => ResponseTemplate::new(503),
+                2 => ResponseTemplate::new(200).set_body_json(json!({"synced":{"tasks":1}})),
+                // Real socket deadlines exercise timeout logging; no test sleep.
+                _ => ResponseTemplate::new(200).set_delay(Duration::from_secs(10)),
+            }
+        }).mount(&server).await;
+    let log = ReceiptLog::default();
+    let captured_log = log.clone();
+    let endpoint = server.uri();
+    tokio::task::spawn_blocking(move || {
+        let _subscriber = tracing::subscriber::set_default(captured_log.subscriber());
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let queue = Arc::new(SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let mut task = crate::types::Task::new("correlation".into(), "private-payload".into());
+        task.origin_project = Some("p".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        let payload = serde_json::to_string(&task).unwrap();
+        let config = CloudConfig { endpoint, token: Some("private-token".into()), ..Default::default() };
+        for (timeout, succeeds) in [(Duration::from_secs(5), true), (Duration::from_millis(250), false)] {
+            queue.enqueue(EntityType::Task, &task.id, SyncOperation::Upsert, Some(&payload)).unwrap();
+            let syncer = CloudSyncer::new_for_project(queue.clone(), config.clone(),
+                CloudSyncerConfig { timeout, backoff_base_ms: 0, ..Default::default() },
+                "p".into(), &root);
+            let result = syncer.push().unwrap();
+            assert_eq!(result.errors.is_empty(), succeeds);
+        }
+    }).await.unwrap();
+
+    let attempts = attempts.lock().unwrap();
+    assert_eq!(attempts.len(), 5);
+    let ids = attempts.iter().map(|id| id.as_deref().expect("Cloud mutation attempt header"))
+        .collect::<Vec<_>>();
+    for id in &ids { assert_eq!(uuid::Uuid::parse_str(id).unwrap().get_version_num(), 4); }
+    assert_eq!(ids[0], ids[1]);
+    assert!(ids[2..].iter().all(|id| *id == ids[2]));
+    assert_ne!(ids[0], ids[2]);
+    let text = log.text();
+    assert_eq!(text.lines().filter(|line| line.contains("phase=\"transport_error\"") && line.contains(ids[2])).count(), 3);
+    assert!(!text.contains("private-token"));
+    assert!(!text.contains("private-payload"));
 }
 
 fn agent_json(id: &str) -> serde_json::Value {
@@ -215,8 +266,8 @@ async fn list_agent_infos_follows_every_keyset_page() {
     let ids: Vec<&str> = agents.iter().map(|a| a.id.as_str()).collect();
     assert_eq!(ids, ["a1", "a2", "a3"]);
     let requests = server.received_requests().await.unwrap();
-    let first = requests[0].headers.get("X-Cas-Attempt-Id").unwrap();
-    let second = requests[1].headers.get("X-Cas-Attempt-Id").unwrap();
+    let first = requests[0].headers.get("X-Cassy-Attempt-Id").unwrap();
+    let second = requests[1].headers.get("X-Cassy-Attempt-Id").unwrap();
     assert_ne!(first, second, "each page is an explicit dispatch");
 }
 
@@ -326,9 +377,9 @@ async fn cas_f707_register_list_and_claim_calls_carry_the_canonical_id() {
     let requests = server.received_requests().await.unwrap();
     let ids: std::collections::HashSet<_> = requests
         .iter()
-        .filter_map(|request| request.headers.get("X-Cas-Attempt-Id"))
+        .filter_map(|request| request.headers.get("X-Cassy-Attempt-Id"))
         .collect();
-    assert_eq!(ids.len(), 4, "each explicit scoped dispatch has a fresh ID");
+    assert_eq!(ids.len(), requests.len(), "each logical dispatch has a fresh ID");
 }
 
 #[tokio::test]
@@ -456,6 +507,10 @@ async fn cas_4ac8_shutdown_and_release_retry_after_rate_limit() {
         .await
         .unwrap();
         assert!(result.is_ok(), "{result:?}");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        let ids = requests.iter().map(|request| request.headers.get("X-Cassy-Attempt-Id").unwrap()).collect::<Vec<_>>();
+        assert_eq!(ids[0], ids[1]);
         assert!(
             started.elapsed() >= Duration::from_secs(1),
             "Retry-After was ignored"
@@ -669,7 +724,7 @@ async fn correlation_body_complete_records_parse_failure_without_logging_body() 
         let request = server.received_requests().await.unwrap().pop().unwrap();
         let id = request
             .headers
-            .get("X-Cas-Attempt-Id")
+            .get("X-Cassy-Attempt-Id")
             .unwrap()
             .to_str()
             .unwrap();
@@ -711,7 +766,7 @@ fn correlation_transport_error_retains_attempt_and_unknown_claim_outcome() {
         .lines()
         .find_map(|line| {
             line.split_once(": ")
-                .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cas-Attempt-Id"))
+                .filter(|(key, _)| key.eq_ignore_ascii_case("X-Cassy-Attempt-Id"))
                 .map(|(_, value)| value)
         })
         .expect("wire correlation ID");

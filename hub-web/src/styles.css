@@ -2711,7 +2711,7 @@ button.chip:disabled { cursor: default; }
 .conversation-context .status-identifier { display: none; }
 /* cas-a474: an agent row the operator can act on names its worker; the ⋯ menu
    would otherwise be the only place the name appears. */
-.conversation-context .status-agent .status-line > .status-identifier:first-child { display: inline; }
+.conversation-context .status-agent .status-line > .status-identifier { display: inline; }
 
 /* Machine evidence stays beneath the conversations, outside the phone composer. */
 .hub-footer-badges { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
@@ -2913,6 +2913,7 @@ button.chip:disabled { cursor: default; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+  .launch-sheet .dialog-actions button, .launch-tabs [role=tab] { min-height: var(--rail-item-min); }
   /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
   .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
 }

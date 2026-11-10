@@ -1547,6 +1547,97 @@ async fn test_factory_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
+/// Staffing receipts warn about published release history without refusing work.
+#[tokio::test]
+async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
+    let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+    let env = FactoryTestEnv::with_server_supervisor();
+    std::fs::write(env.cas_root.join("config.toml"), "[project]\ncanonical_id = \"cas-a3c3-fixture\"\n").unwrap();
+    cas::store::known_repos::ensure_host_schema().unwrap();
+    let worker = "release-gap-worker";
+    let worker_path = init_sync_repo(&env, worker);
+    let repo = env.cas_root.parent().unwrap();
+    let epic_tip = git_stdout(repo, &["rev-parse", "epic/requested"]);
+    add_epic_with_id(&env, "cas-release-gap", TaskStatus::Open, "epic/requested");
+    let mut epic = env.task_store().get("cas-release-gap").unwrap();
+    epic.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "epic/requested".into(),
+    });
+    env.task_store().update(&epic).unwrap();
+    env.register_worker_with_metadata(worker, HashMap::from([
+        ("clone_path".into(), worker_path.display().to_string()),
+    ]));
+    std::fs::write(repo.join("release.txt"), "published release\n").unwrap();
+    git_stdout(repo, &["add", "release.txt"]);
+    git_stdout(repo, &["commit", "-qm", "published release"]);
+    git_stdout(repo, &["tag", "v1.2.3"]);
+    // A tag alone is not publication evidence.
+    git_stdout(repo, &["tag", "v99.0.0"]);
+    let mut published = cas_store::NewQualityEvent::new(
+        "release|1.2.3",
+        cas_store::QualityPayload::Release {
+            commit_to_main_minutes: None, main_to_published_minutes: None,
+            ejections: 0, rescues: 0,
+        },
+    );
+    published.release_version = Some("v1.2.3".into());
+    cas_store::record_quality_event(&env.cas_root, &published).unwrap();
+    let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
+    let merged_tree = git_stdout(repo, &["merge-tree", "--write-tree", "--no-messages", "main", &epic_tip]);
+    let synced_origin = git_stdout(repo, &["commit-tree", &merged_tree, "-p", "main", "-p", &epic_tip, "-m", "origin synced with release"]);
+    for (behind, pinned, refs) in [
+        (true, false, "local"), (false, false, "local"), (true, true, "local"),
+        (true, false, "remote-only"), (false, false, "remote-only"),
+        (false, false, "remote-newer"),
+    ] {
+        git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind || refs == "remote-newer" { &epic_tip } else { "main" }]);
+        if refs != "local" {
+            git_stdout(repo, &["update-ref", "refs/remotes/origin/epic/requested", if refs == "remote-newer" { &synced_origin } else if behind { &epic_tip } else { "main" }]);
+        }
+        if refs == "remote-only" {
+            git_stdout(repo, &["update-ref", "-d", "refs/heads/epic/requested"]);
+        }
+        let pin = |id: &str| {
+            if pinned {
+                let mut task = env.task_store().get(id).unwrap();
+                task.deliverables.work_target = Some(WorkTarget {
+                    repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "main".into(),
+                });
+                task.deliverables.work_target_pinned = true;
+                env.task_store().update(&task).unwrap();
+            }
+        };
+        let task_id = child_task_of_epic(&env, "cas-release-gap", "Staff published base");
+        pin(&task_id);
+        let assignment = assign(&env, &task_id, worker).await.unwrap();
+        assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
+        let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
+        pin(&spawn_task);
+        let mut req = factory_req("spawn_workers");
+        req.cli = Some("grok".into());
+        req.isolate = Some(true);
+        req.task_id = Some(spawn_task);
+        let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+        let request: TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned} refs={refs}"),
+            "task_type":"task", "risk":"none", "confirm_warning":true,
+            "epic":"cas-release-gap", "assignee":worker,
+            "target_branch":pinned.then_some("main"),
+        })).unwrap();
+        let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
+        for response in [assignment, spawn, created] {
+            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "behind={behind} pinned={pinned} refs={refs}: {response}");
+            if behind && !pinned {
+                assert!(response.contains("tag=v1.2.3"), "{response}");
+                assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
+            }
+        }
+        let queued = env.spawn_queue().peek(10).unwrap();
+        assert_eq!(queued.len(), 1);
+        env.spawn_queue().mark_processed(queued[0].id).unwrap();
+    }
+}
+
 #[tokio::test]
 async fn spawn_workers_refuses_diverged_base_before_enqueue_cas_52b7() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);

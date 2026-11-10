@@ -2903,11 +2903,18 @@ fn collect_git_write_targets(
             for (position, arg) in args.iter().enumerate() {
                 let flags_c = arg.starts_with('-') && !arg.starts_with("--") && arg.contains('c');
                 if flags_c || arg == "--command" {
-                    if let Some(payload) = args.get(position + 1) {
+                    // Shell options can follow -c before its command operand.
+                    let payload = args[position + 1..].iter()
+                        .find(|arg| !arg.starts_with('-') && !arg.starts_with('+'));
+                    if let Some(payload) = payload {
                         // A child inherits cwd but cannot change its parent's cwd.
                         collect_git_write_targets(
                             &mut shell_cwd.clone(), payload, depth + 1, targets,
                         );
+                    } else {
+                        let mut target = default_target.clone();
+                        target.uncertain_scope = true;
+                        targets.push(target);
                     }
                     break;
                 }
@@ -3122,7 +3129,7 @@ fn check_worker_git_commit_scope_at_target(
     registered_worktree_root: Option<&std::path::Path>,
 ) -> Option<String> {
     if target.uncertain_scope {
-        return Some("WORKER COMMIT GUARD: Nested shell scope exceeds the inspection limit. Split the command into explicit operations inside your assigned worktree.".to_string());
+        return Some("WORKER COMMIT GUARD: Cannot determine nested shell command scope. Split the command into explicit operations inside your assigned worktree.".to_string());
     }
     let cwd = target.path_for_scope().display().to_string();
     let clone_path = registered_worktree_root

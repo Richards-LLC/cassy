@@ -481,6 +481,10 @@ bug_families:
     tasks: [cas-943b]
     journeys: [HUB-J17, HUB-J20, HUB-J25]
     invariants: [HUB-TASK-TITLE-FIRST]
+  violet-transport-request-recovery:
+    title: The same session reconnects a dropped Violet transport and reconciles uncertain messages by their original request ID without reposting
+    tasks: [cas-a0c5]
+    journeys: [FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

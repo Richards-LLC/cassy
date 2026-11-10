@@ -16483,10 +16483,7 @@ mod tests {
     fn ct2_p3_operator_row_survives_24h_expiry() {
         let (_temp, store) = create_test_store();
         register_bounce_sender(&store, "retired-worker", "factory-a");
-        register_bounce_sender(&store, "supervisor", "factory-a");
-        store.conn.lock().unwrap().execute(
-            "UPDATE agents SET role = 'supervisor' WHERE name = 'supervisor'", [],
-        ).unwrap();
+        register_agent_at(&store, "mirror-supervisor", "supervisor", 0);
         let operator = store
             .enqueue_with_session("lead-sup", "operator", "status: green", "factory-a")
             .unwrap();
@@ -16563,7 +16560,7 @@ mod tests {
             [format!("operator-mirror-undelivered:{}", mirrors[0])],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
-        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("supervisor", Some("factory-a")));
+        assert_eq!((notice.0.as_str(), notice.1.as_deref()), ("mirror-supervisor", Some("factory-a")));
         // FactoryDaemon::supervisor_wake_class consumes this protocol suffix
         // on daemon-origin notices; plain watchdog prose cannot wake an idle sender.
         assert!(notice.2.ends_with("<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"));

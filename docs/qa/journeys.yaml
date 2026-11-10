@@ -447,6 +447,10 @@ bug_families:
     tasks: [cas-0d5e]
     journeys: [HUB-J17, HUB-J25, HUB-J26]
     invariants: [HUB-WORKER-TIMELINE-HEADER]
+  launch-sheet-phone-touch-targets:
+    title: New session's project tabs and its Cancel and Start actions are 44px touch targets on a phone
+    tasks: [cas-59e5]
+    journeys: [HUB-J13]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

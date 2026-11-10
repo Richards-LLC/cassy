@@ -2913,6 +2913,7 @@ button.chip:disabled { cursor: default; }
   .launch-list { max-height: none; }
   .launch-row { min-height: 52px; }
   .launch-actions button { flex: 1 1 0; }
+  .launch-sheet .dialog-actions button, .launch-tabs [role=tab] { min-height: var(--rail-item-min); }
   /* The sticky bar reads as a bar over the scrolling form, not as the form's last row. */
   .launch-actions { border-top: var(--line-width) solid var(--line-subtle); }
 }

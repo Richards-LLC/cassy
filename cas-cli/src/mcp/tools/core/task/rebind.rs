@@ -184,7 +184,7 @@ pub(super) fn reassigned_branch_start(
             return None;
         }
     }
-    if previous.work_target != *target && !empty_successor {
+    if (queued_start || previous.work_target != *target) && !empty_successor {
         return None;
     }
     let base_sha = git.text(&["merge-base", "--all", &tip, &target_tip]).ok()?;

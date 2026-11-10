@@ -291,7 +291,8 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(menu.getByRole("menuitem")).toHaveText([/quiet-owl-7/]);
     await menu.getByRole("menuitem", { name: "Assign to quiet-owl-7" }).click();
     await expect(announcer).toContainText(new RegExp("(?=[\\s\\S]*cas\\-2001)(?=[\\s\\S]*quiet\\-owl\\-7)"));
-    await expect(row("quiet-owl-7")).toContainText("cas-2001");
+    // cas-943b: the card shows the task title and keeps the id in its title attribute.
+    await expect(row("quiet-owl-7").locator('.status-activity[title="cas-2001"]')).toBeVisible();
     expect(hub.operations.at(-1)?.body).toMatchObject({ op: { kind: "assign_task", task_id: "cas-2001", assignee: "quiet-owl-7" }, expected: { assignee: null, updated_at: "2026-10-03T11:20:00Z" } });
   });
 

@@ -64,29 +64,45 @@ mod tests {
         env.set("CAS_AGENT_NAME", "registration-owner");
         env.set("CAS_FACTORY_SESSION", "registration-pane");
         for action in ["register", "session_start"] {
-            for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Director, AgentRole::Standard] {
+            for (role, state) in [
+                (AgentRole::Supervisor, "live"), (AgentRole::Supervisor, "retired"),
+                (AgentRole::Supervisor, "different-pane"), (AgentRole::Supervisor, "other-name"),
+                (AgentRole::Worker, "live"), (AgentRole::Director, "live"), (AgentRole::Standard, "live"),
+            ] {
                 env.set("CAS_AGENT_ROLE", &role.to_string());
                 let old_id = format!("durable-{action}-{role}");
                 env.set("CAS_SESSION_ID", &old_id);
                 let temp = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(temp.path()).unwrap();
-                let core = crate::mcp::CasCore::with_daemon(root, None, None);
+                let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
                 core.register_agent(old_id.clone(), "registration-owner".into(), None).unwrap();
                 let agents = core.open_agent_store().unwrap();
                 let before = agents.get(&old_id).unwrap();
+                if state == "retired" {
+                    cas_store::SqliteAgentStore::open(&root).unwrap()
+                        .record_session_end(&old_id, Some("exit")).unwrap();
+                } else if state == "different-pane" {
+                    let mut foreign = before.clone();
+                    foreign.pid = Some(i32::MAX as u32);
+                    foreign.ppid = None;
+                    agents.update(&foreign).unwrap();
+                }
                 let service = CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
                 let new_id = format!("harness-{action}-{role}");
+                let name = if state == "other-name" { "another-owner" } else { "registration-owner" };
                 service.coordination(Parameters(serde_json::from_value(serde_json::json!({
-                    "action": action, "name": "registration-owner", "agent_type": role.to_string(),
+                    "action": action, "name": name, "agent_type": role.to_string(),
                     "session_id": new_id,
                 })).unwrap())).await.unwrap();
-                let reuses = role == AgentRole::Supervisor || (role == AgentRole::Worker && action == "session_start");
-                assert_eq!(agents.list(None).unwrap().len(), if reuses { 1 } else { 2 }, "{action}/{role}");
+                let reuses = (role == AgentRole::Supervisor && state == "live")
+                    || (role == AgentRole::Worker && action == "session_start");
+                assert_eq!(agents.list(None).unwrap().len(), if reuses { 1 } else { 2 }, "{action}/{role}/{state}");
                 assert_eq!(service.inner.get_agent_id().unwrap(), old_id);
                 let id = if reuses { &old_id } else { &new_id };
                 let registered = agents.get(id).unwrap();
                 assert_eq!(registered.cc_session_id.as_deref(), Some(new_id.as_str()));
                 assert_eq!(registered.role, role);
+                assert_eq!(registered.name, name);
                 if reuses {
                     assert_eq!(registered.registered_at, before.registered_at);
                     assert_eq!(registered.factory_session, before.factory_session);

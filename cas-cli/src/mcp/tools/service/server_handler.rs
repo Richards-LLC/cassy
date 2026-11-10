@@ -1537,6 +1537,7 @@ mod tests {
             service.tool_work.wait_idle().await;
             let data = error.data.unwrap();
             assert_eq!(data["mutation_outcome"], "IN_PROGRESS");
+            assert!(data["continuation_id"].as_str().is_some_and(|id| !id.is_empty()));
             let rows = crate::store::open_supervisor_queue_store(&root).unwrap()
                 .poll("durable-owner", 10).unwrap();
             assert_eq!(rows.len(), 1);

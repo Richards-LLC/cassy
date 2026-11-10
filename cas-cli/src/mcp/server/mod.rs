@@ -826,7 +826,10 @@ impl CasCore {
                 .map(|id| agent_store.get(id)).transpose().map_err(inspect_error)?;
             let harness = crate::agent_id::get_cc_pid_for_mcp();
             match existing.filter(|agent| {
-                agent.name == name && agent.role == crate::types::AgentRole::Supervisor
+                // The row this call itself registered (session_start writes
+                // it first) is not a predecessor to rebind.
+                agent.id != session_id
+                    && agent.name == name && agent.role == crate::types::AgentRole::Supervisor
                     && agent.is_alive()
                     && (agent.pid == Some(pid) || agent.pid == Some(harness) || agent.ppid == Some(harness))
                     && matches!(crate::mcp::daemon::evaluate_liveness(agent,

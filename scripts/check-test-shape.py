@@ -55,7 +55,10 @@ def python_literal_value(node):
 
 def machine_id_receiver(expression):
     # Exact typed projections are machine data; do not guess commands from prose.
-    return re.search(r'\.(?:code|error_code|rule_id|command|redirect_command)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+    return (re.search(r'\.(?:code|error_code|rule_id)(?:\(\))?(?=\s*(?:,|\)|$))', expression) is not None
+            or re.fullmatch(r'\s*(?:assert_(?:eq|ne)!\(\s*)?'
+                            r'[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.(?:command|redirect_command)(?:\(\))?'
+                            r'\s*,?\s*', expression) is not None)
 
 
 def python_bindings(scope):

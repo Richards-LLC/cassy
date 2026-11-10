@@ -28,6 +28,8 @@
               "delivery": {
                 "id": "0000de2a-1111-4111-8111-00000000de2a",
                 "occurrence_id": "00000cc2-1111-4111-8111-000000000cc2",
+                "event_kind": "message",
+                "author_user_id": "U01HUMAN42",
                 "reader_slot_id": "a1a1a1a1-0000-4000-8000-00000000000a",
                 "registration_id": "reg-supervisor-alpha-01",
                 "route_kind": "owner",

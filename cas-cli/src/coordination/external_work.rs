@@ -648,6 +648,11 @@ pub trait VioletThreadResolver: Send + Sync {
     /// Resolve only through Violet's authenticated `violet_read` contract and
     /// return its normalized, verified thread identity.
     fn resolve(&self, external_ref: &str, timeout: Duration) -> Result<Value, RemoteError>;
+    /// Read back and settle an existing reply intent through Violet. Never post.
+    fn reconcile_reply(&self, intent_id: &str, timeout: Duration) -> Result<Value, RemoteError> {
+        let _ = (intent_id, timeout);
+        Err(RemoteError::unavailable("Violet reply readback is unavailable"))
+    }
 }
 
 /// cas-85c1 (GH #1292): the one mapping from a proxied `violet_read` call to
@@ -2004,6 +2009,85 @@ mod tests {
         ExternalWorkCommand::Claim {
             external_ref: external_ref.to_string(),
             request_id: Some(request_id.to_string()),
+        }
+    }
+
+    /// Cloud owns dead/expired eligibility. The client must read back the
+    /// named intent, then acquire with a new id, never dispatch another reply.
+    #[test]
+    fn dead_expired_reply_readback_reclaims_without_duplicate_and_live_holder_blocks_cas_f039() {
+        struct RecoveryCloud {
+            journal: SqliteRequestJournal,
+            settled: Arc<Mutex<bool>>,
+            held: Value,
+            acquired: Value,
+            posts: Mutex<Vec<Value>>,
+        }
+        impl CloudCoordinationPort for RecoveryCloud {
+            fn post(&self, path: &str, payload: &Value, _: Duration) -> Result<Value, RemoteError> {
+                assert_eq!(path, "/api/coordination/external-work/claim");
+                let id = payload["request_id"].as_str().unwrap();
+                assert!(self.journal.get(id).unwrap().unwrap().wire_json.is_some());
+                self.posts.lock().unwrap().push(payload.clone());
+                let mut result = if *self.settled.lock().unwrap() { self.acquired.clone() } else { self.held.clone() };
+                result["receipt"]["request_id"] = payload["request_id"].clone();
+                Ok(result)
+            }
+            fn lookup(&self, _: &str, _: &str, _: Duration) -> Result<Value, RemoteError> {
+                panic!("a settled replay must use its journal, never look up a different operation");
+            }
+        }
+        struct RecoveryViolet {
+            settled: Arc<Mutex<bool>>,
+            outcome: &'static str,
+            reads: Mutex<Vec<String>>,
+        }
+        impl VioletThreadResolver for RecoveryViolet {
+            fn resolve(&self, link: &str, budget: Duration) -> Result<Value, RemoteError> {
+                FakeViolet::ok().resolve(link, budget)
+            }
+            fn reconcile_reply(&self, intent_id: &str, _: Duration) -> Result<Value, RemoteError> {
+                self.reads.lock().unwrap().push(intent_id.to_string());
+                let settled = self.outcome != "unknown";
+                *self.settled.lock().unwrap() = settled;
+                Ok(json!({"ok": self.outcome != "settled_posted" && settled,
+                    "state": if self.outcome == "settled_posted" { "posted" } else if settled { self.outcome } else { "outcome_unknown" },
+                    "coordination_operation_id": intent_id,
+                    "message_ts": if self.outcome == "posted" { json!("1760616010.000001") } else { Value::Null },
+                    "reason": if self.outcome == "settled_posted" { "intent_not_unresolved" } else { "retry_later" },
+                    "retry_after": 120}))
+            }
+        }
+        let cases = fixture("claim")["cases"].as_array().unwrap().clone();
+        let payload = |code: &str, reason: Option<&str>| cases.iter().map(|case| &case["response"]["payload"])
+            .find(|value| value["code"] == code && reason.is_none_or(|reason| value["reason"] == reason)).unwrap().clone();
+        let unresolved = payload("held", Some("reply_unresolved"));
+        let intent = unresolved["receipt"]["reply_intent"]["id"].as_str().unwrap();
+        let acquired = cases.iter().map(|case| &case["response"]["payload"])
+            .find(|value| value["code"] == "acquired" && value["receipt"]["generation"] == 2).unwrap().clone();
+        for outcome in ["posted", "rejected", "settled_posted", "unknown", "live"] {
+            let journal = journal();
+            let settled = Arc::new(Mutex::new(false));
+            let cloud = Arc::new(RecoveryCloud { journal: journal.clone(), settled: settled.clone(),
+                held: if outcome == "live" { payload("held", Some("owner_holds_claim")) } else { unresolved.clone() },
+                acquired: acquired.clone(), posts: Mutex::new(Vec::new()) });
+            let violet = Arc::new(RecoveryViolet { settled, outcome, reads: Mutex::new(Vec::new()) });
+            let service = ExternalWorkService::new(journal, cloud.clone(), violet.clone(), OperationContext {
+                project_id: "github.com/richards-llc/cassy".into(), registration_id: "reg-supervisor-beta-07".into() });
+            let command = claim(REQUEST_ID, "https://workspace.slack.com/archives/C08COORD01/p1760616000123456");
+            let result = service.execute(command.clone()).unwrap();
+            let terminal = !matches!(outcome, "unknown" | "live");
+            assert_eq!(result["code"], if terminal { "acquired" } else { "held" }, "{outcome}: {result}");
+            assert_eq!(service.execute(command).unwrap(), result, "{outcome}: replay changes its outcome");
+            let posts = cloud.posts.lock().unwrap();
+            assert_eq!(posts.len(), if terminal { 2 } else { 1 }, "{outcome}");
+            if terminal {
+                assert_ne!(posts[0]["request_id"], posts[1]["request_id"]);
+                assert_eq!(result["receipt"]["generation"], 2);
+                assert_eq!(*violet.reads.lock().unwrap(), vec![intent.to_string()]);
+            } else if outcome == "live" {
+                assert!(violet.reads.lock().unwrap().is_empty());
+            }
         }
     }
 

@@ -364,7 +364,7 @@ mod tests {
         let f = fixture();
         let checkout = nested_worktree(&f);
         let report = write(
-            &checkout.join("docs/release-reports/v4.10.0.html"),
+            &checkout.join("docs/release-reports/v9.99.0.html"),
             "report",
         );
         assert_eq!(resolve_publishable_path(&report, &f.roots).unwrap(), report);

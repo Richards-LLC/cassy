@@ -402,6 +402,31 @@ impl SqliteRequestJournal {
     /// refreshes authority through Violet/Cloud; this cache never grants a post
     /// or a claim. Follow later renew/release/transfer receipts for the resource.
     pub(crate) fn task_source_receipt(&self, source: &str, project: &str) -> Result<Option<Value>, JournalError> {
+        Ok(self.source_receipts(source, project)?.into_iter().next().filter(|receipt| {
+            receipt["resource"]["state"] == "claimed"
+                && receipt["visible_owner"]["registration_id"].is_string()
+                && receipt["expires_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                    .is_some_and(|at| at > Utc::now())
+        }))
+    }
+
+    /// Status-only authority survives expiry/release of the reply claim.
+    /// Accepted claim receipts already durably capture the owner. Follow every
+    /// later observed owner, including a peer's takeover, but never grant a
+    /// reply intent or a message post from this historical evidence.
+    pub(crate) fn source_status_owner(&self, source: &str, project: &str) -> Result<Option<String>, JournalError> {
+        let mut receipts = self.source_receipts(source, project)?;
+        // A delayed response from an older claim must never undo an observed
+        // takeover. Stable sorting retains observation order within one CAS
+        // generation, including released receipts without a visible owner.
+        receipts.sort_by_key(|receipt| std::cmp::Reverse(receipt["generation"].as_u64().unwrap_or(0)));
+        Ok(receipts.iter().find_map(|receipt| {
+            receipt["visible_owner"]["registration_id"].as_str()
+                .filter(|owner| !owner.is_empty()).map(str::to_string)
+        }))
+    }
+
+    fn source_receipts(&self, source: &str, project: &str) -> Result<Vec<Value>, JournalError> {
         fn alias(source: &str) -> Option<String> {
             let url = url::Url::parse(source).ok()?;
             let parts = url.path_segments()?.collect::<Vec<_>>();
@@ -413,10 +438,10 @@ impl SqliteRequestJournal {
             if root.is_empty() || !root.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
             Some(format!("{}/{}/{root}", url.host_str()?, parts[1]))
         }
-        let Some(source) = alias(source) else { return Ok(None); };
+        let Some(source) = alias(source) else { return Ok(Vec::new()); };
         let rows: Vec<(String, String)> = {
             let conn = self.conn.lock().map_err(|_| JournalError::Storage("connection lock poisoned".into()))?;
-            let mut query = conn.prepare("SELECT input_json, response_json FROM external_work_operations WHERE response_json IS NOT NULL ORDER BY created_at DESC, rowid DESC")
+            let mut query = conn.prepare("SELECT input_json, response_json FROM external_work_operations WHERE response_json IS NOT NULL ORDER BY updated_at DESC, rowid DESC")
                 .map_err(|error| JournalError::Storage(error.to_string()))?;
             query.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .map_err(|error| JournalError::Storage(error.to_string()))?
@@ -429,17 +454,11 @@ impl SqliteRequestJournal {
             (input["external_ref"].as_str().and_then(alias).as_deref() == Some(source.as_str()))
                 .then(|| response["receipt"]["resource"]["id"].as_str().map(str::to_owned)).flatten()
         });
-        let Some(resource) = resource else { return Ok(None); };
-        let receipt = rows.into_iter().find_map(|(_, response)| {
+        let Some(resource) = resource else { return Ok(Vec::new()); };
+        Ok(rows.into_iter().filter_map(|(_, response)| {
             let receipt = &response["receipt"];
             (receipt["resource"]["id"].as_str() == Some(resource.as_str())).then(|| receipt.clone())
-        });
-        Ok(receipt.filter(|receipt| {
-            receipt["resource"]["state"] == "claimed"
-                && receipt["visible_owner"]["registration_id"].is_string()
-                && receipt["expires_at"].as_str().and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-                    .is_some_and(|at| at > Utc::now())
-        }))
+        }).collect())
     }
 
     pub fn has_due(&self, now_ms: i64) -> Result<bool, JournalError> {

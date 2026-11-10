@@ -27,6 +27,7 @@ use crate::types::{AgentRole, AgentStatus};
 mod outbox;
 mod workers;
 pub(crate) use workers::WorkerDirectory;
+pub(crate) use outbox::enqueue_feedback;
 mod runtime;
 pub mod transcript;
 pub use outbox::{OUTBOX_TTL_SECS, OpenPeerAsk, PeerSendError, open_asks, outbox_status_text, retry_peer_send};

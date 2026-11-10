@@ -55,11 +55,12 @@ impl CasService {
         &self,
         req: ArtifactRequest,
     ) -> Result<CallToolResult, McpError> {
-        let options = PostOptions {
+        let mut options = PostOptions {
             channel: req.channel.clone().unwrap_or_default(),
             reply_to: req.reply_to.clone(),
             title: req.title.clone(),
             initial_comment: req.initial_comment.clone(),
+            reply_claim: None,
         };
         if options.channel.trim().is_empty() {
             return Err(post_error(PostError::new(
@@ -76,6 +77,11 @@ impl CasService {
         let caller = self.proxy_caller()?;
 
         let cas_root = self.inner.cas_root.clone();
+        if let Some(reply_to) = options.reply_to.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+            options.reply_claim = crate::coordination::external_work::reply_post(
+                &cas_root, &caller.agent_id, reply_to,
+            ).map_err(|error| post_error(PostError::new(&error.code, error.message)))?;
+        }
         let id = req.id.clone().unwrap_or_default();
         let (view, bytes) = tokio::task::spawn_blocking({
             let cas_root = cas_root.clone();

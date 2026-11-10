@@ -6405,6 +6405,27 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[test]
+    fn cas_4d39_unlinked_personal_backlog_is_visible_without_mutation() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut cloud = crate::cloud::CloudConfig::default();
+        cloud.team_auto_promote = Some(false);
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let before = queue.list_all(10).unwrap();
+
+        assert!(held_personal_notice(&root).is_some());
+        assert!(matches!(cloud_queue_check(&root).status, CheckStatus::Warning));
+        let after = queue.list_all(10).unwrap();
+        assert_eq!(after.len(), before.len());
+        assert_eq!(after[0].team_id, before[0].team_id);
+        assert_eq!(after[0].payload, before[0].payload);
+        assert_eq!(after[0].retry_count, before[0].retry_count);
+    }
+
     /// cas-9b5d: prowl's petra-stella-cloud had no open session for 13 days,
     /// so nothing pulled. Doctor names the stale pull and its cause, and a
     /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).

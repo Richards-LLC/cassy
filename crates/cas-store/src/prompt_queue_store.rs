@@ -16421,23 +16421,67 @@ mod tests {
     }
 
     #[test]
-    fn cas_31c9_current_session_mirrors_expire_without_watchdog_wake() {
+    fn cas_31c9_recent_operator_mirrors_batch_while_old_replays_stay_quiet() {
         let (_temp, store) = create_test_store();
+        // A session registered before yesterday's copies is still live today.
         register_agent_at(&store, "current-supervisor", "supervisor", 3 * PROMPT_QUEUE_STALE_TTL_SECS);
-        for kind in ["status", "ask", "blocker"] {
-            let id = aged_transcript_mirror(&store, kind, kind);
-            store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        let operator_ask = store.enqueue_operator_message(
+            "commander:Operator@phone", "current-supervisor", "May we proceed?", Some("factory-a"),
+            None, None, false, None,
+            &OperatorStamp { operator: "Operator".into(), device_id: "phone".into(),
+                device_label: "phone".into(), scopes: vec!["message:send".into()], verified: true },
+        ).unwrap().id();
+        backdate(&store, operator_ask, 12 * 60);
+        store.mark_processed(operator_ask).unwrap();
+        let unrelated = store.enqueue_with_session("worker", "current-supervisor", "worker report", "factory-a").unwrap();
+        backdate(&store, unrelated, 12 * 60);
+        store.mark_processed(unrelated).unwrap();
+        let mirror = |key: &str, kind: &str, age: i64, reply_to: Option<i64>| {
+            let now = Utc::now();
+            let id = store.mirror_supervisor_turn(
+                "factory-a", &format!("commander-mirror:factory-a:{key}"), now, now,
+                &serde_json::json!({"message":key,"kind":kind,"reply_to":reply_to}).to_string(),
+                key, "*", kind,
+            ).unwrap().unwrap();
+            backdate(&store, id, age);
+            id
+        };
+        let old = mirror("day-old", "ask", PROMPT_QUEUE_STALE_TTL_SECS + 60, None);
+        let quiet = [
+            mirror("recent-status", "status", 6 * 60, None),
+            mirror("recent-receipt", "receipt", 6 * 60, None),
+            mirror("unlinked-answer", "answer", 6 * 60, None),
+            mirror("answer-to-worker", "answer", 6 * 60, Some(unrelated)),
+            mirror("still-delivering", "ask", 60, None),
+            mirror("outside-replay-window", "ask", 61 * 60, None),
+        ];
+        let delivered = mirror("already-delivered", "ask", 6 * 60, None);
+        store.mark_transport_delivered(delivered).unwrap();
+        let eligible = [
+            mirror("recent-ask", "ask", 6 * 60, None),
+            mirror("recent-blocker", "blocker", 6 * 60, None),
+            mirror("answer-to-operator", "answer", 6 * 60, Some(operator_ask)),
+        ];
+        store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        let notices = store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 20).unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].source, "delivery-watchdog");
+        assert_eq!(notices[0].priority, NotificationPriority::High);
+        let notified: Vec<i64> = store.conn.lock().unwrap().prepare(
+            "SELECT id FROM prompt_queue WHERE delivery_stalled_notified_at IS NOT NULL ORDER BY id",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(notified, eligible);
+        let old_report = store.message_delivery_report(old).unwrap().unwrap();
+        assert_eq!(old_report.stage, DeliveryStage::Suppressed);
+        assert_eq!(old_report.pending_reason, Some(PendingReason::SupersededStale));
+        for id in quiet.into_iter().chain(eligible) {
             let report = store.message_delivery_report(id).unwrap().unwrap();
-            assert_eq!(report.stage, DeliveryStage::Suppressed);
-            assert_eq!(report.pending_reason, Some(PendingReason::SupersededStale));
+            assert_eq!(report.stage, DeliveryStage::Enqueued);
             assert!(report.delivered_at.is_none());
-            let notices: i64 = store.conn.lock().unwrap().query_row(
-                "SELECT COUNT(*) FROM prompt_queue WHERE source = 'delivery-watchdog' AND target = 'current-supervisor'",
-                [], |row| row.get(0),
-            ).unwrap();
-            assert_eq!(notices, 0);
-            assert!(store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 10).unwrap().is_empty());
         }
+        store.expire_stale_pending(PROMPT_QUEUE_STALE_TTL_SECS).unwrap();
+        assert_eq!(store.peek_for_targets(&["current-supervisor"], Some("factory-a"), 20).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![notices[0].id]);
     }
 
     #[test]

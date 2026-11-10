@@ -7917,6 +7917,53 @@ mod team_cmd_tests {
     }
 
     #[test]
+    fn cas_cb74_retry_queue_ids_preserves_neighbors_and_diagnostics() {
+        use clap::Parser;
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in ["a:b:blocks", "a:c:blocks", "a:d:blocks"] {
+            queue.enqueue_for_team(crate::cloud::EntityType::TaskDependency, id,
+                crate::cloud::SyncOperation::Upsert, Some("{}"), "cb74-team").unwrap();
+        }
+        let rows = queue.list_all(10).unwrap();
+        let selected = rows.iter().find(|row| row.entity_id == "a:b:blocks").unwrap();
+        for row in &rows {
+            if row.entity_id == "a:d:blocks" {
+                queue.mark_failed(row.id, "Network error: timeout").unwrap();
+            } else {
+                queue.park_intentionally(row.id, "dependency_endpoint_foreign", 5).unwrap();
+            }
+        }
+        let cli = crate::cli::try_parse_from_with_wordmark(["cas", "--json", "cloud", "queue"]).unwrap();
+        let id = selected.id.to_string();
+        let wrong_reason = CloudQueueArgs::try_parse_from([
+            "queue", "--retry", "--ids", &id, "--retry-reason", "dependency_endpoint_deleted"
+        ]).unwrap();
+        execute_queue(&wrong_reason, &cli, &root).unwrap();
+        assert_eq!(queue.pending_for_team("cb74-team", 10, 5).unwrap().len(), 1);
+        let args = CloudQueueArgs::try_parse_from(["queue", "--retry", "--ids", &id]).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        execute_queue(&args, &cli, &root).unwrap();
+        let after = queue.list_all(10).unwrap();
+        assert_eq!(after.len(), 3);
+        for row in after {
+            match row.entity_id.as_str() {
+                "a:b:blocks" => {
+                    assert_eq!(row.retry_count, 0);
+                    assert_eq!(row.last_reason.as_deref(), Some("dependency_endpoint_foreign"));
+                    assert_eq!(row.last_error.as_deref(), Some("dependency_endpoint_foreign"));
+                    assert_eq!(row.payload, selected.payload);
+                }
+                "a:c:blocks" => assert_eq!(row.retry_count, 5),
+                "a:d:blocks" => assert_eq!(row.retry_count, 1),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
     fn cas_8095_queue_purge_flag_is_targeted_and_mutually_exclusive() {
         use clap::Parser;
         let args = CloudQueueArgs::try_parse_from(["queue", "--purge-team-owned"]).unwrap();

@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  worker-context-respawn:
+    title: Typed worker respawn requests queue one recycle and a quiet receipt while preserving recipe, task bindings and the handoff path
+    tasks: [cas-53ed]
+    invariants: [FACTORY-WORKER-RESPAWN]
+    journeys: [FACTORY-SUPERVISE]
   task-start-preserves-supervisor-notes:
     title: Starting a pre-assigned worker preserves supervisor notes appended after its task snapshot, including concurrent appends
     tasks: [cas-3045]
@@ -383,6 +388,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  FACTORY-WORKER-RESPAWN:
+    statement: Only the worker's same-session status can request its recycle, with the recorded recipe, retained task bindings, saved handoff and a quiet supervisor receipt; the per-worker cooldown survives dequeue and restart.
+    check: Run typed_worker_respawn_queues_one_recycle_cas_53ed through message_send; verify one recycle, recipe and task retention, handoff path, quiet mail, sibling-session refusal and duplicate suppression after dequeue.
+    bug: {task: cas-53ed}
   FACTORY-EXACT-TIMEOUT-RECOVERY:
     statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.
     check: Run close_ops::merge_state_gate_tests::epic_timeout_recovery_commands_execute_cas_bf13; execute every advertised recovery payload through the service and read the epic verdict and terminal state, including stale-dispatch and unshipped-receipt controls.
@@ -1034,8 +1043,8 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE

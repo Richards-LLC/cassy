@@ -51,7 +51,7 @@ Stay available after handoff. Never self-dispatch: every time you go idle, use a
   use `kind=receipt` or `wake=false`.
 - Never block the pane: run long commands in the background with a log.
   Signal only PIDs you started; never `pkill`, `killall` or name matching.
-- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md, send one `kind=status` with `need: respawn`.
+- Checkpoint, never compact. At 80% or at the harness compaction warning: commit, push, write HANDOFF.md in the task artifact directory, send one `coordination action=message target=supervisor kind=respawn` with the return contract. Cassy queues your recycle and a quiet supervisor receipt, at most once per worker every ten minutes; the replacement reads HANDOFF.md.
   See [Interrupted assignment or checkout](references/recovery.md#interrupted-assignment-or-checkout).
 
 ## Phase references

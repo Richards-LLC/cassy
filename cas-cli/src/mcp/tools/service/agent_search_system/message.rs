@@ -1063,6 +1063,60 @@ impl CasService {
             .map_err(|e| internal("Failed to schedule the ask deadline", e.to_string()))
     }
 
+    /// A worker can request only its own recycle, after the message handler
+    /// authenticates both same-session endpoints. Keep the cooldown outside
+    /// the registration so it survives replacement and daemon restarts.
+    async fn request_worker_respawn(
+        &self,
+        worker: &cas_types::Agent,
+        session: &str,
+    ) -> Result<bool, McpError> {
+        use std::io::{Read, Seek, Write};
+        use sha2::Digest;
+
+        let failure = |error: std::io::Error| {
+            Self::error(ErrorCode::INTERNAL_ERROR, format!("Worker respawn admission failed: {error}"))
+        };
+        let directory = self.inner.cas_root.join("worker-respawns");
+        std::fs::create_dir_all(&directory).map_err(failure)?;
+        let key = sha2::Sha256::digest(format!("{session}\0{}", worker.name).as_bytes());
+        let mut stamp = std::fs::OpenOptions::new().create(true).truncate(false)
+            .read(true).write(true).open(directory.join(format!("{key:x}"))).map_err(failure)?;
+        match fs2::FileExt::try_lock_exclusive(&stamp) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(failure(error)),
+        }
+        let mut previous = String::new();
+        stamp.read_to_string(&mut previous).map_err(failure)?;
+        let now = chrono::Utc::now().timestamp();
+        if !previous.is_empty() {
+            let last: i64 = previous.parse().map_err(|error| {
+                Self::error(ErrorCode::INTERNAL_ERROR, format!("Invalid worker respawn stamp: {error}"))
+            })?;
+            if now.saturating_sub(last) < 600 {
+                return Ok(false);
+            }
+        }
+        // This is the ordinary recycle safety/recipe admission, scoped to
+        // the authenticated worker. No caller-controlled target is forwarded.
+        let context = crate::ops::fleet::FleetContext {
+            factory_session: Some(session.to_string()),
+            owned_workers: Some(std::collections::HashSet::from([worker.name.clone()])),
+            supervisor_authorized: true,
+            requester_from_env: false,
+        };
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "recycle_worker", "target": worker.name,
+        })).map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        self.factory_recycle_worker_in(&context, request).await?;
+        stamp.rewind().map_err(failure)?;
+        stamp.set_len(0).map_err(failure)?;
+        stamp.write_all(now.to_string().as_bytes()).map_err(failure)?;
+        stamp.sync_all().map_err(failure)?;
+        Ok(true)
+    }
+
     pub(in crate::mcp::tools::service) async fn message_send(
         &self,
         req: AgentRequest,
@@ -1070,6 +1124,12 @@ impl CasService {
         use crate::store::open_prompt_queue_store;
 
         let mut req = req;
+        if req.kind.as_deref() == Some("respawn") {
+            // The lifecycle action is automatic; its supervisor copy is
+            // always a quiet receipt, including duplicate requests.
+            req.wake = Some(false);
+            req.urgent = Some(false);
+        }
         if req.merge_request.unwrap_or(false)
             && let Some(hold) = cas_store::project_hold::notice(&self.inner.cas_root)
         {
@@ -1202,6 +1262,10 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        if req.kind.as_deref() == Some("respawn") && role != "worker" {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST,
+                "kind=respawn requires a registered worker messaging its same-session supervisor"));
+        }
         // Persist this message's classification before folding adds labels
         // and other bodies that no longer look like a pure acknowledgement.
         let quiet_message = req.wake == Some(false)
@@ -2146,14 +2210,14 @@ impl CasService {
         // before CAS attaches the marker consumed by the wake gate.
         let worker_action_kind = if role == "worker" {
             match req.kind.as_deref() {
-                Some("status" | "ready") => {
+                Some("status" | "ready" | "respawn") => {
                     let session = factory_session
                         .as_deref()
                         .filter(|session| !session.trim().is_empty())
                         .ok_or_else(|| {
                             Self::error(
                                 ErrorCode::INVALID_REQUEST,
-                                "kind=status|ready requires a registered worker and its same-session supervisor",
+                                "kind=status|ready|respawn requires a registered worker and its same-session supervisor",
                             )
                         })?;
                     let registered_worker = agent_from_store.as_ref().is_some_and(|agent| {
@@ -2175,27 +2239,35 @@ impl CasService {
                     if !registered_worker || !same_session_supervisor {
                         return Err(Self::error(
                             ErrorCode::INVALID_REQUEST,
-                            "kind=status|ready is only for a registered worker messaging its same-session supervisor",
+                            "kind=status|ready|respawn is only for a registered worker messaging its same-session supervisor",
                         ));
                     }
                     if req.merge_request.unwrap_or(false) || req.blocker.unwrap_or(false) {
                         return Err(Self::error(
                             ErrorCode::INVALID_PARAMS,
-                            "kind=status|ready cannot be combined with merge_request=true or blocker=true",
+                            "kind=status|ready|respawn cannot be combined with merge_request=true or blocker=true",
                         ));
                     }
-                    Some(if req.kind.as_deref() == Some("status") {
-                        crate::prompt_revalidation::WorkerActionKind::Status
-                    } else {
-                        crate::prompt_revalidation::WorkerActionKind::Ready
-                    })
+                    match req.kind.as_deref() {
+                        Some("status") => Some(crate::prompt_revalidation::WorkerActionKind::Status),
+                        Some("ready") => Some(crate::prompt_revalidation::WorkerActionKind::Ready),
+                        _ => {
+                            let queued = self.request_worker_respawn(
+                                agent_from_store.as_ref().expect("registered worker checked above"),
+                                session,
+                            ).await?;
+                            let outcome = if queued { "queued" } else { "held by the ten-minute cooldown or an in-flight request" };
+                            message = format!("Context respawn for {display_name}: {outcome}. The daemon uses the recorded recipe and preserves task bindings.\n\n{message}");
+                            None
+                        },
+                    }
                 }
                 Some("receipt" | "answer" | "ask") => None,
                 Some(other) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "worker messages support status, ready, receipt, answer or ask; status/ready require the same-session supervisor, not '{other}'"
+                            "worker messages support status, ready, respawn, receipt, answer or ask; status/ready/respawn require the same-session supervisor, not '{other}'"
                         ),
                     ));
                 }
@@ -6789,6 +6861,10 @@ mod cas_89e1_post_merge_message_type_tests {
         task.status = TaskStatus::InProgress;
         task.assignee = Some(worker.name.clone());
         tasks.add(&task).unwrap();
+        let artifacts = crate::config::resolved_factory_artifacts_root(None);
+        let handoff = crate::config::factory_task_artifact_dirs(&root, &artifacts, &task.id)[0].join("HANDOFF.md");
+        std::fs::create_dir_all(handoff.parent().unwrap()).unwrap();
+        std::fs::write(&handoff, "next command: finish the focused test\n").unwrap();
         core.set_agent_id_for_testing(worker.id.clone());
         let service = gh_1171_service(&core);
         let mut request = message_request_to("supervisor");
@@ -6798,6 +6874,9 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut foreign = request.clone();
         foreign.target = Some(sibling.name.clone());
         assert!(service.message_send(foreign).await.is_err());
+        core.set_agent_id_for_testing(owner.id.clone());
+        assert!(service.message_send(request.clone()).await.is_err());
+        core.set_agent_id_for_testing(worker.id.clone());
         service.message_send(request.clone()).await.expect("typed respawn accepted");
         let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
         let queued = spawns.peek(10).unwrap();
@@ -6817,6 +6896,11 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(spawns.peek(10).unwrap().is_empty());
         assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+        let brief = crate::ui::factory::app::render_and_ops::epic_workers::recycle_resume_brief(
+            &root, &worker.name, worker.factory_session.as_deref().unwrap(),
+        ).unwrap();
+        // The replacement consumes this exact checkpoint path from its resume brief.
+        assert!(brief.contains(handoff.to_str().unwrap()));
         let messages = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert!(!messages.is_empty());
         assert!(messages.iter().all(|row| row.target == owner.name

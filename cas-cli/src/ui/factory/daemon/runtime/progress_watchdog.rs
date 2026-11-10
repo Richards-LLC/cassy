@@ -547,6 +547,34 @@ mod tests {
         assert!(tasks.get_execution_state(&epic.id).unwrap()
             .is_none_or(|state| state.get("close_refusal").is_none()));
         assert_eq!(queue.peek_all(50).unwrap().iter().filter(|row| row.target == "operator").count(), 1);
+
+        // Another real close gate used to be omitted by the identity-only
+        // recorder. Its untyped response must be held too, while a specific
+        // identity still wins when supplied by the gate.
+        epic.status = TaskStatus::Closed;
+        tasks.update(&epic).unwrap();
+        let mut post_release = Task::new("cas-098dd-post-release".into(), "Post-release observation pending".into());
+        post_release.task_type = cas_types::TaskType::Epic;
+        post_release.status = TaskStatus::Blocked;
+        post_release.assignee = epic.assignee.clone();
+        tasks.add(&post_release).unwrap();
+        std::fs::write(root.join("config.toml"), "[qa.post_release]\ncommand = 'probe'\n").unwrap();
+        let refused = core.cas_task_close(rmcp::handler::server::wrapper::Parameters(
+            serde_json::from_value(serde_json::json!({"id":post_release.id,"reason":"Delivered work is ready"})).unwrap()
+        )).await.unwrap();
+        assert_eq!(refused.is_error, Some(true));
+        for (metadata, code) in [(None, "close_gate"), (refused.structured_content.clone(), "post_release_gate")] {
+            let mut reply = refused.clone();
+            reply.structured_content = metadata;
+            crate::mcp::tools::core::task::close_refusal::record(&root, &post_release.id, &Ok(reply)).unwrap();
+            for minutes in [300, 345, 390, 435] {
+                super::sweep(&root, SESSION, now + chrono::Duration::minutes(minutes));
+            }
+            let rows = queue.peek_all(50).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.target == "operator" && row.prompt.contains(&post_release.id)).count(), 0, "{rows:?}");
+            assert_eq!(tasks.get_execution_state(&post_release.id).unwrap().unwrap()["close_refusal"]["code"], code);
+            assert_eq!(rows.iter().filter(|row| row.prompt.contains(code) && row.prompt.contains(&post_release.id)).count(), 1, "{rows:?}");
+        }
     }
 
     /// cas-1f65: the Nov 9 overnight. A train frozen for release (lift is

@@ -14822,7 +14822,9 @@ fn without_promoted_changelog_fragments(
                 .map(str::trim_end)
                 .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                 .collect();
-            let Some(release) = git_text(&["log", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
+            // Default path simplification hides the release when the train is
+            // merged into a target that never held the fragment (cas-2fe8).
+            let Some(release) = git_text(&["log", "--full-history", "-1", "--format=%H", "--diff-filter=D", &target_ref, "--", path])
                 .map(|sha| sha.trim().to_string())
                 .filter(|sha| !sha.is_empty())
             else {
@@ -25851,6 +25853,13 @@ fn delivery_content_presence_on_target_for_paths(
     let DeliveryContentPresence::Dropped { paths } = presence else {
         return presence;
     };
+    // CODEMAP is generated for the integrated tree; its lane-specific text is
+    // never delivery content to preserve verbatim (cas-2fe8).
+    let remaining = paths
+        .iter()
+        .filter(|path| path.as_str() != ".claude/CODEMAP.md")
+        .cloned()
+        .collect();
     // A release cut consumes per-task fragments after promoting their entries
     // into CHANGELOG.md. Apply that content-equivalence rule at the shared
     // target seam so close, merge and epic callers cannot disagree.
@@ -25858,7 +25867,7 @@ fn delivery_content_presence_on_target_for_paths(
         repo_path,
         delivery_commit,
         target_ref,
-        paths.clone(),
+        remaining,
         owners,
     );
     if let Some(note) = note {
@@ -36667,10 +36676,12 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                 }
             }
             let release = head_sha(&p);
-            write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
-            git(&p, &["commit", "-q", "-am", "regenerate codemap"]);
             git(&p, &["checkout", "-q", "main"]);
-            git(&p, &["merge", "--no-ff", "-q", "epic/release", "-m", "merge released train"]);
+            git(&p, &["merge", "--no-ff", "--no-commit", "-q", "epic/release"]);
+            // Regeneration in the integrating resolution replaces the lane map.
+            write(".claude/CODEMAP.md", "# Map\n- src/: integrated modules\n");
+            git(&p, &["add", "-A"]);
+            git(&p, &["commit", "-q", "-m", "merge released train; regenerate codemap"]);
             let mut task = worker_task("worker");
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
@@ -36735,7 +36746,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         let (presence, note) = epic_anchor_content_presence(&task, &[task.clone(), sibling], dir.path(), &anchor, "main");
         assert!(
             matches!(presence, DeliveryContentPresence::Present { .. })
-                && note.as_deref().is_some_and(|note| note.contains("cas-other") && note.contains(&fragment)),
+                && note.as_deref().is_some_and(|note| note.contains("cas-other") && note.contains(&fragment) && note.contains(&release[..12])),
             "an epic close accepts its child's promoted fragment: {presence:?} {note:?}"
         );
     }

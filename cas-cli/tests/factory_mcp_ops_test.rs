@@ -15105,9 +15105,10 @@ async fn cas_3e3a_public_recycle_and_clear_keep_clean_held_work_without_force() 
         let path = init_pushed_worker_repo(&env, "checkpoint-worker");
         let worker = register_codex_worker_at(&env, "checkpoint-worker", "session-3e3a", &path);
         let config = cas::config::Config::load(&env.cas_root).unwrap();
-        let handoff = cas::config::factory_artifact_paths(
-            &env.cas_root, config.factory().artifacts_root.as_deref(),
-        ).task_dirs("cas-3111")[0].join("HANDOFF.md");
+        let artifacts_base = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let handoff = cas::config::factory_task_artifact_dirs(
+            &env.cas_root, &artifacts_base, "cas-3111",
+        )[0].join("HANDOFF.md");
         let mut before = Vec::new();
         for (id, status) in [
             ("cas-3111", TaskStatus::InProgress),

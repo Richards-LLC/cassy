@@ -674,7 +674,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
         const page = conversationHistoryPage(threadKey);
         return !page.loaded && !page.unavailable && !page.failure;
       },
-      historyError: () => conversationHistoryPage(threadKey).failure?.detail,
+      historyError: () => conversationHistoryPage(threadKey).failure,
       retryHistory: () => {
         const page = conversationHistoryPage(threadKey);
         if (page.failure) connections.get(threadMachineId)?.requestConversationHistory(threadSession, page.failure.before);

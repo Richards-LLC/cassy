@@ -214,7 +214,7 @@ export interface ConversationViewOptions {
    * line rather than claiming nothing is waiting (cas-04ee).
    */
   loadingHistory?: () => boolean;
-  historyError?: () => string | undefined;
+  historyError?: () => { detail: string; before?: number } | undefined;
   retryHistory?: () => void;
   /**
    * When this conversation began to open (cas-813a). The loading line keeps
@@ -836,8 +836,13 @@ export class ConversationView {
     this.renderPinned(document);
     this.renderUnsent();
     const historyError = this.options.historyError?.();
+    const revealHistoryFailure = this.historyFailure.hidden && !!historyError;
     this.historyFailure.hidden = !historyError;
-    this.historyFailureDetail.textContent = historyError ?? "";
+    this.historyFailureDetail.textContent = historyError?.detail ?? "";
+    // An older-page failure belongs beside the paging control the reader
+    // used, not beyond the cached tail of a long conversation.
+    const failureAnchor = historyError?.before === undefined ? this.empty : this.loadEarlier;
+    if (failureAnchor.nextElementSibling !== this.historyFailure) failureAnchor.after(this.historyFailure);
     this.renderEmpty(model.length === 0 && !historyError, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
     this.endReceipt.hidden = !ended;
@@ -869,6 +874,7 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+    if (revealHistoryFailure) this.historyFailure.scrollIntoView?.({ block: "nearest" });
   }
 
   /** Explicit paging through rows already held in memory. */

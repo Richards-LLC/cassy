@@ -22183,9 +22183,12 @@ mod gh_1153_idle_pty_delivery_tests {
                     daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
                     assert!(!daemon.normal_delivery_probes.contains_key(&row), "{target} {receipt}: drained mail still has a delivery wake probe");
                 }
-                // A new notification, even with the same body and pane, owns
-                // its own undelivered wake; retiring the old one cannot mute it.
+                // A new directed request owns its own undelivered wake;
+                // retiring the old notification cannot mute it. Repeated
+                // worker reports with identical bodies are intentionally deduped.
+                probe.prompt.push_str(" New directed request.");
                 let next = queue.enqueue_with_session(source, target, &probe.prompt, "provision-test").unwrap();
+                assert_ne!(next, row);
                 queue.mark_transport_delivered(next).unwrap();
                 probe.delivered_at_utc = chrono::Utc::now();
                 probe.next_check_at = Some(Instant::now());

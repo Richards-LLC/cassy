@@ -12643,6 +12643,43 @@ mod worker_commit_guard_tests {
         );
     }
 
+    #[test]
+    fn nested_shell_commit_scope_cas_4923e() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/nested-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "nested-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        let mut mismatches = Vec::new();
+        for (command, denied) in [
+            (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
+            (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
+            (format!("sh -c 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("zsh -lc 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("eval 'cd \"{repo_path}\" && git commit -m probe'"), true),
+            (format!("sh -c 'bash -c \"cd {repo_path} && git commit -m probe\"'"), true),
+            (format!("eval 'cd \"{repo_path}\"'; git commit -m probe"), true),
+            (format!("cd '{repo_path}'; bash -c 'git commit -m probe'"), true),
+            ("bash -c 'git commit -m work'".to_string(), false),
+            (format!("bash -c 'cd \"{repo_path}\"'; git commit -m work"), false),
+            (format!("cd '{repo_path}'; sh -c 'cd \"{linked_path}\" && git commit -m work'"), false),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            if (value["hookSpecificOutput"]["permissionDecision"] == "deny") != denied {
+                mismatches.push(format!("{command}: expected denied={denied}: {value}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────
 
     fn add_linked_worktree(repo: &std::path::Path, worktree: &std::path::Path, branch: &str) {

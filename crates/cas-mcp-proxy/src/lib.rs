@@ -3369,11 +3369,16 @@ mod tests {
     /// `echo` answers, `drop` exits the process mid-call (a transport error)
     /// and `hang` never answers. Every tool call is appended to `calls.log`.
     fn fake_upstream(dir: &Path) -> ServerConfig {
+        fake_upstream_mode(dir, false)
+    }
+
+    fn fake_upstream_mode(dir: &Path, violet: bool) -> ServerConfig {
         let script = dir.join("fake_mcp.py");
         std::fs::write(
             &script,
             r#"import json, os, sys, time
 log = sys.argv[1]
+violet = len(sys.argv) > 2 and sys.argv[2] == "violet"
 with open(os.path.join(os.path.dirname(log), "starts.log"), "a") as handle:
     handle.write("start\n")
 def send(message):
@@ -3392,13 +3397,41 @@ for line in sys.stdin:
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "fake", "version": "1"}}})
     elif method == "tools/list":
-        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}}
-                 for name in ("echo", "drop", "hang")]
+        names = ("violet_read", "violet_post", "violet_reconcile_reply") if violet else ("echo", "drop", "hang")
+        tools = [{"name": name, "description": name, "inputSchema": {"type": "object"}} for name in names]
         send({"jsonrpc": "2.0", "id": ident, "result": {"tools": tools}})
     elif method == "tools/call":
         name = message["params"]["name"]
         with open(log, "a") as handle:
             handle.write(name + "\n")
+        args = message["params"].get("arguments", {})
+        if violet:
+            request_id = args.get("request_id")
+            with open(log + ".requests", "a") as handle:
+                handle.write(json.dumps({"name": name, "request_id": request_id}) + "\n")
+            state_path = log + ".state"
+            if name == "violet_read" and args.get("channel") == "close":
+                os._exit(0)
+            if name == "violet_post":
+                mode = args.get("text", "posted")
+                state = mode if mode in ("outcome_unknown", "not_posted") else "posted"
+                with open(state_path, "w") as handle:
+                    json.dump({"request_id": request_id, "state": state}, handle)
+                if mode == "transport":
+                    os._exit(0)
+                body = {"ok": False, "request_id": request_id, "error": {"code": "outcome_unknown", "retryable": False},
+                        "reconcile": {"tool": "violet_reconcile_reply", "arguments": {"request_id": request_id}}}
+            elif name == "violet_reconcile_reply":
+                with open(state_path) as handle:
+                    state = json.load(handle)
+                body = {"ok": state["state"] != "outcome_unknown", **state}
+                if state["state"] == "posted":
+                    body["receipt"] = {"ok": True, **state, "message": {"message_id": "1710000000.000001"}}
+            else:
+                body = {"ok": True}
+            result = {"content": [{"type": "text", "text": json.dumps(body)}], "isError": not body["ok"]}
+            send({"jsonrpc": "2.0", "id": ident, "result": result})
+            continue
         if name == "drop":
             os._exit(0)
         if name == "hang":
@@ -3417,6 +3450,7 @@ for line in sys.stdin:
                 "-I".to_string(),
                 script.display().to_string(),
                 dir.join("calls.log").display().to_string(),
+                if violet { "violet".into() } else { "fake".into() },
             ],
             env: HashMap::new(),
         }
@@ -3435,6 +3469,56 @@ for line in sys.stdin:
 
     async fn fake_health(engine: &ProxyEngine) -> UpstreamHealth {
         engine.health.read().await.get("fake").cloned().expect("fake health")
+    }
+
+    #[tokio::test]
+    async fn violet_transport_close_recovers_on_the_next_call_in_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ProxyEngine::from_configs(HashMap::from([(
+            "violet".into(), fake_upstream_mode(dir.path(), true),
+        )])).await.unwrap();
+        let caller = registered_worker_caller();
+        let dropped = engine.call_tool(&caller, "violet", "violet_read",
+            Some(serde_json::json!({"channel": "close"}).as_object().unwrap().clone())).await;
+        assert!(dropped.is_err());
+        let recovered = engine.call_tool(&caller, "violet", "violet_read", None).await.unwrap();
+        let body: Value = serde_json::from_str(recovered["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(std::fs::read_to_string(dir.path().join("starts.log")).unwrap().lines().count(), 2);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn violet_uncertain_message_is_reconciled_by_request_id_without_reposting() {
+        for (mode, expected) in [("posted", "posted"), ("transport", "posted"),
+            ("outcome_unknown", "outcome_unknown"), ("not_posted", "not_posted")] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = ProxyEngine::from_configs(HashMap::from([(
+                "violet".into(), fake_upstream_mode(dir.path(), true),
+            )])).await.unwrap();
+            let caller = registered_worker_caller();
+            let mut args = serde_json::json!({"channel": "C123", "kind": "message", "text": mode});
+            if mode == "transport" {
+                args["request_id"] = Value::String("00000091-2222-4222-8222-000000000091".into());
+            }
+            let result = engine.call_tool(&caller, "violet", "violet_post", args.as_object().cloned()).await.unwrap();
+            let body: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(body["state"], expected, "{mode}: {body}");
+            let requests = std::fs::read_to_string(dir.path().join("calls.log.requests")).unwrap();
+            let calls: Vec<Value> = requests.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(calls.len(), 2, "{mode}: {calls:?}");
+            assert_eq!(calls[0]["name"], "violet_post");
+            assert_eq!(calls[1]["name"], "violet_reconcile_reply");
+            let request_id = calls[0]["request_id"].as_str().unwrap();
+            assert_eq!(request_id.len(), 36);
+            assert_eq!(calls[1]["request_id"], request_id);
+            assert_eq!(body["request_id"], request_id);
+            if mode == "transport" {
+                assert_eq!(request_id, args["request_id"].as_str().unwrap());
+            }
+            assert_eq!(body["ok"], expected == "posted");
+            engine.shutdown().await;
+        }
     }
 
     /// cas-b3b4a: with a cached catalog a serve spawns no upstream until one

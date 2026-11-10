@@ -1602,7 +1602,8 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
             "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned}"),
-            "task_type":"task", "risk":"none", "epic":"cas-release-gap", "assignee":worker,
+            "task_type":"task", "risk":"none", "confirm_warning":true,
+            "epic":"cas-release-gap", "assignee":worker,
             "target_branch":pinned.then_some("main"),
         })).unwrap();
         let created = get_text(&env.service.task(Parameters(request)).await.unwrap());

@@ -1225,7 +1225,7 @@ pub(crate) fn offer_batch_receipts(cas_root: &Path) -> Result<usize> {
                 if notice.prompt_delivered_at.is_some() { continue 'offers; }
                 break; // Repair a committed outbox row's missing prompt with the same key.
             };
-            if !queue.message_status(row.id)?.is_some_and(|status| {
+            if !queue.message_delivery_report(row.id)?.is_some_and(|status| {
                 status.pending_reason == Some(cas_store::PendingReason::SupersededStale)
             }) {
                 continue 'offers;

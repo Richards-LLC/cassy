@@ -1556,6 +1556,7 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     let worker = "release-gap-worker";
     let worker_path = init_sync_repo(&env, worker);
     let repo = env.cas_root.parent().unwrap();
+    let epic_tip = git_stdout(repo, &["rev-parse", "epic/requested"]);
     add_epic_with_id(&env, "cas-release-gap", TaskStatus::Open, "epic/requested");
     env.register_worker_with_metadata(worker, HashMap::from([
         ("clone_path".into(), worker_path.display().to_string()),
@@ -1576,27 +1577,38 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     published.release_version = Some("v1.2.3".into());
     cas_store::record_quality_event(&env.cas_root, &published).unwrap();
     let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
-    for behind in [true, false] {
-        if !behind {
-            git_stdout(repo, &["update-ref", "refs/heads/epic/requested", "main"]);
-        }
+    for (behind, pinned) in [(true, false), (false, false), (true, true)] {
+        git_stdout(repo, &["update-ref", "refs/heads/epic/requested", if behind { &epic_tip } else { "main" }]);
+        let pin = |id: &str| {
+            if pinned {
+                let mut task = env.task_store().get(id).unwrap();
+                task.deliverables.work_target = Some(WorkTarget {
+                    repo_selector: "project:cas-a3c3-fixture".into(), target_branch: "main".into(),
+                });
+                task.deliverables.work_target_pinned = true;
+                env.task_store().update(&task).unwrap();
+            }
+        };
         let task_id = child_task_of_epic(&env, "cas-release-gap", "Staff published base");
+        pin(&task_id);
         let assignment = assign(&env, &task_id, worker).await.unwrap();
         assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
         let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
+        pin(&spawn_task);
         let mut req = factory_req("spawn_workers");
         req.cli = Some("grok".into());
         req.isolate = Some(true);
         req.task_id = Some(spawn_task);
         let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
-            "action":"create", "title":format!("Create staffed work behind={behind}"),
-            "task_type":"task", "epic":"cas-release-gap", "assignee":worker,
+            "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned}"),
+            "task_type":"task", "risk":"none", "epic":"cas-release-gap", "assignee":worker,
+            "target_branch":pinned.then_some("main"),
         })).unwrap();
         let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
         for response in [assignment, spawn, created] {
-            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind, "{response}");
-            if behind {
+            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "{response}");
+            if behind && !pinned {
                 assert!(response.contains("tag=v1.2.3"), "{response}");
                 assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
             }

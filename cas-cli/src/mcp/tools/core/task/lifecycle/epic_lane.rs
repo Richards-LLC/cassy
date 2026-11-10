@@ -410,6 +410,13 @@ pub(crate) fn published_release_note(
         };
         let branch = super::super::repo_context::effective_epic_branch(&epic)?;
         let repo = crate::train_guardrails::train_repo_root(root, &epic).ok()?;
+        if subject.task_type != cas_types::TaskType::Epic
+            && let Some(target) = super::super::repo_context::effective_task_work_target(subject, Some(&epic))
+            && (target.target_branch.strip_prefix("origin/").unwrap_or(&target.target_branch) != branch
+                || !super::super::repo_context::repo_answers_to(&repo, &target.repo_selector))
+        {
+            return None;
+        }
         let release_root = crate::store::find_cas_root_ignoring_env(&repo).ok()?;
         let version = cas_store::quality_release_events(&release_root).ok()?
             .into_iter().find_map(|event| event.release_version)?;

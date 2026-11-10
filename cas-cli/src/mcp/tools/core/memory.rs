@@ -1415,6 +1415,74 @@ impl CasCore {
 }
 
 #[cfg(test)]
+mod handoff_update_tests {
+    use super::*;
+    use crate::test_support::TestEnvGuard;
+    use cas_types::AgentRole;
+
+    #[tokio::test]
+    async fn update_preserves_handoff_lineage_and_stamps_conversion_cas_6733() {
+        let mut env = TestEnvGuard::temp_home();
+        for role in [AgentRole::Supervisor, AgentRole::Worker, AgentRole::Director, AgentRole::Standard] {
+            env.set("CAS_AGENT_ROLE", &role.to_string());
+            let temp = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            let core = CasCore::with_daemon(root, None, None);
+            let writer = format!("writer-{role}");
+            core.register_agent(writer.clone(), "writer".into(), None).unwrap();
+            let agents = core.open_agent_store().unwrap();
+            let mut author = agents.get(&writer).unwrap();
+            author.machine_id = Some("writer-host".into());
+            agents.update(&author).unwrap();
+            let owner = if role == AgentRole::Supervisor { "supervisor:writer".into() } else { format!("session:{writer}") };
+            let store = core.open_store().unwrap();
+            for (name, initial, updates) in [
+                ("foreign", "handoff,role:supervisor,handoff-machine:peer-host,handoff-owner:peer-owner", vec![
+                    (Some("handoff,topic,handoff-machine:writer-host,handoff-owner:forged"), Some("peer-host"), Some("peer-owner")),
+                    (None, Some("peer-host"), Some("peer-owner")),
+                    (Some("topic"), Some("peer-host"), Some("peer-owner")),
+                    (Some("handoff,topic"), Some("peer-host"), Some("peer-owner")),
+                ]),
+                ("ordinary", "topic", vec![
+                    (Some("topic,handoff-machine:forged,handoff-owner:forged"), None, None),
+                    (Some("handoff,topic,handoff-machine:forged,handoff-owner:forged"), Some("writer-host"), Some(owner.as_str())),
+                ]),
+                ("legacy", "handoff,role:supervisor", vec![
+                    (Some("handoff,topic,handoff-machine:forged,handoff-owner:forged"), None, None),
+                ]),
+            ] {
+                let id = format!("lineage-{role}-{name}");
+                store.add(&Entry {
+                    id: id.clone(), content: "before".into(),
+                    tags: initial.split(',').map(str::to_string).collect(),
+                    ..Default::default()
+                }).unwrap();
+                for (step, (tags, machine, owner)) in updates.into_iter().enumerate() {
+                    let content = format!("payload-{name}-{step}");
+                    core.cas_update(Parameters(EntryUpdateRequest {
+                        id: id.clone(), title: None, content: Some(content.clone()),
+                        tags: tags.map(str::to_string), importance: None, valid_until: None,
+                    })).await.unwrap();
+                    let entry = store.get(&id).unwrap();
+                    assert_eq!(entry.content, content);
+                    assert!(entry.tags.iter().any(|tag| tag == "topic"));
+                    for (prefix, expected) in [("handoff-machine:", machine), ("handoff-owner:", owner)] {
+                        let stamps: Vec<_> = entry.tags.iter().filter_map(|tag| tag.strip_prefix(prefix)).collect();
+                        assert_eq!(stamps, expected.into_iter().collect::<Vec<_>>(), "{role}/{name}/{step}");
+                    }
+                    if machine == Some("peer-host") {
+                        assert!(handoff::current_handoff(std::slice::from_ref(&entry), "supervisor",
+                            Some(&handoff::HandoffLineage::for_agent(&author))).is_none());
+                    } else if machine == Some("writer-host") {
+                        assert_eq!(handoff::handoff_role(&entry), role.to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod expiry_tests {
     use super::*;
 

@@ -1124,6 +1124,7 @@ impl CasService {
         use crate::store::open_prompt_queue_store;
 
         let mut req = req;
+        let mut respawn_queued = None;
         if req.kind.as_deref() == Some("respawn") {
             // The lifecycle action is automatic; its supervisor copy is
             // always a quiet receipt, including duplicate requests.
@@ -2256,6 +2257,7 @@ impl CasService {
                                 agent_from_store.as_ref().expect("registered worker checked above"),
                                 session,
                             ).await?;
+                            respawn_queued = Some(queued);
                             let outcome = if queued { "queued" } else { "held by the ten-minute cooldown or an in-flight request" };
                             message = format!("Context respawn for {display_name}: {outcome}. The daemon uses the recorded recipe and preserves task bindings.\n\n{message}");
                             None
@@ -3732,7 +3734,18 @@ impl CasService {
             ],
         );
 
-        Ok(Self::success(receipt))
+        let mut result = Self::success(receipt);
+        if let Some(queued) = respawn_queued {
+            result.structured_content = Some(serde_json::json!({
+                "respawn_queued": queued, "cooldown_seconds": 600, "notification_id": message_id,
+            }));
+            result.content.push(rmcp::model::Content::text(if queued {
+                "Context respawn queued with the recorded recipe and task bindings."
+            } else {
+                "No additional recycle queued: the ten-minute cooldown or another request is active."
+            }));
+        }
+        Ok(result)
     }
 
     pub(in crate::mcp::tools::service) async fn inbox_poll(
@@ -6869,6 +6882,8 @@ mod cas_89e1_post_merge_message_type_tests {
         let service = gh_1171_service(&core);
         let mut request = message_request_to("supervisor");
         request.kind = Some("respawn".into());
+        request.urgent = Some(true);
+        request.wake = Some(true);
         request.task_id = Some(task.id.clone());
         request.message = Some("status: in_progress\nneed: respawn from HANDOFF.md".into());
         let mut foreign = request.clone();
@@ -6877,7 +6892,8 @@ mod cas_89e1_post_merge_message_type_tests {
         core.set_agent_id_for_testing(owner.id.clone());
         assert!(service.message_send(request.clone()).await.is_err());
         core.set_agent_id_for_testing(worker.id.clone());
-        service.message_send(request.clone()).await.expect("typed respawn accepted");
+        let response = service.message_send(request.clone()).await.expect("typed respawn accepted");
+        assert_eq!(response.structured_content.unwrap()["respawn_queued"], true);
         let spawns = crate::store::open_spawn_queue_store(&root).unwrap();
         let queued = spawns.peek(10).unwrap();
         assert_eq!(queued.len(), 1);
@@ -6892,13 +6908,15 @@ mod cas_89e1_post_merge_message_type_tests {
         // Consume the lifecycle row: rate limiting must survive dequeue and a new service.
         spawns.mark_processed(queued[0].id).unwrap();
         let restarted = gh_1171_service(&core);
-        restarted.message_send(request).await.unwrap();
+        let response = restarted.message_send(request).await.unwrap();
+        assert_eq!(response.structured_content.unwrap()["respawn_queued"], false);
         assert!(spawns.peek(10).unwrap().is_empty());
         assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
         let messages = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert!(!messages.is_empty());
         assert!(messages.iter().all(|row| row.target == owner.name
+            && !row.urgent
             && crate::supervisor_message_wakes::quiet(&row.prompt)
             && crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt).is_none()));
         let resume = crate::ui::factory::enqueue_context_resume_brief(

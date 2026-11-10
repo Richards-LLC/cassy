@@ -4630,8 +4630,9 @@ function render(captureDraft = true, stoppedSelection = false): void {
   const attentionFocus = preservedAttention?.contains(document.activeElement) ? document.activeElement as HTMLElement : undefined;
   preservedAttention?.remove();
   const currentGrid = document.querySelector<HTMLElement>("#conversation-stage");
-  const keepHeaderMenu = Boolean(selectedThreadKey && currentGrid?.dataset.sessionKey === selectedThreadKey
-    && document.querySelector<HTMLElement>("#conversation-more-menu")?.matches(":popover-open"));
+  const priorHeaderMenu = document.querySelector<HTMLElement>("#conversation-more-menu");
+  const keepHeaderMenu = Boolean(typeof priorHeaderMenu?.showPopover === "function" && selectedThreadKey
+    && currentGrid?.dataset.sessionKey === selectedThreadKey && priorHeaderMenu.matches(":popover-open"));
   const machineDialog = document.querySelector<HTMLDialogElement>("#paired-machines-dialog");
   const pairedDialogWasOpen = machineDialog?.open === true;
   if (pairedDialogWasOpen) machineDialog!.remove();

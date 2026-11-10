@@ -86,6 +86,7 @@ fn factory_worker_session() -> Option<String> {
 }
 
 #[derive(Args, Debug, Clone)]
+#[command(max_term_width = 80)]
 pub struct HubArgs {
     /// Publish through tailnet-only Tailscale Serve HTTPS (on by default)
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]

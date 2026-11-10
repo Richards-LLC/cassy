@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  installed-release-notice-deadline:
+    title: Hung post-release notices time out and remain pending per version while newer releases install first; retries reuse notice and close receipts
+    tasks: [cas-a00be]
+    journeys: [CLI-RELEASE]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]
@@ -1102,7 +1106,7 @@ journeys:
   kind: cli
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Read the release publication receipt]
-  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, cas-cli/src/finding_triage.rs]
+  owners: [cas-cli/src/cli/release_automation.rs, scripts/release.sh, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, cas-cli/src/finding_triage.rs]
   invariants: [FACTORY-FINDING-PRIORITY]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}

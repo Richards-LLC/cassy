@@ -40,7 +40,18 @@ if [[ "$1 $2" == "release installed" ]]; then
     notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
     printf 'notice=%s\n' "$notice_tag" >>"$FAKE_LOG"
     if [[ "${FAKE_NOTICE_HANGS:-}" == "$notice_tag" ]]; then
-        exec perl -e '$SIG{TERM} = "IGNORE"; open my $f, ">", $ENV{FAKE_NOTICE_PID} or die $!; print $f "$$\n"; close $f; select undef, undef, undef, 60; exit 1;'
+        exec perl -MPOSIX=setpgid -e '
+            my $parent = $$;
+            my $child = fork(); defined $child or die $!;
+            if (!$child) {
+                setpgid(0, 0) == 0 or die $!;
+                $SIG{TERM} = "IGNORE";
+                open my $f, ">", $ENV{FAKE_NOTICE_PID} or die $!;
+                print $f "$parent $$\n"; close $f;
+                select undef, undef, undef, 60; exit 1;
+            }
+            waitpid($child, 0); exit 1;
+        '
     fi
     [[ "${FAKE_NOTICE_FAIL_TAG:-}" == "$notice_tag" ]] && exit 1
     [[ "${FAKE_NOTICE_FAILS:-}" == 1 ]] && exit 1
@@ -115,6 +126,7 @@ check 'grep -q "^api repos/example/repo/releases/latest$" "$FAKE_LOG" && ! grep 
 FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
 # Force a new publication episode by clearing only the fixture notification receipt.
 rm -f "$XDG_STATE_HOME/cassy/install-on-publish.notified"
+rm -f "$XDG_STATE_HOME/cassy/install-on-publish.notified.d/v9.99.2"
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.2 FAKE_NOTICE_FAILS=1 "$installer" --once >/dev/null
 FAKE_LATEST=v9.99.2 "$installer" --once >/dev/null
@@ -142,7 +154,8 @@ PY_ORDER
     [[ $? == 0 ]] || exit 1
 ) && ok 'a newer install precedes retries and retains the older pending notice' || bad 'a newer install precedes retries and retains the older pending notice'
 
-# Exercise an actual hung, TERM-ignoring notice. A separate test deadline
+# Exercise a hung notice with a TERM-ignoring child in its own process group.
+# A separate test deadline
 # bounds the red run too; kill only the process group this fixture started.
 (
     export XDG_STATE_HOME="$tmp/timeout-state" FAKE_NOTICE_PID="$tmp/notice.pid"
@@ -157,16 +170,26 @@ process = subprocess.Popen([sys.argv[1], "--once"], start_new_session=True, stdo
 try:
     assert process.wait(timeout=6) == 0
 except BaseException:
+    pid_file = pathlib.Path(os.environ["FAKE_NOTICE_PID"])
+    if pid_file.exists():
+        for owned in map(int, pid_file.read_text().split()):
+            try:
+                os.kill(owned, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     os.killpg(process.pid, signal.SIGKILL)
     process.wait()
     raise
-pid = int(pathlib.Path(os.environ["FAKE_NOTICE_PID"]).read_text())
+pid, child = map(int, pathlib.Path(os.environ["FAKE_NOTICE_PID"]).read_text().split())
 try:
     os.kill(pid, 0)
 except ProcessLookupError:
     pass
 else:
     raise AssertionError("timed-out notice survived")
+# An orphaned child may await init reaping; it must already be terminated.
+state = subprocess.run(["/bin/ps", "-o", "stat=", "-p", str(child)], capture_output=True, text=True).stdout.strip()
+assert not state or state.startswith("Z"), state
 state = pathlib.Path(os.environ["XDG_STATE_HOME"]) / "cassy"
 assert (state / "install-on-publish.pending.d/v9.99.4.json").exists()
 assert not (state / "install-on-publish.notified.d/v9.99.4").exists()

@@ -83,12 +83,16 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     git_with_timeout(repo, args, std::time::Duration::from_secs(30))
 }
 
-fn git_with_timeout(repo: &Path, args: &[&str], _timeout: std::time::Duration) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()?;
+fn git_with_timeout(repo: &Path, args: &[&str], timeout: std::time::Duration) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    // A credential helper or remote can hang while the parent polls its pipes.
+    // Capture to files and kill the owned Git process group on the deadline.
+    let out = crate::bounded_process::run_command(
+        &mut command,
+        crate::bounded_process::Deadline::after(timeout),
+        timeout,
+    ).map_err(|error| anyhow::anyhow!("git {}: {error:?}", args.join(" ")))?;
     ensure!(
         out.status.success(),
         "git {}: {}",
@@ -461,11 +465,9 @@ fn delivery_is_shipped(repo: &Path, child: &cas_types::Task, tag_sha: &str) -> b
 
 fn published_later_tags(repo: &Path, tag: &str) -> Result<Vec<(String, String)>> {
     let version = semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))?;
-    let output = Command::new("git").arg("-C").arg(repo)
-        .args(["ls-remote", "--tags", "origin"]).output()?;
-    ensure!(output.status.success(), "cannot verify later published tags: {}", String::from_utf8_lossy(&output.stderr));
+    let output = git(repo, &["ls-remote", "--tags", "origin"])?;
     let mut published = std::collections::BTreeMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         let Some((sha, reference)) = line.split_once('\t') else { continue };
         let Some(name) = reference.strip_prefix("refs/tags/") else { continue };
         let name = name.strip_suffix("^{}").unwrap_or(name);
@@ -722,12 +724,8 @@ fn reconcile_shipped_train(root: &Path, train_id: &str, tag: &str, dry_run: bool
 fn published_tag_sha(repo: &Path, tag: &str) -> Result<String> {
     ensure!(semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).is_ok(), "invalid release tag {tag}");
     let local = git(repo, &["rev-parse", "--verify", "--end-of-options", &format!("refs/tags/{tag}^{{commit}}")])?;
-    let remote = std::process::Command::new("git")
-        .arg("-C").arg(repo)
-        .args(["ls-remote", "origin", &format!("refs/tags/{tag}"), &format!("refs/tags/{tag}^{{}}")])
-        .output()?;
-    ensure!(remote.status.success(), "cannot verify published tag {tag}: {}", String::from_utf8_lossy(&remote.stderr));
-    let found = String::from_utf8_lossy(&remote.stdout).lines().any(|line| {
+    let remote = git(repo, &["ls-remote", "origin", &format!("refs/tags/{tag}"), &format!("refs/tags/{tag}^{{}}")])?;
+    let found = remote.lines().any(|line| {
         line.split_whitespace().next() == Some(local.as_str())
     });
     ensure!(found, "tag {tag} is not published on origin at {local}");
@@ -806,8 +804,9 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
         .and_then(|s| s.strip_prefix('v'))
         .context("publication has no version tag")?;
     ensure!(
-        version_ok(version) && version == env!("CARGO_PKG_VERSION"),
-        "publication must match the installed binary"
+        version_ok(version)
+            && semver::Version::parse(version)? <= semver::Version::parse(env!("CARGO_PKG_VERSION"))?,
+        "publication must not be newer than the installed binary"
     );
     ensure!(
         publication["draft"].as_bool() == Some(false),
@@ -976,12 +975,16 @@ mod tests {
         fs::write(&publication_path, serde_json::to_vec(&serde_json::json!({
             "tag_name": tag, "draft": false, "published_at": "2026-11-05T23:00:00Z",
         })).unwrap()).unwrap();
+        let before = open_task_store(&root).unwrap().get(&train.id).unwrap();
         for _ in 0..2 {
             installed(&InstalledArgs {
                 receipt: publication_path.clone(), repo: "example/repo".into(),
             }, Some(&root)).unwrap();
         }
-        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().status, TaskStatus::Closed);
+        let after = open_task_store(&root).unwrap().get(&train.id).unwrap();
+        assert_eq!(after.status, TaskStatus::Closed);
+        assert_eq!(after.closed_at, before.closed_at);
+        assert_eq!(after.updated_at, before.updated_at);
         let rows = crate::store::open_prompt_queue_store(&root)
             .unwrap()
             .peek_all(10)

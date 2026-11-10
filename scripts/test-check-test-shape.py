@@ -27,6 +27,8 @@ class Shapes(unittest.TestCase):
             ('test_example.py', 'assert error.code == "forbidden"', False),
             ('test_example.py', 'self.assertEqual(error.code, "forbidden")', False),
             ('src/example.rs', '#[test] fn check() { assert_eq!(error.code(), "forbidden"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.redirect_command(), "cas cloud project set"); }', False),
+            ('src/example.rs', '#[test] fn check() { assert_eq!(error.message(), "Use cas cloud project set to configure this project."); }', True),
             ('src/example.rs', '#[test] fn check() { assert!(reason.contains("2026-05-01T00:00:00Z")); }', False),
             ('src/example.rs', '#[test] fn check() { assert!(reason.contains("entry:e1")); }', False),
             ('src/example.rs', '#[test] fn check() { assert!(reason.contains("database.md:42")); }', False),

@@ -163,7 +163,7 @@ pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
 pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
 /// cas-7aa5: the `.gitattributes` value for CHANGELOG.md's [Unreleased] union driver.
 pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
-/// Registry driver: independent bug families merge; competing edits conflict.
+/// Registry driver: independent entries merge; competing edits conflict.
 pub const JOURNEYS_MERGE_ATTRIBUTE: &str = "merge=cas-journeys";
 /// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
 /// `merge-tree`) runs the same driver whatever the checkout carries.

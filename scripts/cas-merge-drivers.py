@@ -18,9 +18,9 @@
         cut) stays a conflict.
 
     cas-merge-drivers.py journeys <base> <ours> <theirs> [<marker-size>]
-        Union independent bug_families entries and take the newest ISO updated
-        date. Competing edits to one family stay conflicts. Other fields use
-        Git's ordinary merge; unsupported YAML layouts fall back to it too.
+        Merge disjoint keyed entries and take the newest ISO updated date.
+        Competing edits to an entry stay conflicts. Other fields and unsupported
+        YAML layouts use Git's ordinary merge.
 
 `merge=cas-generated` (hub-web/dist and the builtin reference-history ledger)
 keeps ours with no conflict; the merge then rebuilds both with
@@ -62,7 +62,7 @@ def install(repo):
     if source != driver.resolve():
         shutil.copyfile(source, driver)
     for key, value in (
-        ("merge.cas-journeys.name", "journey registry: merge independent families and newest updated date"),
+        ("merge.cas-journeys.name", "journey registry: merge independent entries and newest updated date"),
         ("merge.cas-journeys.driver", f"python3 '{driver}' journeys %O %A %B %L"),
         ("merge.cas-generated.name", "generated build output: keep ours, regenerate after the merge"),
         ("merge.cas-generated.driver", "true"),
@@ -142,72 +142,102 @@ def changelog(base, ours, theirs, marker=7):
     return 1 if unresolved else 0
 
 
+REGISTRY_ENTRY_SECTIONS = (
+    "bug_families", "owner_groups", "invariants", "manual_checks", "fixtures", "journeys",
+)
+REGISTRY_FIELD = re.compile(r"([A-Za-z_][A-Za-z0-9_]*):(.*)")
+REGISTRY_MAP_ENTRY = re.compile(r"  ([A-Za-z0-9_.-]+):(?:[ \t].*)?")
+REGISTRY_JOURNEY_ENTRY = re.compile(r"(  )?- id: ([A-Za-z0-9][A-Za-z0-9._-]*)(?:[ \t]+(?:#.*)?)?")
+
+
 def registry_parts(text):
-    """Split the registry's block map without reserializing YAML or its comments.
+    """Separate the registry's entry blocks from its ordinary YAML fields.
 
-    Only the repository's simple, two-space family keys are handled. Unusual
-    YAML (flow maps, anchors, aliases, duplicate keys) uses Git's normal merge.
+    Keep source bytes and comments. Unsupported YAML layouts and duplicate
+    keys fall back to Git's normal merge rather than guessing at boundaries.
     """
+    if re.search(r"(?:^|[\s\[,{])(?:[&*][\w-]+|<<:)", text):
+        raise ValueError("unsupported registry YAML")
     lines = text.splitlines(keepends=True)
-    starts = [i for i, line in enumerate(lines) if line == "bug_families:\n"]
-    if len(starts) != 1 or re.search(r"(?:^|[\s\[,{])(?:[&*][\w-]+|<<:)", text):
-        raise ValueError("unsupported registry map")
-    start = starts[0] + 1
-    end = start
-    families = {}
-    key = None
-    while end < len(lines):
-        line = lines[end]
-        if line.strip() and not line.startswith(" "):
-            break
-        match = re.fullmatch(r"  ([A-Za-z0-9_-]+):[ \t]*\n", line)
-        if match:
-            key = match[1]
-            if key in families:
-                raise ValueError("duplicate family")
-            families[key] = ""
-        elif line.strip() and not line.startswith(("    ", "  #")):
-            raise ValueError("unsupported family key")
-        if key is None:
-            if line.strip():
-                raise ValueError("missing family key")
-        else:
-            families[key] += line
-        end += 1
-    # Preserve the rest of the document for Git's ordinary three-way merge.
-    return "".join(lines[:start] + lines[end:]), families
+    header, sections = [], {}
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        index += 1
+        field = REGISTRY_FIELD.fullmatch(line.rstrip("\n"))
+        if field is None or field[1] not in REGISTRY_ENTRY_SECTIONS:
+            if field is None and line.strip() and not line.startswith((" ", "#", "- ")):
+                raise ValueError("unsupported top-level registry field")
+            header.append(line)
+            continue
+        name, value = field[1], field[2].strip()
+        sequence = name == "journeys"
+        if name in sections or value not in ("", "[]" if sequence else "{}"):
+            raise ValueError(f"unsupported registry section {name}")
+        entries = sections[name] = {}
+        header.append(f"{name}:\n")
+        if value:
+            continue
+        end = index
+        while end < len(lines) and (not lines[end].strip()
+                                    or lines[end].startswith((" ", "#"))
+                                    or (sequence and lines[end].startswith("- "))):
+            end += 1
+        body_end = end
+        while body_end > index and (not lines[body_end - 1].strip()
+                                    or lines[body_end - 1].startswith("#")):
+            body_end -= 1
+        key = None
+        indent = None
+        entry_pattern = REGISTRY_JOURNEY_ENTRY if sequence else REGISTRY_MAP_ENTRY
+        for row in lines[index:body_end]:
+            entry = entry_pattern.fullmatch(row.rstrip("\n"))
+            if entry:
+                key = entry[2] if sequence else entry[1]
+                if key in entries:
+                    raise ValueError(f"duplicate registry entry {name}.{key}")
+                row_indent = len(entry[1] or "") + 2 if sequence else 4
+                if indent is not None and indent != row_indent:
+                    raise ValueError(f"mixed registry entry indentation in {name}")
+                indent = row_indent
+                entries[key] = ""
+            elif key is None or (row.strip() and not row.startswith((" " * indent, "#", "  #"))):
+                raise ValueError(f"unsupported registry entry in {name}")
+            entries[key] += row
+        header.extend(lines[body_end:end])
+        index = end
+    return "".join(header), sections
 
 
-def journeys(base, ours, theirs, marker=7):
-    paths = [base, ours, theirs]
-    originals = [Path(path).read_text() for path in paths]
-    try:
-        parts = [registry_parts(text) for text in originals]
-        dates = []
-        for text, _ in parts:
-            matches = re.findall(r"(?m)^updated: ['\"]?(\d{4}-\d{2}-\d{2})['\"]?[ \t]*$", text)
-            if len(matches) != 1:
-                raise ValueError("unsupported updated date")
-            if len(re.findall(r"(?m)^updated:", text)) != 1:
-                raise ValueError("duplicate updated field")
-            dates.append(datetime.date.fromisoformat(matches[0]))
-    except ValueError:
-        return ordinary_merge(base, ours, theirs, marker)
-
+def merge_registry_entries(base, ours, theirs, marker):
     merged = []
     conflict = False
-    maps = [families for _, families in parts]
-    # Ours-first order retains existing layout and appends incoming-only keys.
-    for key in dict.fromkeys([*maps[1], *maps[2], *maps[0]]):
-        ancestor, left, right = (families.get(key, "") for families in maps)
+    # Preserve the ancestor's order. Sort new IDs so branch order cannot
+    # change the merged registry or the candidate tree it produces.
+    for key in [*base, *sorted((ours.keys() | theirs.keys()) - base.keys())]:
+        ancestor, left, right = (entries.get(key, "") for entries in (base, ours, theirs))
         if left == right or right == ancestor:
             merged.append(left)
         elif left == ancestor:
             merged.append(right)
         else:
-            # A family is the conflict unit, including edit/delete conflicts.
             conflict = True
             merged.append(f"{'<' * marker} ours\n{left}{'=' * marker}\n{right}{'>' * marker} theirs\n")
+    return "".join(merged), conflict
+
+
+def journeys(base, ours, theirs, marker=7):
+    originals = [Path(path).read_text() for path in (base, ours, theirs)]
+    try:
+        parts = [registry_parts(text) for text in originals]
+        dates = []
+        for text, _ in parts:
+            matches = re.findall(r"(?m)^updated: ['\"]?(\d{4}-\d{2}-\d{2})['\"]?[ \t]*$", text)
+            if len(matches) != 1 or len(re.findall(r"(?m)^updated:", text)) != 1:
+                raise ValueError("unsupported updated date")
+            dates.append(datetime.date.fromisoformat(matches[0]))
+    except ValueError:
+        return ordinary_merge(base, ours, theirs, marker)
 
     newest = max(dates).isoformat()
     with tempfile.TemporaryDirectory() as temporary:
@@ -218,10 +248,25 @@ def journeys(base, ours, theirs, marker=7):
             inputs.append(str(path))
         result = ordinary_merge(*inputs, marker)
         text = Path(inputs[1]).read_text()
-    # Keep conflicts in policy, journeys, and all other fields unresolved.
-    text = text.replace("bug_families:\n", "bug_families:\n" + "".join(merged), 1)
+    # Header policy stays on Git's ordinary three-way path. Only keyed
+    # entry sections use semantic merge, and competing changes still conflict.
+    for name in REGISTRY_ENTRY_SECTIONS:
+        entries, conflict = merge_registry_entries(
+            *(sections.get(name, {}) for _, sections in parts), marker,
+        )
+        if not any(name in sections for _, sections in parts):
+            continue
+        header = f"{name}:\n"
+        empty = "[]" if name == "journeys" else "{}"
+        body = header + entries if entries else f"{name}: {empty}\n"
+        text, count = re.subn(rf"(?m)^{name}:\n", lambda _: body, text)
+        if count > 1 or (entries and count == 0):
+            # A competing structural change moved or removed the section.
+            # Leave it to Git rather than silently losing merged entries.
+            return ordinary_merge(base, ours, theirs, marker)
+        result = result or int(conflict)
     Path(ours).write_text(text)
-    return result or int(conflict)
+    return result
 
 
 def ordinary_merge(base, ours, theirs, marker=7):

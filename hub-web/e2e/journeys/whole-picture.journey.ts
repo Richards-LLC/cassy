@@ -152,7 +152,8 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         expect(order).toEqual(["before", "work", "after"]);
         const summary = blocks.getByRole("button", { name: /Reasoning, ran 1 tool \(1 failed\)/ });
         await expect(summary).toHaveAttribute("aria-expanded", "false");
-        await expect(blocks.locator(".work-chip")).toHaveText("cas-42 parked");
+        // cas-943b: the chip leads with the task title; its id stays in the title attribute.
+        await expect(blocks.locator(".work-chip")).toHaveAttribute("title", /cas-42/);
         await expect(blocks.locator(".work-row")).toHaveCount(0);
         // The worker's own tool call belongs to its timeline, not the thread.
         await expect(thread).not.toContainText("limits.rs");

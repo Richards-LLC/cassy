@@ -379,6 +379,7 @@ for (const variant of variants) {
         hub.supervisorSays(PELICAN, `Epic progress, ready for review.\n\n![Epic progress at desktop width](${shown})\n\n![Outside the artifacts directory](/etc/shadow.png)\n\n![Remote](https://example.com/x.png)`);
         const image = log.getByRole("img", { name: "Epic progress at desktop width" });
         await expect(image).toBeVisible();
+        await image.evaluate(node => (node as HTMLImageElement).decode());
         expect(await image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
         await expect(log).toContainText("![Outside the artifacts directory](/etc/shadow.png)");
         await expect(log).toContainText("![Remote](https://example.com/x.png)");

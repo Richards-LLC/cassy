@@ -1,0 +1,4 @@
+title: Inline reply image assertions wait for decoding before reading intrinsic dimensions
+tasks: [cas-a16f]
+invariants: [HUB-J22-REPLY-IMAGES]
+journeys: [HUB-J22]

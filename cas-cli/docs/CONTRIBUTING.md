@@ -4616,8 +4616,10 @@ needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
 release freeze, not a temporary CI hold: only the operator can lift it in
 Commander, or a published release covering its tip ends it.
-Commander's `freeze_train` operation (factory:operate) does the
-same for the operator. The freeze is a `release-train-frozen:<unix>:<tip>`
+Commander's `freeze_train` operation does the same for the operator. Both
+`freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
+`machine:read` scope, without worker-management permissions. Preview pairings
+cannot mutate a train. The freeze is a `release-train-frozen:<unix>:<tip>`
 label on the train epic, which syncs to peer machines with the task row. One
 gate in `workflow/release_freeze.rs` refuses `worktree_merge` into the frozen
 lane (through `check_cut_merge`, before and under the target lock), CI retry
@@ -4628,7 +4630,7 @@ admission is noted on the train. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
 contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation (factory:manage). There is no supervisor lift.
+`lift_train_freeze` operation. There is no supervisor lift.
 
 ### Temporary CI merge hold follow-up
 

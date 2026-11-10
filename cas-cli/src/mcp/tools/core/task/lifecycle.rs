@@ -2955,9 +2955,9 @@ impl CasCore {
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    // Reassignment may replace a boundary only after all old
-                    // tips are proven inherited. Inspect immediately before the
-                    // successful start write, through the shared rebind audit.
+                    // Reassignment preserves prior deliveries. A queued,
+                    // untouched successor can also adopt its fresh target;
+                    // inspect before the guarded start write and shared audit.
                     let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
                             start.assignee != worker.name && start.branch != worker_branch
                         })
@@ -3603,7 +3603,9 @@ impl CasCore {
             task.deliverables.factory_branch_start = Some(start);
         }
         let automatic_rebind = reassigned_branch.and_then(|(checkout, worker, branch)| {
-            super::rebind::reassigned_branch_start(&checkout, &task, &worker, &branch)
+            super::rebind::reassigned_branch_start(
+                &self.cas_root, &checkout, &task, &worker, &branch, queued_start,
+            )
         });
         if let Some((start, _)) = automatic_rebind.as_ref() {
             task.deliverables.factory_branch_start = Some(start.clone());

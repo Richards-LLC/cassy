@@ -25,10 +25,10 @@ pub(super) fn self_addressed_reminder(row: &cas_store::QueuedPrompt) -> bool {
         && cas_store::parse_reminder_delivery_id(&row.prompt).is_some()
 }
 
-/// What a delivery probe learned about recipient-authored activity (GH #1163).
+/// What a delivery probe learned about recipient activity or a satisfied message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecipientActivity {
-    /// A reply or attributed task note after delivery.
+    /// The message was read/resolved, or a reply/attributed task note followed delivery.
     Found,
     /// The store answered: none yet.
     Absent,
@@ -5367,12 +5367,14 @@ impl FactoryDaemon {
                 }
                 NormalDeliveryProbeAction::RetryNormalNudge => {
                     let source = "lifecycle-wake:delivery-watchdog";
+                    let nudge = format!("{DELIVERY_WATCHDOG_NUDGE}\n{}",
+                        super::delivery::pointer_wake_payload("supervisor", Some(row_id)));
                     let payload = super::delivery::prepare_pty_machine_delivery(
                         self.app.cas_dir(),
                         &pane,
                         self.app.harness_for(&pane),
                         source,
-                        DELIVERY_WATCHDOG_NUDGE,
+                        &nudge,
                         Some(row_id),
                     );
                     let nudge = self.app.mux.inject(&pane, &payload).await;
@@ -22184,6 +22186,7 @@ mod gh_1153_idle_pty_delivery_tests {
                 // its own undelivered wake; retiring the old one cannot mute it.
                 let next = queue.enqueue_with_session("supervisor", target, &probe.prompt, "provision-test").unwrap();
                 queue.mark_transport_delivered(next).unwrap();
+                probe.delivered_at_utc = chrono::Utc::now();
                 probe.next_check_at = Some(Instant::now());
                 daemon.normal_delivery_probes.insert(next, probe);
                 daemon.resolve_normal_delivery_probes(queue.as_ref()).await;

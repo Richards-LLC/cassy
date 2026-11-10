@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  drained-inbox-delivery-watchdog:
+    title: Drained worker and supervisor inboxes retire delivery wakes while fresh unread notifications still wake
+    tasks: [cas-40ed]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

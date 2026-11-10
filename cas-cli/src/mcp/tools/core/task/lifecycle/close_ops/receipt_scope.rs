@@ -1494,6 +1494,27 @@ mod tests {
     }
 
     #[test]
+    fn park_refuses_committed_root_handoff_cas_c55fa() {
+        let repo = changelog_fixture();
+        let cas_root = tempfile::tempdir().unwrap();
+        let task = Task::new("cas-c55fa".into(), "checkpoint delivery".into());
+        std::fs::write(repo.path().join("HANDOFF.md"), "Resume the worker.\n").unwrap();
+        let head = commit_changelog_fixture(repo.path(), "checkpoint");
+        // Inspect the delivered commit, including a handoff retained from an
+        // earlier push, rather than trusting the changed-path list or checkout.
+        std::fs::remove_file(repo.path().join("HANDOFF.md")).unwrap();
+        for changed in [vec!["HANDOFF.md".into()], vec!["docs/guide.md".into()]] {
+            let refusals = park_refusals(cas_root.path(), repo.path(), &task, &changed, &head, "main", None);
+            assert!(refusals.iter().any(|r| r.starts_with("ROOT_HANDOFF_COMMITTED:")), "{refusals:?}");
+        }
+        std::fs::create_dir_all(repo.path().join("docs")).unwrap();
+        std::fs::write(repo.path().join("docs/HANDOFF.md"), "Project documentation.\n").unwrap();
+        let clean = commit_changelog_fixture(repo.path(), "remove worker scratch notes");
+        assert!(park_refusals(cas_root.path(), repo.path(), &task,
+            &["HANDOFF.md".into(), "docs/HANDOFF.md".into()], &clean, "main", None).is_empty());
+    }
+
+    #[test]
     fn non_product_paths_do_not_require_a_changelog_entry() {
         let repo = changelog_fixture();
         let cas_root = tempfile::tempdir().unwrap();

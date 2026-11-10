@@ -173,7 +173,11 @@ cas violet read   --channel <name> --since <RFC3339> | --thread <message_id> | -
   `size_bytes` and `sha256` declared. Up to 1048576 bytes in total go inline in
   one call (`file` or `files[]`); anything larger uses `file_external`: begin,
   each file streamed from disk to its `upload_url` (which is never printed),
-  then complete.
+  then complete. For a managed `--reply-to`, the caller's live journal intent
+  supplies the operation ID and claim generation to both steps; one request
+  UUID stays unchanged through completion (`--request-id` reuses it for the
+  same reply). A locally known managed thread without a current caller intent
+  is refused before an upload is begun.
 - **thread**: one `kind: "thread"` call. Replies keep the order given; each
   `--reply-file` attaches to the `--reply` before it. Files across the whole
   thread go inline up to 1048576 bytes; above that every file is uploaded
@@ -198,6 +202,8 @@ or its error receipt, as one document, preserving additive fields. Every
 
 | Code | Meaning |
 | --- | --- |
+| `managed_reply_required` | This locally known managed thread has no live caller reply intent, or `--request-id` was given without one; check claim status and register an intent before posting |
+| `journal_error` | Local reply authority could not be read; no upload was begun |
 | `invalid_input` | a flag is missing or out of range, a path is empty or not a file, or more than 10 files per message or 20 replies |
 | `local_request_failed` | a file could not be read, or changed while being posted |
 | `not_configured` | no `[servers.violet]` registration here; run `cas integrate violet` |
@@ -262,6 +268,12 @@ downloads it, and refuses bytes whose size or SHA-256 differ from the published
 record (records are 1 byte to 25 MiB). It then runs Violet's `file_external`
 begin, direct upload and complete steps through the registered proxy. The caller
 never handles bytes, signed URLs or upload URLs.
+
+For `reply_to`, artifact posting resolves the authenticated caller's live
+journal intent and carries its operation ID, claim generation and one request
+UUID through both upload steps. Missing or stale authority on a locally known
+managed thread is refused before calling Violet. Violet remains responsible
+for authoritative remote claim and exact thread checks before allocation.
 
 The receipt lists `artifact_id`, `channel_id`, `message_id`, `file_id`,
 `permalink`, `size_bytes`, `sha256` and `sha256_verified`, and the permalink is

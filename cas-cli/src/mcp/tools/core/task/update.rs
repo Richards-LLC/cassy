@@ -2992,7 +2992,7 @@ mod status_transition_tests {
         let stored = tasks.get(&task.id).unwrap();
         assert_eq!(stored.priority, Priority(2));
         assert!(stored.labels.iter().any(|l| l == "incident"));
-        assert_eq!(stored.design.as_deref(), Some("x"));
+        assert_eq!(stored.design, "x");
     }
 
     #[tokio::test]

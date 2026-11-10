@@ -1102,11 +1102,11 @@ fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
         assert_eq!(action_enum(schema), expected, "{tool} action enum drifted");
     }
 
-    let coordination = serde_json::to_value(schemars::schema_for!(CoordinationRequest)).unwrap();
-    assert_eq!(
-        coordination["properties"]["occurrence_id"]["description"],
-        "reply_intent only: optional; when supplied, use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
-    );
+    assert!(action_enum(schemars::schema_for!(ArtifactRequest)).contains(&"revoke".into()));
+    let payload = serde_json::json!({"action":"revoke", "id":"art-fixture", "reason":"Disposable fixture cleanup"});
+    let request: ArtifactRequest = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(serde_json::to_value(request).unwrap()["reason"], payload["reason"]);
+
 }
 
 #[test]

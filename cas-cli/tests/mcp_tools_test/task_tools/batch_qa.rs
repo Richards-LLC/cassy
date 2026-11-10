@@ -670,6 +670,22 @@ fn fixture(env: &mut TestEnvGuard) -> Fx {
 }
 
 impl Fx {
+    fn with_declared_coverage(mut self) -> Self {
+        let root = self.repo.join(".cas");
+        let owner = open_task_store(&root).unwrap().get("cas-bq01").unwrap();
+        let body = cas::qa_ledger::scaffold_with_coverage(&owner, &[], &self.staging,
+            &["cas-bq01".into(), "cas-bq02".into()]);
+        // cas-6354: mentioning an unreviewed task in prose must not grant coverage.
+        std::fs::write(&self.ledger, body + "\nUnreviewed follow-up: cas-bq03\n").unwrap();
+        let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let context = cas::artifacts::PublishContext {
+            store: &store,
+            roots: cas::artifacts::paths::PublishRoots::new(&root, &self.repo.join("artifacts"), "cas-bq01"),
+            task_id: "cas-bq01".into(), cloud: None,
+        };
+        self.artifact = cas::artifacts::publish(&context, &self.ledger).unwrap().artifact.id;
+        self
+    }
     fn request(&self) -> VerificationRequest {
         serde_json::from_value(serde_json::json!({
             "action":"batch_receipt", "task_ids":["cas-bq01","cas-bq02","cas-bq01"],
@@ -745,7 +761,11 @@ async fn reviewed_delivery_with_legacy_producer_ledger_closes_cas_dd03() {
 #[tokio::test]
 async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture(&mut env).with_declared_coverage();
+    let mut uncovered = fx.request();
+    uncovered.task_ids = Some(vec!["cas-bq01".into(), "cas-bq03".into()]);
+    assert!(fx.supervisor.verification(Parameters(uncovered)).await.is_err());
+    assert!(cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap().is_empty());
     let recorded = fx
         .supervisor
         .verification(Parameters(fx.request()))
@@ -812,7 +832,7 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
 #[tokio::test]
 async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() {
     let mut env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut env);
+    let fx = fixture(&mut env).with_declared_coverage();
     let verdict = |tasks: &[&str]| -> VerificationRequest {
         let mut request = serde_json::to_value(fx.request()).unwrap();
         request.as_object_mut().unwrap().extend(
@@ -820,8 +840,8 @@ async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() 
         );
         serde_json::from_value(request).unwrap()
     };
-    // The published report names cas-bq01 and cas-bq02 only.
-    let refused = fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq03"]))).await.unwrap_err();
+    // Explicit coverage excludes cas-bq03 even though the report mentions it.
+    assert!(fx.supervisor.verification(Parameters(verdict(&["cas-bq01", "cas-bq03"]))).await.is_err());
 
     fx.supervisor.verification(Parameters(verdict(&["cas-bq01"]))).await.unwrap();
     let close = fx.close("cas-bq01").await;

@@ -33,9 +33,10 @@ missing optional 1.64 features do not make a cell NOT EXERCISED.
 ## Layout
 
 The bundle lives at `~/.cas/artifacts/<project-key>/<task-id>/qa/`. `LEDGER.md` stays one
-level up. An independent QA round uses `independent-qa/round-<n>/` and a
+level up. An independent QA round uses `independent-qa/<full-head>/<pass-id>/round-<n>/` and a
 journey uses `journeys/<journey-id>/`, each with the same shape and its own
-`bundle.json`.
+`bundle.json`. Use the dispatched pass's directory; leave historical round-only
+directories unchanged.
 
 | `files` key | name | required |
 | --- | --- | --- |
@@ -66,6 +67,9 @@ journey evaluation scores polish for it.
 
 - `schema: 1`, `task_id`, and `producer` (`cas-qa-craft`, `independent-qa`, or `journey`)
 - `head_sha`: the full SHA of the build under test
+- `pass_id`: for `independent-qa`, the immutable pass id from the dispatched QA task.
+  `qa_record` rejects a supplied id for another pass; historical bundles without
+  this field remain readable at their recorded paths.
 - `build_url`, `playwright_version`, `created_at` (RFC 3339)
 - `visual_change` (boolean) and `visual_qa_status` (`pass`, `fail`, or `unavailable`).
   `pass` is a claim that close checks against the run's own report,
@@ -160,7 +164,7 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    only one side goes in `unpaired[]`: it is kept for the record and never rendered.
 
    ```json
-   {"schema": 1, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
+   {"schema": 2, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
     "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": [1280,800], "scheme": "light", "masked": [".avatar"],
       "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
       "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
@@ -171,6 +175,12 @@ Without capture configuration, absence is advisory. On deploy-only projects, run
    use the same row shape, with just `before` or `after`; each present side must
    name nonempty `png` and `jpg` files with matching `sha256` and `jpg_sha256`,
    resolved relative to, and confined inside, the directory containing `pairs.json`.
+   New manifests use schema 2, which requires both digests. Close also reads
+   historical schema 1 manifests that sealed only the PNG: it verifies that seal
+   and any supplied JPG seal, still requires both image files, and preserves the
+   original manifest bytes. This does not certify an unsealed historical JPG.
+   Unknown schema versions require a compatible reader or a provenance-preserving
+   migration, never a fabricated seal or a new BEFORE capture.
    Every `pairs[]` row needs both sides; every `unpaired[]` row needs exactly one.
    Keep every baseline cell, including cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
    AFTER must contain every BEFORE id, and may add ids. A partial comparison that

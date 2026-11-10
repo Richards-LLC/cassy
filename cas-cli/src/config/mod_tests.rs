@@ -1071,6 +1071,7 @@ fn every_settable_factory_key_round_trips_through_get_and_list_cas_1a05() {
         ("factory.focus_mode", " visible chunks first ", "visible chunks first"),
         ("factory.slot_id", " second-supervisor ", "second-supervisor"),
         ("factory.artifacts_root", " /mnt/scratch/artifacts ", "/mnt/scratch/artifacts"),
+        ("factory.codex_home", " ~/.codex-work ", "~/.codex-work"),
         ("factory.scratch_root", " /mnt/rewind/cas ", "/mnt/rewind/cas"),
         ("factory.worker_local_gate", " pnpm ci:local ", "pnpm ci:local"),
         ("factory.release_command", " scripts/promote.sh staging ", "scripts/promote.sh staging"),

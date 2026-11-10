@@ -175,6 +175,14 @@ fn narrow_split_tool(tool_name: &str, schema: &mut JsonObject) {
             }
         }
     }
+    if tool_name == "factory"
+        && let Some(Value::Object(reason)) = properties.get_mut("reason")
+    {
+        reason.insert(
+            "description".to_string(),
+            Value::String("loop_cancel reason; worktree_merge audit reason with supervisor_override=true. train_freeze: \"release-freeze: <reason>\"; only Commander operator or publication lifts it. No CI holds; see CONTRIBUTING.".to_string()),
+        );
+    }
     if let Some(Value::Object(action)) = properties.get_mut("action") {
         action.insert(
             "enum".to_string(),

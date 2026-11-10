@@ -1,0 +1,4 @@
+title: Corrected heads and fresh independent passes never reuse prior round-only evidence
+tasks: [cas-6813]
+invariants: [FACTORY-QA-EVIDENCE-IDENTITY]
+journeys: [FACTORY-QA-RECEIPT]

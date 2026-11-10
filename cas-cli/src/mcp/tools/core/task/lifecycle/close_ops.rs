@@ -5307,53 +5307,24 @@ mod supervisor_override_tests {
     }
 }
 
-/// Why the close path decided to skip (or not skip) the task-verifier step
-/// for a given close attempt.
-///
-/// Carried through to the response message so the audit trail cites the
-/// real reason instead of the catch-all "assignee inactive" phrase that
-/// surfaced cas-3bd4.
-///
-/// The pre-cas-3bd4 implementation represented this as a single
-/// `assignee_inactive: bool`. Every lookup failure — including the
-/// very-common name-vs-id mismatch described below — defaulted to `true`
-/// and the success message confidently lied that the assignee was inactive.
-/// This enum preserves the same skip *behavior* (supervisor still closes
-/// orphaned or genuinely-stale tasks without a verifier hop) but forces
-/// every skip reason to be named.
-///
-/// ## Why the old `agent_store.get(task.assignee)` kept returning "inactive"
-///
-/// `task.assignee` is set by `task_claiming.rs:89` to
-/// `Some(agent_name.clone())` — the human-readable display name, e.g.
-/// `"mighty-viper-52"`. But `AgentStore::get(id)` runs `WHERE id = ?` in
-/// `ops_agent.rs:79`, and `id` is the session-id (a UUID-like
-/// identifier), not the name. The lookup never found the row, so
-/// `unwrap_or(true)` treated the worker as inactive even though it was
-/// actively holding a fresh lease. `compute_verification_skip_reason`
-/// fixes this by consulting the task's active lease first — `TaskLease`
-/// stores the real `agent_id`, not the name.
+/// Close-time identity state and explicit verification exemptions.
+/// Unavailable implementers remain useful recovery evidence, never authority
+/// to waive review. Resolve display names through task leases before falling
+/// back to the registry's id/name lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VerificationSkipReason {
     /// The assignee is alive and no bypass flag was set. Verification
     /// runs normally; this is *not* a skip.
     None,
-    /// The task has no assignee at all. Treated as orphaned; legacy
-    /// callers reached this via the same skip path.
+    /// No implementer is recorded; this does not waive required review.
     NoAssignee,
     /// The assignee exists and is registered, but their heartbeat or
     /// lease is stale. `minutes_stale` is the observed staleness if we
     /// could measure it.
     AssigneeInactive { minutes_stale: Option<i64> },
-    /// `task.assignee` is set but we cannot resolve it through the
-    /// lease *or* a direct id lookup. The agent may have been GC'd or
-    /// the assignee row holds an old display name no longer in the
-    /// agent store. Skip verification and cite the real reason.
-    AssigneeUnknown,
-    /// Supervisor is closing a task whose assignee is still alive and
-    /// has explicitly requested a verification skip via
-    /// `supervisor_override=true`. Separate from `AssigneeInactive` so
-    /// the audit note reflects supervisor intent, not worker state.
+    /// A named implementer is no longer in the agent registry.
+    AssigneeUnregistered { assignee: String },
+    /// A live registered supervisor explicitly requested a verification waiver.
     SupervisorBypass,
     /// A live registered supervisor accepted a measured negative result with
     /// durable evidence and a closed-unmerged PR/branch receipt. No delivery
@@ -5368,7 +5339,10 @@ pub(crate) enum VerificationSkipReason {
 impl VerificationSkipReason {
     /// Whether this reason short-circuits the verification gate.
     pub(crate) fn is_skip(&self) -> bool {
-        !matches!(self, VerificationSkipReason::None)
+        matches!(self,
+            Self::SupervisorBypass | Self::SupervisorNegativeResult
+                | Self::SupervisorEvidenceOnly | Self::SupervisorDecision
+        )
     }
 
     /// Short human-readable suffix appended to the `Closed task:` line.
@@ -5376,26 +5350,15 @@ impl VerificationSkipReason {
     /// format string.
     pub(crate) fn response_suffix(&self, verification_enabled: bool) -> String {
         match self {
-            VerificationSkipReason::None => {
+            VerificationSkipReason::None
+                | VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnregistered { .. } => {
                 if verification_enabled {
                     " (verified)".to_string()
                 } else {
                     String::new()
                 }
-            }
-            VerificationSkipReason::NoAssignee => {
-                " (verification skipped — orphaned task, no assignee)".to_string()
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: Some(m),
-            } => {
-                format!(" (verification skipped — assignee inactive for {m}m)")
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: None,
-            } => " (verification skipped — assignee lease expired)".to_string(),
-            VerificationSkipReason::AssigneeUnknown => {
-                " (verification skipped — assignee unknown)".to_string()
             }
             VerificationSkipReason::SupervisorBypass => {
                 " (verification skipped — supervisor override via supervisor_override=true)"
@@ -5414,32 +5377,30 @@ impl VerificationSkipReason {
         }
     }
 
+    fn assignee_suffix(&self) -> String {
+        match self {
+            Self::NoAssignee => " (no assignee recorded)".into(),
+            Self::AssigneeInactive { minutes_stale: Some(minutes) } =>
+                format!(" (assignee inactive for {minutes}m)"),
+            Self::AssigneeInactive { minutes_stale: None } => " (assignee lease expired)".into(),
+            Self::AssigneeUnregistered { assignee } =>
+                format!(" (assignee `{assignee}` is no longer registered)"),
+            _ => String::new(),
+        }
+    }
+
     /// Reason text written to the `Skipped` verification row so the
     /// audit trail records the accurate reason alongside the row, not
     /// just in the response text.
     pub(crate) fn audit_reason(&self) -> String {
         match self {
-            VerificationSkipReason::None => String::new(),
-            VerificationSkipReason::NoAssignee => {
-                "Closed via supervisor bypass — task had no assignee (orphaned).".to_string()
-            }
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: Some(m),
-            } => format!(
-                "Closed via supervisor bypass — assignee inactive for {m} minute(s) at close time."
-            ),
-            VerificationSkipReason::AssigneeInactive {
-                minutes_stale: None,
-            } => "Closed via supervisor bypass — assignee lease had expired at close time."
-                .to_string(),
-            VerificationSkipReason::AssigneeUnknown => {
-                "Closed via supervisor bypass — assignee row not found in agent store (likely \
-                 a stale or renamed agent)."
-                    .to_string()
-            }
+            VerificationSkipReason::None
+                | VerificationSkipReason::NoAssignee
+                | VerificationSkipReason::AssigneeInactive { .. }
+                | VerificationSkipReason::AssigneeUnregistered { .. } => String::new(),
             VerificationSkipReason::SupervisorBypass => {
                 "Closed via supervisor override — supervisor_override=true explicitly set by \
-                 supervisor while assignee was still active."
+                 supervisor with a recorded close reason."
                     .to_string()
             }
             VerificationSkipReason::SupervisorEvidenceOnly => {
@@ -8099,6 +8060,7 @@ impl CasCore {
                             })?;
                         return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                             &req.id,
+                            required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Dispatch {
                                 dispatch_id: &timed_out.id,
                                 waited_mins: None,
@@ -8169,6 +8131,7 @@ impl CasCore {
                 {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
                         &req.id,
+                        required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
                             dispatch_id: &dispatch.id,
                             waited_mins: None,
@@ -8436,7 +8399,7 @@ impl CasCore {
             && !supervisor_closing_merged_receipt
             && !supervisor_closing_merged_anchor
             && matches!(self.compute_verification_skip_reason(&task, &req),
-                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnknown)
+                VerificationSkipReason::AssigneeInactive { .. } | VerificationSkipReason::AssigneeUnregistered { .. })
         {
             match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
                 (Some(context), Some(receipt)) => {
@@ -9741,32 +9704,17 @@ impl CasCore {
             decision.tier == super::review_tier::VerificationTier::Adversarial
         });
 
-        // Skip verification for orphaned tasks: if caller is supervisor and the
-        // task's assignee is inactive (heartbeat expired or lease gone), allow
-        // close without verification. cas-3bd4: compute the reason as a typed
-        // enum so the response message cites the actual state instead of
-        // defaulting to "assignee inactive" for every lookup failure.
+        let assignee_state = self.compute_verification_skip_reason(&task, &req);
         let skip_reason = if close_disposition == TaskCloseDisposition::Decision {
             VerificationSkipReason::SupervisorDecision
         } else if close_disposition == TaskCloseDisposition::EvidenceOnly {
             VerificationSkipReason::SupervisorEvidenceOnly
         } else if !close_disposition.requires_delivery_gates() {
             VerificationSkipReason::SupervisorNegativeResult
-        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close() {
-            // cas-eda0: Cassy's own post-merge close never takes the
-            // supervisor's orphan/convenience skip; it needs a real verdict.
-            if task.task_type == TaskType::Epic || tier_two {
-                // Ownership admits this caller; the assembled epic still needs
-                // its own dispatch/verdict, as does a Tier 2 delivery whose
-                // assignee has retired. Only an explicit override waives it.
-                if req.supervisor_override.unwrap_or(false) {
-                    VerificationSkipReason::SupervisorBypass
-                } else {
-                    VerificationSkipReason::None
-                }
-            } else {
-                self.compute_verification_skip_reason(&task, &req)
-            }
+        } else if verification_enabled && is_supervisor_from_env() && !in_cassy_merge_close()
+            && req.supervisor_override.unwrap_or(false)
+        {
+            VerificationSkipReason::SupervisorBypass
         } else {
             VerificationSkipReason::None
         };
@@ -9777,23 +9725,18 @@ impl CasCore {
             cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id),
             Ok(None)
                 | Ok(Some(cas_types::VerificationDispatch {
-                    state: cas_types::VerificationDispatchState::Resolved
-                        | cas_types::VerificationDispatchState::Invalidated,
+                    state: cas_types::VerificationDispatchState::Invalidated,
                     ..
                 }))
         );
-        // cas-ce5e: with no per-task dispatch to protect it, a merged delivery whose
-        // worker has gone must not lose its release review to the orphan convenience.
-        // The explicit supervisor bypass and non-delivery dispositions are unaffected.
-        let orphan_skip_of_release_verdict = matches!(
-            skip_reason,
-            VerificationSkipReason::NoAssignee
-                | VerificationSkipReason::AssigneeInactive { .. }
-                | VerificationSkipReason::AssigneeUnknown
-        ) && !depth_light
-            && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root);
-        let skip_verification =
-            skip_reason.is_skip() && exact_dispatch_allows_skip && !orphan_skip_of_release_verdict;
+        // Legacy errors also retain their authority when no typed dispatch exists.
+        let skip_verification = skip_reason.is_skip() && exact_dispatch_allows_skip
+            && self.open_verification_store().is_ok_and(|store| {
+                store.get_latest_for_task(&req.id).is_ok_and(|latest| latest.is_none_or(|row| {
+                    row.dispatch_id.is_some()
+                        || matches!(row.status, VerificationStatus::Approved | VerificationStatus::Skipped)
+                }))
+            });
 
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
@@ -10073,6 +10016,7 @@ impl CasCore {
                     let recovery_action = timed_out.recovery_action.to_string();
                     return Ok(Self::tool_error(gate_text::verification_timeout_message(
                         &req.id,
+                        required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
                             dispatch_id: &timed_out.id,
                             waited_mins: Some(elapsed_mins),
@@ -10228,6 +10172,7 @@ impl CasCore {
                         // supervisor an alias they cannot call.
                         return Ok(Self::tool_error(gate_text::verification_timeout_message(
                             &req.id,
+                            required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Legacy {
                                 waited_mins: elapsed_mins,
                             },
@@ -10297,7 +10242,7 @@ impl CasCore {
                             && matches!(self.compute_verification_skip_reason(&task, &req),
                                 VerificationSkipReason::NoAssignee
                                     | VerificationSkipReason::AssigneeInactive { .. }
-                                    | VerificationSkipReason::AssigneeUnknown);
+                                    | VerificationSkipReason::AssigneeUnregistered { .. });
                         // A retired worker's recorded delivery is the recovery
                         // boundary even when close supplies no new receipt.
                         // It must still be proven on the declared target below.
@@ -11856,8 +11801,7 @@ impl CasCore {
         }
         task.deliverables = deliverables;
 
-        // When closing via the supervisor bypass (assignee inactive / orphaned /
-        // supervisor-forced), we skip the verification gate but MUST still
+        // Explicit exemptions skip the verification gate but MUST still
         // write a durable `Skipped` verification row. Without this row, the
         // exact-task close gate treats the task as unverified on retry.
         //
@@ -12422,11 +12366,23 @@ impl CasCore {
 
         crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.id).await;
 
-        // cas-3bd4: use the typed skip reason so the audit suffix cites
-        // the real reason (e.g. "assignee unknown" for name/id mismatches,
-        // "supervisor bypass" for explicit overrides) instead of always
-        // saying "assignee inactive".
-        let verification_note = skip_reason.response_suffix(verification_enabled);
+        // Report the exemption actually applied, separately from implementer state.
+        let verification_note = if skip_verification {
+            skip_reason.response_suffix(verification_enabled)
+        } else if !verification_enabled {
+            String::new()
+        } else if depth_light {
+            " (verification not required — light-depth policy)".into()
+        } else if tier_skips_verifier {
+            " (verification not required — measured Tier 0 docs/tests delivery)".into()
+        } else if rapid_unsampled {
+            " (verification deferred — recorded rapid-response sampling policy)".into()
+        } else if shipped_timeout_waiver.is_some() {
+            " (verification waived — recorded shipped-timeout recovery)".into()
+        } else {
+            VerificationSkipReason::None.response_suffix(verification_enabled)
+        };
+        let verification_note = format!("{verification_note}{}", assignee_state.assignee_suffix());
 
         // Note about worktree status (merge already handled by worktree-merger agent)
         let worktree_msg = if let Some(worktree_id) = &task.worktree_id {
@@ -12781,13 +12737,9 @@ impl CasCore {
         )
     }
 
-    /// Compute why (if at all) the task-verifier step should be skipped
-    /// for this close attempt.
-    ///
-    /// Only invoked after the caller has been identified as a supervisor
-    /// and `verification_enabled` is true — the `VerificationSkipReason::None`
-    /// cases here represent "supervisor is closing, but the assignee is
-    /// still alive and no bypass flag was set, so run the verifier".
+    /// Resolve implementer availability for reporting and receipt recovery.
+    /// Identity states do not waive review. A requested bypass is applied only
+    /// by the separate authenticated close policy and exact-proof checks.
     ///
     /// Resolution order:
     ///
@@ -12802,7 +12754,7 @@ impl CasCore {
     ///    the referenced agent is dead → `AssigneeInactive`.
     /// 3. No lease — resolve either the legacy agent id or display name from
     ///    the registry. Same liveness logic as above.
-    /// 4. Everything failed → `AssigneeUnknown` (never falsely reported
+    /// 4. Everything failed → `AssigneeUnregistered` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
     pub(crate) fn compute_verification_skip_reason(
         &self,
@@ -12849,7 +12801,7 @@ impl CasCore {
                 }
                 // Lease is valid but the referenced agent row is gone —
                 // agent was unregistered but the lease wasn't cleaned up.
-                return VerificationSkipReason::AssigneeUnknown;
+                return VerificationSkipReason::AssigneeUnregistered { assignee: assignee.into() };
             }
             // Lease exists but expired.
             return VerificationSkipReason::AssigneeInactive {
@@ -12872,9 +12824,12 @@ impl CasCore {
             };
         }
 
-        // 3) No lease, no matching agent row. The assignee is unknown
-        //    to the store — do not falsely report "inactive".
-        VerificationSkipReason::AssigneeUnknown
+        // Only report registry absence when the registry can actually be read.
+        if agent_store.list(None).is_err() {
+            return VerificationSkipReason::None;
+        }
+        // A named assignee remains known even after its registration is gone.
+        VerificationSkipReason::AssigneeUnregistered { assignee: assignee.into() }
     }
 
     /// End planned work without claiming a delivery.
@@ -29665,7 +29620,7 @@ mod merge_state_gate_tests {
     async fn queue_landed_premerge_candidate_closes_cas_192b0() {
         use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
         use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
-        for row in ["queue-landed", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
+        for row in ["queue-landed", "released-train", "queue-target-progress", "same-line-evolved", "batch-target-proof", "source-absent", "partial-patch", "foreign-candidate"] {
             let mut env = TestEnvGuard::temp_home();
             let (dir, _bare) = handoff_repo();
             let p = dir.path();
@@ -29677,6 +29632,9 @@ mod merge_state_gate_tests {
             git(p, &["checkout", "-q", "main"]);
             std::fs::write(p.join("seed.txt"), "old\nmiddle\nbase\n").unwrap();
             git(p, &["commit", "-qam", "shared context before delivery"]);
+            if matches!(row, "released-train" | "partial-patch") {
+                git(p, &["branch", "release-parent"]);
+            }
             git(p, &["checkout", "-q", "factory/worker"]);
             git(p, &["merge", "-q", "main", "--no-edit"]);
             std::fs::write(p.join("seed.txt"), "new\nmiddle\nbase\n").unwrap();
@@ -29699,6 +29657,13 @@ mod merge_state_gate_tests {
             git(p, &["push", "-q", "origin", "main"]);
             let wt = tempfile::tempdir().unwrap();
             git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
+            let source = if row == "released-train" {
+                // The incident's source already includes the reviewed target;
+                // the synthetic candidate adds no file changes over the anchor.
+                git(wt.path(), &["merge", "-q", "main", "--no-edit"]);
+                git(wt.path(), &["push", "-q", "origin", "factory/worker"]);
+                head_sha(wt.path())
+            } else { source };
             let root = p.join(".cas");
             std::fs::create_dir_all(&root).unwrap();
             env.set("CAS_ROOT", &root);
@@ -29739,6 +29704,9 @@ mod merge_state_gate_tests {
                 reviewed_task.id = "cas-other".into(); tasks.add(&reviewed_task).unwrap();
             }
             let candidate = core.build_completion_candidate(&reviewed_task, p, "factory/worker", "main").unwrap();
+            if row == "released-train" {
+                assert_eq!(resolve_branch_sha(p, &format!("{source}^{{tree}}")).unwrap(), candidate.tree);
+            }
             let mut dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "supervisor-id", "supervisor-id", &VerificationProofBoundary::task_at(candidate.proof.clone()), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap();
             let recorded = core.cas_verification_add(Parameters(crate::mcp::tools::VerificationAddRequest {
                 task_id: task.id.clone(), status: "approved".into(), summary: "Reviewed premerge candidate before queue publication".into(), confidence: Some(1.0),
@@ -29770,6 +29738,10 @@ mod merge_state_gate_tests {
             }
             git(p, &["commit", "-q", "-m", "Merge pull request #1527: queue owns this commit"]);
             let landed = head_sha(p);
+            if matches!(row, "released-train" | "partial-patch") {
+                task.deliverables.green_merge_commit = Some(landed.clone());
+                tasks.update(&task).unwrap();
+            }
             assert_ne!(landed, candidate.proof.head_commit);
             if matches!(row, "queue-landed" | "same-line-evolved" | "batch-target-proof") {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
@@ -29781,7 +29753,7 @@ mod merge_state_gate_tests {
                 assert_eq!(resolve_branch_sha(p, &format!("{landed}^{{tree}}")).unwrap(), candidate.tree);
             }
             assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "main"));
-            if matches!(row, "same-line-evolved" | "batch-target-proof") {
+            if matches!(row, "released-train" | "same-line-evolved" | "batch-target-proof") {
                 // Publication records the reviewed mapping before sibling work
                 // evolves the same file. Close must reuse that immutable map.
                 git(p, &["push", "-q", "origin", "main"]);
@@ -29805,14 +29777,30 @@ mod merge_state_gate_tests {
             std::fs::write(p.join("later.txt"), "unrelated target progress\n").unwrap();
             git(p, &["add", "later.txt"]); git(p, &["commit", "-q", "-m", "advance target after queue publication"]);
             git(p, &["push", "-q", "origin", "main"]);
+            if matches!(row, "released-train" | "partial-patch") {
+                // cas-3806 / cas-abb0: after release, the published lane points
+                // at main's merge, with the original train on its second parent.
+                git(p, &["checkout", "-q", "release-parent"]);
+                git(p, &["merge", "-q", "--no-ff", "main", "-m", "publish released train"]);
+                git(p, &["push", "-q", "origin", "HEAD:main"]);
+                assert!(git_commit_is_ancestor(p, &source, "origin/main"));
+                assert!(!git_commit_is_ancestor(p, &candidate.proof.head_commit, "origin/main"));
+            }
             // Probe the same containment guard as well as full close, so a
             // prior content gate cannot conceal a permissive partial-patch rule.
             match verified_delivery::current(&root, &task) {
                 Err(_) if row == "foreign-candidate" => {},
-                Ok(Some(reviewed)) => assert_eq!(
-                    reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
-                    matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
-                ),
+                Ok(Some(reviewed)) => {
+                    if row == "released-train" {
+                        let mut unpublished = task.clone();
+                        unpublished.deliverables.green_merge_commit = Some(candidate.proof.head_commit.clone());
+                        assert!(reviewed.merge_refusal(p, &unpublished, "main", None).is_some());
+                    }
+                    assert_eq!(
+                        reviewed.merge_refusal(p, &task, "main", Some(&landed)).is_none(),
+                        matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "containment guard: {row}",
+                    );
+                },
                 _ => panic!("missing task-bound review: {row}"),
             }
             if matches!(row, "same-line-evolved" | "batch-target-proof") {
@@ -29836,7 +29824,7 @@ mod merge_state_gate_tests {
             req.supervisor_override = Some(true); req.reason = Some("Reviewed queue delivery; scoped proof deferred to fixture assembly".into());
             let result = core.cas_task_close(Parameters(req)).await;
             let closed = tasks.get(&task.id).unwrap();
-            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
+            assert_eq!(closed.status == TaskStatus::Closed, matches!(row, "queue-landed" | "released-train" | "queue-target-progress" | "same-line-evolved" | "batch-target-proof"), "{row}: {result:?}");
             assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap().id, dispatch.id,
                 "close cannot silently replace the reviewed dispatch: {row}");
         }
@@ -30008,6 +29996,7 @@ mod merge_state_gate_tests {
             "head_repository": {"full_name": "acme/epic"},
         });
         match case {
+            "queue-wrapper" | "queue-wrapper-colon" => run["path"] = serde_json::json!(".github/workflows/full-validation.yml"),
             "failed" => run["conclusion"] = serde_json::json!("failure"),
             "pending" => run["status"] = serde_json::json!("in_progress"),
             "wrong-event" => run["event"] = serde_json::json!("pull_request"),
@@ -30072,7 +30061,9 @@ esac
             task.deliverables.green_merge_commit = Some(landed);
         }
         store.add(&task).unwrap();
-        let reason = if case == "no-citation" || automatic { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
+        let reason = if case == "no-citation" || automatic { "Reviewed delivery" }
+            else if case == "queue-wrapper-colon" { "Reviewed delivery; merge_group_run=4386:" }
+            else { "Reviewed delivery; merge_group_run=4386" };
         let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
             "action": "close", "id": task.id, "commit_receipt": delivery,
             "supervisor_override": supervisor_override, "reason": reason,
@@ -30083,16 +30074,18 @@ esac
     #[cfg(unix)]
     #[tokio::test]
     async fn supervisor_close_reuses_landed_queue_proof_cas_4386() {
-        let (task, text) = queue_proof_close_cas_4386("green", true).await;
-        assert_eq!(task.status, TaskStatus::Closed, "{text}");
-        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
-        assert!(task.notes.contains("run=4386"), "{}", task.notes);
+        for case in ["green", "queue-wrapper", "queue-wrapper-colon"] {
+            let (task, text) = queue_proof_close_cas_4386(case, true).await;
+            assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
+            assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
+            assert!(task.notes.contains("run=4386"), "{}", task.notes);
+        }
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831() {
-        for case in ["green", "automatic-green"] {
+        for case in ["green", "automatic-green", "automatic-queue-wrapper"] {
             let (task, text) = queue_proof_close_cas_4386(case, false).await;
             assert_eq!(task.status, TaskStatus::Closed, "{case}: {text}");
             assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
@@ -30727,7 +30720,7 @@ esac
     fn worker_task_close_skipped_for_no_assignee() {
         // Orphan tasks have no factory branch convention to resolve.
         // The guard must Proceed (covered by NoAssignee verification
-        // skip elsewhere; here we just need it not to false-reject).
+        // policy elsewhere; here we just need it not to false-reject).
         let dir = init_factory_repo("worker");
         // Stranded commits exist on factory/worker, but our task has no assignee.
         std::fs::write(dir.path().join("d.rs"), "// d\n").unwrap();
@@ -31048,7 +31041,8 @@ esac
 
         let (refused, text) = close("shipped by PR 1513".into(), &receipt).await;
         assert!(refused, "{text}");
-        assert!(text.contains("VERIFICATION TIMED OUT") && text.contains("Already shipped"), "{text}");
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap().state,
+            cas_types::VerificationDispatchState::TimedOut);
         assert!(!text.contains("blocking dependencies"), "shipped blocker must not hold: {text}");
         assert_ne!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
 
@@ -31058,6 +31052,112 @@ esac
         assert_eq!(closed.status, TaskStatus::Closed, "{text}");
         assert!(closed.notes.contains("Blocker cas-4b22-blocker already shipped"), "{}", closed.notes);
         assert!(closed.notes.contains(&format!("passed timed-out verification dispatch {}", dispatch.id)), "{}", closed.notes);
+    }
+
+    /// Execute the machine calls in the epic timeout refusal, including every
+    /// advertised alternative, so guidance cannot offer an unusable escape.
+    #[tokio::test]
+    async fn epic_timeout_recovery_commands_execute_cas_bf13() {
+        use crate::mcp::CasService;
+        use cas_types::{Agent, AgentRole, VerificationProofBoundary};
+
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let (dir, _bare) = handoff_repo();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["branch", "-D", "factory/worker"]);
+        git(p, &["branch", "epic/timeout"]);
+        git(p, &["push", "-q", "origin", "epic/timeout"]);
+        let receipt = rev_parse_local(p, "origin/main");
+        let cas_dir = crate::store::init_cas_dir(p).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        let actor = "cas-bf13-supervisor";
+        core.open_agent_store().unwrap().register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        core.set_agent_id_for_testing(actor.into());
+        let store = core.open_task_store().unwrap();
+        let mut epic = Task::new("cas-bf13-epic".into(), "Timed-out epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.status = TaskStatus::InProgress;
+        epic.branch = Some("epic/timeout".into());
+        epic.epic_verification_owner = Some(actor.into());
+        epic.risk = vec![TaskRisk::None];
+        store.add(&epic).unwrap();
+        let service = CasService::new(core, None);
+        let create_dispatch = |deadline| cas_store::create_verification_dispatch_bound(
+            &cas_dir, &epic.id, "task-verifier", actor,
+            &VerificationProofBoundary::task(), deadline, true,
+        ).unwrap();
+        let stale = create_dispatch(chrono::Utc::now() - chrono::Duration::minutes(1));
+        cas_store::timeout_verification_dispatch(&cas_dir, &epic.id, chrono::Utc::now()).unwrap();
+        let current = create_dispatch(chrono::Utc::now() + chrono::Duration::minutes(1));
+        let stale_verdict = serde_json::from_value(serde_json::json!({
+            "action": "add", "task_id": epic.id, "dispatch_id": stale.id,
+            "status": "approved", "verification_type": "epic", "summary": "Reviewed old epic",
+        })).unwrap();
+        let old_result = service.verification(Parameters(stale_verdict)).await.unwrap();
+        assert_ne!(old_result.is_error, Some(true), "{old_result:?}");
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &current.id).unwrap().state,
+            cas_types::VerificationDispatchState::Pending);
+        cas_store::timeout_verification_dispatch(
+            &cas_dir, &epic.id, chrono::Utc::now() + chrono::Duration::minutes(2),
+        ).unwrap();
+        let request = serde_json::json!({
+            "action": "close", "id": epic.id, "supervisor_override": true,
+            "commit_receipt": receipt,
+            "reason": format!("shipped; verifier dispatch {} timed out", current.id),
+        });
+        let response = service.task(Parameters(serde_json::from_value(request).unwrap())).await.unwrap();
+        assert_eq!(response.is_error, Some(true), "an unshipped epic cannot waive review");
+        let text = response.content.iter().filter_map(|content| match &content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text.as_str()), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        // Backtick-delimited MCP payloads are the refusal's copyable interface.
+        // Consume parameters, not prose; fill only the documented placeholders.
+        let fields = regex::Regex::new(r#"(\w+)=("[^"]*"|<[^>]*>|[^\s]+)"#).unwrap();
+        let commands: Vec<_> = text.split('`').skip(1).step_by(2).filter_map(|command| {
+            let tool = command.split_whitespace().next()?;
+            (tool.ends_with("verification") || tool.ends_with("task")).then(|| {
+                let mut args = serde_json::Map::new();
+                for capture in fields.captures_iter(command) {
+                    let key = &capture[1];
+                    let value = capture[2].trim_matches('"');
+                    args.insert(key.into(), match key {
+                        "supervisor_override" => serde_json::json!(value == "true"),
+                        "commit_receipt" => serde_json::json!(receipt),
+                        "summary" => serde_json::json!("Reviewed assembled epic"),
+                        _ => serde_json::json!(value),
+                    });
+                }
+                (tool.ends_with("verification"), serde_json::Value::Object(args))
+            })
+        }).collect();
+        // Try every advertised alternate escape before recording the verdict.
+        for (_, args) in commands.iter().filter(|(verification, args)| !verification && args.get("supervisor_override").is_some()) {
+            let result = service.task(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "advertised recovery failed: {result:?}");
+        }
+        let verdicts: Vec<_> = commands.iter().filter(|(verification, _)| *verification).collect();
+        assert_eq!(verdicts.len(), 1, "one exact-dispatch recovery command");
+        for (_, args) in verdicts {
+            assert_eq!(args["dispatch_id"], current.id);
+            let result = service.verification(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        let verdict = cas_store::get_verification_for_dispatch(&cas_dir, &current.id).unwrap().unwrap();
+        assert_eq!(verdict.verification_type, VerificationType::Epic);
+        assert_eq!(verdict.provenance, cas_types::VerificationProvenance::SupervisorDirect);
+        for (_, args) in commands.iter().filter(|(verification, args)| !verification && args.get("supervisor_override").is_none()) {
+            let result = service.task(Parameters(serde_json::from_value(args.clone()).unwrap())).await.unwrap();
+            assert_ne!(result.is_error, Some(true), "{result:?}");
+        }
+        assert_eq!(store.get(&epic.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(cas_store::get_verification_dispatch(&cas_dir, &stale.id).unwrap().state,
+            cas_types::VerificationDispatchState::Resolved);
     }
 
     /// cas-f01b (GH #1068): the gabber-studio cas-cfd8 sequence through the

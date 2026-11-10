@@ -660,7 +660,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Factory: workers, queues, epics, worktrees, servers, loops, notices, leases, GC. train_merge id=<epic>: queue parked task_ids in order (default updated time); hold single merges, resume after review. worker_queue: list/reorder/clear pending task_ids; ordered spawns isolate checkouts. clear_context requires transcript reset. Workers: own servers only. Neon: supervisor only, one branch/task, delete at close; DATABASE_URL in worker .env.cas-db; workers ask via blocker. Slack-thread claims/reply_intent: supervisor auth required. Identity/messages/reminders: coordination."
+        description = "Factory: workers, queues, epics, worktrees, servers. train_freeze reason=\"release-freeze: <reason>\": only Commander operator/publication lifts; never CI hold. train_merge id=<epic> queues task_ids; holds single merges. Workers: own servers; Neon/Slack claims: supervisor. Identity/messages: coordination."
     )]
     pub async fn factory(
         &self,
@@ -861,13 +861,14 @@ impl CasService {
         panic_catch::dispatch_with_catch("artifact", async move {
             crate::ui::factory::record_supervisor_mcp_call();
             let action = req.action.clone();
-            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch");
+            let is_mutating = matches!(action.as_str(), "publish" | "post" | "fetch" | "revoke");
 
             let result = match action.as_str() {
                 "publish" => this.inner.artifact_publish(Parameters(req)).await,
                 "show" => this.inner.artifact_show(Parameters(req)).await,
                 "list" => this.inner.artifact_list(Parameters(req)).await,
                 "fetch" => this.inner.artifact_fetch(Parameters(req)).await,
+                "revoke" => this.inner.artifact_revoke(Parameters(req)).await,
                 #[cfg(feature = "mcp-proxy")]
                 "post" => this.artifact_post(req).await,
                 #[cfg(not(feature = "mcp-proxy"))]
@@ -877,7 +878,7 @@ impl CasService {
                 )),
                 _ => Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post"),
+                    format!("Unknown artifact action: {action}. Valid: publish, show, list, fetch, post, revoke"),
                 )),
             };
 
@@ -1421,8 +1422,9 @@ impl CasService {
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))
                 }
 
-                // cas-2f4d: freeze a train for release. Only the release
-                // landing or the operator's Commander lift ends it.
+                // train_freeze requires reason="release-freeze: <reason>".
+                // Only a published release or the operator's Commander lift
+                // ends it; it is not a supervisor-reversible CI hold.
                 "train_freeze" => {
                     let train = req.id.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "train_freeze requires id=<release-train epic>"))?;
                     let inner = this.inner.clone();

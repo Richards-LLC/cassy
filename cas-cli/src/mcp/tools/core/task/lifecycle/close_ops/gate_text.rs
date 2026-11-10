@@ -87,6 +87,7 @@ pub(crate) enum VerificationTimeout<'a> {
 /// VERIFICATION TIMED OUT, for every timeout path in the close gate.
 pub(crate) fn verification_timeout_message(
     task_id: &str,
+    verification_type: cas_types::VerificationType,
     timeout: VerificationTimeout<'_>,
     supervisor_prefix: &str,
     caller_prefix: &str,
@@ -109,14 +110,11 @@ pub(crate) fn verification_timeout_message(
                  Task {task_id} exact dispatch {dispatch_id} timed out{waited} without a \
                  verdict. Its lease was released; a registered supervisor recovers it.\n\n\
                  Recovery{recovery}:\n\
-                 1. Re-dispatch the task-verifier for task {task_id}, or record the verdict \
+                 1. A registered supervisor reviews the exact dispatch and records the verdict \
                  directly: `{supervisor_prefix}verification action=add task_id={task_id} \
-                 dispatch_id={dispatch_id} status=approved summary=\"...\"`\n\
-                 2. Then retry {retry}.\n\
-                 Already shipped by a merged PR or merge-queue run: a registered supervisor \
-                 closes it with `{supervisor_prefix}task action=close id={task_id} \
-                 supervisor_override=true commit_receipt=<merge sha on origin/target> \
-                 reason=\"shipped; verifier dispatch {dispatch_id} timed out\"`."
+                 dispatch_id={dispatch_id} verification_type={verification_type} \
+                 status=approved summary=\"...\"`\n\
+                 2. Then retry {retry}."
             )
         }
         VerificationTimeout::Legacy { waited_mins } => format!(
@@ -128,7 +126,8 @@ pub(crate) fn verification_timeout_message(
              1. Retry {retry} to mint a verification dispatch.\n\
              2. Re-dispatch the task-verifier for task {task_id}, or record the verdict \
              directly: `{supervisor_prefix}verification action=add task_id={task_id} \
-             dispatch_id=<dispatch id named in that response> status=approved summary=\"...\"`\n\
+             dispatch_id=<dispatch id named in that response> verification_type={verification_type} \
+             status=approved summary=\"...\"`\n\
              3. Then retry {retry}."
         ),
     }

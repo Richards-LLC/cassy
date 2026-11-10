@@ -20,6 +20,13 @@ incomplete ledger beats a late one: mark unrun cells `NOT EXERCISED: <reason>`.
 reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
 For batch work, capture before/after evidence during implementation. The supervisor
 builds one candidate per release at the exact frozen tip and walks one combined matrix.
+Initialize the batch ledger with `cas qa ledger init --task <qa-task>
+--covers <delivery-a>,<delivery-b>` using every intended receipt task ID.
+Keep those IDs in its `covers:` header and run `cas qa ledger check <path>
+--task <qa-task> --covers <delivery-a>,<delivery-b>` before publishing; the
+checker rejects missing or incomplete coverage. Init defaults to its owner
+when `--covers` is omitted. A mention elsewhere in the report does not extend
+declared coverage.
 Publish the PASS ledger, then record `verification action=batch_receipt` with
 `task_ids`, `staging_sha`, `ledger_artifact_id`, `ledger_path` and `ledger_author`
 (a non-implementer). Every listed

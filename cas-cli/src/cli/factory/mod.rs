@@ -831,6 +831,9 @@ pub enum FactoryCommands {
         /// Fixed provider credential scrub plus this private XDG directory, applied to tests only.
         #[arg(long)]
         isolated_test_env: Option<std::path::PathBuf>,
+        /// Allowlisted child-only NAME=value or -NAME test input.
+        #[arg(long, hide = true, allow_hyphen_values = true)]
+        test_env: Vec<String>,
         #[arg(last = true, required = true)]
         cargo_args: Vec<String>,
     },
@@ -1395,16 +1398,18 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 detach: true,
                 completion_id: _,
                 isolated_test_env,
+                test_env,
                 cargo_args,
-            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref()),
+            } => crate::factory_worker_check::execute_detached(cas_root, cargo_args, isolated_test_env.as_deref(), test_env),
             FactoryCommands::WorkerCheck {
                 cas_root,
                 detach: false,
                 completion_id,
                 isolated_test_env,
+                test_env,
                 cargo_args,
             } => {
-                let execute = || crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref());
+                let execute = || crate::factory_worker_check::execute(cas_root, cargo_args, isolated_test_env.as_deref(), test_env);
                 match completion_id {
                     Some(id) => crate::factory_worker_runs::monitor(cas_root, id, execute),
                     None => execute(),

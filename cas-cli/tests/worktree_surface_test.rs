@@ -4678,6 +4678,56 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         outcome => failures.push(format!("a landed parked tip with a stale bound candidate must be contained: {outcome:?}")),
     }
     assert!(failures.is_empty(), "{failures:#?}");
+
+    // GH #1417: recovery of an integrated local delivery outlives its worker
+    // and needs neither origin nor a newly manufactured review authority.
+    run_git(&["worktree", "remove", worker.to_str().unwrap()], &repo.root);
+    open_agent_store(&root).unwrap().unregister("worker-noop").unwrap();
+    run_git(&["remote", "remove", "origin"], &repo.root);
+    task = tasks.get(&task.id).unwrap();
+    task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
+    tasks.update(&task).unwrap();
+    let recovered_tip = git_stdout(&repo.root, &["rev-parse", "main"]);
+    let dispatch_before = cas_store::get_latest_verification_dispatch(&root, &task.id)
+        .unwrap().map(|dispatch| dispatch.id);
+    let now = chrono::Utc::now();
+    cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+        task_id: &task.id, implementer_agent_id: "worker-noop",
+        branch: task.deliverables.parked_branch.as_deref().unwrap(),
+        bound_head: task.deliverables.factory_branch_anchor.as_deref().unwrap(),
+        deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+    }, now).unwrap();
+    let mut recovery = request;
+    recovery.id = task.deliverables.parked_branch.clone();
+    let held = service.factory(Parameters(recovery.clone())).await
+        .expect_err("retired local delivery must retain its pending independent QA gate");
+    assert_eq!(held.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    cas_store::waive_qa_pass(&root, &task.id, "supervisor-noop", "worker-noop",
+        task.deliverables.parked_branch.as_deref().unwrap(),
+        task.deliverables.factory_branch_anchor.as_deref().unwrap(),
+        "fixture: isolate local containment after proving pending QA refusal", now).unwrap();
+    for configured_origin in [false, true] {
+        if configured_origin {
+            run_git(&["remote", "add", "origin", remote.path().join("gone.git").to_str().unwrap()], &repo.root);
+            // A stale remote target must not outrank the declared local main.
+            run_git(&["update-ref", "refs/remotes/origin/main", &format!("{recovered_tip}^")], &repo.root);
+        }
+        let recovered = service.factory(Parameters(recovery.clone())).await
+            .expect("retired local delivery must reconcile through its local refs");
+        assert!(!recovered.is_error.unwrap_or(false), "{recovered:?}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), recovered_tip);
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(cas_store::get_latest_verification_dispatch(&root, &task.id)
+            .unwrap().map(|dispatch| dispatch.id), dispatch_before);
+
+        task.delivery_mode = cas::types::DeliveryMode::PushBranch;
+        tasks.update(&task).unwrap();
+        let refused = service.factory(Parameters(recovery.clone())).await
+            .expect_err("a push delivery still requires its recorded live origin");
+        assert_eq!(refused.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        task.delivery_mode = cas::types::DeliveryMode::LocalMerge;
+        tasks.update(&task).unwrap();
+    }
 }
 
 #[tokio::test]

@@ -60,7 +60,7 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
     let before = side("roster.before");
     let after = side("roster.after");
     fs::write(dir.join("pairs.json"), serde_json::to_vec(&serde_json::json!({
-        "schema":1,"task_id":"cas-fixture","base_sha":"base","head_sha":"head","origin":"fixture",
+        "schema":2,"task_id":"cas-fixture","base_sha":"base","head_sha":"head","origin":"fixture",
         "pairs":[
             {"id":"roster","surface":"drivers","viewport":[1280,800],"scheme":"light","masked":[".email"],"before":before,"after":after},
             {"id":"missing","surface":"drivers","viewport":[1280,800],"scheme":"light","masked":[".email"],"before":before}

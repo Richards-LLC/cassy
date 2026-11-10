@@ -454,6 +454,7 @@ mod tests {
                 cloud_url: None,
                 slack_permalink: None,
                 created_at: "2026-10-29T12:00:00Z".into(),
+                revocation: None,
             }
         };
         let proof = EvidenceProof {

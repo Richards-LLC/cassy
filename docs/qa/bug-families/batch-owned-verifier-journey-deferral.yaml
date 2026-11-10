@@ -1,0 +1,3 @@
+title: Premerge verifier honors configured batch journey ownership while escalating per-task and unrelated missing evidence
+tasks: [cas-8f8b]
+journeys: [FACTORY-MERGE]

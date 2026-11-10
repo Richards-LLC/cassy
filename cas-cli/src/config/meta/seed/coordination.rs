@@ -197,6 +197,20 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
     });
 
     registry.register(ConfigMeta {
+        key: "factory.codex_home",
+        section: "factory",
+        name: "Worker Codex Account",
+        description: "Default Codex account directory for spawn_workers on this project and machine. Explicit batch or per-worker config_dir wins; otherwise this preference overrides inherited accounts and quota recommendations, including lane requests. Existing account paths, ~/ paths and aliases are supported. Empty uses the account recommender.",
+        value_type: ConfigType::String,
+        default: "",
+        constraint: Constraint::None,
+        advanced: false,
+        requires_feature: None,
+        keywords: &["factory", "worker", "codex", "account", "home", "preference"],
+        use_cases: &["Pin workers to the operator's chosen Codex account"],
+    });
+
+    registry.register(ConfigMeta {
         key: "factory.scratch_root",
         section: "factory",
         name: "Worker Build Scratch Root",

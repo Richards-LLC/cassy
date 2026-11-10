@@ -2815,6 +2815,11 @@ fn artifact_view_error(error: crate::artifacts::ViewError) -> Response {
     use crate::artifacts::cloud::ViewFailure;
     let (status, code, detail) = match &error {
         ViewError::Unknown(_) => return generic_not_found(),
+        ViewError::Revoked(_) | ViewError::Cloud(ViewFailure::Revoked) => (
+            StatusCode::GONE,
+            "artifact_revoked",
+            None,
+        ),
         ViewError::NotInCloud { status } => (
             StatusCode::CONFLICT,
             "artifact_not_in_cloud",
@@ -4790,6 +4795,7 @@ mod artifact_view_tests {
     #[test]
     fn each_reason_an_artifact_cannot_be_viewed_has_its_own_status() {
         let cases = [
+            (ViewError::Revoked(crate::artifacts::ArtifactRevoked { artifact_id: "art-fixture".into() }), StatusCode::GONE),
             (
                 ViewError::NotInCloud {
                     status: "local".to_string(),

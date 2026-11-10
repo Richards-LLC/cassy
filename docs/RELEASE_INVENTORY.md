@@ -60,7 +60,13 @@ SHA; their anchor and shipped commit are null.
 
 `exceptions[].code` is one of `missing_task`, `foreign_scope`, `not_epic`,
 `cancelled`, `missing_anchor`, `retired_anchor`, `missing_base`, `invalid_base`,
-`missing_mapping`, `missing_no_code_proof`. A delivery may also have a base
+`missing_mapping`, `missing_no_code_proof`, `quarantined`. A delivery may also have a base
 exception: callers must inspect both arrays. The inventory does not grant QA,
 review, content-preservation or close admission, and does not alter existing
 publication scripts or the current installed/backfill closer.
+
+Quarantined rows remain suppressed on the ordinary task board. The resolver
+uses the existing by-ID inspection path to preserve their shipped facts and
+adds a `quarantined` exception; membership never lifts that independent hold.
+Recorded anchors and bases must resolve to their own full SHA, never a symbolic
+branch alias.

@@ -91,6 +91,7 @@ pub(crate) enum ReleaseInventoryCode {
     InvalidBase,
     MissingMapping,
     MissingNoCodeProof,
+    Quarantined,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -144,16 +145,25 @@ pub(crate) fn resolve_release_inventory(
         }
     }
     // Structured identities must be immutable commits, never a branch alias.
-    let recorded_commit = |sha: &str| {
-        commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha))
-    };
+    let recorded_commit =
+        |sha: &str| commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha));
     let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
-    let tasks: BTreeMap<_, _> = store
+    let mut tasks: BTreeMap<_, _> = store
         .list(None)
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|t| (t.id.clone(), t))
         .collect();
+    // Board suppression cannot erase a shipped fact. `get` intentionally
+    // permits quarantine inspection; the marker remains an explicit hold.
+    let quarantined = crate::cloud::SyncQueue::open_read_only(root)
+        .and_then(|queue| queue.quarantined_ids(crate::cloud::QUARANTINE_TASK))
+        .unwrap_or_default();
+    for id in &quarantined {
+        if let Ok(task) = store.get(id) {
+            tasks.insert(id.clone(), task);
+        }
+    }
     let dependencies = store
         .list_dependencies(Some(DependencyType::ParentChild))
         .map_err(|e| e.to_string())?;
@@ -174,6 +184,12 @@ pub(crate) fn resolve_release_inventory(
     while let Some(id) = pending.pop() {
         if !epics.insert(id.clone()) {
             continue;
+        }
+        if quarantined.contains(&id) {
+            inventory.exceptions.push(ReleaseInventoryException {
+                task_id: id.clone(),
+                code: ReleaseInventoryCode::Quarantined,
+            });
         }
         let code = match tasks.get(&id) {
             None => Some(ReleaseInventoryCode::MissingTask),
@@ -235,6 +251,9 @@ pub(crate) fn resolve_release_inventory(
             issue(ReleaseInventoryCode::Cancelled);
             continue;
         }
+        if quarantined.contains(&id) {
+            issue(ReleaseInventoryCode::Quarantined);
+        }
         let parent = dependencies
             .iter()
             .find(|d| d.from_id == id)
@@ -251,8 +270,8 @@ pub(crate) fn resolve_release_inventory(
             .as_ref()
             .and_then(|s| recorded_commit(&s.base_sha));
         let explicit = scope.no_code_members.get(&id);
-        let (anchor, shipped_commit, membership, proofs) = if (crate::qa_pass::is_no_code(t)
-            || t.deliverables.evidence_only.is_some())
+        let (anchor, shipped_commit, membership, proofs) = if crate::qa_pass::is_no_code(t)
+            || t.deliverables.evidence_only.is_some()
         {
             let Some(proofs) = explicit.filter(|proofs| {
                 !proofs.is_empty()

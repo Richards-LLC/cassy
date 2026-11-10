@@ -1019,6 +1019,7 @@ mod tests {
             ("cas-b009", "cancelled"),
             ("cas-b00a", "missing_mapping"),
             ("cas-b00b", "symbolic_anchor"),
+            ("cas-b00c", "quarantined"),
         ] {
             let mut t = code.clone();
             t.id = id.into();
@@ -1065,6 +1066,13 @@ mod tests {
                 _ => {}
             }
             store.add(&t).unwrap();
+            if scenario == "quarantined" {
+                let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+                queue.init().unwrap();
+                queue
+                    .quarantine_row(crate::cloud::QUARANTINE_TASK, id, "legacy marker")
+                    .unwrap();
+            }
             if scenario != "backlog" {
                 store
                     .add_dependency(&Dependency::new(
@@ -1142,7 +1150,10 @@ mod tests {
             .iter()
             .map(|d| d.task_id.as_str())
             .collect();
-        assert_eq!(ids, ["cas-b001", "cas-b002", "cas-b003", "cas-b007"]);
+        assert_eq!(
+            ids,
+            ["cas-b001", "cas-b002", "cas-b003", "cas-b007", "cas-b00c"]
+        );
         let shipped = &inventory.deliveries[0];
         assert_eq!(shipped.anchor.as_deref(), Some(anchor.as_str()));
         assert_eq!(shipped.base_sha.as_deref(), Some(base.as_str()));
@@ -1185,7 +1196,8 @@ mod tests {
                 ("cas-b008", Code::MissingNoCodeProof),
                 ("cas-b009", Code::Cancelled),
                 ("cas-b00a", Code::MissingMapping),
-                ("cas-b00b", Code::MissingAnchor)
+                ("cas-b00b", Code::MissingAnchor),
+                ("cas-b00c", Code::Quarantined)
             ]
         );
         assert_eq!(
@@ -1196,6 +1208,14 @@ mod tests {
                 .deliverables
                 .factory_branch_anchor
                 .unwrap()
+        );
+        assert!(
+            !open_task_store(&root)
+                .unwrap()
+                .list(None)
+                .unwrap()
+                .iter()
+                .any(|t| t.id == "cas-b00c")
         );
         let mut wrong = scope.clone();
         wrong.project_id = "other".into();

@@ -28,6 +28,7 @@ import {
   type RowNote,
   type UndoOffer,
 } from "./fleet-ops";
+import { epicTitle, focusEpicChoices, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
 import { writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
 import type { Scope } from "./types";
@@ -40,7 +41,8 @@ export interface FleetOpsViewContext {
   readonly now: number;
   readonly agents: readonly FleetAgent[];
   readonly tasks: readonly FleetTask[];
-  readonly epics: readonly string[];
+  readonly epics: readonly ReleaseEpic[];
+  readonly supervisors: readonly string[];
   readonly currentEpic: string | null;
   /** When each awaiting-merge task was last asked about, by task id. */
   readonly asked: ReadonlyMap<string, number>;
@@ -446,9 +448,14 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
     wrap.append(form);
   }
   if (panel === "focus" && focusGate.allowed) {
-    const actions = context.epics.filter((epic) => epic !== context.currentEpic).map((epic) => focusEpicAction(epic, context.currentEpic));
-    if (actions.length || context.phone) wrap.append(picker(document, context, "header", actions, "Focus epic", context.currentEpic ? `Current focus: ${context.currentEpic}` : "No epic focused."));
-    else { const none = document.createElement("p"); none.className = "fleet-ops-note"; none.textContent = "No other epic to focus."; wrap.append(none); }
+    const current = context.currentEpic ? context.epics.find(epic => epic.id === context.currentEpic) ?? { id: context.currentEpic } : null;
+    const actions = focusEpicChoices(context.epics, context.supervisors, context.currentEpic).map(epic => focusEpicAction(epic, current));
+    const choices = picker(document, context, "header", actions, "Focus epic", current ? `Current focus: ${epicTitle(current) || "Not reported"}` : "No epic focused.");
+    choices.classList.add("fleet-ops-epics");
+    if (!actions.length && !context.phone) {
+      const empty = document.createElement("p"); empty.setAttribute("role", "status"); empty.textContent = "No other live epics to focus."; choices.append(empty);
+    }
+    wrap.append(choices);
   }
   if (panel === "grant" && grantGate.allowed && context.writeAccess) wrap.append(writeAccessPanel(document, context.writeAccess));
   const note = noteLine(document, context, "header");

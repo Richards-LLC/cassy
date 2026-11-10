@@ -2656,6 +2656,8 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
         let id = "cas-8488-one";
         let old_branch = "factory/former-worker";
         let new_branch = format!("{LANE}-{id}");
+        let dirty_path = checkout.join(".gitignore");
+        let dirty_contents = b".cas/\ndurable-artifacts/\n*.local\n";
         let target_tip = git(repo, &["rev-parse", "origin/main"]);
         git(repo, &["branch", old_branch, &f.foreign_tip]);
         let mut task = f.task(id);
@@ -2679,7 +2681,7 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
         } else if case == "history" {
             task.deliverables.historical_factory_branch_anchors.push(f.foreign_tip.clone());
         } else if case == "dirty" {
-            std::fs::write(checkout.join("other.rs"), "unrelated local edit\n").unwrap();
+            std::fs::write(&dirty_path, dirty_contents).unwrap();
         } else if case == "prepared" {
             git(repo, &["branch", &new_branch, &f.foreign_tip]);
         } else if case == "missing-old" {
@@ -2719,7 +2721,7 @@ async fn queued_blocked_successor_records_fresh_start_cas_57df() {
             assert_eq!(git(repo, &["rev-parse", old_branch]), old_tip, "{case}");
         }
         if case == "dirty" {
-            assert_eq!(std::fs::read_to_string(checkout.join("other.rs")).unwrap(), "unrelated local edit\n");
+            assert_eq!(std::fs::read(&dirty_path).unwrap(), dirty_contents);
         }
     }
 }

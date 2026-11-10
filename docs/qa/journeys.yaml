@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  retained-dependency-sync-recovery:
+    title: Repaired endpoint ownership releases one retained dependency without crossing foreign boundaries or multiplying conflict snapshots
+    tasks: [cas-cb74]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
   stopped-catalog-journal-arrival:
     title: Saved messages survive either stopped catalog and journal restoration order without sending; readiness waits for the catalog response
     tasks: [cas-c724]

@@ -2012,7 +2012,14 @@ async fn cas_cb74_repaired_dependency_identity_drains_after_restart() {
     syncer.pull_team(team, project, store.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref()).unwrap();
     assert!(reopened.pending_for_team(team, 10, 5).unwrap().is_empty());
     assert_eq!(reopened.list_all(10).unwrap()[0].id, original.id);
+    assert_eq!(reopened.list_all(10).unwrap()[0].created_at, original.created_at);
+    assert_eq!(reopened.list_all(10).unwrap()[0].payload, original.payload);
     assert_eq!(tasks.get_dependencies("cb74-owned").unwrap().len(), 1);
+
+    // Resetting a retry count cannot authorize a still-foreign endpoint.
+    assert_eq!(reopened.retry_failed_for_reason("dependency_endpoint_foreign", 5).unwrap(), 1);
+    assert_eq!(syncer.push_team(team).unwrap().pushed_task_dependencies, 0);
+    assert_eq!(reopened.list_all(10).unwrap()[0].retry_count, 5);
 
     // Simulate an explicit, verified ownership repair; sync must revalidate it.
     to.origin_project = Some(project.into());

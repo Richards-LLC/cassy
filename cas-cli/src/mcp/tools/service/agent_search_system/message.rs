@@ -6896,16 +6896,19 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(spawns.peek(10).unwrap().is_empty());
         assert_eq!(tasks.get(&task.id).unwrap().assignee, task.assignee);
         assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
-        let brief = crate::ui::factory::app::render_and_ops::epic_workers::recycle_resume_brief(
-            &root, &worker.name, worker.factory_session.as_deref().unwrap(),
-        ).unwrap();
-        // The replacement consumes this exact checkpoint path from its resume brief.
-        assert!(brief.contains(handoff.to_str().unwrap()));
         let messages = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
         assert!(!messages.is_empty());
         assert!(messages.iter().all(|row| row.target == owner.name
             && crate::supervisor_message_wakes::quiet(&row.prompt)
             && crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt).is_none()));
+        let resume = crate::ui::factory::enqueue_context_resume_brief(
+            &root, &owner.name, worker.factory_session.as_deref(), &worker.name,
+        ).unwrap().unwrap();
+        let messages = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        let brief = messages.iter().find(|row| row.id == resume).unwrap();
+        assert_eq!(brief.target, worker.name);
+        // The replacement consumes this exact checkpoint path from its resume brief.
+        assert!(brief.prompt.contains(handoff.to_str().unwrap()));
     }
 
     #[tokio::test(flavor = "current_thread")]

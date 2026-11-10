@@ -390,7 +390,7 @@ impl TaskProposalClient {
         url: &str,
         body: &impl Serialize,
     ) -> Result<T, TaskProposalError> {
-        let response = ureq::post(url)
+        let response = crate::cloud::mutation_request("POST", url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
             .send_json(body);

@@ -346,7 +346,7 @@ impl ArtifactUploadClient {
             return Err("invalid Cloud artifact id".into());
         }
         let url = format!("{}/api/artifacts/{artifact_id}/revoke", self.endpoint);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(self.timeout)
             .send_json(serde_json::json!({"reason": reason, "actor_id": actor_id}));
@@ -530,7 +530,7 @@ impl ArtifactUploadClient {
             body.team_id = self.team_id.clone();
             body.project_id = body.project_id.or_else(|| self.project_id.clone());
         }
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)
@@ -644,7 +644,7 @@ impl ArtifactUploadClient {
         declared: &ArtifactDigest,
     ) -> Result<CompleteResponse, UploadFailure> {
         let url = format!("{}/api/artifacts/{artifact_id}/complete", self.endpoint);
-        let response = ureq::post(&url)
+        let response = crate::cloud::mutation_request("POST", &url)
             .set("Authorization", &format!("Bearer {}", self.token))
             .set("Content-Type", "application/json")
             .timeout(self.timeout)

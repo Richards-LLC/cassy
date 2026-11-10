@@ -26,14 +26,17 @@ never from memory. A worker that receives a report brief without that template f
 workflow anyway.
 
 1. **Write the markdown first.** `docs/<area>/YYYY-MM-DD-<topic>.md`. Get the analysis right in plain
-   text before any presentation decision. If the markdown is weak, the HTML is decoration on nothing.
+   text before any presentation decision. Judge the originating goal against its stated criteria
+   using `references/review-checklist.md` section 0; keep added bars separate from the plan verdict.
+   If the markdown is weak, the HTML is decoration on nothing.
 2. **Pick your cell**: report type × audience, from `references/report-types.md`. The cell fixes the
    required sections, their order, and the **hero figure** the type owes the reader.
 3. **Write the concept brief** (`cas-ui-craft` step 1) and commit it beside the markdown as
    `<basename>.brief.md`, from `cas-ui-craft/references/concept-brief.md`, with
    `Audience: executive|practitioner|external` on its own line: the single idea; the hero
    form and the reason its shape is the claim; the emotional register; one distinctive move; what is
-   deliberately omitted. A brief whose hero is "a paragraph", "a row of numbers", or "a table of
+   deliberately omitted. Include the section 0 plan alignment record before the critique. A brief
+   whose hero is "a paragraph", "a row of numbers", or "a table of
    everything" is rejected before rendering: the hero shows the argument, it does not summarize the
    document. Choose every form from `cas-ui-craft/references/form-vocabulary.md`, the one form table,
    and write the reason; "a table" needs a reason as much as anything else does.
@@ -50,7 +53,9 @@ workflow anyway.
      markdown.
    - **Business readers.** Executive and external reports show no task ids anywhere and no internal
      vocabulary (workers, lanes, file paths, PR numbers) in the verdict or above the first section.
-5. **Score it with the `cas-ui-craft` rubric** (`references/critique-rubric.md`) and append the
+5. **Check substance before form.** Reject a verdict that contradicts the originating criteria,
+   even when the page passes visual QA. Then score it with the `cas-ui-craft` rubric
+   (`references/critique-rubric.md`) and append the
    table to the brief under `## Critique`. A report ships only when it meets that rubric's floor,
    with its visual-QA receipt, a print preview, and a JS-disabled reload as evidence; then run
    `references/review-checklist.md`. A grep for expected tags is not a review. **A visual-QA PASS
@@ -60,10 +65,11 @@ workflow anyway.
    markdown source is a provenance failure; a markdown report whose HTML is stale is worse than no
    HTML at all; a rendered report without its brief cannot be critiqued.
 
-**The close gate enforces this.** For an `.html` under `docs/` beside a same-basename `.md`, the
+**The close gate enforces report form.** For an `.html` under `docs/` beside a same-basename `.md`, the
 close gate (G7) refuses the task and lists each gap: the brief and its audience, the critique floor,
 the brand tokens, network fetches, the verdict, the height budget and, for business readers, task
-ids and jargon. Release, feature, SOW and customer deliverables keep their own skills.
+ids and jargon. Authors and supervisors judge plan alignment; G7 does not evaluate the reasoning.
+Release, feature, SOW and customer deliverables keep their own skills.
 
 ## What counts as a report
 

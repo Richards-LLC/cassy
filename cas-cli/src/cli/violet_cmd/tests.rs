@@ -143,7 +143,7 @@ fn run_cli_at(
         shared.0.borrow_mut().connects += 1;
         Ok(Box::new(shared.clone()))
     };
-    let reply_claim = |reply_to: &str| claim.clone().filter(|block| block["reply_to"] == reply_to);
+    let reply_claim = |reply_to: &str| Ok(claim.clone().filter(|block| block["reply_to"] == reply_to));
     let mut context = RunContext {
         cas_root,
         json,
@@ -1281,30 +1281,43 @@ fn a_managed_reply_carries_the_callers_reply_intent_cas_8239() {
     run_cli_claimed(&with_id, &hub, false, &no_gate, Some(intent.clone())).1.unwrap();
     assert_eq!(hub.calls()[0].1["request_id"], retry);
 
-    // cas-d626: past the inline limit a managed reply fails before any call.
+    // Managed replies above the inline limit use the supported external flow.
     let big = write_file(&dir, "big.bin", &vec![b'a'; INLINE_LIMIT as usize + 1]);
     let too_big = ["post", "--channel", "gabber-internal", "--reply-to", root, "--file", big.to_str().unwrap()];
-    let gate_calls = RefCell::new(Vec::new());
-    let refusing_gate = |post: &Value| {
-        gate_calls.borrow_mut().push(post.clone());
-        Some("PUBLICATION BLOCKED (verification_pending)".to_string())
-    };
-    let hub = ScriptedHub::with(Vec::new());
-    let error = run_cli_claimed(&too_big, &hub, false, &refusing_gate, Some(intent.clone()))
-        .1
-        .unwrap_err();
-    assert_eq!(error.code, "invalid_input");
+    let big_bytes = std::fs::read(&big).unwrap();
+    let hub = ScriptedHub::with(vec![
+        json!({"ok": true, "file_id": "F2", "upload_url": "https://files.slack.test/upload/F2"}),
+        file_receipt("F2", "big.bin", &big_bytes),
+    ]);
+    run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap();
+    let calls = hub.calls();
+    assert_eq!(calls.len(), 2);
+    for (_, args) in &calls {
+        assert_eq!(args["coordination_operation_id"], intent["coordination_operation_id"]);
+        assert_eq!(args["expected_generation"], 1);
+        assert_eq!(args["request_id"], calls[0].1["request_id"]);
+        assert_eq!(args["reply_to"], root);
+        assert_eq!(args["sha256"], sha(&big_bytes));
+    }
+    assert_eq!(hub.uploads()[0].1, sha(&big_bytes));
+    assert_eq!(hub.uploads()[0].2, big_bytes.len() as u64);
 
-    assert!(gate_calls.borrow().is_empty(), "publication gate ran before the size refusal");
-    assert_eq!(hub.connects(), 0);
+    let hub = ScriptedHub::with(vec![json!({"ok": false, "error": {
+        "code": "stale_generation", "message": "claim changed", "retryable": false,
+    }})]);
+    let error = run_cli_claimed(&too_big, &hub, false, &no_gate, Some(intent.clone())).1.unwrap_err();
+    assert_eq!(error.code, "stale_generation");
+    assert!(error.file_ids.is_empty());
+    assert!(hub.uploads().is_empty());
+    assert_eq!(hub.calls().len(), 1);
 
     let refusal = json!({"ok": false, "error": {"code": "managed_reply_required", "retryable": false,
         "message": "a reply needs coordination_operation_id, expected_generation and request_id from the current claim"}});
     let hub = ScriptedHub::with(vec![refusal]);
     let (_, result) = run_cli_claimed(&with_id, &hub, false, &no_gate, None);
     assert_eq!(result.unwrap_err().code, "managed_reply_required");
-    let args = &hub.calls()[0].1;
-    assert!(args.get("coordination_operation_id").is_none() && args.get("request_id").is_none(), "{args}");
+    assert_eq!(hub.connects(), 0);
+    assert!(hub.calls().is_empty());
 }
 
 

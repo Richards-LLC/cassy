@@ -372,6 +372,10 @@ bug_families:
     title: Report receipts preserve distinct provider-returned upload-message and file permalinks, including thread context
     tasks: [cas-bbf4]
     journeys: [CLI-RELEASE]
+  worker-respawn-handoff-isolation:
+    title: Recycling keeps task handoffs in artifacts and parking refuses new or retained repo-root handoffs from the delivered commit
+    tasks: [cas-c55fa]
+    journeys: [FACTORY-CLOSE, FACTORY-SPAWN, HUB-J26]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

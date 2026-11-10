@@ -797,6 +797,69 @@ fn test_mcp_task_create_cannot_escape_cas_sandbox() {
 }
 
 #[test]
+#[cfg(unix)]
+fn long_sandbox_serve_discovers_hook_session_for_reminders_and_handoff() {
+    use cas::mcp::socket::{DaemonEvent, DaemonResponse, send_event};
+
+    let sandbox = CasSandbox::new();
+    let parent = sandbox.path().join(format!(
+        "artifacts/cassy-{}/cas-d9bd/qa/native-session-scratch",
+        "a".repeat(64)
+    ));
+    let project = parent.join("project");
+    let root = project.join(".cas");
+    let home = parent.join("home");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    assert!(root.as_os_str().len() > 108);
+    let command = || {
+        let mut cmd = sandbox.command();
+        cmd.current_dir(&project)
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("CAS_ROOT", &root)
+            .env("CAS_DIR", &root)
+            .env("CLAUDE_PROJECT_DIR", &project);
+        cmd
+    };
+    let initialized = command().args(["init", "--yes"]).output().unwrap();
+    assert!(initialized.status.success(), "{:?}", initialized);
+
+    let mut serve = command();
+    let log_dir = server_log_dir(&serve);
+    let child = serve.arg("serve").arg("--sandbox").arg(&parent)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap();
+    let mut client = McpTestClient::from_child(child, false, log_dir);
+    assert!(client.initialize().error.is_none());
+
+    // Normal SessionStart delivery supplies the harness identity; the MCP
+    // caller must discover it without a manual coordination registration.
+    let hook = send_event(&root, &DaemonEvent::SessionStart {
+        session_id: "long-sandbox-native-session".into(),
+        agent_name: Some("long-sandbox-native".into()),
+        agent_role: None,
+        cc_pid: std::process::id(),
+        clone_path: None,
+    });
+    assert!(matches!(hook, Ok(DaemonResponse::Ok)), "{hook:?}");
+    for (tool, arguments) in [
+        ("coordination", json!({"action":"whoami"})),
+        ("coordination", json!({"action":"remind_list"})),
+        ("memory", json!({"action":"remember", "entry_type":"handoff", "title":"Long sandbox handoff", "content":"Resume the isolated sandbox work."})),
+    ] {
+        let response = client.call_tool(tool, arguments);
+        assert!(response.error.is_none(), "{response:?}");
+        assert_ne!(response.result.as_ref().and_then(|r| r.get("isError")).and_then(Value::as_bool), Some(true), "{response:?}");
+    }
+    drop(client);
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    let handoffs: i64 = conn.query_row("SELECT COUNT(*) FROM entries WHERE entry_type = 'handoff'", [], |row| row.get(0)).unwrap();
+    assert_eq!(handoffs, 1);
+}
+
+#[test]
 fn test_sandbox_init_and_serve_never_touch_inherited_host_known_repos() {
     let inherited = tempfile::tempdir().expect("create inherited host sentinel");
     let host_home = inherited.path().join("home");

@@ -3,7 +3,7 @@ use crate::qa_batch::{ReleaseInventory, ReleaseScope};
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use cas_types::{Dependency, DependencyType, TaskStatus, TaskTerminalOutcome, TaskType};
+use cas_types::{TaskStatus, TaskType};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -692,7 +692,7 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use cas_types::{Agent, AgentRole, Task, TaskType, WorkTarget};
+    use cas_types::{Agent, AgentRole, Dependency, DependencyType, Task, TaskType, WorkTarget};
 
     /// Shared with the release adapters' tests under a crate-unique name.
     pub(in crate::cli) fn release_fixture() -> (tempfile::TempDir, PathBuf, Task, Agent, TrackArgs) {

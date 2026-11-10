@@ -4790,13 +4790,21 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
     let target_status = git_stdout(&repo.root, &["status", "--porcelain"]);
-    for _ in 0..2 {
+    for attempt in 0..2 {
+        if attempt == 1 {
+            // A failed advisory refresh must still report the local content
+            // conflict, without any network or successful remote fetch.
+            run_git(&["remote", "set-url", "origin",
+                remote.path().join("missing-origin.git").to_str().unwrap()], &repo.root);
+        }
         let error = supervisor.factory(Parameters(request.clone())).await.unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
 
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), target_tip);
         assert_eq!(git_stdout(&repo.root, &["status", "--porcelain"]), target_status);
         assert!(!repo.root.join(".git/MERGE_HEAD").exists());
     }
+    run_git(&["remote", "set-url", "origin", remote.path().to_str().unwrap()], &repo.root);
     let returned = tasks.get(&task.id).unwrap();
     assert_eq!(returned.status, TaskStatus::Open, "conflict must release parked task");
     assert_eq!(returned.assignee, task.assignee);

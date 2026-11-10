@@ -197,6 +197,20 @@ fn timeout_pane_tail(buffer: Option<&super::relay::PaneBuffer>) -> Option<String
     Some(bounded_tail_text(trimmed))
 }
 
+/// Keep the diagnostic before a secret assignment while dropping the rest
+/// of that line, including quoted or incomplete values. The shared pass
+/// handles other credential shapes and PEM blocks before this is persisted.
+fn boot_output_tail(text: Option<&str>) -> Option<String> {
+    static ASSIGNMENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?im)\b(?:api[_-]?key|token|secret|password)\b[ \t]*[:=][^\r\n]*").unwrap()
+    });
+    let text = text?.trim();
+    if text.is_empty() { return None; }
+    let text = ASSIGNMENT.replace_all(text, "[REDACTED SECRET]");
+    let (text, _) = crate::hooks::handlers::handlers_events::message_display::redact_secrets(text.into_owned());
+    Some(bounded_tail_text(&crate::ai_enrichment::redact_string(&text)))
+}
+
 /// A PTY exit in plain words: the signal wins, then the code; a missing status
 /// stays explicitly unavailable rather than becoming a guessed code.
 fn pane_exit_status(exit_code: Option<i32>, exit_signal: Option<&str>) -> String {
@@ -6585,14 +6599,16 @@ impl FactoryDaemon {
                     crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
                 );
                 if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
+                    let tail = boot_output_tail(pane_tail.as_deref());
                     return Some((
                         worker.clone(),
-                        VerificationAction::Failed(crate::factory_hook_canary::failure_detail_since(
+                        VerificationAction::Failed(format!("{}\n\nObserved worker boot output:\n{}",
+                            crate::factory_hook_canary::failure_detail_since(
                             self.app.cas_dir(),
                             worker,
                             crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
                             verification.launched_wall,
-                        )),
+                        ), tail.as_deref().unwrap_or("unavailable"))),
                     ));
                 }
 
@@ -6689,7 +6705,7 @@ impl FactoryDaemon {
             let Some(verification) = verification else {
                 continue;
             };
-            let (outcome, success, detail) = match action {
+            let (outcome, success, mut detail) = match action {
                 VerificationAction::Confirmed => (
                     "confirmed",
                     true,
@@ -6703,8 +6719,19 @@ impl FactoryDaemon {
                 // A worker that failed during boot may not be reachable through
                 // the normal shutdown path. Reap its PTY, stale its registry
                 // row immediately, and remove it from the live pane roster.
-                if let Err(error) = self.app.mux.kill_worker(&worker, true).await {
-                    tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
+                match self.app.mux.kill_worker(&worker, true).await {
+                    Ok(()) => {
+                        detail.push_str("\nPTY teardown: confirmed.");
+                        if let Some(task_id) = verification.task_id.as_deref() {
+                            crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound(
+                                self.app.cas_dir(), task_id, &worker,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(worker = %worker, error = %error, "failed to reap boot-failed worker PTY");
+                        detail.push_str(&format!("\nPTY teardown: unconfirmed ({error}); task binding retained."));
+                    }
                 }
                 let cleanup = self.app.mark_worker_crashed_in_memory(&worker);
                 self.mark_registered_worker_stale(
@@ -20117,10 +20144,95 @@ mod tests {
         );
     }
 
-    /// GH #1173: a Claude worker can register and then spend the documented
-    /// 20-second startup wait for the CAS server. A registered MCP child that
-    /// is temporarily unavailable must not make boot verification reap the
-    /// still-starting harness before its post-registration window expires.
+    /// GH #1420: canary refusal preserves boot evidence even without an Agent.
+    #[tokio::test]
+    async fn canary_failure_retains_boot_diagnostics_cas_4cdd() {
+        if let Ok(root) = std::env::var("CAS_4CDD_DIAG_ROOT") {
+            crate::cli::factory::wedged::execute_is_wedged(
+                Some(std::path::Path::new(&root)),
+                &std::env::var("CAS_4CDD_DIAG_SELECTOR").unwrap(), true,
+            ).unwrap();
+            unreachable!();
+        }
+        if !super::super::supervisor_single_turn_tests::fixture_child(
+            "ui::factory::daemon::runtime::queue_and_events::tests::canary_failure_retains_boot_diagnostics_cas_4cdd",
+        ) { return; }
+        let temp = tempfile::TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let queue = crate::store::open_spawn_queue_store(&cas_dir).unwrap();
+        let tasks = crate::store::open_task_store_cached(&cas_dir).unwrap();
+        for has_pane in [true, false] {
+            let worker = if has_pane { "canary-reaped" } else { "canary-unconfirmed" };
+            let task_id = if has_pane { "cas-boot1" } else { "cas-boot2" };
+            let mut task = Task::new(task_id.into(), "boot fixture".into());
+            task.assignee = Some(worker.into());
+            tasks.add(&task).unwrap();
+            let request = queue.enqueue_spawn(1, &[], false, None,
+                Some(&daemon.session_name), Some(task_id)).unwrap();
+            queue.record_spawn_state(request, cas_store::SpawnLifecycleState::Launched,
+                Some(worker), None).unwrap();
+            daemon.app.mux.set_worker_spec(worker, cas_mux::WorkerSpec::builtin_default());
+            let output = format!("{}\nBOOT_FIXTURE_E_SETTINGS token=fixture-secret-4cdd\n", "x".repeat(2_100));
+            if has_pane {
+                let pty = cas_mux::Pty::spawn(worker, cas_mux::PtyConfig {
+                    command: "sh".into(), args: vec!["-c".into(), "read line".into()],
+                    cwd: Some(temp.path().to_path_buf()), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+                }).unwrap();
+                daemon.app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+                    worker, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Claude,
+                ).unwrap());
+            }
+            let mut pane = super::super::relay::PaneBuffer::default();
+            pane.append(output.as_bytes());
+            daemon.pane_buffers.insert(worker.into(), pane);
+            daemon.spawn_verifications.insert(worker.into(), SpawnVerification {
+                request_id: Some(request), launched_at: Instant::now() - Duration::from_secs(61),
+                registered_at: None, task_id: Some(task_id.into()),
+                launched_wall: std::time::SystemTime::now() - Duration::from_secs(61),
+            });
+            daemon.reconcile_spawn_verifications().await;
+            assert!(!daemon.spawn_verifications.contains_key(worker));
+            assert!(daemon.dead_workers.contains(worker));
+            assert!(!daemon.pane_buffers.contains_key(worker));
+            assert!(crate::store::open_agent_store(&cas_dir).unwrap().list(None).unwrap().is_empty());
+            let row = queue.recent_spawn_lifecycle(&daemon.session_name, 20).unwrap()
+                .into_iter().find(|row| row.id == request).unwrap();
+            assert_eq!(row.state, cas_store::SpawnLifecycleState::Failed);
+            assert_eq!(row.worker_name.as_deref(), Some(worker));
+            assert_eq!(row.task_id.as_deref(), Some(task_id));
+            let detail = row.detail.unwrap();
+            assert!(detail.contains("BOOT_FIXTURE_E_SETTINGS"), "{worker}: {detail}");
+            assert!(!detail.contains(&"x".repeat(2_100)));
+            assert!(!detail.contains("fixture-secret-4cdd"));
+            let task = tasks.get(task_id).unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            assert_eq!(task.assignee.as_deref(), if has_pane { None } else { Some(worker) });
+            assert!(crate::cli::factory::wedged::execute_debug(Some(&cas_dir), worker, 20).is_ok());
+            assert!(crate::cli::factory::wedged::execute_debug(Some(&cas_dir), &request.to_string(), 20).is_ok());
+            for selector in [worker.to_string(), request.to_string()] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "ui::factory::daemon::runtime::queue_and_events::tests::canary_failure_retains_boot_diagnostics_cas_4cdd", "--nocapture"])
+                    .env("CAS_4CDD_DIAG_ROOT", &cas_dir)
+                    .env("CAS_4CDD_DIAG_SELECTOR", selector)
+                    .output().unwrap();
+                assert_eq!(output.status.code(), Some(4), "{}", String::from_utf8_lossy(&output.stderr));
+                let value: serde_json::Value = String::from_utf8_lossy(&output.stdout).lines()
+                    .find_map(|line| serde_json::from_str(line).ok()).unwrap();
+                assert_eq!(value["state"], "unverified");
+                assert_eq!(value["boot_state"], "failed");
+                assert_eq!(value["request_id"], request);
+                assert_eq!(value["worker"], worker);
+                assert_eq!(value["task_id"], task_id);
+                assert!(value["pid_alive"].is_null());
+                assert!(value["detail"].as_str().unwrap().contains("BOOT_FIXTURE_E_SETTINGS"));
+                assert!(!output.stdout.windows(b"fixture-secret-4cdd".len())
+                    .any(|bytes| bytes == b"fixture-secret-4cdd"));
+            }
+        }
+    }
+
+    /// GH #1173: a registered worker may still be waiting for its CAS server.
     #[tokio::test]
     async fn post_registration_verification_tolerates_cas_server_wait_gh_1173() {
         let temp = tempfile::TempDir::new().unwrap();

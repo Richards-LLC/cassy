@@ -402,6 +402,28 @@ bug_families:
     title: Superseded batch QA offers return once per ownership episode when the same supervisor session regains the outstanding set
     tasks: [cas-b26e]
     journeys: [FACTORY-QA-RECEIPT]
+  drained-inbox-delivery-watchdog:
+    title: Drained worker and supervisor inboxes retire delivery wakes while fresh unread notifications still wake
+    tasks: [cas-40ed]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
+  named-live-focus-choices:
+    title: Focus choices preserve titles and include only live owned epics, with the release train first and current focus excluded
+    tasks: [cas-b200]
+    invariants: [HUB-J17-FOCUS-CHOICES]
+    journeys: [HUB-J17]
+  peer-cap-sender-feedback:
+    title: Capped peer messages notify the sender with a retry time while substantive linked replies bypass the cap
+    tasks: [cas-0e49]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-PEER-CAP-FEEDBACK]
+  managed-thread-verified-file-replies:
+    title: Artifact and CLI file replies carry live claim identity through external upload and locally refuse known managed threads without authority
+    tasks: [cas-4deb]
+    journeys: [FACTORY-SUPERVISE]
+  leaderless-registry-holder-lifetime:
+    title: A ready cas-named leaderless registry holder is reaped with kernel exit proof while unrelated and stale-identity controls survive
+    tasks: [cas-919d]
+    journeys: [FACTORY-SPAWN, HUB-J26]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -498,6 +520,10 @@ invariants:
     statement: Verifier host-path redaction preserves the surrounding supervisor question in notices and verification show/latest.
     check: Run verifier_embedded_absolute_paths_are_redacted for mixed Unicode questions and quoted or embedded host paths; in batch QA submit a supervisor_call containing a path and compare notice and verification show/latest to the original question with only path spans replaced.
     bug: {task: cas-ef5e8}
+  FACTORY-PEER-CAP-FEEDBACK:
+    statement: A peer status held by the hourly wake cap produces one sender-facing hold and retry-time reply; substantive linked answers remain eligible without consuming an extra debounce wait.
+    check: Run peer_cap_reports_eta_and_releases_linked_answer_cas_0e49 through the real scheduler and durable outbox for project and user scopes. Spend six wakes, hold a release-go status, inspect one correctly addressed feedback payload and retry time across reselection, then admit its linked status answer. Verify no network runs on the scheduler lane and quiet intent remains quiet.
+    bug: {task: cas-0e49}
   FACTORY-SPAWN-FETCH-TRACKING:
     statement: Successful spawn fetches refresh the requested origin tracking ref even outside the configured fetch mapping, so workers contain the fetched commit.
     check: Run work_target_checkout_uses_fetched_origin_tip_when_local_branch_is_stale_cas_7a87 with matching stale local and tracking staging refs, a main-only remote refspec and a newer remote staging commit. Verify FETCH_HEAD, origin/staging and the actual worker checkout use the new commit; retain configured-origin failure refusal and managed/local-only epic behavior.
@@ -937,6 +963,10 @@ invariants:
     statement: A verified default pairing without factory-operate or factory-manage can lift and set a freeze from the release card; revoked or preview credentials cannot mutate it, and supervisors have no lift action.
     check: Run hub::tests::release_freeze_default_pairing_cas_16c0a and the existing fleet-ops view freeze/lift case. In batch QA, use a verified default pairing to lift a frozen disposable train from its release card, read back removal of its freeze label, then freeze it again; worker controls still require their own permissions.
     bug: {task: cas-16c0a}
+  HUB-J17-FOCUS-CHOICES:
+    statement: Focus epic offers only titled live epics owned by the selected supervisor or its verification identity, excludes the current focus, and orders the release train before priority. Progress, completion and Undo use titles while operations keep exact IDs; the desktop menu scrolls within a short region.
+    check: Run the mixed-catalog fleet-ops vitest and the filtered HUB-J17 phone pickers journey, including its desktop cas-b200 stage in light and dark. Require only live owned IDs, title labels, exact focus precondition and a bounded menu.
+    bug: {task: cas-b200}
   HUB-J17-STATUS-TRUTH:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
@@ -1103,8 +1133,8 @@ journeys:
   kind: factory
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
-  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs, cas-cli/src/mcp/server/mod.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-WORKER-RESPAWN]
+  owners: [cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs, cas-cli/src/mcp/server/mod.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE
@@ -2594,6 +2624,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-FOCUS-CHOICES
   - HUB-J17-UNDO-SHELL-FOCUS
   - HUB-J17-STATUS-TRUTH
   - HUB-J17-RELEASE-FREEZE-PAIRING

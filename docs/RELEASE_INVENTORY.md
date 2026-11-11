@@ -17,7 +17,7 @@ The scope is portable; the repository argument is the local checkout to inspect.
 | `reviewed_sha` | Full immutable candidate commit. It need not equal the release commit. |
 | `final_release_sha` | Full immutable shipped commit. Moving main/epic refs never decide membership. |
 | `promotion_pr`, `release_tag` | Optional PR number and tag. A supplied local tag must resolve to the final SHA. Publication/PR authenticity belongs to the trusted adapter. |
-| `constituent_epic_ids` | Declared epics; recursively include their descendants, including terminal deliveries. |
+| `constituent_epic_ids` | Declared epics whose descendants are searched for shipped deliveries, including terminal rows. |
 | `included_task_ids` | Explicit expected deliveries, including terminal rows outside the declared epics. |
 | `no_code_members` | Map of explicitly included no-code task IDs to portable proof references. |
 | `proof_refs` | Release-level QA/review references for the subsequent proof consumer. They do not imply per-task coverage. |
@@ -47,8 +47,12 @@ task mention is used. The source anchor and full start boundary remain intact;
 squashes produce `missing_mapping`; patch/content similarity is not approval.
 
 Beyond the explicit scope, live project deliveries with structured recorded
-anchors/merge receipts are considered, so already-shipped close debt is included.
-Terminal rows outside explicit scope are omitted. Foreign project/repository
+anchors/merge receipts are searched for proven shipped close debt. Descendant
+discovery alone does not declare an unstarted or unshipped task as a release
+obligation. `included_task_ids` and `no_code_members` keep missing declared
+members visible even when their mapping fails. A shipped historical anchor
+can retain a hold for an unresolved earlier cycle without rebinding the current
+delivery to that anchor. Terminal rows outside explicit scope are omitted. Foreign project/repository
 rows, cancelled tasks and retired anchors are exceptions, never close authority.
 
 A reachable anchor with no start base is still shipped, with a `missing_base`
@@ -180,6 +184,12 @@ contains `members`, `issue_outcomes`, `parents`, inventory `exceptions` (includi
 `quarantined`), `residuals {task_id, gate, owner, next_action}`, `sync_pending`, and
 stage timestamps. Completion never asserts peer synchronization. Every live
 member or parent has a named residual; independent exceptions remain visible.
+
+On retry, obsolete discovery holds for missing anchors, mappings or undeclared
+no-code proofs are removed when the fresh inventory excludes the task and no
+saved close intent binds its cycle. Their residual and sync-pending references
+are retired together. Frozen declarations, current obligations and committed
+close intents retain their holds.
 
 The operation persists `notice_intent {key, recipient, fingerprint}` and sends
 no notice. The publication/promotion adapter alone enqueues that intent using

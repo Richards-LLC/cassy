@@ -868,6 +868,7 @@ pub(super) mod tests {
             ("cas-b00c", "quarantined"),
             ("cas-b00d", "successor"),
             ("cas-b00e", "unstarted"),
+            ("cas-b00f", "new_cycle"),
         ] {
             let mut t = code.clone();
             t.id = id.into();
@@ -911,11 +912,14 @@ pub(super) mod tests {
                     t.deliverables.factory_branch_anchor =
                         Some(git(repo, &["rev-parse", "HEAD"]).unwrap());
                 }
-                "successor" => {
+                "successor" | "new_cycle" => {
                     t.deliverables.factory_branch_anchor = store.get("cas-b00a").unwrap()
                         .deliverables.factory_branch_anchor;
                     t.deliverables.factory_branch_start.as_mut().unwrap()
                         .work_target.target_branch = "epic/successor".into();
+                    if scenario == "new_cycle" {
+                        t.deliverables.historical_factory_branch_anchors.push(anchor.clone());
+                    }
                 }
                 "unstarted" => {
                     t.status = TaskStatus::Open;
@@ -1060,6 +1064,7 @@ pub(super) mod tests {
                 ("cas-b00a", Code::MissingMapping),
                 ("cas-b00b", Code::MissingAnchor),
                 ("cas-b00c", Code::Quarantined),
+                ("cas-b00f", Code::MissingMapping),
                 ("cas-missing", Code::MissingTask)
             ]
         );
@@ -1070,6 +1075,10 @@ pub(super) mod tests {
         let unstarted = store.get("cas-b00e").unwrap();
         assert_eq!(unstarted.status, TaskStatus::Open);
         assert!(unstarted.deliverables.factory_branch_start.is_none());
+        let new_cycle = store.get("cas-b00f").unwrap();
+        assert_eq!(new_cycle.deliverables.factory_branch_anchor,
+            store.get("cas-b00a").unwrap().deliverables.factory_branch_anchor);
+        assert_eq!(new_cycle.deliverables.historical_factory_branch_anchors, [anchor.clone()]);
         assert_eq!(
             git(repo, &["rev-parse", "HEAD"]).unwrap(),
             store

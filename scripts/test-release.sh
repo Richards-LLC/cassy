@@ -68,7 +68,11 @@ case "$1 $2" in
       no_train) echo 'Error: no open release train; create work on the train first' >&2; exit 1 ;;
       different_branch) echo 'Error: check out the open release train epic/train-cas-a001 first' >&2; exit 1 ;;
     esac
-    printf '{"branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
+    printf '{"train_id":"cas-0001","branch":"%s","integration":"main"}\n' "$(git branch --show-current)" ;;
+  "release preview")
+    jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" '{scope:{final_release_sha:$sha},members:2,would_close:$n,would_hold:(2-$n),by_reason:{REVIEW_MISSING:(2-$n)},review_missing:["cas-0001"]}' ;;
+  "qa candidate")
+    case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
   "ledger estimate") echo 'typical 16 min, bad day 31 min; 20 references'; exit "${FAKE_ESTIMATE_EXIT:-0}" ;;
   *) echo "unexpected fake cas invocation: $*" >&2; exit 2 ;;
@@ -113,7 +117,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -443,7 +447,7 @@ check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
 check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
 check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
-check 'grep -q -- "--first-child $epic_first_child$" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
+check 'grep -q -- "--first-child $epic_first_child --preview " "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a
@@ -541,10 +545,10 @@ hotfix_fallback() {
     clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
     mkdir -p "$tmp/state-$mode"
     write_valid_draft "$tmp/hotfix-$mode.md"
-    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
-    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
-    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log" &&
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
 train_receipt_cut() {
@@ -588,8 +592,8 @@ PY
 }
 check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
-check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
-check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
+check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
+check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {
     local fixture="$tmp/cut-failure" status=0
     clone_epic "$fixture" epic/cut-failure cut-failure
@@ -658,6 +662,26 @@ one_item_hotfix_train() {
         grep -q 'one-hotfix shipped' "$tmp/one-hotfix-published.md"
 }
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
+
+cut_preview_gate() {
+    local fixture="$tmp/preview-cut" status=0
+    clone_epic "$fixture" epic/preview-cut preview-cut
+    write_valid_draft "$tmp/preview-notes.md"
+    : >"$FAKE_CAS_LOG"
+    : >"$FAKE_GH_LOG"
+    FAKE_WOULD_CLOSE=0 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
+    [[ "$status" != 0 ]] &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
+        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
+        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
+    : >"$FAKE_CAS_LOG"
+    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
+        grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
+        grep -q '^release track .* --preview ' "$FAKE_CAS_LOG"
+}
+check 'cut_preview_gate' 'cut refuses zero would-close before push and permits approved members with one candidate build'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

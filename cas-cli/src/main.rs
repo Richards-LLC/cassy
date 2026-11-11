@@ -160,6 +160,14 @@ fn main() -> ExitCode {
         }
     };
 
+    // Preview must leave no logging, telemetry or command-trace writes, even on failure.
+    if matches!(cli.command.as_ref(), Some(cli::Commands::Release(cli::ReleaseCommands::Preview(_)))) {
+        return match cli::run(cli) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => { eprintln!("{error:#}"); ExitCode::FAILURE }
+        };
+    }
+
     // The updater owns retired-setting guidance through its maintenance
     // receipts. Establish that scope before the earliest config read.
     let startup = cli::validate_process_startup(&cli);

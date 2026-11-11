@@ -57,11 +57,12 @@ on:
 
 # cas-12ab: a newer push to the same factory/* branch cancels the run it
 # supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Every
-# release-train push also replaces its older tip. Other events keep a run-id
-# group, so main, ordinary epics, tags and the merge queue remain independent.
+# release-train ref keeps one running and the newest pending run (cas-43ab).
+# Other events keep a run-id group, so main, ordinary epics, tags and the merge
+# queue remain independent.
 concurrency:
   group: ${{ (startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && format('ci-branch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -1206,10 +1207,13 @@ jobs:
           # The default report dir is tracked docs; the queue step needs a clean tree.
           VISUAL_QA_ARTIFACT_DIR: ${{ runner.temp }}/visual-qa
         run: |
-          if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps --no-shell chromium
+          npx playwright install --no-shell chromium
+          browser="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          libraries="$(ldd "$browser")"
+          if grep -q 'not found' <<< "$libraries"; then
+            npx playwright install-deps chromium
           else
-            npx playwright install --no-shell chromium
+            echo "Chromium libraries present; skipping apt dependencies"
           fi
           # Use the full pinned browser we installed, rather than a system
           # Chrome or Playwright's default headless shell.
@@ -1287,10 +1291,13 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           npm ci
-          if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps --no-shell chromium
+          npx playwright install --no-shell chromium
+          browser="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          libraries="$(ldd "$browser")"
+          if grep -q 'not found' <<< "$libraries"; then
+            npx playwright install-deps chromium
           else
-            npx playwright install --no-shell chromium
+            echo "Chromium libraries present; skipping apt dependencies"
           fi
           python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
             --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"

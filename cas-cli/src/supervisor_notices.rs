@@ -308,6 +308,7 @@ pub(crate) enum ReleaseNoticePhase {
     RustRed,
     #[allow(dead_code)] // cas-61e0 sends it on publish.
     PostPublish,
+    PostPublishFailed,
 }
 
 impl ReleaseNoticePhase {
@@ -316,6 +317,7 @@ impl ReleaseNoticePhase {
             Self::CutReady => "release_cut_ready",
             Self::RustRed => "train_ci_red",
             Self::PostPublish => "release_post_publish",
+            Self::PostPublishFailed => "release_post_publish_failed",
         }
     }
 }
@@ -339,7 +341,7 @@ pub(crate) fn is_action_envelope(body: &str) -> bool {
     let Some((tag, _)) = body.split_once('\n') else {
         return false;
     };
-    let valid_kind = ["blocker", "premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_closeout", "factory_binary_skew", "train_ci_red", "registration_outcome"]
+    let valid_kind = ["blocker", "premerge_verification", "batch_close_hold", "epic_orphaned", "integration_conflict", "capacity_wait", "epic_ready", "reminder_expiring", "reminder_cancelled", "release_cut_ready", "release_post_publish", "release_post_publish_failed", "release_closeout", "factory_binary_skew", "train_ci_red", "registration_outcome"]
         .iter()
         .any(|kind| {
             tag.starts_with(&format!(

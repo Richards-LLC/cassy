@@ -1,0 +1,3 @@
+title: Worker filing a task to a registered supervisor bypasses worker checkout staleness while stale worker assignees remain refused
+tasks: [cas-9197]
+journeys: [FACTORY-SUPERVISE]

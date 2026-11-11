@@ -30153,10 +30153,6 @@ mod merge_state_gate_tests {
                         }],
                     };
                     let inventory = crate::qa_batch::resolve_release_inventory(&root, p, &scope).unwrap();
-                    let mut invalid = inventory.clone(); invalid.scope.proof_refs[0].sha256 = "0".repeat(64);
-                    let bad = core.close_release_inventory_outcomes(&invalid).await;
-                    assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
-                    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge);
                     let mut missing = inventory.clone(); missing.deliveries.clear();
                     let bad = core.close_release_inventory_outcomes(&missing).await;
                     assert!(matches!(bad.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Held(_))));
@@ -30170,7 +30166,11 @@ mod merge_state_gate_tests {
                     let later = crate::qa_batch::release_close::ReleaseClose::for_receipt(&root, p, &snapshot, &later_receipt);
                     let loss = later.scope(async { delivery_content_presence_on_target_for_task(p, &source, &head_sha(p), &task.id) }).await;
                     assert!(matches!(loss, DeliveryContentPresence::Dropped { ref paths } if paths.contains(&"early.rs".into())));
-                    let outcomes = core.close_release_inventory_outcomes(&inventory).await;
+                    // cas-734b: recorded member approval survives a stale
+                    // whole-release proof; publication does not revalidate it.
+                    let mut stale_proof = inventory.clone(); stale_proof.scope.proof_refs[0].sha256 = "0".repeat(64);
+                    let outcomes = core.close_release_inventory_outcomes(&stale_proof).await;
+                    assert!(matches!(outcomes.get(&task.id), Some(super::super::merge_close::CassyMergeClose::Closed { .. })));
                     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
                     super::release_parent::probe_deleted_parent_and_single_pending_cycle(&core, &root, p, &scope, &task.id).await;
                     outcomes.iter().map(|(id, outcome)| outcome.receipt(id)).collect::<Vec<_>>().join("\n")

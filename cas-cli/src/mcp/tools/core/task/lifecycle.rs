@@ -4908,6 +4908,77 @@ mod related_recall_response_tests {
         assert!(invalid_target_task.deliverables.work_target.is_none());
     }
 
+    #[tokio::test]
+    async fn create_supervisor_assignee_skips_worker_staleness_cas_9197() {
+        use cas_types::{Agent, AgentRole};
+
+        let mut env = TestEnvGuard::temp_home();
+        for key in ["CAS_FACTORY_SESSION", "CAS_AGENT_ROLE", "CAS_AGENT_ID",
+            "CAS_AGENT_NAME", "CAS_ROOT", "CAS_CLONE_PATH", "CAS_SESSION_ID"] {
+            env.remove(key);
+        }
+        env.set("CAS_FACTORY_MODE", "1");
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let temp = TempDir::new().unwrap();
+        let repo = temp.path();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args).current_dir(repo).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.com"]);
+        std::fs::write(repo.join("file"), "base").unwrap();
+        git(&["add", "file"]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "epic/fixture"]);
+        std::fs::write(repo.join("file"), "epic advance").unwrap();
+        git(&["commit", "-qam", "advance"]);
+        git(&["checkout", "-q", "main"]);
+        let before = git(&["rev-parse", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"),
+            "[project]\ncanonical_id=\"github.com/acme/fixture\"\n[factory]\nwarn_stale_assignment=true\nblock_stale_assignment=true\nstale_threshold_commits=1\n").unwrap();
+        assert_eq!(crate::mcp::tools::count_unheld_behind(repo, "epic/fixture"), Some(1));
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        let caller = Agent::new_with_role("caller-id".into(), "filing-worker".into(), AgentRole::Worker);
+        agents.register(&caller).unwrap();
+        core.set_agent_id_for_testing(caller.id);
+        // Same checkout and stale target: only the assignee's role differs.
+        let tasks = core.open_task_store().unwrap();
+        for (role, id, name, title) in [
+            (AgentRole::Worker, "worker-id", "stale-worker", "Repair payment reader"),
+            (AgentRole::Supervisor, "supervisor-id", "live-supervisor", "Correct invoice totals"),
+        ] {
+            let mut assignee = Agent::new_with_role(id.into(), name.into(), role);
+            assignee.metadata.insert("clone_path".into(), repo.to_string_lossy().into_owned());
+            agents.register(&assignee).unwrap();
+            // UUID normalization must also survive the supervisor exemption.
+            let mut request = plain_task_request(title);
+            request.assignee = Some(id.into());
+            let result = core.cas_task_create_with_target(
+                request, None, Some("epic/fixture"), false,
+            ).await;
+            if role == AgentRole::Worker {
+                let error = result.expect_err("stale worker assignment stays guarded");
+                assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
+                assert!(tasks.list(None).unwrap().is_empty());
+            } else {
+                result.expect("supervisor checkout is not a worker lane");
+                let saved = tasks.list(None).unwrap();
+                assert_eq!(saved.len(), 1);
+                assert_eq!(saved[0].assignee.as_deref(), Some(name));
+                assert_eq!(saved[0].deliverables.work_target.as_ref().unwrap().target_branch,
+                    "epic/fixture");
+            }
+        }
+        assert_eq!(git(&["rev-parse", "HEAD"]), before, "assignment preserves the checkout");
+    }
+
     // pin: queued dispatch preserves test authorization, worker-owned close, and
     // the docs-only acceptance-check exception for no-code tasks.
     #[tokio::test]

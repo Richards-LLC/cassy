@@ -12964,8 +12964,10 @@ mod worker_commit_guard_tests {
         }
         let mut mismatches = Vec::new();
         for (command, denied) in [
-            ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), false),
-            ("sh scripts/test-release.sh --check > /tmp/cas-6837.log 2>&1".into(), false),
+            (format!("bash scripts/test-release.sh > '{linked_path}/shell.log' 2>&1"), false),
+            ("sh scripts/test-release.sh --check > shell.log 2>&1".into(), false),
+            // Script recognition must not bypass the later workspace-write guard.
+            ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),
             ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
             ("bash scripts/test-release.sh".into(), false),
             ("bash".into(), true),

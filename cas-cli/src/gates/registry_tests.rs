@@ -6,6 +6,27 @@ use chrono::Utc;
 
 use super::{Family, REGISTRY, UNCODED, facts, tag, override_tag, codes_in};
 
+#[test]
+fn audited_retirements_match_the_measured_registry() {
+    let audit: serde_json::Value = serde_json::from_str(include_str!("retirements.json")).unwrap();
+    use std::collections::BTreeSet;
+    let baseline: BTreeSet<_> = audit["baseline_codes"].as_array().unwrap().iter()
+        .map(|code| code.as_str().unwrap()).collect();
+    let removed: BTreeSet<_> = audit["rows"].as_array().unwrap().iter()
+        .filter(|row| row["action"] == "remove").map(|row| row["code"].as_str().unwrap()).collect();
+    let live: BTreeSet<_> = REGISTRY.iter().map(|row| row.code).collect();
+    assert_eq!(baseline.len(), audit["baseline_total"].as_u64().unwrap() as usize);
+    assert!(removed.is_subset(&baseline));
+    assert!(removed.is_disjoint(&live), "{:?}", removed.intersection(&live).collect::<Vec<_>>());
+    // Later independent additions/deletions must not invalidate this task's
+    // historical retirement receipt. Its own removed IDs can never reappear.
+    let unrelated_removed = baseline.difference(&live).filter(|code| !removed.contains(*code)).count();
+    let unrelated_added = live.difference(&baseline).count();
+    assert_eq!(REGISTRY.len(), baseline.len() - removed.len() - unrelated_removed + unrelated_added);
+    eprintln!("registry: baseline={} retired={} other_removed={} other_added={} measured={}",
+        baseline.len(), removed.len(), unrelated_removed, unrelated_added, REGISTRY.len());
+}
+
 /// The registry is measured from code: every row comes from one declaration,
 /// and every refusing check (gates and guards declared in Rust) emits its
 /// code, so its refusals are recorded under that code and not as uncoded.

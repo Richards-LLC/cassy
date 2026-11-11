@@ -4805,7 +4805,6 @@ impl CasCore {
         // cas-619f: a user-facing delivery merges only after an independent
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
-        // gate[G-98 merge-admission]: Independent QA required before merge
         if let Some(task_id) = task_id
             && let Some(refusal) = self.independent_qa_merge_refusal(
                 task_id, task_source.as_ref().or(receipt_resume.as_ref()).map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
@@ -4813,7 +4812,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(crate::gates::tag("G-98", refusal)),
+                message: Cow::from(crate::gates::tag("G-94", refusal)),
                 data: None,
             });
         }

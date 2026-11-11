@@ -154,8 +154,8 @@ pub use delivery_cycle::{
     delivery_cycle_id, delivery_cycles,
 };
 pub use delivery_store::{
-    build_worker_completion_receipt_in_cycle,
-    DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
+    DELIVERY_SCHEMA, build_worker_completion_receipt, build_worker_completion_receipt_in_cycle,
+    clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,
     get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,

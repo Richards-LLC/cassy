@@ -2,10 +2,12 @@
 //!
 //! A cycle is minted the first time a task's `factory_branch_anchor` is
 //! written and every later anchor write in that cycle appends its tip. Only
-//! request-changes and a reopen end a cycle, so the next anchor write mints
-//! the next one. A lease transfer or a re-park is not a new cycle. The task
-//! store writes these rows inside the same transaction that persists the
-//! anchor; nothing reads them yet.
+//! request-changes and a reopen start the next cycle; they advance
+//! `TaskDeliverables::delivery_cycle`, which syncs with the task row, so every
+//! machine derives the same cycle number and therefore the same `cycle_id`.
+//! A lease transfer or a re-park is not a new cycle. The task store writes
+//! these rows inside the transaction that persists the anchor; nothing reads
+//! them yet.
 
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -22,6 +24,7 @@ CREATE TABLE IF NOT EXISTS delivery_cycles (
     anchors TEXT NOT NULL,
     start_base TEXT,
     authorized_merge_sources TEXT NOT NULL,
+    attribution_not_before TEXT,
     ended_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -39,9 +42,13 @@ pub struct DeliveryCycle {
     /// Append-only pushed tips parked in this cycle; the last is current.
     pub anchors: Vec<String>,
     pub start_base: Option<String>,
+    /// The commit-attribution window start, frozen at the cycle's first park.
+    pub attribution_not_before: Option<DateTime<Utc>>,
     pub ended: bool,
 }
 
+/// Deterministic across machines: the cycle number comes from the synced
+/// task row, never from local row counts.
 pub fn delivery_cycle_id(project: &str, task_id: &str, cycle: u32) -> String {
     let mut hasher = Sha256::new();
     for part in [project, task_id, &cycle.to_string()] {
@@ -51,8 +58,20 @@ pub fn delivery_cycle_id(project: &str, task_id: &str, cycle: u32) -> String {
     format!("dc-{}", &format!("{:x}", hasher.finalize())[..24])
 }
 
-fn latest(conn: &Connection, task_id: &str) -> Result<Option<(String, u32, Vec<String>, bool)>> {
-    conn.execute_batch(DELIVERY_CYCLE_SCHEMA)?;
+fn parse_time(stamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(stamp).map(|stamp| stamp.with_timezone(&Utc)).ok().or_else(|| {
+        chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S").ok().map(|stamp| stamp.and_utc())
+    })
+}
+
+struct Latest {
+    cycle_id: String,
+    cycle: u32,
+    anchors: Vec<String>,
+    ended: bool,
+}
+
+fn latest(conn: &Connection, task_id: &str) -> Result<Option<Latest>> {
     let row: Option<(String, u32, String, Option<String>)> = conn
         .query_row(
             "SELECT cycle_id, cycle, anchors, ended_at FROM delivery_cycles
@@ -61,88 +80,212 @@ fn latest(conn: &Connection, task_id: &str) -> Result<Option<(String, u32, Vec<S
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
-    row.map(|(id, cycle, anchors, ended)| {
-        Ok((id, cycle, serde_json::from_str(&anchors)?, ended.is_some()))
+    row.map(|(cycle_id, cycle, anchors, ended)| {
+        Ok(Latest { cycle_id, cycle, anchors: serde_json::from_str(&anchors)?, ended: ended.is_some() })
     })
     .transpose()
 }
 
-/// The cycle the task's next anchor write belongs to.
-pub fn current_delivery_cycle_with_conn(conn: &Connection, task_id: &str) -> Result<u32> {
-    Ok(match latest(conn, task_id)? {
-        Some((_, cycle, _, false)) => cycle,
-        Some((_, cycle, _, true)) => cycle + 1,
-        None => 1,
-    })
+fn effective(counter: u32, latest: Option<&Latest>) -> u32 {
+    let recorded = latest.map_or(1, |row| row.cycle + u32::from(row.ended));
+    counter.max(1).max(recorded)
 }
 
-pub fn current_delivery_cycle(root: &std::path::Path, task_id: &str) -> Result<u32> {
+/// The cycle the task's next anchor write belongs to. `counter` is the
+/// task row's `delivery_cycle`.
+pub fn current_delivery_cycle_with_conn(conn: &Connection, task_id: &str, counter: u32) -> Result<u32> {
+    Ok(effective(counter, latest(conn, task_id)?.as_ref()))
+}
+
+pub fn current_delivery_cycle(root: &std::path::Path, task_id: &str, counter: u32) -> Result<u32> {
     let conn = Connection::open(root.join("cas.db"))?;
     crate::shared_db::install_busy_handler(&conn)?;
-    current_delivery_cycle_with_conn(&conn, task_id)
+    current_delivery_cycle_with_conn(&conn, task_id, counter)
 }
 
-/// Mint the current cycle with `anchor`, or append `anchor` to it. Writing
-/// the cycle's current anchor again is a no-op.
-pub fn mint_or_append_with_conn(
-    conn: &Connection,
-    project: &str,
-    task_id: &str,
-    anchor: &str,
-    start_base: Option<&str>,
-    authorized_merge_sources: &str,
-    now: DateTime<Utc>,
-) -> Result<()> {
-    match latest(conn, task_id)? {
-        Some((cycle_id, _, mut anchors, false)) => {
-            if anchors.last().map(String::as_str) != Some(anchor) {
-                anchors.push(anchor.to_string());
-                conn.execute(
-                    "UPDATE delivery_cycles SET anchors = ?2, updated_at = ?3 WHERE cycle_id = ?1",
-                    params![cycle_id, serde_json::to_string(&anchors)?, now.to_rfc3339()],
-                )?;
-            }
-        }
-        previous => {
-            let cycle = previous.map_or(1, |(_, cycle, _, _)| cycle + 1);
+pub(crate) struct AnchorWrite<'a> {
+    pub project: &'a str,
+    pub task_id: &'a str,
+    pub anchor: &'a str,
+    pub counter: u32,
+    pub start_base: Option<&'a str>,
+    pub authorized_merge_sources: &'a str,
+    /// A sync apply replays another machine's writes; it never re-appends a
+    /// tip this cycle already holds, so a stale echo cannot reorder anchors.
+    pub replicated: bool,
+}
+
+/// Mint the current cycle with the anchor, or append the anchor to it, and
+/// return the cycle id. Writing the cycle's current anchor again is a no-op.
+pub(crate) fn mint_or_append_with_conn(conn: &Connection, write: &AnchorWrite<'_>, now: DateTime<Utc>) -> Result<String> {
+    let latest = latest(conn, write.task_id)?;
+    let cycle = effective(write.counter, latest.as_ref());
+    let now = now.to_rfc3339();
+    conn.execute(
+        "UPDATE delivery_cycles SET ended_at = ?3, updated_at = ?3
+         WHERE task_id = ?1 AND cycle < ?2 AND ended_at IS NULL",
+        params![write.task_id, cycle, now],
+    )?;
+    if let Some(mut row) = latest.filter(|row| row.cycle == cycle) {
+        let held = if write.replicated {
+            row.anchors.iter().any(|anchor| anchor == write.anchor)
+        } else {
+            row.anchors.last().map(String::as_str) == Some(write.anchor)
+        };
+        if !held {
+            row.anchors.push(write.anchor.to_string());
             conn.execute(
-                "INSERT INTO delivery_cycles (cycle_id, project, task_id, cycle, anchors,
-                     start_base, authorized_merge_sources, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-                params![
-                    delivery_cycle_id(project, task_id, cycle),
-                    project,
-                    task_id,
-                    cycle,
-                    serde_json::to_string(&[anchor])?,
-                    start_base,
-                    authorized_merge_sources,
-                    now.to_rfc3339(),
-                ],
+                "UPDATE delivery_cycles SET anchors = ?2, updated_at = ?3 WHERE cycle_id = ?1",
+                params![row.cycle_id, serde_json::to_string(&row.anchors)?, now],
             )?;
         }
+        return Ok(row.cycle_id);
     }
+    let cycle_id = delivery_cycle_id(write.project, write.task_id, cycle);
+    insert(conn, &cycle_id, write, cycle, &[write.anchor.to_string()], None, &now)?;
+    Ok(cycle_id)
+}
+
+fn insert(
+    conn: &Connection,
+    cycle_id: &str,
+    write: &AnchorWrite<'_>,
+    cycle: u32,
+    anchors: &[String],
+    ended_at: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO delivery_cycles (cycle_id, project, task_id, cycle, anchors,
+             start_base, authorized_merge_sources, ended_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![
+            cycle_id,
+            write.project,
+            write.task_id,
+            cycle,
+            serde_json::to_string(anchors)?,
+            write.start_base,
+            write.authorized_merge_sources,
+            ended_at,
+            now,
+        ],
+    )?;
     Ok(())
 }
 
-/// Request-changes and reopen end the open cycle; the next anchor write
-/// mints the next one. Ending an already-ended cycle is a no-op.
-pub fn end_delivery_cycle_with_conn(conn: &Connection, task_id: &str, now: DateTime<Utc>) -> Result<()> {
-    conn.execute_batch(DELIVERY_CYCLE_SCHEMA)?;
+/// Request-changes and reopen end the current cycle. Returns the task row's
+/// next `delivery_cycle`; the next anchor write mints that cycle.
+pub(crate) fn end_delivery_cycle_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    counter: u32,
+    now: DateTime<Utc>,
+) -> Result<u32> {
+    let current = current_delivery_cycle_with_conn(conn, task_id, counter)?;
     conn.execute(
-        "UPDATE delivery_cycles SET ended_at = ?2, updated_at = ?2
-         WHERE task_id = ?1 AND ended_at IS NULL",
-        params![task_id, now.to_rfc3339()],
+        "UPDATE delivery_cycles SET ended_at = ?3, updated_at = ?3
+         WHERE task_id = ?1 AND cycle <= ?2 AND ended_at IS NULL",
+        params![task_id, current, now.to_rfc3339()],
     )?;
+    Ok(current + 1)
+}
+
+/// Freeze the cycle's attribution window start at its first park: the latest
+/// lease claim or transfer, else task creation (`resolve_task_commit_receipt_window`).
+/// A later claim or transfer does not move it.
+pub(crate) fn freeze_attribution_not_before_with_conn(
+    conn: &Connection,
+    task_id: &str,
+    cycle_id: &str,
+    task_created_at: DateTime<Utc>,
+) -> Result<()> {
+    let mut statement = conn.prepare_cached(
+        "SELECT timestamp FROM task_lease_history
+         WHERE task_id = ?1 AND event_type IN ('claimed', 'transferred')",
+    )?;
+    let latest_claim = statement
+        .query_map(params![task_id], |row| row.get::<_, String>(0))?
+        .filter_map(|stamp| stamp.ok().and_then(|stamp| parse_time(&stamp)))
+        .max();
+    let not_before = latest_claim.filter(|claim| *claim > task_created_at).unwrap_or(task_created_at);
+    conn.execute(
+        "UPDATE delivery_cycles SET attribution_not_before = ?2
+         WHERE cycle_id = ?1 AND attribution_not_before IS NULL",
+        params![cycle_id, not_before.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// One-shot backfill for open tasks anchored before cycles existed. Retired
+/// anchors fill earlier cycles in order, each declined anchor (request-changes)
+/// closing one; the current anchor lands in the open newest cycle.
+pub(crate) fn backfill_with_conn(conn: &Connection, default_project: Option<&str>) -> Result<()> {
+    let candidates = "FROM tasks t
+         WHERE t.status NOT IN ('closed', 'cancelled')
+           AND NOT EXISTS (SELECT 1 FROM delivery_cycles c WHERE c.task_id = t.id)
+           AND json_valid(t.deliverables) AND json_type(t.deliverables) = 'object'
+           AND (json_extract(t.deliverables, '$.factory_branch_anchor') IS NOT NULL
+                OR json_array_length(t.deliverables, '$.historical_factory_branch_anchors') > 0)";
+    let pending: bool = conn.query_row(&format!("SELECT EXISTS (SELECT 1 {candidates})"), [], |row| row.get(0))?;
+    if !pending {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(String, Option<String>, String)> = tx
+        .prepare(&format!("SELECT t.id, t.origin_project, t.deliverables {candidates}"))?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let now = Utc::now().to_rfc3339();
+    for (task_id, project, deliverables) in rows {
+        let Ok(deliverables) = serde_json::from_str::<cas_types::TaskDeliverables>(&deliverables) else {
+            continue;
+        };
+        let project = project.as_deref().or(default_project).unwrap_or_default();
+        let declined = deliverables
+            .declined_factory_branch_anchors
+            .as_ref()
+            .unwrap_or(&deliverables.historical_factory_branch_anchors);
+        let mut cycles: Vec<(Vec<String>, bool)> = vec![(Vec::new(), false)];
+        for anchor in &deliverables.historical_factory_branch_anchors {
+            let open = cycles.last_mut().expect("one cycle");
+            open.0.push(anchor.clone());
+            if declined.iter().any(|known| known.eq_ignore_ascii_case(anchor)) {
+                open.1 = true;
+                cycles.push((Vec::new(), false));
+            }
+        }
+        if let Some(anchor) = deliverables.factory_branch_anchor.as_deref().filter(|tip| !tip.trim().is_empty()) {
+            cycles.last_mut().expect("one cycle").0.push(anchor.to_string());
+        }
+        let sources = serde_json::to_string(&deliverables.authorized_merge_sources)?;
+        let write = AnchorWrite {
+            project,
+            task_id: &task_id,
+            anchor: "",
+            counter: 0,
+            start_base: deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+            authorized_merge_sources: &sources,
+            replicated: false,
+        };
+        for (index, (anchors, ended)) in cycles.iter().enumerate() {
+            if anchors.is_empty() {
+                continue;
+            }
+            let cycle = index as u32 + 1;
+            let cycle_id = delivery_cycle_id(project, &task_id, cycle);
+            insert(&tx, &cycle_id, &write, cycle, anchors, ended.then_some(now.as_str()), &now)?;
+        }
+    }
+    tx.commit()?;
     Ok(())
 }
 
 pub fn delivery_cycles(root: &std::path::Path, task_id: &str) -> Result<Vec<DeliveryCycle>> {
     let conn = Connection::open(root.join("cas.db"))?;
     crate::shared_db::install_busy_handler(&conn)?;
-    conn.execute_batch(DELIVERY_CYCLE_SCHEMA)?;
     let mut statement = conn.prepare(
-        "SELECT cycle_id, project, task_id, cycle, anchors, start_base, ended_at
+        "SELECT cycle_id, project, task_id, cycle, anchors, start_base, attribution_not_before, ended_at
          FROM delivery_cycles WHERE task_id = ?1 ORDER BY cycle",
     )?;
     let rows = statement
@@ -155,11 +298,12 @@ pub fn delivery_cycles(root: &std::path::Path, task_id: &str) -> Result<Vec<Deli
                 row.get::<_, String>(4)?,
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rows.into_iter()
-        .map(|(cycle_id, project, task_id, cycle, anchors, start_base, ended)| {
+        .map(|(cycle_id, project, task_id, cycle, anchors, start_base, not_before, ended)| {
             Ok(DeliveryCycle {
                 cycle_id,
                 project,
@@ -167,6 +311,7 @@ pub fn delivery_cycles(root: &std::path::Path, task_id: &str) -> Result<Vec<Deli
                 cycle,
                 anchors: serde_json::from_str(&anchors)?,
                 start_base,
+                attribution_not_before: not_before.as_deref().and_then(parse_time),
                 ended: ended.is_some(),
             })
         })

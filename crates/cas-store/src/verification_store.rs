@@ -2655,7 +2655,9 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     // cas-50b2: request-changes ends the delivery cycle; the corrective
     // delivery's first anchor write mints the next one.
-    crate::delivery_cycle::end_delivery_cycle_with_conn(&tx, task_id, now)?;
+    deliverables.delivery_cycle = crate::delivery_cycle::end_delivery_cycle_with_conn(
+        &tx, task_id, deliverables.delivery_cycle, now,
+    )?;
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,

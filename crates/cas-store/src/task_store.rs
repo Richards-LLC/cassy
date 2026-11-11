@@ -355,19 +355,23 @@ impl SqliteTaskStore {
                 persisted_deliverables.merge_ci_admission = None;
             }
 
+            // cas-50b2: a local reopen ends the delivery cycle. A synced row
+            // already carries the advanced cycle from the machine that reopened.
+            if reopening_terminal && !from_sync {
+                persisted_deliverables.delivery_cycle = crate::delivery_cycle::end_delivery_cycle_with_conn(
+                    &tx, &task.id, persisted_deliverables.delivery_cycle, now,
+                )?;
+            }
+
             // Updates preserve the row's provenance. Only creation supplies a
             // default; an unattributed imported task must not become local on
             // its next edit.
             let persisted_origin_project = task.origin_project.as_ref();
 
-            let prior: Option<(String, String, Option<String>, Option<String>)> = tx.query_row(
-                "SELECT notes, updated_at,
-                        CASE WHEN json_valid(deliverables) AND json_type(deliverables) = 'object'
-                             THEN json_extract(deliverables, '$.factory_branch_anchor') END,
-                        origin_project
-                 FROM tasks WHERE id = ?1",
+            let prior: Option<(String, String, Option<String>)> = tx.query_row(
+                "SELECT notes, updated_at, origin_project FROM tasks WHERE id = ?1",
                 params![task.id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             ).optional()?;
             let prior_notes = prior.as_ref().map(|(notes, ..)| notes.as_str());
             let mut safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, prior_notes);
@@ -442,32 +446,34 @@ impl SqliteTaskStore {
             if rows == 0 {
                 return Err(StoreError::TaskNotFound(task.id.clone()));
             }
-            if !from_sync {
-                // cas-50b2: every anchor write mints or appends its delivery
-                // cycle in this transaction; a reopen ends the cycle first.
-                if reopening_terminal {
-                    crate::delivery_cycle::end_delivery_cycle_with_conn(&tx, &task.id, now)?;
-                }
-                let (prior_anchor, prior_project) = prior
-                    .as_ref()
-                    .map(|(_, _, anchor, project)| (anchor.as_deref(), project.as_deref()))
+            // cas-50b2: every anchor write, local or synced, mints or appends
+            // its delivery cycle in this transaction. A local park freezes the
+            // cycle's attribution window at the first AwaitingMerge transition.
+            if !task.is_terminal()
+                && let Some(anchor) = persisted_deliverables.factory_branch_anchor.as_deref()
+                && !anchor.trim().is_empty()
+            {
+                let project = task.origin_project.as_deref()
+                    .or(prior.as_ref().and_then(|(_, _, project)| project.as_deref()))
+                    .or(self.origin_project.as_deref())
                     .unwrap_or_default();
-                if let Some(anchor) = persisted_deliverables.factory_branch_anchor.as_deref()
-                    && !anchor.trim().is_empty()
-                    && prior_anchor != Some(anchor)
-                {
-                    let project = task.origin_project.as_deref()
-                        .or(prior_project)
-                        .or(self.origin_project.as_deref())
-                        .unwrap_or_default();
-                    crate::delivery_cycle::mint_or_append_with_conn(
-                        &tx,
+                let sources = serde_json::to_string(&persisted_deliverables.authorized_merge_sources)?;
+                let cycle_id = crate::delivery_cycle::mint_or_append_with_conn(
+                    &tx,
+                    &crate::delivery_cycle::AnchorWrite {
                         project,
-                        &task.id,
+                        task_id: &task.id,
                         anchor,
-                        persisted_deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-                        &serde_json::to_string(&persisted_deliverables.authorized_merge_sources)?,
-                        now,
+                        counter: persisted_deliverables.delivery_cycle,
+                        start_base: persisted_deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+                        authorized_merge_sources: &sources,
+                        replicated: from_sync,
+                    },
+                    now,
+                )?;
+                if !from_sync && prev_status.is_some() && task.status == TaskStatus::AwaitingMerge {
+                    crate::delivery_cycle::freeze_attribution_not_before_with_conn(
+                        &tx, &task.id, &cycle_id, task.created_at,
                     )?;
                 }
             }
@@ -677,6 +683,13 @@ impl SqliteTaskStore {
             None
         };
         let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, prior_notes.as_deref());
+        // cas-50b2: reopening a terminal task ends its delivery cycle.
+        let mut deliverables = task.deliverables.clone();
+        if matches!(expected_status, TaskStatus::Closed | TaskStatus::Cancelled) && !task.is_terminal() {
+            deliverables.delivery_cycle = crate::delivery_cycle::end_delivery_cycle_with_conn(
+                conn, &task.id, deliverables.delivery_cycle, task.updated_at,
+            )?;
+        }
         let rows = conn.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
              acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
@@ -711,7 +724,7 @@ impl SqliteTaskStore {
                 if task.pending_worktree_merge { 1 } else { 0 },
                 task.epic_verification_owner,
                 task.team_id,
-                Self::deliverables_to_string(&task.deliverables),
+                Self::deliverables_to_string(&deliverables),
                 task.demo_statement,
                 task.execution_note,
                 task.share.as_ref().map(|s| s.to_string()),
@@ -731,9 +744,6 @@ impl SqliteTaskStore {
             return Err(StoreError::Parse(
                 "exact task reopen raced with another task mutation".to_string(),
             ));
-        }
-        if matches!(expected_status, TaskStatus::Closed | TaskStatus::Cancelled) && !task.is_terminal() {
-            crate::delivery_cycle::end_delivery_cycle_with_conn(conn, &task.id, task.updated_at)?;
         }
         Ok(())
     }
@@ -1124,6 +1134,10 @@ impl TaskStore for SqliteTaskStore {
             // idempotent (`CREATE TABLE IF NOT EXISTS`). See cas-bdb9
             // fix-round-1 P1 for why a duplicated slim definition is dangerous.
             conn.execute_batch(crate::AGENT_SCHEMA)?;
+            // cas-50b2: anchor writes mint cycles inside task transactions;
+            // the backfill is read-only once every open anchored task has one.
+            conn.execute_batch(crate::DELIVERY_CYCLE_SCHEMA)?;
+            crate::delivery_cycle::backfill_with_conn(&conn, self.origin_project.as_deref())?;
             let missing_revision: bool = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM tasks t WHERE NOT EXISTS (
                      SELECT 1 FROM task_mutation_revisions r WHERE r.entity_id = t.id))",

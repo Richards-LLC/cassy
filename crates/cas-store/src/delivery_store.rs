@@ -1176,6 +1176,12 @@ mod tests {
         task.deliverables.delivery_pr_merged_at = Some(Utc::now());
         task.pending_worktree_merge = true;
         task_store.add(&task).unwrap();
+        // cas-50b2: a delivery parked before cycles existed gets exactly one
+        // open cycle when the store opens.
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        let cycles = || crate::delivery_cycles(root.path(), &task.id).unwrap();
+        let shape = || cycles().into_iter().map(|c| (c.cycle, c.anchors, c.ended)).collect::<Vec<_>>();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
 
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let (delivery, dispatch) = create_worker_delivery_with_dispatch(
@@ -1238,6 +1244,7 @@ mod tests {
         assert!(reopened.deliverables.delivery_pr_merged_at.is_none());
         assert!(!reopened.pending_worktree_merge);
 
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true)]);
         assert!(reopened.notes.contains("factory/worker"));
         assert!(reopened.notes.contains("revert the public output change"));
         let sources = &reopened.deliverables.authorized_merge_sources;
@@ -1296,11 +1303,29 @@ mod tests {
         assert_eq!(retained.updated_at, parked_at);
         assert_eq!(retained.deliverables.factory_branch_anchor,
             corrective.deliverables.factory_branch_anchor);
+        // The re-park mints cycle 2 and freezes its attribution window; the
+        // same commit parked in cycle 2 gets a receipt id distinct from cycle 1's.
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true), (2, vec!["c".repeat(40)], false)]);
+        assert_eq!(cycles()[1].attribution_not_before, Some(retained.created_at));
+        assert_eq!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 1).id, receipt.id);
+        assert_ne!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 2).id, receipt.id);
         // Opposite ordering: when park commits first, request_changes wins.
         crate::request_changes_for_parked_delivery(
             root.path(), &task.id, "supervisor-session", "Corrective delivery also needs changes",
         ).unwrap();
-        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
+        let current = task_store.get(&task.id).unwrap();
+        assert_eq!(current.status, TaskStatus::Open);
+        // A synced park from another machine mints the same deterministic
+        // cycle there and here: the cycle number travels with the row.
+        let mut synced = current.clone();
+        synced.status = TaskStatus::AwaitingMerge;
+        synced.deliverables.mint_or_append(&"e".repeat(40));
+        synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
+        task_store.update_from_sync(&synced, &current).unwrap().unwrap();
+        let synced_cycles = cycles();
+        assert_eq!(synced_cycles[1].ended, true);
+        assert_eq!((synced_cycles[2].cycle, synced_cycles[2].anchors.clone()), (3, vec!["e".repeat(40)]));
+        assert_eq!(synced_cycles[2].cycle_id, crate::delivery_cycle_id("", &task.id, 3));
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

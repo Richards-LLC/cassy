@@ -719,6 +719,12 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declined_factory_branch_anchors: Option<Vec<String>>,
 
+    /// cas-50b2: the delivery cycle request-changes or a reopen last
+    /// started (0 until one does). It travels with the row, so every machine
+    /// numbers the task's `DeliveryCycle` rows the same way.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delivery_cycle: u32,
+
     /// cas-a844: the `factory/<assignee>` branch name recorded alongside
     /// `factory_branch_anchor` at commit time, with MERGE REQUIRED parking as
     /// a fallback. `factory_branch_anchor` is only useful if you already know
@@ -777,6 +783,10 @@ pub struct NoDeliveryCloseIntent {
     pub assignee: Option<String>,
 }
 
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
 /// The object-shaped representation used by current task payloads.
 ///
 /// This stays separate from [`TaskDeliverables`] so its custom deserializer
@@ -833,6 +843,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
     #[serde(default)]
+    delivery_cycle: u32,
+    #[serde(default)]
     parked_branch: Option<String>,
     #[serde(default)]
     handoff_branches: Vec<String>,
@@ -875,6 +887,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             authorized_merge_sources: value.authorized_merge_sources,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
+            delivery_cycle: value.delivery_cycle,
             parked_branch: value.parked_branch,
             handoff_branches: value.handoff_branches,
             merge_conflicted: value.merge_conflicted,

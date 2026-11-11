@@ -5959,7 +5959,14 @@ impl CasCore {
                 "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}` or its per-task branch `{task_source}`."
             )));
         }
-        let cycle = cas_store::current_delivery_cycle(&self.cas_root, &task.id).map_err(|error| {
+        // cas-50b2: read outside the delivery transaction on purpose. Only
+        // request_changes and reopen move the cycle, and neither applies to
+        // an InProgress task under this worker's live lease, so the cycle
+        // read here is the one this park mints; an exact retry in the same
+        // cycle rebuilds the same receipt id.
+        let cycle = cas_store::current_delivery_cycle(
+            &self.cas_root, &task.id, task.deliverables.delivery_cycle,
+        ).map_err(|error| {
             Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to read delivery cycle: {error}"))
         })?;
         let receipt = cas_store::build_worker_completion_receipt_in_cycle(
@@ -30137,6 +30144,10 @@ mod merge_state_gate_tests {
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
         assert!(handoff && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
+        // cas-50b2: the reviewed correction appends B to the parked cycle.
+        let cycle = cas_store::delivery_cycles(&root, &task.id).unwrap();
+        assert_eq!(cycle.iter().map(|c| (c.cycle, c.anchors.clone(), c.ended)).collect::<Vec<_>>(),
+            [(1, vec![a.clone(), b.clone()], false)]);
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
         assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
         assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);

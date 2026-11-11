@@ -474,8 +474,8 @@ bug_families:
     tasks: [cas-f47a]
     journeys: [HUB-J6]
   nested-shell-worker-commit-scope:
-    title: Nested shell and eval history writes obey the worker worktree and branch guards
-    tasks: [cas-4923e]
+    title: Literal shell script calls with arguments and redirects are admitted while nested shell and eval history writes obey worktree and branch guards
+    tasks: [cas-4923e, cas-6837]
     journeys: [FACTORY-SUPERVISE]
   regenerated-merge-candidate-bundle:
     title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review

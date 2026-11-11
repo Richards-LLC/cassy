@@ -2991,6 +2991,17 @@ fn collect_git_write_targets(
             } else {
                 args
             };
+            // A literal script file is opaque, just like executing it directly.
+            // Its remaining arguments are script data, not shell options.
+            if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+                && args.first().is_some_and(|script| {
+                    !script.is_empty()
+                        && !script.starts_with(['-', '+'])
+                        && path_word(script).literal == Some(true)
+                })
+            {
+                continue;
+            }
             let payload = match args {
                 [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
                 [flag, payload, ..] if flag == "-c"

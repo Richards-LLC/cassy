@@ -742,6 +742,7 @@ impl TaskCloseDisposition {
     }
 }
 
+// gate-audit[forward]: G-26 Pure renderer; gate-close authority validation tags its refusal.
 pub(super) fn gate_supervisor_authority_error(
     operation: &str,
     error: SupervisorAuthorityError,
@@ -4879,6 +4880,7 @@ mod risk_proof_tests {
     }
 }
 
+// gate-audit[negative_result]: input Validates declaration/receipt completeness before measuring a negative result.
 fn negative_result_missing_receipts(
     req: &TaskCloseRequest,
     negative_result: &NegativeResultCloseRequest,
@@ -7744,6 +7746,12 @@ impl CasCore {
         result
     }
 
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-67,G-68,G-71,G-74,G-76,G-77,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
+    // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
+    // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
+    // gate-audit[evidence_only]: selector Chooses a separately authorized, measured non-integration terminal disposition.
+    // gate-audit[negative_result]: selector Chooses a separately authorized, measured negative result; no code delivery is approved.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -9815,7 +9823,7 @@ impl CasCore {
                 }))
             });
 
-        if skip_verification && matches!(skip_reason, VerificationSkipReason::SupervisorBypass) {
+        if skip_verification && !depth_light && matches!(skip_reason, VerificationSkipReason::SupervisorBypass) {
             accepted_override_codes.push("G-68");
         }
 
@@ -11097,7 +11105,6 @@ impl CasCore {
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
         // gate[G-74 park]: Execution-note diff contracts (additive-only / value-only)
         if close_disposition.requires_delivery_gates()
-            && !supervisor_override
             && task.execution_note.as_deref() == Some("additive-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
@@ -11128,6 +11135,7 @@ impl CasCore {
                         .map(|v| format!("  {} ({})", v.path, v.status))
                         .collect::<Vec<_>>()
                         .join("\n");
+                    if supervisor_override {accepted_override_codes.push("G-74");} else {
                     return Ok(Self::tool_error(crate::gates::tag("G-74", format!(
                         "⚠️ ADDITIVE-ONLY VIOLATION\n\n\
                         task close rejected: execution_note=additive-only but diff contains \
@@ -11135,6 +11143,7 @@ impl CasCore {
                         Modified/deleted/renamed files:\n{file_list}\n\n\
                         Use execution_note=null or test-first to modify existing files."
                     ))));
+                    }
                 }
             }
         }
@@ -11147,7 +11156,6 @@ impl CasCore {
         // gates below; unlike an additive-only task, it has a real modified
         // diff for those gates to inspect.
         if close_disposition.requires_delivery_gates()
-            && !supervisor_override
             && task.execution_note.as_deref() == Some("value-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
@@ -11175,6 +11183,7 @@ impl CasCore {
                         .map(|v| format!("  {} ({})", v.path, v.status))
                         .collect::<Vec<_>>()
                         .join("\n");
+                    if supervisor_override {accepted_override_codes.push("G-74");} else {
                     return Ok(Self::tool_error(crate::gates::tag("G-74", format!(
                         "⚠️ VALUE-ONLY VIOLATION\n\n\
                         task close rejected: execution_note=value-only permits only \
@@ -11183,6 +11192,7 @@ impl CasCore {
                         Use execution_note=additive-only for new-file-only work, or \
                         execution_note=null or test-first for broader changes."
                     ))));
+                    }
                 }
             }
         }
@@ -11291,9 +11301,6 @@ impl CasCore {
                 })
             };
 
-        if supervisor_override && matches!(task.execution_note.as_deref(), Some("additive-only" | "value-only")) {
-            accepted_override_codes.push("G-74");
-        }
         let mut waived_risk_gate = None;
         let mut accepted_inherited_scoped_failures = None;
         let mut accepted_merge_queue_proof = None;
@@ -11623,7 +11630,14 @@ impl CasCore {
                 if !supervisor_override {
                     return Ok(Self::tool_error(epic_refusal(message)));
                 }
-                accepted_override_codes.extend(crate::gates::codes_in(&message));
+                for code in crate::gates::codes_in(&message) {
+                    match code {
+                        "G-76" => accepted_override_codes.push("G-76"),
+                        "G-77" => accepted_override_codes.push("G-77"),
+                        "G-78" => accepted_override_codes.push("G-78"),
+                        _ => {},
+                    }
+                }
                 // Supervisor authority and a non-empty reason were checked at
                 // entry. Waive only the declared-risk mismatch; the mandatory
                 // scoped proof derived from the actual diff still runs.
@@ -12704,7 +12718,7 @@ impl CasCore {
                 configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
         }
         if epic_override_note_pending { accepted_override_codes.push("G-125"); }
-        for code in accepted_override_codes.into_iter()
+        for code in accepted_override_codes.into_iter().chain(close_notes.override_codes.iter().copied())
             .chain(crate::gates::override_codes_in(&registry_upkeep_notices.join("\n")))
         {
             receipt = crate::gates::override_tag(code, receipt);
@@ -12889,6 +12903,7 @@ impl CasCore {
     ///    the registry. Same liveness logic as above.
     /// 4. Everything failed → `AssigneeUnregistered` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
+    // gate-audit[bypass_requested]: bypass G-68 Pure verification classification; final close producer tags the actual accepted waiver.
     pub(crate) fn compute_verification_skip_reason(
         &self,
         task: &cas_types::Task,
@@ -16509,6 +16524,7 @@ pub(crate) fn unpushed_delivery_tip(
     (!git_commit_is_ancestor(repo_path, tip, &remote)).then_some(pushed)
 }
 
+// gate-audit[forward]: G-59 Pure renderer; park caller tags unpushed delivery refusal.
 fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> String {
     let [push] = match crate::worktree::GitOperations::git_remedies([&["push", "origin", branch]]) {
         Ok(commands) => commands,
@@ -16835,6 +16851,8 @@ fn checkout_is_clean(worktree: &std::path::Path) -> bool {
 /// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
 /// Inspect both local and origin refs: a merged local lane cannot hide a newer
 /// remote delivery. All measurements use immutable IDs from one ref inventory.
+// gate-audit[evidence_only]: selector Disposition measurement excludes mutually exclusive declarations; does not waive delivery policy.
+// gate-audit[negative_result]: selector Disposition measurement excludes mutually exclusive declarations; does not waive delivery policy.
 fn measure_no_delivery(
     repo: &std::path::Path,
     task: &Task,
@@ -17086,6 +17104,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
 }
 
 // gate[G-55 park]: Delivery merged into its target before close (factory-branch merge state)
+// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
 fn run_factory_branch_merge_gate_for_delivery(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -19389,6 +19408,7 @@ fn supervisor_merged_anchor_close(
         && anchor.is_some_and(|anchor| commit_is_merged_into_parent(repo, anchor, target_branch))
 }
 
+// gate-audit[input]: Validates requested Git refs and receipt bindings; caller retains gate authority.
 fn validate_pre_close_worktree(
     path: &std::path::Path,
     expected: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -20241,6 +20261,7 @@ fn target_reachable_squash_of(
         && source_tree == resolve_branch_sha(repo, &format!("{receipt}^{{tree}}"))
 }
 
+// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged in its success narrative.
 pub(crate) fn validate_task_commit_receipt(
     repo_path: &std::path::Path,
     receipt: &str,
@@ -20291,9 +20312,9 @@ pub(crate) fn validate_task_commit_receipt(
             .as_deref()
             .filter(|reason| !reason.trim().is_empty())
         {
-            prior_cycle_basis = Some(format!(
+            prior_cycle_basis = Some(crate::gates::override_tag("G-58",format!(
                 " Registered supervisor override accepted historical receipt despite task epoch boundary. Reason: {reason}"
-            ));
+            )));
         } else if task_attribution::in_work_window(
             window,
             commit_epoch,
@@ -20464,6 +20485,7 @@ fn validate_lagging_epic_receipt_on_integration_branch(
 /// rule.  A rejected push is re-read once: another closer may simply have
 /// advanced the epic further.  We never auto-merge or force-push divergent
 /// shared epic history.
+// gate-audit[forward]: G-125 Epic-close reconciliation helper; it returns a refusal to the registered parent decision.
 fn advance_clean_epic_after_child_integration(
     repo_path: &std::path::Path,
     epic_id: &str,
@@ -20721,14 +20743,16 @@ pub(crate) fn find_squash_tree_match(
 struct CloseNoteTracker<'a> {
     store: &'a dyn cas_store::TaskStore,
     persisted_bytes: usize,
+    override_codes: std::collections::BTreeSet<&'static str>,
 }
 
 impl<'a> CloseNoteTracker<'a> {
     fn new(store: &'a dyn cas_store::TaskStore, task: &Task) -> Self {
-        Self { store, persisted_bytes: task.notes.len() }
+        Self { store, persisted_bytes: task.notes.len(), override_codes: Default::default() }
     }
 
     fn record(&mut self, task: &mut Task, note: &str) {
+        self.override_codes.extend(crate::gates::override_codes_in(note));
         if append_close_decision_note(self.store, task, note) {
             self.persisted_bytes = task.notes.len();
         }
@@ -24990,6 +25014,7 @@ pub(crate) enum LightweightLintOutcome {
     PassWithFallback(String),
 }
 
+// gate-audit[forward]: G-41 Pre-close context validation supplies the enclosing hook gate.
 fn target_only_receipt_lint_parent(
     repo: &std::path::Path,
     receipt: &str,
@@ -25091,6 +25116,7 @@ fn commits_have_equivalent_patch(repo_path: &std::path::Path, left: &str, right:
     patch_id(left) == patch_id(right)
 }
 
+// gate-audit[forward]: G-41 Pure pre-close refusal renderer; no acceptance path.
 fn stale_rebased_anchor_rejection(
     task_id: &str,
     parked_anchor: &str,
@@ -25241,6 +25267,8 @@ pub(crate) fn validate_pushed_task_receipt(
         task.id, context.repo_root.display()))
 }
 
+// gate-audit[forward]: G-41 Pure diagnostic for the declared pre-close hook; does not accept a waiver.
+// gate-audit[supervisor_override]: selector Alters recovery guidance only; no authorization decision.
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,
@@ -25267,6 +25295,7 @@ fn pre_close_unreachable_rejection(
 }
 
 // gate[G-41 park]: Declared pre-close hook (pre-close hook failed, unreachable, target-only, stale anchor)
+// gate-audit[supervisor_override]: selector Selects a separately validated pushed-receipt recovery context; the declared pre-close hook still runs.
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,
     repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,

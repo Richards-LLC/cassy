@@ -708,6 +708,7 @@ mod reused_factory_branch_tests {
 }
 
 // gate[G-130 create]: User-facing task demo statement required
+// gate-audit[supervisor_override]: bypass G-130 The create/proposal producer tags an accepted missing-demo waiver.
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
     labels: &[String],
@@ -757,6 +758,7 @@ pub(crate) fn validate_demo_statement_requirement(
 }
 
 /// cas-5f28: refusal for a start whose task a peer on another machine holds.
+// gate-audit[forward]: G-15 Pure renderer; task-start caller tags the peer-claim refusal.
 fn peer_claim_refusal(task_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -> String {
     let prefix = crate::mcp::tools::core::guidance::caller_prefix();
     format!(
@@ -1339,6 +1341,8 @@ impl CasCore {
         .await
     }
 
+    // gate-audit[supervisor_override]: bypass G-129,G-130 Missing-risk and missing-demo waivers use the same policy validators for attribution.
+    // gate-audit[confirm_warning]: bypass G-147,G-148 Explicitly accepts a measured competing plan or duplicate create refusal.
     pub(crate) async fn cas_task_create_with_delivery_mode(
         &self,
         req: TaskCreateRequest,
@@ -1526,12 +1530,13 @@ impl CasCore {
                     message: Cow::from(format!("Failed to inspect recent epic planning: {error}")),
                     data: None,
                 })? {
+                    // gate[G-147 create]: Concurrent epic-planning admission
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-147",format!(
                             "PLANNING RACE WARNING: supervisor {other_creator} created children under epic {epic} at {planned_at}. \
                              Review that plan before adding another child; if this is intentional, retry with confirm_warning=true."
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -1575,10 +1580,23 @@ impl CasCore {
             if !blocking_warnings.is_empty() {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(blocking_warnings.join("\n\n")),
+                    // gate[G-148 create]: Duplicate task or epic admission
+                    message: Cow::from(crate::gates::tag("G-148",blocking_warnings.join("\n\n"))),
                     data: None,
                 });
             }
+        }
+
+        // Measurement only: a confirmation never adds a new failure path.
+        if confirm_warning {
+            if let (Some(epic),Some(creator),None)=(epic_id.as_deref(),created_by.as_deref(),release_train.as_deref())
+                && matches!(recent_other_epic_planner(task_store.as_ref(),epic,creator,chrono::Utc::now()),Ok(Some(_)))
+            {policy_override_tags=crate::gates::override_tag("G-147",policy_override_tags);}
+            let epic_overlap=task_type==TaskType::Epic && matches!(epic_overlap::warning(self,task_store.as_ref(),&req.title,
+                req.description.as_deref().unwrap_or_default()).await,Ok(Some(_)));
+            let duplicate=matches!(open_task_similarity(task_store.as_ref(),&req.title,req.description.as_deref().unwrap_or_default(),
+                epic_id.as_deref().filter(|_|release_train.is_none()),task_type==TaskType::Epic),Ok(overlap) if overlap.blocking.is_some());
+            if epic_overlap||duplicate{policy_override_tags=crate::gates::override_tag("G-148",policy_override_tags);}
         }
 
         // Reject the case where the epic and a blocker are the same task (cas-6009).

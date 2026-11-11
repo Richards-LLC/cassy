@@ -234,3 +234,9 @@ pub fn observe_hook_output(cas_root: &Path, output: &cas_core::hooks::HookOutput
         observe_refusal(cas_root, None, reason);
     }
 }
+
+/// CLI producers share the MCP result classifier, including legacy advisory
+/// refusals. Call once with the final tagged response, before printing it.
+pub fn observe_cli_output(cas_root: &Path, text: &str) {
+    observe_tool_result(cas_root, None, &Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(text)])));
+}

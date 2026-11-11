@@ -88,6 +88,7 @@ struct ProviderCheck {
 }
 
 /// Validate supervisor authority and the local proof precondition.
+// gate-audit[forward]: G-27 External-verification store guard returns to the registered CLI/MCP authority boundary.
 pub fn authorize_request(request: &ExternalVerificationRequest) -> Result<()> {
     if request.caller_role != AgentRole::Supervisor {
         return Err(StoreError::Parse(

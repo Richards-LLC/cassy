@@ -190,6 +190,10 @@ fn main() -> ExitCode {
             ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = startup.and_then(|()| cli::run(cli));
+    if let Err(error) = &outcome
+        && !cas::gates::codes_in(&format!("{error:#}")).is_empty()
+        && let Ok(root) = store::find_cas_root()
+    { cas::gates::facts::observe_refusal(&root, None, &format!("{error:#}")); }
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
     // The shared SQLite pool owns every close; checkpoint and close its idle

@@ -728,6 +728,7 @@ impl CasCore {
     ///    two-step fallback if `transfer` is unavailable.
     ///
     /// Safety: refuses to reset a `Closed` task (use `reopen` instead).
+    // gate-audit[force]: bypass G-134 Live-worker reset safety refusal; only an actual live-owner reset receives the override tag.
     pub async fn cas_task_reset(
         &self,
         Parameters(req): Parameters<TaskReleaseRequest>,
@@ -1045,6 +1046,8 @@ impl CasCore {
     ///
     /// Non-supervisor callers that set `supervisor_override=true` receive an
     /// explicit rejection; the flag is not silently ignored.
+    // gate-audit[supervisor_override_requested]: bypass G-141 Transfer proceeds without the ordinary caller lease/assignee ownership.
+    // gate-audit[adopt_branch]: selector Requests validated branch adoption as part of transfer; ownership and cleanliness remain enforced.
     pub async fn cas_task_transfer(
         &self,
         Parameters(req): Parameters<TaskTransferRequest>,

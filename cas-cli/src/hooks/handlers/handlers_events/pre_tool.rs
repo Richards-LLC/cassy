@@ -470,6 +470,7 @@ pub(crate) fn worker_cargo_request(input: &HookInput) -> bool {
             .and_then(worker_check_command)
             .is_some()
 }
+// gate-audit[git_push_bypasses_required_hooks]: selector A detector result used to reject skipped hooks; never authorizes skipping them.
 fn handle_pre_tool_use_inner(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -2334,6 +2335,9 @@ fn git_push_bypasses_required_hooks(command: &str) -> bool {
             })
 }
 
+// gate-audit[bypasses_hooks]: selector Detects a prohibited Git configuration; it does not accept a bypass.
+// gate-audit[git_config_environment_bypass_in_shell]: selector Recursive detector for prohibited Git configuration; no authorization waiver.
+// gate-audit[nested_bypass]: selector Detector result for nested prohibited Git configuration; not a request option.
 fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
     if depth > 6 {
         return false;
@@ -2467,6 +2471,7 @@ fn shell_command_invokes_push(command: &str) -> bool {
         .any(|(name, args)| name == "git" && git_invocation_is_push_or_alias(args))
 }
 
+// gate-audit[git_config_env_value_bypasses_hooks]: selector Detector for environment values that disable hooks; refuses rather than accepts bypasses.
 fn git_config_environment_override(words: &[String]) -> bool {
     let mut index = 0;
     while index < words.len() {
@@ -2827,6 +2832,7 @@ struct WorkerPathWord {
 /// Only constants and whole, previously bound variables are known here. Never
 /// execute substitutions or infer a value from an argument that looks like an
 /// assignment. Mixed quoting of the same spelling remains uncertain.
+// gate-audit[allow_variables]: input Controls shell-variable parsing in a path validator; workspace policy is applied after parsing.
 fn worker_path_value(
     value: &str, word: WorkerPathWord,
     bindings: &std::collections::HashMap<String, String>, allow_variables: bool,
@@ -7191,6 +7197,7 @@ fn read_only_find(args: &[String]) -> bool {
 /// stay manageable; `cas mcp import --force` is refused while any
 /// supervisor-only server is configured, since it may overwrite one.
 #[cfg(feature = "mcp-proxy")]
+// gate-audit[forward]: H-13 Returned denial is tagged by the common PreToolUse supervisor-only MCP-server guard.
 fn supervisor_only_mcp_command_denial(command: &str, cas_root: &Path) -> Option<String> {
     use crate::config::operator_policy::{supervisor_only_mcp_names, supervisor_only_mcp_refusal};
     let mut only: Option<Vec<String>> = None;
@@ -7260,6 +7267,7 @@ fn role_env_tampering_denial(command: &str) -> Option<String> {
     role_env_tampering_at_depth(command, 0)
 }
 
+// gate-audit[forward]: H-12 Returned denial is tagged by the environment-role spoof guard.
 fn role_env_denial(what: &str) -> String {
     format!(
         "🚫 ROLE SPOOF REFUSED (cas-3c26): {what}. {} tell Cassy which role this agent has; an agent may not set, unset or clear them for the commands it runs. Run the command as you are. Operator-only actions are the operator's to run from their own terminal.",

@@ -588,6 +588,7 @@ pub fn index_code_files(files: &[PathBuf], cas_root: &Path) -> Result<CodeIndexR
 /// `force` exists for `cas index code`: the content-hash skip is the right call for the watcher,
 /// but it would make a rebuild of a lost or corrupted BM25 index a no-op, since the SQLite rows
 /// it compares against would still be present.
+// gate-audit[force]: selector Reindexes unchanged files; no policy refusal is bypassed.
 pub fn index_code_files_with(
     files: &[PathBuf],
     cas_root: &Path,

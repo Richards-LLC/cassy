@@ -143,6 +143,7 @@ fn public_ids<'a>(
         .collect()
 }
 
+// gate-audit[allow_leading_underscore]: input Selects a lexical identifier grammar; no policy permission is waived.
 fn public_id(name: &str, prefix: &str, max_len: usize, allow_leading_underscore: bool) -> String {
     if is_generated_public_id(name, prefix)
         || is_safe_operator_name(name, max_len, allow_leading_underscore)
@@ -164,6 +165,7 @@ fn is_generated_public_id(name: &str, prefix: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+// gate-audit[allow_leading_underscore]: input Selects lexical operator-name syntax; authorization runs separately.
 fn is_safe_operator_name(name: &str, max_len: usize, allow_leading_underscore: bool) -> bool {
     if name.is_empty() || name.len() > max_len || !name.is_ascii() {
         return false;

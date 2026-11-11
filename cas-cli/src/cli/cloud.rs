@@ -949,6 +949,7 @@ fn cached_team_options(config: &CloudConfig) -> String {
     }
 }
 
+// gate-audit[allow_uuid_passthrough]: selector Resolves an already-declared UUID without a network name lookup; no policy permission is waived.
 fn resolve_team_set_target(
     arg: Option<&str>,
     user_config: &CloudConfig,
@@ -4864,6 +4865,7 @@ pub fn ensure_team_project_registration(
     ensure_team_project_registration_with_output(cloud_config, cas_root, cli, force, true)
 }
 
+// gate-audit[force]: selector Explicitly selects registration replacement; remote registration authority remains enforced.
 fn ensure_team_project_registration_with_output(
     cloud_config: &CloudConfig,
     cas_root: &Path,
@@ -6732,10 +6734,10 @@ unknown is not safe for a destructive purge"
 cloud (e.g. {}) — the purge would delete them and the re-pull cannot bring them back",
                 sample.join(", ")
             ),
-            PurgeRefusal::TooManyForeignTasks { foreign, total } => format!(
+            PurgeRefusal::TooManyForeignTasks { foreign, total } => crate::gates::tag("G-145",format!(
                 "refusing to purge foreign tasks: {foreign} of {total} local tasks exceed the 50% \
 safety limit — review project attribution before deleting anything"
-            ),
+            )),
             PurgeRefusal::ProvenRule { count } => format!(
                 "refusing to purge {count} proven rule{} — proven rules are protected even with --force",
                 if *count == 1 { "" } else { "s" }
@@ -6775,6 +6777,8 @@ fn evaluate_purge_hard_guards(
     evaluate_purge_hard_guards_with_options(delete_set, total_tasks, proven_rule_count, false)
 }
 
+// gate[G-145 purge]: Majority-foreign task preservation
+// gate-audit[allow_majority_foreign]: bypass G-145 CLI purge tags the accepted majority-foreign deletion decision.
 fn evaluate_purge_hard_guards_with_options(
     delete_set: &PurgeDeleteSet,
     total_tasks: usize,
@@ -6799,6 +6803,7 @@ fn evaluate_purge_hard_guards_with_options(
     refusals
 }
 
+// gate-audit[allow_majority_foreign]: input Validates the required --yes pairing; this helper accepts no deletion or policy waiver.
 fn validate_majority_foreign_override(
     allow_majority_foreign: bool,
     yes: bool,
@@ -7302,6 +7307,9 @@ fn execute_adopt_unknown(
 /// Execute a foreign-row purge while optionally leaving rendering to the
 /// caller. Doctor embeds this operation in its checks array, so a nested
 /// purge must not print a second JSON document (or a second human report).
+// gate[G-144 purge]: Destructive cloud purge safety state
+// gate-audit[force]: bypass G-144 Explicitly accepts recoverability safety refusals; proven-rule and majority limits remain enforced.
+// gate-audit[allow_majority_foreign]: bypass G-145 Explicitly accepts deleting a measured majority of foreign task rows.
 fn execute_purge_foreign_with_output(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,
@@ -7591,18 +7599,18 @@ fn execute_purge_foreign_with_output(
             .collect::<Vec<_>>()
             .join("\n");
         if refusals.iter().any(PurgeRefusal::is_hard) {
-            anyhow::bail!(
+            anyhow::bail!(crate::gates::tag("G-144",format!(
                 "Refusing to purge {} local rows:\n{reasons}\n\
 These classifier safety limits cannot be overridden with --force.",
                 delete_set.total()
-            );
+            )));
         }
         if !args.force {
-            anyhow::bail!(
+            anyhow::bail!(crate::gates::tag("G-144",format!(
                 "Refusing to purge {} local rows:\n{reasons}\n\
 Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
                 delete_set.total()
-            );
+            )));
         }
         eprintln!("warning: purging despite safety refusal (--force):\n{reasons}");
     }
@@ -7626,6 +7634,12 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
         deleted
     };
 
+    let mut bypass_tags=String::new();
+    if args.force && !refusals.is_empty(){bypass_tags=crate::gates::override_tag("G-144",bypass_tags);}
+    if args.allow_majority_foreign && tasks_before>0 && delete_set.tasks.len().saturating_mul(2)>tasks_before {
+        bypass_tags=crate::gates::override_tag("G-145",bypass_tags);
+    }
+    if !bypass_tags.is_empty(){crate::gates::facts::observe_cli_output(cas_root,&bypass_tags);eprintln!("{bypass_tags}");}
     // Step 3: Re-pull from cloud with project-scoped filtering
     let queue = SyncQueue::open(cas_root)?;
     queue.init()?;

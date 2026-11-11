@@ -105,6 +105,7 @@ pub(crate) struct ReleaseInventoryException {
 /// discovery, commit-subject parsing, proof approval or lifecycle writes.
 /// Epic descendants and live recorded deliveries are discovery candidates.
 /// Only declared tasks or proven shipped work create closeout obligations.
+// gate-audit[evidence_only]: selector Filters delivery inventory by measured terminal outcome; no acceptance bypass.
 pub(crate) fn resolve_release_inventory(
     root: &Path,
     repo: &Path,

@@ -1925,6 +1925,7 @@ impl TeamsManager {
     /// Claude Code's /doctor validator regardless of Anthropic #58441 state.
     // gate[H-39 git-hook]: Worker pre-commit guard (layer 2)
     pub const WORKER_PRE_COMMIT_HOOK: &'static str = "#!/bin/sh
+trap 'status=$?; if [ \"$status\" -ne 0 ]; then cas gates record-refusal --message \"[H-39]\" >/dev/null 2>&1 || true; fi; exit \"$status\"' EXIT
 # Cassy factory worker guard — installed by `cas factory` when spawning isolated workers.
 # Workers may ONLY commit on their own factory/<name> branch, or on their own
 # per-task branch factory/<name>-<task-id> while factory/<name> is frozen for a
@@ -1969,6 +1970,7 @@ esac
     /// boundary, after any preceding command in a compound shell invocation.
     // gate[H-40 git-hook]: Worker pre-push guard
     pub const WORKER_PRE_PUSH_HOOK: &'static str = "#!/bin/sh
+trap 'status=$?; if [ \"$status\" -ne 0 ]; then cas gates record-refusal --message \"[H-40]\" >/dev/null 2>&1 || true; fi; exit \"$status\"' EXIT
 # Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 expected=\"factory/$CAS_AGENT_NAME\"

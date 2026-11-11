@@ -2197,6 +2197,7 @@ pub fn correct_parked_delivery_execution_note(
     )
 }
 
+// gate-audit[allow_merged_delivery]: selector Selects the distinct authorized merged-delivery correction transaction; record ownership/CAS checks remain enforced.
 fn correct_parked_delivery_proof_scope_inner(
     cas_dir: &Path,
     corrected_task: &Task,

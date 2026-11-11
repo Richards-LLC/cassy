@@ -29,6 +29,7 @@ use crate::ui::factory::boot::screen::BootScreen;
 ///
 /// This is used in the fork-first architecture where the daemon does
 /// all initialization and sends progress updates via socket.
+// gate-audit[skip_animation]: selector Skips display animation; no policy check.
 pub fn run_boot_screen_client(
     boot_config: &BootConfig,
     sock_path: &std::path::Path,

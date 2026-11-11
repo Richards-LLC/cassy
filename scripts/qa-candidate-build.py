@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate-audit[CAS_SKIP_FACTORY_TOOLING]: selector Preserves prebuilt tooling in disposable QA setup; does not disable admission hooks.
 """Build an exact-tip QA binary with the release environment and owned scratch."""
 
 import argparse

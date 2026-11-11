@@ -698,6 +698,8 @@ pub(crate) fn configure_claude_hooks_for_index(
     configure_claude_hooks_at(target, false, &[], project)
 }
 
+// gate-audit[force]: selector Replaces hook configuration instead of merging it; generated hook permissions remain enforced.
+// gate-audit[allow_arr]: selector Installs the explicitly requested optional automatic-response route; no policy refusal is bypassed.
 fn configure_claude_hooks_at(
     project_root: &Path,
     force: bool,

@@ -2710,6 +2710,8 @@ impl CasService {
             &mut || crate::orchestration::names::generate_unique(1).remove(0)).await
     }
 
+    // gate-audit[force_build_guard]: bypass G-135 Admits a spawn despite measured builder-capacity refusal.
+    // gate-audit[force_peer_claim]: bypass G-142 Admits a duplicate spawn despite a current peer claim.
     async fn factory_spawn_workers_in_with_name_source(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -3676,6 +3678,7 @@ impl CasService {
     /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
     /// from this process's environment, so the Commander hub's operator
     /// facade runs the same body (cas-9b08).
+    // gate-audit[force]: bypass G-136 Accepts stopping an active worker only after preserving work.
     pub(crate) async fn factory_shutdown_workers_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -7212,6 +7215,8 @@ impl CasService {
         outcomes
     }
 
+    // gate-audit[force]: bypass G-137 Admits stale-worker dirty/mid-task synchronization; live workers and active rebases remain protected.
+    // gate-audit[explicitly_targeted]: bypass G-149 Explicit worker selection can override measured branch affinity.
     pub(super) async fn factory_sync_all_workers(
         &self,
         req: FactoryRequest,
@@ -7312,6 +7317,9 @@ impl CasService {
 
             // cas-5884: branch affinity first — it is decided from task state
             // alone and is the most decisive reason not to touch a worktree.
+            let affinity_override=explicitly_targeted && matches!(sync_affinity_gate(
+                &worker.name, binding.map(|b|b.label.as_str()), binding.map_or(&BranchAffinity::Unknown,|b|&b.affinity),
+                &sync_ref,&default_branch,false),SyncGate::Refuse(_));
             if let SyncGate::Refuse(reason) = sync_affinity_gate(
                 &worker.name,
                 binding.map(|b| b.label.as_str()),
@@ -7365,7 +7373,8 @@ impl CasService {
 
             match sync_worker_clone(&path, &sync_ref) {
                 Ok(details) => {
-                    let row=format!("{} ({})", worker.name, details);
+                    let mut row=format!("{} ({})", worker.name, details);
+                    if affinity_override{row=crate::gates::override_tag("G-149",row);}
                     synced.push(if force && (dirty_files > 0 || in_progress.is_some()) {
                         crate::gates::override_tag("G-137",row)
                     } else {row});
@@ -8124,6 +8133,7 @@ impl CasService {
         Ok(Self::success(format!("{text}{shared}")))
     }
 
+    // gate-audit[force]: selector With dry_run=false selects explicit garbage-collection execution; live-owner and retention checks remain enforced.
     pub(super) async fn factory_gc_cleanup(
         &self,
         req: FactoryRequest,
@@ -10432,6 +10442,7 @@ pub(crate) enum SyncGate {
 /// stale worker record with a mid-task. It deliberately does NOT cover a live
 /// worker or an in-flight rebase: a second rebase on top of an in-flight
 /// resolution destroys progress, and no automated recovery is safe.
+// gate-audit[force]: bypass G-137 Pure consent classification; successful sync producer tags only actual dirty/mid-task waivers.
 pub(crate) fn sync_gate_for_worker(
     worker_name: &str,
     dirty_files: usize,
@@ -10479,6 +10490,8 @@ pub(crate) fn sync_gate_for_worker(
 /// rebasing under a live agent, neither of which says anything about the
 /// branch being correct, and a fleet sweep with `force=true` is exactly the
 /// call that caused this bug.
+// gate[G-149 sync]: Worker branch-affinity preservation
+// gate-audit[explicitly_targeted]: bypass G-149 Successful sync producer tags only an otherwise-refused target mismatch.
 pub(crate) fn sync_affinity_gate(
     worker_name: &str,
     task_label: Option<&str>,
@@ -10498,25 +10511,25 @@ pub(crate) fn sync_affinity_gate(
             if normalize_branch_ref(branch) == sync {
                 SyncGate::Proceed
             } else {
-                SyncGate::Refuse(format!(
+                SyncGate::Refuse(crate::gates::refusal_tag("G-149",format!(
                     "{worker_name} (branch affinity mismatch — {task} integrates into `{branch}`, \
                      not the requested sync target `{sync_ref}`; rebasing it would graft foreign \
                      commits onto its factory branch and corrupt close accounting. Name it in \
                      worker_names= to sync it anyway)"
-                ))
+                )))
             }
         }
         BranchAffinity::Trunk => {
             if normalize_branch_ref(default_branch) == sync {
                 SyncGate::Proceed
             } else {
-                SyncGate::Refuse(format!(
+                SyncGate::Refuse(crate::gates::refusal_tag("G-149",format!(
                     "{worker_name} (branch affinity mismatch — {task} is standalone and \
                      integrates into trunk `{default_branch}`, not the requested sync target \
                      `{sync_ref}`; rebasing it would graft foreign commits onto its factory \
                      branch and corrupt close accounting. Name it in worker_names= to sync it \
                      anyway)"
-                ))
+                )))
             }
         }
     }

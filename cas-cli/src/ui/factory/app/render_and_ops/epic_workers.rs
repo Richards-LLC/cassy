@@ -1494,6 +1494,7 @@ fn refresh_epic_base_from_parent(
 /// Turn a declared-parent refresh failure into a hard spawn refusal. The
 /// branch pair in `error` is intentionally preserved so the operator knows
 /// exactly which histories must be reconciled before another cut.
+// gate-audit[input]: Renders an advisory refusal to refresh an invalid or occupied epic checkout; no bypass accepted.
 fn epic_base_refresh_refusal(error: &str) -> String {
     format!(
         "EPIC BASE REFRESH REFUSED: {error}. Reconcile the named branches before spawning a worker."

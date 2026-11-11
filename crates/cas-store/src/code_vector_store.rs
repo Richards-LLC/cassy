@@ -487,6 +487,7 @@ impl SqliteCodeVectorStore {
     /// `repositories` limits which symbols are queued or re-armed. Queue rows
     /// whose symbol no longer exists carry no repository and are dropped
     /// regardless, exactly as before.
+    // gate-audit[force]: selector Rebuilds a cached code-vector projection; no policy admission.
     pub fn reconcile_scoped(
         &self,
         force: bool,

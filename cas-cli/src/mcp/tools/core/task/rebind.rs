@@ -13,10 +13,11 @@ use crate::mcp::CasCore;
 
 use super::{lifecycle::close_ops, repo_context, resolve_agent_identity};
 
+// gate[G-152 rebind]: Delivery branch rebinding authority and evidence
 fn refused(reason: impl Into<String>) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("DELIVERY BRANCH REBIND REFUSED: {}", reason.into()),
+        crate::gates::tag("G-152",format!("DELIVERY BRANCH REBIND REFUSED: {}", reason.into())),
     )
 }
 

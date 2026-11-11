@@ -580,6 +580,7 @@ impl CasCore {
     /// Shared pre-persistence assignment policy for create and update. Keep
     /// identity normalization and freshness together so dispatch cannot accept
     /// an assignment that the supervisor's update path would refuse.
+    // gate-audit[supervisor_override]: bypass G-132 Reasoned supervisor stale-assignment waiver.
     pub(crate) fn validate_task_assignee(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -779,6 +780,8 @@ impl CasCore {
         .await
     }
 
+    // gate-audit[supervisor_override]: bypass G-07,G-132,G-133 Split assignment, stale assignment and peer-source ownership waivers are explicitly tagged.
+    // gate-audit[proof_scope_fix]: bypass G-151 Authorized frozen-binding correction invalidates old proof; mandatory per-crate proof still runs.
     pub(crate) async fn cas_task_update_with_delivery_mode(
         &self,
         req: TaskUpdateRequest,
@@ -812,6 +815,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let binding_override = proof_scope_fix && task.status == TaskStatus::AwaitingMerge
+            && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some());
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.
@@ -2888,6 +2893,7 @@ impl CasCore {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
         if split_takeover.is_some() { response = crate::gates::override_tag("G-07", response); }
+        if binding_override {response=crate::gates::override_tag("G-151",response);}
 
         Ok(update_result(&task, response))
     }
@@ -2908,6 +2914,7 @@ pub(crate) fn known_epics(task_store: &dyn cas_store::TaskStore) -> Vec<Task> {
 /// already parked for merge: its branch, anchor and proof were measured
 /// against the current target. Refuse, naming the explicit correction, as the
 /// `update epic=` guard does.
+// gate[G-151 update]: Frozen parked-delivery target binding
 pub(crate) fn refuse_retarget_of_parked_delivery(
     task: &Task,
     epic_id: &str,
@@ -2924,13 +2931,13 @@ pub(crate) fn refuse_retarget_of_parked_delivery(
         .unwrap_or_else(|| "no work target".to_string());
     Err(McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: Cow::from(format!(
+        message: Cow::from(crate::gates::tag("G-151",format!(
             "RE-PARENT REFUSED: task {id} is parked for merge against {current}, and moving it under epic {epic_id} would retarget it to {repo} @ {branch}. A parked delivery is not retargeted implicitly. To move the delivery, a registered supervisor runs `{prefix}task action=update id={id} proof_scope_fix=true target_repo={repo} target_branch={branch} reason=\"<why>\"`, then repeats the re-parent.",
             id = task.id,
             repo = target.repo_selector,
             branch = target.target_branch,
             prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
-        )),
+        ))),
         data: None,
     })
 }

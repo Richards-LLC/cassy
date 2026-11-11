@@ -98,6 +98,7 @@ pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
 /// boundary. `risk` is required for code-bearing task/bug/feature creates;
 /// the supervisor override is explicit and audited by the caller.
 // gate[G-129 create]: Task risk declaration required
+// gate-audit[supervisor_override]: bypass G-129 Create/proposal producer tags accepted missing-risk declarations.
 pub fn validate_task_risk_declaration(
     task_type: TaskType,
     risk: Option<&str>,

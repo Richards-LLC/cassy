@@ -20,6 +20,7 @@ pub const HOTFIX_LABEL: &str = "hotfix";
 /// The decision a task records when its diff touches no journey.
 pub const NO_JOURNEY_IMPACT: &str = "no journey impact:";
 const ELIGIBLE: &str = "FAST LANE ELIGIBLE";
+// gate-audit[forward]: G-109 Shared fast-lane refusal text is tagged by merge admission.
 const REFUSED: &str = "FAST LANE REFUSED";
 const MERGED: &str = "FAST LANE MERGE";
 const RERUN: &str = "FAST LANE RERUN";
@@ -228,6 +229,7 @@ pub fn evaluate_delivery(lane: &FastLaneConfig, task: &Task, repo: &Path, target
 }
 
 /// The decision note recorded at park, for the verifier and operator to audit.
+// gate-audit[forward]: G-109 Reports fast-lane eligibility; caller performs the registered admission decision.
 pub fn eligibility_note(lane: &FastLaneConfig, head: &str, eligibility: &Eligibility) -> String {
     match eligibility {
         Eligibility::Eligible { files, lines } => format!(

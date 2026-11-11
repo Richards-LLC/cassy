@@ -346,6 +346,7 @@ fn authorize_with_relay_with_config(
     )
 }
 
+// gate-audit[skip_hub_readiness]: selector Disposable test/pairing setup skips the readiness probe; authentication and scopes still apply.
 fn authorize_with_relay_with_config_and_probe<F>(
     args: &HubAuthorizeArgs,
     cli: &Cli,

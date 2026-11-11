@@ -9,6 +9,7 @@ const OVERVIEW_FRAGMENT_DIR: &str = "docs/product-overview.d";
 
 /// One reply for every refusal of a park attempt. A lone refusal keeps its own
 /// text, which workers and the classifiers that count bounces already read.
+// gate-audit[forward]: G-55 Renders already-tagged policy refusals; no independent check or acceptor.
 pub(crate) fn park_reply(mut refusals: Vec<String>) -> String {
     refusals.dedup();
     if let Some(receipt) = crate::mcp::tools::service::mutation_receipt::current()

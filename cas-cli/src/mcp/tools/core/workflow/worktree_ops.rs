@@ -86,6 +86,7 @@ const CI_VALIDATED_POLICY_NOTICE: &str =
 
 /// Decide admission from bounded evidence; never poll for pending CI.
 // gate[G-108 merge-admission]: Lane CI admission (code CI required, CI red, CI pending, override)
+// gate-audit[override_requested]: bypass G-108 Producer tags only accepted red/unvalidated CI waivers; pending/unpushed sources remain refused.
 fn admit_branch_ci(
     state: &BranchCiState,
     override_requested: bool,
@@ -2747,6 +2748,8 @@ fn epic_lane_bypassed_by_trunk_target(
 }
 
 // gate[G-140 merge-admission]: Explicit authorization for trunk fallback
+// gate-audit[allow_trunk]: bypass G-140 Explicitly permits the otherwise-refused trunk fallback.
+// gate-audit[epic_lane_bypassed_by_trunk_target]: selector Detects a trunk-pinned child; permission remains controlled by allow_trunk.
 fn resolve_system_b_merge_target(
     task_store: &dyn cas_store::TaskStore,
     agent_store: &dyn cas_store::AgentStore,
@@ -3514,6 +3517,7 @@ impl CasCore {
     /// - the worktree is dirty (`abandon`'s own gate).
     ///
     /// Only the dirty and unmerged refusals are bypassable with `force`.
+    // gate-audit[force]: bypass G-138 Only an actual successful dirty-worktree removal receives the tag.
     pub async fn worktree_cleanup(
         &self,
         id: Option<&str>,
@@ -3648,6 +3652,7 @@ impl CasCore {
     }
 
     /// cas-f102 (GH #140): remove ONE worktree, resolved System A then System B.
+    // gate-audit[force]: bypass G-138,G-139 Dirty and unmerged worktree preservation guards; live-owner guard remains enforced.
     async fn worktree_cleanup_target(
         &self,
         id: &str,
@@ -4414,6 +4419,8 @@ impl CasCore {
         )).await
     }
 
+    // gate-audit[force]: bypass G-138 Consents to dirty source worktree handling; shared-target residue is still refused.
+    // gate-audit[supervisor_override]: bypass G-108 Admits red/unvalidated lane CI with a durable supervisor decision.
     async fn worktree_merge_admitted(
         &self,
         id: &str,

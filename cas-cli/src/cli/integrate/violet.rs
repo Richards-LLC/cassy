@@ -738,6 +738,7 @@ fn hub_auth_error(error: &HubClientError) -> anyhow::Error {
     }
 }
 
+// gate-audit[bypass]: selector Selects a legacy credential name from configuration; not an admission bypass.
 fn fallback_bypass(
     env: &dyn EnvLookup,
     vercel: &dyn BypassReader,
@@ -817,6 +818,8 @@ fn provision_credentials(
     )
 }
 
+// gate-audit[existing_bypass]: selector Describes an existing credential value; no policy decision.
+// gate-audit[hub_bypass]: selector Describes an existing hub credential value; no policy decision.
 fn provision_credentials_with_cloud_token(
     args: &VioletArgs,
     env: &dyn EnvLookup,
@@ -2127,6 +2130,7 @@ pub fn run(
     run_with_credentials(args, project_proxy, paths, env, probe, None)
 }
 
+// gate-audit[skip_verify]: selector Controls an optional connection verification probe after credential provisioning; service permissions remain enforced.
 fn run_with_credentials(
     args: &VioletArgs,
     project_proxy: Option<&Path>,
@@ -2633,6 +2637,7 @@ fn existing_claude_violet_entry(path: &Path) -> Option<serde_json::Value> {
 
 /// Why an existing Claude entry cannot authenticate as written. Names the
 /// shape only; a literal value is never echoed.
+// gate-audit[legacy_bypass]: selector Names a legacy credential environment variable; it is data, not a check-bypass flag.
 fn stale_claude_reason(entry: &serde_json::Value) -> Option<&'static str> {
     let headers = entry.get("headers")?.as_object()?;
     let authorization = headers
@@ -3103,6 +3108,7 @@ fn existing_machine_env_names(paths: &MachinePaths, url: &str) -> Result<Option<
     )
 }
 
+// gate-audit[bypass]: selector Names a credential environment key; no policy check is waived.
 fn registered_machine_env_names(
     paths: &MachinePaths,
     url: &str,
@@ -3172,6 +3178,7 @@ fn registered_machine_env_names(
     Ok(None)
 }
 
+// gate-audit[bypass_env]: selector Selects the credential key used by the configured service; authorization remains at the service.
 pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationOutcome> {
     if !args.dry_run && !args.no_harness {
         super::violet_retirement::retire_installed_hub(project_proxy_path().as_deref())?;

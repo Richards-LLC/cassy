@@ -450,6 +450,7 @@ impl WorktreeManager {
         self.merge_preserving_worktree_at_with_publication(worktree, force, will_cleanup, source_sha, None)
     }
 
+    // gate-audit[force]: bypass G-138 Caller-visible operation supplies the explicit successful dirty-source waiver tag.
     pub(crate) fn merge_preserving_worktree_at_with_publication(
         &self,
         worktree: &mut Worktree,
@@ -685,6 +686,7 @@ impl WorktreeManager {
     }
 
     /// Abandon a worktree without merging
+    // gate-audit[force]: bypass G-138 Caller-visible operation tags a successful dirty removal; shared helper owns its refusal code.
     pub fn abandon(&self, worktree: &mut Worktree, force: bool) -> WorktreeResult<()> {
         // Check for uncommitted changes (cas-006c: same named-path
         // classification as merge_and_cleanup). will_remove=true always —

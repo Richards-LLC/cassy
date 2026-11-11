@@ -454,6 +454,7 @@ fn explain_boot_error(message: &str, worktrees_enabled: bool) -> String {
     }
 }
 
+// gate-audit[input]: Constructs and validates a boot configuration; policy refusal text is a diagnostic, not an acceptor.
 fn build_boot_profile(config: &FactoryConfig, worker_count: usize) -> String {
     let mode = if config.enable_worktrees {
         "isolated worktrees"

@@ -478,6 +478,7 @@ fn find_settings_files_with_cas_hooks(
 }
 
 /// Configure Claude Code hooks
+// gate-audit[force]: selector Chooses replacement of an existing hook configuration rather than leaving it unchanged; no running factory work is admitted.
 fn execute_configure(force: bool, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
 

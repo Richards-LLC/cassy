@@ -2488,6 +2488,7 @@ fn server_bearer_env(server: &ServerConfig) -> Option<String> {
     }
 }
 
+// gate-audit[override_path]: selector Config file path in an integration diagnostic; no request is admitted.
 fn build_remedy(
     env_states: &[(String, EnvState)],
     probe: &ProbeOutcome,
@@ -2564,6 +2565,7 @@ fn schema_problem_remedy(problems: &[String]) -> String {
 /// a name reference. The whole document is round-tripped through
 /// `serde_json::Value`, which preserves every unrelated key (project history,
 /// onboarding state) rather than rewriting the file from a partial model.
+// gate-audit[bypass_env]: selector Non-factory connector credential setting, forwarded to profile registration; not factory-work policy.
 fn register_claude(
     path: Option<&Path>,
     url: &str,
@@ -2598,6 +2600,7 @@ fn register_claude(
 
 /// GH #1164: reconcile another Claude profile only if it already registers the
 /// hub. A profile that never did is not this command's to change.
+// gate-audit[bypass_env]: selector Non-factory connector credential setting used for profile reconciliation.
 fn reconcile_claude_profile(
     path: &Path,
     url: &str,
@@ -2763,6 +2766,7 @@ fn apply_claude(
 /// Codex: an `[mcp_servers.violet]` table naming the bearer variable.
 /// Edited with `toml_edit` so an operator's 3000-line `config.toml` keeps its
 /// comments, ordering, and every unrelated table.
+// gate-audit[bypass_env]: selector Non-factory connector credential setting, not factory-work policy.
 fn register_codex(
     path: Option<&Path>,
     url: &str,

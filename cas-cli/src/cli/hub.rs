@@ -1235,6 +1235,7 @@ fn required_transport_refusal(
     message
 }
 
+// gate-audit[force]: selector Dispatches explicit non-factory Hub lifecycle recovery; each operation still validates process/lock authority.
 fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
     let requested = match &args.command {
         Some(HubCommands::Start(_) | HubCommands::Restart(_) | HubCommands::Serve(_))

@@ -4217,6 +4217,7 @@ impl FactoryApp {
     /// * `count` - Number of workers to shutdown (0 or None = all)
     /// * `names` - Specific worker names to shutdown (overrides count)
     /// * `force` - Reserved for compatibility; supervisor should pre-check worktree safety
+    // gate-audit[force]: selector Forwards signal strategy (SIGKILL/SIGTERM) to shutdown_worker_inner; no active-work admission is bypassed here.
     pub async fn shutdown_workers(
         &mut self,
         count: Option<usize>,

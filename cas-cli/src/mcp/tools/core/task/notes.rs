@@ -220,6 +220,7 @@ impl CasCore {
         Ok(Self::success(response))
     }
 
+    // gate-audit[supervisor_override_reason]: selector Records accepted note-waiver provenance; it does not admit another oversized note.
     fn record_task_note_activity(
         &self,
         task_id: &str,

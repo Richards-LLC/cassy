@@ -86,17 +86,21 @@ fn candidate(name: &str) -> bool {
         || name == "decision_reason"
 }
 fn test_only(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        a.path().is_ident("test")
-            || a.path().segments.last().is_some_and(|s| s.ident == "test")
-            || a.path().is_ident("cfg")
-                && match &a.meta {
-                    syn::Meta::List(list) => {
-                        list.tokens.to_string().contains("test")
-                            && !list.tokens.to_string().starts_with("not")
-                    }
-                    _ => false,
-                }
+    fn requires_test(meta: &syn::Meta) -> bool {
+        use syn::{punctuated::Punctuated, Token};
+        match meta {
+            syn::Meta::Path(path) => path.is_ident("test"),
+            syn::Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
+                let Ok(items) = list.parse_args_with(Punctuated::<syn::Meta, Token![,]>::parse_terminated) else { return false; };
+                if list.path.is_ident("all") { items.iter().any(requires_test) }
+                else { !items.is_empty() && items.iter().all(requires_test) }
+            }
+            _ => false,
+        }
+    }
+    attrs.iter().any(|attr| {
+        attr.path().segments.last().is_some_and(|segment| segment.ident == "test")
+            || attr.path().is_ident("cfg") && matches!(&attr.meta, syn::Meta::List(list) if list.parse_args::<syn::Meta>().is_ok_and(|meta| requires_test(&meta)))
     })
 }
 fn bracket_codes(text: &str, prefix: &str) -> BTreeSet<String> {
@@ -151,6 +155,8 @@ impl<'ast> Visit<'ast> for Body<'_> {
                             self.function.emissions.push((code.clone(), "override", expr.span().start().line));
                             self.function.overridden.insert(code);
                         }
+                    } else {
+                        self.function.emissions.push(("runtime registered code".into(), if name == "override_tag" { "override" } else { "refusal" }, expr.span().start().line));
                     }
                 }
             }

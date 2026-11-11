@@ -684,6 +684,7 @@ impl SessionInfo {
             })
     }
 
+    // gate-audit[override_policy]: selector Chooses whether CAS_ROOT participates in read-only registry lookup.
     fn live_registry_worker_names(&self, override_policy: RootOverride) -> Option<Vec<String>> {
         let project_dir = self.metadata.project_dir.as_deref()?;
         let cas_root = match override_policy {

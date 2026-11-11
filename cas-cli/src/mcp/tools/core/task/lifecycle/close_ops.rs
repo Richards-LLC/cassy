@@ -7763,6 +7763,8 @@ impl CasCore {
     // gate-audit[validate_supervisor_override]: selector Validation of authority; only explicit accepted_override_codes at actual waived checks count.
     // gate-audit[shipped_timeout_waiver]: selector Replays a previously issued exact-dispatch approval; lookup does not mint an override.
     // gate-audit[tags_from]: registry_upkeep.rs#finish
+    // gate-audit[no_delivery]: selector Chooses the separately measured non-delivery disposition; does not approve a delivered-code bypass.
+    // gate-audit[skip_reason]: selector Derived verification disposition; only actual waived gates contribute override codes.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -15942,6 +15944,8 @@ fn anchored_delivery_content_gate(
     }
 }
 
+// gate-audit[supervisor_override_reason]: bypass G-58 Only a validated historical-receipt exception is accepted; content-presence refusals remain mandatory.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn anchored_delivery_content_gate_unbounded(
     task: &Task,
     repo_path: &std::path::Path,

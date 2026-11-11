@@ -94,6 +94,7 @@ enum ForceStaleRefusal {
 
 // gate-audit[force]: selector Confirms the requested session termination without an interactive prompt; PID identity checks still run.
 // gate-audit[force_stale]: selector Chooses explicit stale-process recovery, revalidating PID start time; does not skip that identity check.
+// gate-audit[force_clear_stale_session]: selector Explicit stale-session cleanup operation; PID identity is still revalidated before any signal.
 fn execute_kill_with_terminal_check(
     name: Option<&str>,
     force: bool,

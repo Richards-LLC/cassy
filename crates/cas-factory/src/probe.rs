@@ -148,6 +148,7 @@ fn codex_auth_present_at(codex_home: &str) -> bool {
 /// present-but-not-logged-in `~/.codex` must not shadow a logged-in account
 /// living elsewhere. `None` (or blank) preserves the original
 /// [`codex_auth_present`] `~/.codex/auth.json` default-home check.
+// gate-audit[home_override]: selector Injected home for credential probing; auth requirement is still evaluated against the selected source.
 pub fn codex_auth_present_for(home_override: Option<&str>) -> bool {
     match home_override {
         Some(dir) if !dir.trim().is_empty() => codex_auth_present_at(dir),

@@ -2418,6 +2418,7 @@ impl CasCore {
         self.start_task_with_principal(req, Some(principal)).await
     }
 
+    // gate-audit[force]: bypass G-15 Starts despite an actual peer claim; peer_notes carries the successful tag.
     async fn start_task_with_principal(
         &self, req: TaskStartRequest, principal: Option<crate::worker_task_queue::QueueStartPrincipal>,
     ) -> Result<CallToolResult, McpError> {

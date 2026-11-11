@@ -824,6 +824,7 @@ pub fn index_code_files_with(
 /// that were never queued survive every rerun (cas-8a03). Dropped rows also
 /// lose their cached vector here, so a retired symbol cannot keep answering
 /// semantic queries.
+// gate-audit[force]: selector Requeues data-index work instead of reusing cached state; no factory policy waiver.
 pub fn reconcile_code_vector_queue(cas_root: &Path, force: bool, result: &mut CodeIndexResult) {
     let store = match cas_store::SqliteCodeVectorStore::open(cas_root) {
         Ok(store) => store,

@@ -741,6 +741,7 @@ fn is_loopback_origin(origin: &str) -> bool {
     }
 }
 
+// gate-audit[override_scopes]: selector Reduces requested device scopes; scope escalation is always rejected. Non-factory device API.
 fn granted_scopes(
     requested: &[Scope],
     override_scopes: Option<&BTreeSet<Scope>>,

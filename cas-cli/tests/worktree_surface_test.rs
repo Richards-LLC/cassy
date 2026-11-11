@@ -4941,7 +4941,7 @@ async fn post_merge_upkeep_refusal_preserves_delivery_for_supervisor_cas_efc1() 
     assert_eq!(after.deliverables.green_merge_commit, returned.deliverables.green_merge_commit);
     let queue = cas::store::open_prompt_queue_store(&root).unwrap();
     let notices: Vec<_> = queue.peek_all(100).unwrap().into_iter()
-        .filter(|row| row.kind.as_deref() == Some("post_merge_close_recovery")).collect();
+        .filter(|row| row.summary.as_deref() == Some("post_merge_close_recovery")).collect();
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].target, "supervisor");
     assert_eq!(notices[0].factory_session.as_deref(), Some("upkeep-session"));

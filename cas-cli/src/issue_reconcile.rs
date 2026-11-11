@@ -826,6 +826,7 @@ mod tests {
         store.add(&task("cas-ship", TaskStatus::Closed, "Shipped fix")).unwrap();
         store.add(&task("cas-quar", TaskStatus::InProgress, "GH #1792: quarantined part")).unwrap();
         let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
         for id in ["cas-quar", "cas-0019", "cas-gone"] {
             queue.quarantine_row(crate::cloud::QUARANTINE_TASK, id, "fixture").unwrap();
         }

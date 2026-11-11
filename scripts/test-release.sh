@@ -520,10 +520,10 @@ hotfix_fallback() {
     clone_epic "$fixture" "release/v9.99.1-$mode" "hotfix-$mode"
     mkdir -p "$tmp/state-$mode"
     write_valid_draft "$tmp/hotfix-$mode.md"
-    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
+    FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" FAKE_CAS_LOG="$tmp/hotfix-$mode-cas.log" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
-    [[ "$status" != 0 ]] &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet "refs/heads/release/v9.99.1-$mode" &&
+    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
+        ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
 train_receipt_cut() {
@@ -567,8 +567,8 @@ PY
 }
 check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
-check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included task cannot build a cut candidate'
-check 'hotfix_fallback different_branch' 'an unrelated train cannot provide candidate identity for a standalone hotfix'
+check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
+check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {
     local fixture="$tmp/cut-failure" status=0
     clone_epic "$fixture" epic/cut-failure cut-failure

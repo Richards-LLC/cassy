@@ -443,7 +443,10 @@ preview_cut() {
     if [[ -z "$task" ]]; then
         task="$(jq -r '.included_task_ids[0] // empty' "$release_input_report")"
     fi
-    [[ -n "$task" ]] || die "cut preview needs a train or an included task ID for its candidate; nothing pushed"
+    if [[ -z "$task" ]]; then
+        say "no release members; skipping close preview and candidate"
+        return 0
+    fi
     local candidate_dir
     candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
     mkdir -p "$candidate_dir"

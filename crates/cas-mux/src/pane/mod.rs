@@ -1060,6 +1060,15 @@ impl Pane {
             .map_err(|e| Error::terminal(e.to_string()))
     }
 
+    /// Read the live screen without moving a viewer scrolled into history.
+    pub fn dump_live_row(&self, row: u16) -> Result<String> {
+        let info = self.terminal.scrollback_info();
+        let start = info.total_scrollback.saturating_sub(u32::from(info.viewport_rows));
+        self.terminal
+            .dump_screen_row(start + u32::from(row))
+            .map_err(|e| Error::terminal(e.to_string()))
+    }
+
     pub fn row_styles(&self, row: u16) -> Result<Vec<CellStyle>> {
         self.terminal
             .row_cell_styles(row)

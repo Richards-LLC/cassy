@@ -118,8 +118,11 @@ impl ReleaseClose {
                     return Err(format!("RELEASE_REVIEW_NOT_INDEPENDENT: {id}"));
                 }
             }
-            let (_, path) =
+            let (artifact, path) =
                 validate_ledger(root, &proof.artifact_id, Path::new(&receipt.ledger_path))?;
+            if artifact.sha256 != proof.sha256 || artifact.size_bytes != proof.size_bytes {
+                return Err("RELEASE_PROOF_BINDING".into());
+            }
             let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
             reviews.push((receipt.clone(), body.clone()));
             if let Some(manifest) = parse_manifest(&body)? {

@@ -1344,6 +1344,49 @@ mod tests {
         cas_root
     }
 
+    #[test]
+    fn report_keeps_review_rounds_and_wake_notice_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = Vec::new();
+        for (id, outcome, provenance) in [("ver-1", "fail", "independent"), ("ver-2", "fail", "independent"), ("ver-3", "pass", "supervisor_direct")] {
+            let payload = serde_json::from_value(serde_json::json!({
+                "kind": "check_run", "check_id": "task_verifier", "stage": "verifier", "outcome": outcome,
+                "review": {"verification_id": id, "cycle_id": "dc-delivery", "provenance": provenance}
+            })).unwrap();
+            let mut event = cas_store::NewQualityEvent::new(id, payload);
+            event.task_id = Some("cas-b5cd".into());
+            cas_store::record_quality_event(dir.path(), &event).unwrap();
+        }
+        let payload = serde_json::from_value(serde_json::json!({"kind": "turn", "woken_by": "daemon",
+            "notice_kind": "ci_completed", "actions": [], "no_op": true,
+            "input_tokens": null, "output_tokens": null, "minutes": null})).unwrap();
+        cas_store::record_quality_event(dir.path(), &cas_store::NewQualityEvent::new("wake", payload)).unwrap();
+        events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
+        let report = aggregate("v4.16.0".into(), true, None, None, &events);
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["reviews"][0]["rounds"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["reviews"][0]["cycle_id"], "dc-delivery");
+        assert_eq!(json["reviews"][0]["rounds"][2]["provenance"], "supervisor_direct");
+        assert_eq!(json["turns_by_notice_kind"]["ci_completed"]["no_op_wakes"], 1);
+    }
+
+    #[test]
+    fn report_measures_deliveries_inside_a_release_train() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = release_fixture(dir.path());
+        // The release train carries three deliveries in one main merge.
+        git_in(dir.path(), &["branch", "train"]);
+        git_in(dir.path(), &["checkout", "-q", "main"]);
+        git_in(dir.path(), &["reset", "--hard", "v1.0.0"]);
+        git_dated(dir.path(), &["merge", "-q", "--no-ff", "-m", "land train", "train"],
+            "2026-10-01T15:00:00Z", "2026-10-01T15:00:00Z");
+        git_in(dir.path(), &["tag", "-f", "v1.1.0"]);
+        let report = build_report(&root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(report.speed.commit_to_main,
+            Measure::Known(LandingSpread { median_minutes: 90.0, p90_minutes: 240.0, deliveries: 3 }));
+    }
+
     /// Commit to main is per delivery, from its first commit to its landing.
     #[test]
     fn report_shows_commit_to_main_median_and_p90_per_delivery() {

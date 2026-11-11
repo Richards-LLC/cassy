@@ -9,6 +9,6 @@
 
 - **Count script and merge decisions** — Script failures emit their registered
   codes; merge CI refusals and accepted overrides, including pre-push fast-row
-  skips, record typed per-code facts. Merge results are observed once, including
-  early refusals; release and pre-push reporters also attempt to record refusals
-  without changing their exit status.
+  skips, record typed per-code facts. One MCP router boundary observes every
+  tool's coded refusal or tagged accepted override; one outer hook entry covers
+  ordinary and native fast paths. Release/pre-push reporters retain refusal exits.

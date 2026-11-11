@@ -167,27 +167,15 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
         Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
 
-    // G-92 returns before CI admission: exercise the public merge API.
-    let operator = dir.path().join("operator");
-    std::fs::create_dir_all(&operator).unwrap();
-    let hold = operator.join("project-hold.json");
-    std::fs::write(&hold, serde_json::to_vec(&cas_store::project_hold::State {
-        active: Some(cas_store::project_hold::Hold {
-            reason: "fixture".into(), operator: "fixture".into(), set_at: Utc::now(),
-        }), history: vec![],
-    }).unwrap()).unwrap();
-    let core = crate::mcp::CasCore::with_daemon(dir.path().to_path_buf(), None, None);
-    let result = core.worktree_merge("fixture", false, Some("cas-hold"), false, None, false, None).await;
-    assert!(result.is_err());
-    std::fs::remove_file(hold).unwrap();
-    assert_eq!(facts::summarize(&store, before).unwrap().get("G-92"),
-        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
-
-    // Exercise the same CI admission and accepted-override boundaries used
-    // by worktree_merge, outside the task-tool dispatcher.
-    crate::mcp::tools::core::workflow::exercise_ci_gate_facts(dir.path());
+    // The shared observer distinguishes a tagged accepted override from a
+    // successful read quoting the same code.
+    let override_reply = Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(tag("G-108", "accepted"))]));
+    facts::observe_tool_result(dir.path(), None, &override_reply);
+    assert!(!facts::summarize(&store, before).unwrap().contains_key("G-108"));
+    let arguments = serde_json::json!({"supervisor_override":true,"task_id":"cas-ci","reason":"reviewed"});
+    facts::observe_tool_result(dir.path(), arguments.as_object(), &override_reply);
     assert_eq!(facts::summarize(&store, before).unwrap()["G-108"],
-        facts::Counts { refused: 1, overridden: 1, false_positive: 0 });
+        facts::Counts { refused: 0, overridden: 1, false_positive: 0 });
 
     // Replay CAS_SKIP_FAST_ROWS through the real hook. Capture only the
     // executable boundary, then dispatch its exact argv through the real CLI

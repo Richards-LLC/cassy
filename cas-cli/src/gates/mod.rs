@@ -8,8 +8,8 @@
 //! is measured from code: deleting a check's declaration deletes its row.
 //!
 //! Refusals emit their code as a `[CODE]` token through [`tag`]. The task
-//! tool and the PreToolUse hook read those tokens from every refusal and
-//! record a [`facts`] row keyed by the code; overrides and supervisor-declared
+//! router and the outer hook entry read those tokens from every refusal and
+//! record a [`facts`] row keyed by the code; tagged accepted overrides and supervisor-declared
 //! false positives are recorded the same way.
 
 pub mod facts;

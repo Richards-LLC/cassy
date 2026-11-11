@@ -2,8 +2,6 @@ mod loop_tools;
 pub(crate) mod shadow_review;
 pub(crate) mod verification_tools;
 mod worktree_ops;
-#[cfg(test)]
-pub(crate) use worktree_ops::exercise_ci_gate_facts;
 pub(crate) mod train_merge;
 pub(crate) mod release_freeze;
 pub(crate) mod release_auto_cut;

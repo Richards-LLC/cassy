@@ -101,11 +101,9 @@ fn main() -> ExitCode {
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
         return match cli::execute_native_pre_tool_use() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => {
-                let output = cas::hooks::HookOutput::with_pre_tool_permission("deny", &cas::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive."));
-                println!("{}", serde_json::to_string(&output).unwrap());
-                ExitCode::SUCCESS
-            }
+            // Read/validation failures are converted to the observed H-01
+            // denial by the shared hook entry; only output serialization can fail here.
+            Err(_) => ExitCode::FAILURE
         };
     }
 

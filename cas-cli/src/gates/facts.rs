@@ -169,77 +169,38 @@ pub fn observe_refusal(cas_root: &Path, task_id: Option<&str>, text: &str) {
     }
 }
 
-/// Open the project event store and record an override; failures only warn.
-pub fn observe_override(cas_root: &Path, task_id: &str, reason: &str) {
-    let recorded = crate::store::open_event_store(cas_root)
-        .map_err(anyhow::Error::from)
-        .and_then(|store| record_override(store.as_ref(), task_id, reason));
-    if let Err(error) = recorded {
-        tracing::warn!(%error, "could not record gate override fact");
-    }
-}
-
-fn result_text(result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>) -> Option<(bool, String)> {
-    match result {
-        Ok(answer) if answer.is_error == Some(true) => Some((
-            true,
-            answer
-                .content
-                .iter()
-                .filter_map(|content| match &content.raw {
-                    rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )),
-        Ok(_) => None,
-        Err(error) => Some((false, error.message.to_string())),
-    }
-}
-
-/// One observation at the shared result boundary of direct, retry and queued
-/// worktree merges. Successful answers and uncoded infrastructure errors are
-/// not gate refusals.
-pub fn observe_merge_result(
+/// Observe the one MCP router result shared by every tool. Only tagged
+/// refusals and tagged accepted overrides are gate facts; ordinary successful
+/// reads may quote historical codes without creating new facts.
+pub fn observe_tool_result(
     cas_root: &Path,
-    task_id: Option<&str>,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
 ) {
-    if let Some((_, text)) = result_text(result)
-        && !codes_in(&text).is_empty()
-    {
+    let (refused, text) = match result {
+        Err(error) => (true, error.message.to_string()),
+        Ok(answer) => (answer.is_error == Some(true), answer.content.iter().filter_map(|content| {
+            match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            }
+        }).collect::<Vec<_>>().join("\n")),
+    };
+    let codes = codes_in(&text);
+    if codes.is_empty() { return; }
+    let value = |name: &str| arguments.and_then(|args| args.get(name));
+    let task_id = value("task_id").and_then(|id| id.as_str())
+        .or_else(|| value("id").and_then(|id| id.as_str()).filter(|id| id.starts_with("cas-")));
+    if refused {
         observe_refusal(cas_root, task_id, &text);
-    }
-}
-
-/// Record the gate facts of one task tool answer: every refusal that emits a
-/// code; every refused `start` or `close` (uncoded when it emits none); and a
-/// successful supervisor override. Park handoffs are not refusals.
-pub fn observe_task_result(
-    cas_root: &Path,
-    action: &str,
-    task_id: &str,
-    override_reason: Option<&str>,
-    result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
-) {
-    use crate::mcp::tools::core::task::lifecycle::close_ops::is_merge_handoff;
-    let task = (!task_id.is_empty()).then_some(task_id);
-    match result_text(result) {
-        // A tagged answer is a refusal even when it lists MERGE REQUIRED
-        // lines; an untagged one is uncoded unless it is the park handoff.
-        Some((refused, text)) => {
-            let uncoded_gate = refused
-                && matches!(action, "start" | "close")
-                && !text.lines().any(is_merge_handoff);
-            if uncoded_gate || !codes_in(&text).is_empty() {
-                observe_refusal(cas_root, task, &text);
-            }
-        }
-        None => {
-            if let (Some(reason), Some(task_id)) = (override_reason, task) {
-                observe_override(cas_root, task_id, reason);
-            }
+    } else if value("supervisor_override").and_then(|flag| flag.as_bool()) == Some(true) {
+        let reason = value("reason").and_then(|reason| reason.as_str()).unwrap_or(&text);
+        let recorded = crate::store::open_event_store(cas_root)
+            .map_err(anyhow::Error::from)
+            .and_then(|store| record_override_codes(store.as_ref(),
+                &codes.into_iter().map(str::to_string).collect::<Vec<_>>(), task_id, reason));
+        if let Err(error) = recorded {
+            tracing::warn!(%error, "could not record gate override fact");
         }
     }
 }

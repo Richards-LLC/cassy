@@ -212,6 +212,9 @@ pub(crate) fn process_hook_input(
         }
         handle_hook(event, input)?
     };
+    if let Ok(root) = store::find_cas_root() {
+        crate::gates::facts::observe_hook_output(&root, &output);
+    }
     Ok(output)
 }
 

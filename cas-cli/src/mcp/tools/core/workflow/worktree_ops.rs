@@ -78,9 +78,9 @@ const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/ch
 const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
 const CI_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
+    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n[G-108]\n\n";
 const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n";
+    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n[G-108]\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
@@ -130,23 +130,6 @@ fn admit_branch_ci(
         )));
     }
     Ok(false)
-}
-
-fn record_ci_override(cas_root: &Path, task_id: &str, reason: &str) -> anyhow::Result<()> {
-    let store = crate::store::open_event_store(cas_root)?;
-    crate::gates::facts::record_override_codes(
-        store.as_ref(), &["G-108".to_string()], Some(task_id), reason,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn exercise_ci_gate_facts(cas_root: &Path) {
-    let red = BranchCiState::Red { sha: "fixture".to_string(), url: None };
-    let refusal = admit_branch_ci(&red, false, None).unwrap_err();
-    let result = Err(CasCore::error(ErrorCode::INVALID_PARAMS, refusal));
-    crate::gates::facts::observe_merge_result(cas_root, Some("cas-ci"), &result);
-    assert_eq!(admit_branch_ci(&red, true, Some("reviewed")), Ok(true));
-    record_ci_override(cas_root, "cas-ci", "reviewed").unwrap();
 }
 
 impl BranchCiState {
@@ -4439,26 +4422,6 @@ impl CasCore {
         expected_delivery: Option<&crate::factory_ci_retry::Retry>,
         train_queue: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
-        let result = crate::async_runtime::heap_future(|| self.worktree_merge_result(
-            id, force, task_id, allow_trunk, cleanup, supervisor_override, reason,
-            expected_delivery, train_queue,
-        )).await;
-        crate::gates::facts::observe_merge_result(&self.cas_root, task_id, &result);
-        result
-    }
-
-    async fn worktree_merge_result(
-        &self,
-        id: &str,
-        force: bool,
-        task_id: Option<&str>,
-        allow_trunk: bool,
-        cleanup: Option<bool>,
-        supervisor_override: bool,
-        reason: Option<&str>,
-        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
-        train_queue: Option<&str>,
-    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
@@ -5585,11 +5548,6 @@ impl CasCore {
             task_store.append_note(task_id, &note).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}"))),
-                data: None,
-            })?;
-            record_ci_override(&cas_root, task_id, reason.unwrap_or_default()).map_err(|error| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: failed to record CI gate fact: {error}"))),
                 data: None,
             })?;
             if matches!(branch_ci_state, BranchCiState::Red { .. }) {

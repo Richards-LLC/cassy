@@ -4796,6 +4796,13 @@ async fn release_freeze_default_pairing_cas_16c0a() {
         assert_eq!(freeze_of(&store.get("cas-tr").unwrap()).is_some(), frozen);
     }
 
+    let interventions = cas_store::quality_events_between(&fixture.cas_dir, None, None).unwrap();
+    let kinds: Vec<_> = interventions.iter().filter_map(|event| {
+        let payload = serde_json::to_value(&event.payload).unwrap();
+        payload["intervention"].as_str().map(str::to_string)
+    }).collect();
+    assert_eq!(kinds, ["train_freeze_lift", "commander_action"]);
+
     // Possession of an expired/revoked pairing never authorizes a lift.
     fixture.auth.revoke_device(&fixture.device_id, chrono::Utc::now()).unwrap();
     let (status, body) = fixture.operate(serde_json::json!({

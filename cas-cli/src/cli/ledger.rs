@@ -1375,7 +1375,13 @@ mod tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
         let root = release_fixture(dir.path());
-        // The release train carries three deliveries in one main merge.
+        // The release train carries three recorded deliveries in one main merge.
+        for (task, rev, source) in [("cas-feature", "v1.1.0~2", "v1.1.0~2^2"),
+            ("cas-config", "v1.1.0~1", "v1.1.0~1"), ("cas-lint", "v1.1.0", "v1.1.0")] {
+            let merge = git(dir.path(), &["rev-parse", rev]).unwrap();
+            let anchor = git(dir.path(), &["rev-parse", source]).unwrap();
+            cas_store::record_observed_delivery_merge(&root, task, "factory/worker", "epic/train", &anchor, &merge, "supervisor").unwrap();
+        }
         git_in(dir.path(), &["branch", "train"]);
         git_in(dir.path(), &["checkout", "-q", "main"]);
         git_in(dir.path(), &["reset", "--hard", "v1.0.0"]);

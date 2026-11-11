@@ -3620,3 +3620,29 @@ mod factory_message_tests {
         }
     }
 }
+
+#[test]
+fn ledger_backfill_preserves_attested_manual_interventions() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let cas_root = cas::store::init_cas_dir(root).unwrap();
+    let store = cas::store::open_task_store(&cas_root).unwrap();
+    let mut task = cas::types::Task::new("cas-ledger".into(), "Manual release repairs".into());
+    let facts = serde_json::json!([{
+        "occurred_at": "2026-11-11T12:54:00-05:00", "intervention": "operator_repair",
+        "key": "config-symlink", "actor": "operator", "release": "v4.16.0",
+        "task_id": null, "source": "supervisor-attested: message 4238980"
+    }]);
+    task.notes = format!("LEDGER INTERVENTIONS: {facts}");
+    store.add(&task).unwrap();
+    for _ in 0..2 {
+        cas_cmd(root).current_dir(root).env("CAS_GH_BIN", "/nonexistent/gh")
+            .args(["ledger", "backfill", "--days", "36500"]).assert().success();
+    }
+    let events = cas_store::quality_events_between(&cas_root, None, None).unwrap();
+    let interventions: Vec<_> = events.iter().filter(|e| e.payload.kind() == "intervention").collect();
+    assert_eq!(interventions.len(), 1);
+    assert_eq!(interventions[0].release_version.as_deref(), Some("v4.16.0"));
+    assert_eq!(interventions[0].occurred_at.to_rfc3339(), "2026-11-11T17:54:00+00:00");
+    assert_eq!(interventions[0].local_note.as_deref(), Some("supervisor-attested: message 4238980"));
+}

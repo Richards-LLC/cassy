@@ -1190,6 +1190,9 @@ mod tests {
                     "director", &agent.name, "Review the task", Some("factory-1"),
                     None, None, false, Some(&cas_store::QueueOrigin::Daemon),
                 ).unwrap().id();
+                // Typed daemon notice, independent of its rendered body.
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                    "UPDATE prompt_queue SET kind = 'ci_completed' WHERE id = ?1", [id]).unwrap();
                 let prompt = if cli == cas_mux::SupervisorCli::Claude {
                     if role == AgentRole::Supervisor {
                         format!("<teammate-message teammate_id=\"director\">\n[cas #{id} agent-authored 0s first]\nReview the task\n</teammate-message>")
@@ -1241,6 +1244,7 @@ mod tests {
                 let payload = serde_json::to_value(&turns[0].payload).unwrap();
                 // pin: ledger wire fields preserve the authenticated director channel and measured usage.
                 assert_eq!(payload["woken_by"], "director");
+                assert_eq!(payload["notice_kind"], "ci_completed");
                 assert_eq!(payload["no_op"], false);
                 assert!(payload["actions"].as_array().is_some_and(|actions| !actions.is_empty()));
                 assert_eq!(payload["input_tokens"], 30);

@@ -1207,10 +1207,13 @@ jobs:
           # The default report dir is tracked docs; the queue step needs a clean tree.
           VISUAL_QA_ARTIFACT_DIR: ${{ runner.temp }}/visual-qa
         run: |
-          if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps --no-shell chromium
+          npx playwright install --no-shell chromium
+          browser="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          libraries="$(ldd "$browser")"
+          if grep -q 'not found' <<< "$libraries"; then
+            npx playwright install-deps chromium
           else
-            npx playwright install --no-shell chromium
+            echo "Chromium libraries present; skipping apt dependencies"
           fi
           # Use the full pinned browser we installed, rather than a system
           # Chrome or Playwright's default headless shell.
@@ -1288,10 +1291,13 @@ jobs:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/playwright-browsers
         run: |
           npm ci
-          if sudo -n true 2>/dev/null; then
-            npx playwright install --with-deps --no-shell chromium
+          npx playwright install --no-shell chromium
+          browser="$(node -p 'require("@playwright/test").chromium.executablePath()')"
+          libraries="$(ldd "$browser")"
+          if grep -q 'not found' <<< "$libraries"; then
+            npx playwright install-deps chromium
           else
-            npx playwright install --no-shell chromium
+            echo "Chromium libraries present; skipping apt dependencies"
           fi
           python3 ../scripts/ci-queue-flakes.py run playwright --shard "$SHARD/6" \
             --issues-repo Richards-LLC/cassy --out "$GITHUB_WORKSPACE/target/queue-flakes/playwright-$SHARD"

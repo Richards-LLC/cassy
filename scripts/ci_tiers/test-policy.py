@@ -25,6 +25,7 @@ class PolicyTests(unittest.TestCase):
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
         cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/workflows/full-validation.yml', '.github/actions/run-script-suite-tests/action.yml'])
+        cls.files.update(['.github/actions/setup-linux-linker/action.yml', '.github/workflows/release-prebuild.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -807,6 +808,49 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         # which cannot execute these Ubuntu workflow bodies (e.g. mapfile).
         bash = shutil.which('bash')
         return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
+
+    def dependency_fixture(self):
+        commands = self.root / 'bin'; commands.mkdir()
+        scripts = {
+            'gcc': ':', 'mold': ':', 'npm': ':', 'python3': ':',
+            'sudo': '[[ "$*" == "-n true" ]] || exit 100',
+            'node': 'echo /fixture/chrome',
+            'ldd': 'echo "libfixture.so => ${LIBRARY:-/lib/libfixture.so}"',
+            'npx': 'echo "$*" >> "$CALLS"; [[ "$*" != *--with-deps* ]]',
+        }
+        for name, body in scripts.items():
+            command = commands / name
+            command.write_text('#!/bin/bash\n' + body + '\n'); command.chmod(0o755)
+        calls = self.root / 'calls'; calls.touch()
+        return {'PATH': f'{commands}:/usr/bin:/bin', 'CALLS': str(calls),
+                'SHARD': '1', 'GITHUB_WORKSPACE': str(self.root)}
+
+    def test_installed_linkers_skip_unavailable_ubuntu_mirrors(self):
+        values = self.dependency_fixture()
+        setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        prebuild = policy.load(self.root / '.github/workflows/release-prebuild.yml')
+        linker = setup['runs']['steps'][0]
+        release_linker = next(s for s in prebuild['jobs']['build']['steps']
+                              if s.get('uses') == linker.get('uses'))
+        self.assertEqual(release_linker['uses'], linker['uses'])
+        action = policy.load(self.root / linker['uses'] / 'action.yml')
+        result = self.run_body(action['runs']['steps'][0]['run'], values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_browser_setup_installs_system_packages_only_for_missing_libraries(self):
+        values = self.dependency_fixture()
+        jobs = self.ci()['jobs']
+        bodies = [next(s['run'] for s in jobs['fast-validation-web']['steps']
+                       if s.get('env', {}).get('VISUAL_QA_ARTIFACT_DIR')),
+                  next(s['run'] for s in jobs['fast-validation-journeys']['steps']
+                       if s.get('working-directory') == 'hub-web')]
+        for body, missing in itertools.product(bodies, (False, True)):
+            with self.subTest(missing=missing, body=body[:25]):
+                calls = Path(values['CALLS']); calls.write_text('')
+                result = self.run_body(body, {**values, 'LIBRARY': 'not found' if missing else '/lib/libfixture.so'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(['playwright', 'install-deps', 'chromium'] in argv, missing)
 
     def rustup_fixture(self, state):
         fixture = self.root / state

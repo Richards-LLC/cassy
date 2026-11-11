@@ -295,6 +295,21 @@ lint_release_draft() {
         verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
+# cas-4b33: deliveries never edit .claude/CODEMAP.md, so the supervisor
+# regenerates it (/codemap) on the train before the cut. Refuse a map that
+# predates a file added or removed since it was last committed; per-task
+# fragments and release notes do not change the structure.
+require_current_codemap() {
+    local mapped stale
+    git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1 || return 0
+    mapped="$(git log -1 --format=%H -- .claude/CODEMAP.md)"
+    stale="$(git diff --no-renames --name-only --diff-filter=AD "$mapped" HEAD -- . \
+        ':(exclude).claude/CODEMAP.md' ':(exclude)changelog.d' ':(exclude)docs/qa/bug-families' \
+        ':(exclude)docs/product-overview.d' ':(exclude)docs/release-notes')"
+    stale="$(printf '%s\n' "$stale" | sed -n '1,5p')"
+    [[ -z "$stale" ]] || die ".claude/CODEMAP.md predates files added or removed since ${mapped:0:12} (${stale//$'\n'/, }); regenerate it with /codemap, commit it on $branch and rerun"
+}
+
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
@@ -329,6 +344,7 @@ prepare() {
         printf '%s\n' "$version"
         return 0
     fi
+    require_current_codemap
     local source
     source="$(draft_source "$version")"
     lint_release_draft "$source"

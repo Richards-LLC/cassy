@@ -412,11 +412,13 @@ That list is display only and never changes the verdict.
 ## Registry upkeep in the lane
 
 Task park no longer runs registry upkeep (cas-4b33). The `journey-catalog` fast
-row runs `python3 scripts/doc-fragments.py check` on lanes that change the
-registry or its bug-family files, and refuses YAML that does not parse,
-repeated journey IDs, duplicate or malformed families and family references
-that do not resolve. `cas qa journeys --check` remains the full validator, and
-`cas qa impact` lists unowned surface files and registry problems as advice.
+row runs `cas qa journeys --check --base <lane base>` on every lane: the full
+validator plus G1 (registry problems the diff caused; deletions that orphan a
+glob or spec) and G2 (added or renamed surface files without an owner, owner
+group or ignore match; `strict` also checks modified files). The header
+`enforce` policy applies as before: `observe` reports without failing and
+`off` skips. On registry or bug-family changes the row also runs
+`python3 scripts/doc-fragments.py check`.
 A bug fix that touches a live journey should still add a family file naming
 its task. See [documentation upkeep](docs-upkeep.md) for how release prep
 compiles the family files into this registry.

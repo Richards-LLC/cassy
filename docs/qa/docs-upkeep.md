@@ -8,7 +8,7 @@ prep folds them in once (cas-4b33).
 | --- | --- | --- |
 | `docs/qa/journeys.yaml` bug families | `docs/qa/bug-families/<slug>.yaml` | `scripts/release.sh` compiles each file into the inline `bug_families` map and deletes it |
 | `docs/PRODUCT_OVERVIEW.md` | `docs/product-overview.d/<task>.md` | `scripts/release.sh` appends each `## <Section>` block to that section and deletes the fragment; the supervisor may refresh the overview with the project-overview skill |
-| `.claude/CODEMAP.md` | nothing | the supervisor regenerates it with `/codemap` on the train before the cut |
+| `.claude/CODEMAP.md` | nothing | the supervisor regenerates it with `/codemap` on the train before the cut; `scripts/release.sh` refuses to prepare while a file added or removed since the map's last commit is unmapped (fragments and release notes excepted) |
 
 The compile is `python3 scripts/doc-fragments.py compile`; it runs
 `check` first and verifies that every other registry key is unchanged before
@@ -28,16 +28,28 @@ append to that section:
 
 ## Lane lint
 
-The `journey-catalog` fast row runs `python3 scripts/doc-fragments.py check`
-when a lane changes the registry, a bug family, an overview fragment or the
-overview. It refuses a registry that does not parse, repeated journey IDs,
-duplicate or malformed bug families, family journey and invariant references
-that do not resolve, and overview fragments that name a missing section. Each
-problem prints its stable code and a `FIX:` line.
+The `journey-catalog` fast row runs two checks:
+
+- `python3 scripts/doc-fragments.py check` when a lane changes the registry, a
+  bug family, an overview fragment or the overview. It refuses a registry that
+  does not parse, repeated journey IDs, duplicate or malformed bug families,
+  family references that do not resolve, and overview fragments that name a
+  missing section.
+- `cas qa journeys --check --base <lane base>` on every lane diff: the full
+  registry validator plus the former park gates G1 (registry problems the diff
+  caused) and G2 (new surface files no journey owns; strict also checks
+  modified files). The row uses `CAS_BIN` or `cas` on `PATH` and says
+  "registry upkeep not checked" when that binary is missing or predates
+  `--base`.
+
+Each problem prints its code and a `FIX:` line. The former bug-case gate (G3)
+needs the task type, which a lane does not have; the close checks list it as
+advice for bug tasks.
 
 Task park no longer runs the registry upkeep gates (G1–G3) or the CODEMAP and
 PRODUCT_OVERVIEW drift gates (G5/G6), and supervisors are not stopped from
 creating tasks while CODEMAP is stale. `cas qa impact` still lists unowned
-surface files and registry problems under "Required upkeep (registry)". The
-`upkeep.*` and `qa.registry.enforce` settings remain readable by
-`cas qa journeys --status` but no longer gate a close.
+surface files and registry problems under "Required upkeep (registry)" before
+the lane runs. The `upkeep.*` settings remain readable by
+`cas qa journeys --status` but no longer gate anything; `qa.registry.enforce`
+is the lane lint's fallback when the registry header sets no policy.

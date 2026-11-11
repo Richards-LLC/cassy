@@ -31,6 +31,9 @@ def _pinned_linter():
 LINTER = _pinned_linter()
 if LINTER:
     os.environ["MARKDOWNLINT_CLI2"] = LINTER
+# The journey-catalog row's registry upkeep needs a Cassy binary; keep the
+# fixture rows hermetic (cas-4b33). qa_upkeep's Rust test covers the check.
+os.environ["CAS_BIN"] = "/nonexistent/cas"
 
 
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"

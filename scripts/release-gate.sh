@@ -1784,6 +1784,18 @@ check_journey_catalog() {
         python3 scripts/doc-fragments.py check || return 1
         ran=true
     fi
+    # Registry validation plus ownership of new user-facing surface files for
+    # every lane diff (formerly the park gate G-49), through Cassy's validator.
+    local cas_bin="${CAS_BIN:-cas}" base=()
+    [[ "$fast_rows" != true ]] || base=(--base "${fast_base:-HEAD^}")
+    if [[ -f docs/qa/journeys.yaml ]]; then
+        if "$cas_bin" qa journeys --help 2>/dev/null | grep -q -- '--base'; then
+            "$cas_bin" qa journeys --check "${base[@]}" || return 1
+            ran=true
+        else
+            printf 'journey-catalog: registry upkeep not checked: %s lacks `qa journeys --check --base` (set CAS_BIN)\n' "$cas_bin"
+        fi
+    fi
     [[ "$ran" == true ]] || printf 'journey-catalog: no journey catalog, registry, fragment or spec change\n'
 }
 
@@ -2415,7 +2427,7 @@ else
 fi
 gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-gate_row journey-catalog 'journeys-for-diff.py --check (catalog steps match test.step titles); doc-fragments.py check (registry and doc fragments)' \
+gate_row journey-catalog 'journeys-for-diff.py --check (catalog steps); doc-fragments.py check; cas qa journeys --check --base (registry upkeep)' \
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
@@ -2454,7 +2466,7 @@ fast_row_fix() {
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
         builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;
-        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles (python3 scripts/journeys-for-diff.py --check) and fix what python3 scripts/doc-fragments.py check reports' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles (python3 scripts/journeys-for-diff.py --check) fix what python3 scripts/doc-fragments.py check reports, and own new surface files that cas qa journeys --check --base <ref> names' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
         migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
         ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;

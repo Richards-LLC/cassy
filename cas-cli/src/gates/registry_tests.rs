@@ -104,11 +104,11 @@ fn every_registered_refusal_site_emits_its_code() {
     assert!(std::process::Command::new("git").current_dir(repo).args(["checkout", "--detach", "-q"]).status().unwrap().success());
     let scripts = crate::test_paths::crate_root().join("../scripts");
     let release = std::process::Command::new("bash").arg(scripts.join("release.sh"))
-        .current_dir(repo).output().unwrap();
+        .current_dir(repo).env("CAS_BIN", repo.join("missing-cas")).output().unwrap();
     assert!(!release.status.success());
     assert!(codes_in(&String::from_utf8_lossy(&release.stderr)).contains(&"C-34"));
     let mut hook = std::process::Command::new("bash").arg(scripts.join("fast-rows-pre-push.sh"))
-        .current_dir(repo).env_remove("CAS_SKIP_FAST_ROWS")
+        .current_dir(repo).env_remove("CAS_SKIP_FAST_ROWS").env("CAS_BIN", repo.join("missing-cas"))
         .stdin(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
     use std::io::Write;
     writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();
@@ -119,8 +119,8 @@ fn every_registered_refusal_site_emits_its_code() {
 
 /// A refusal, its override and a declared false positive are counted under
 /// the refused code; a refusal with no code is counted as uncoded.
-#[test]
-fn refusals_overrides_and_false_positives_are_counted_per_code() {
+#[tokio::test]
+async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let dir = tempfile::tempdir().unwrap();
     let store = SqliteEventStore::open(dir.path()).unwrap();
     store.init().unwrap();
@@ -137,6 +137,22 @@ fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let counts = facts::summarize(&store, before).unwrap();
     assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
     assert_eq!(counts[UNCODED].refused, 1);
+
+    // G-92 returns before CI admission: exercise the public merge API.
+    let operator = dir.path().join("operator");
+    std::fs::create_dir_all(&operator).unwrap();
+    let hold = operator.join("project-hold.json");
+    std::fs::write(&hold, serde_json::to_vec(&cas_store::project_hold::State {
+        active: Some(cas_store::project_hold::Hold {
+            reason: "fixture".into(), operator: "fixture".into(), set_at: Utc::now(),
+        }), history: vec![],
+    }).unwrap()).unwrap();
+    let core = crate::mcp::CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+    let result = core.worktree_merge("fixture", false, Some("cas-hold"), false, None, false, None).await;
+    assert!(result.is_err());
+    std::fs::remove_file(hold).unwrap();
+    assert_eq!(facts::summarize(&store, before).unwrap().get("G-92"),
+        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
 
     // Exercise the same CI admission and accepted-override boundaries used
     // by worktree_merge, outside the task-tool dispatcher.
@@ -183,9 +199,50 @@ fn refusals_overrides_and_false_positives_are_counted_per_code() {
                 assert!(codes_in(&String::from_utf8_lossy(&result.stderr)).contains(&"H-38"));
             }
         }
+        // Refusal reporters must call the fact CLI, but neither a missing
+        // executable nor a failed recording may replace the original exit.
+        std::fs::write(&fake_cas, "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$FACT_ARGS\"\n").unwrap();
+        let release = dir.path().join("release.sh");
+        std::fs::write(&release, include_str!("../../../scripts/release.sh")).unwrap();
+        assert!(Command::new("git").current_dir(dir.path())
+            .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "fixture"])
+            .status().unwrap().success());
+        assert!(Command::new("git").current_dir(dir.path()).args(["checkout", "--detach", "-q"]).status().unwrap().success());
+        for (reporter, code) in [(&release, "C-34"), (&script, "H-38")] {
+            std::fs::remove_file(&argv).ok();
+            let mut child = Command::new("bash").arg(reporter).current_dir(dir.path())
+                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv).env_remove("CAS_SKIP_FAST_ROWS")
+                .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            if reporter == &script {
+                writeln!(child.stdin.take().unwrap(), "factory/f {} refs/heads/factory/f {}", "1".repeat(40), "0".repeat(40)).unwrap();
+            }
+            let result = child.wait_with_output().unwrap();
+            assert_eq!(result.status.code(), Some(1));
+            assert!(codes_in(&String::from_utf8_lossy(&result.stderr)).contains(&code));
+            let captured = std::fs::read(&argv).expect("refusal reporter did not invoke the fact CLI");
+            let args = std::iter::once("cas".to_string()).chain(captured.split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty()).map(|arg| String::from_utf8(arg.to_vec()).unwrap()));
+            let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+            let Some(crate::cli::Commands::Gates(command)) = &cli.command else { panic!("reporter did not invoke gates"); };
+            crate::cli::gates_cmd::execute(command, &cli, Some(dir.path())).unwrap();
+            assert_eq!(facts::summarize(&store, before).unwrap()[code].refused, 1);
+
+            let failed = dir.path().join("failed-cas");
+            std::fs::write(&failed, "#!/bin/sh\nexit 7\n").unwrap();
+            std::fs::set_permissions(&failed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            for bin in [failed, dir.path().join("missing-cas")] {
+                let mut child = Command::new("bash").arg(reporter).current_dir(dir.path())
+                    .env("CAS_BIN", bin).env_remove("CAS_SKIP_FAST_ROWS")
+                    .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+                if reporter == &script {
+                    writeln!(child.stdin.take().unwrap(), "factory/f {} refs/heads/factory/f {}", "1".repeat(40), "0".repeat(40)).unwrap();
+                }
+                assert_eq!(child.wait_with_output().unwrap().status.code(), Some(1));
+            }
+        }
         let counts = facts::summarize(&store, before).unwrap();
         for code in ["C-07", "H-38"] {
-            assert_eq!(counts[code], facts::Counts { refused: 0, overridden: 1, false_positive: 0 });
+            assert_eq!(counts[code], facts::Counts { refused: 1, overridden: 1, false_positive: 0 });
         }
     }
     assert!(facts::summarize(&store, Utc::now() + chrono::Duration::seconds(5)).unwrap().is_empty());

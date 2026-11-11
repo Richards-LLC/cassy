@@ -1355,9 +1355,9 @@ mod tests {
         forget_cycles(&legacy.id);
         SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
         assert_eq!(open_cycle(), expected, "backfill");
-        legacy = task_store.get(&legacy.id).unwrap();
-        legacy.status = TaskStatus::Closed;
-        task_store.update(&legacy).unwrap();
+        let mut terminal_legacy = task_store.get(&legacy.id).unwrap();
+        terminal_legacy.status = TaskStatus::Closed;
+        task_store.update(&terminal_legacy).unwrap();
         forget_cycles(&legacy.id);
         SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
         assert!(crate::delivery_cycles(root.path(), &legacy.id).unwrap().is_empty());

@@ -166,10 +166,12 @@ pub(crate) fn verification_recorded(root: &Path, verification: &cas_types::Verif
     let Some(outcome) = verifier_outcome(verification.status) else { return false };
     let cycle_id = review_cycle(root, verification);
     let provenance = match verification.provenance {
-        cas_types::VerificationProvenance::TaskVerifier | cas_types::VerificationProvenance::PeerAttested => "independent",
+        cas_types::VerificationProvenance::TaskVerifier => "independent",
         cas_types::VerificationProvenance::SupervisorDirect => "supervisor_direct",
         cas_types::VerificationProvenance::System => "system",
-        cas_types::VerificationProvenance::Legacy => "legacy",
+        // A peer receipt can attest either a direct or an independent verdict
+        // (premerge_verification/peer.rs); only the originating row distinguishes them.
+        cas_types::VerificationProvenance::Legacy | cas_types::VerificationProvenance::PeerAttested => "legacy",
     }.to_string();
     let mut event = NewQualityEvent::new(format!("verifier|{}", verification.id),
         QualityPayload::CheckRun {
@@ -185,11 +187,18 @@ pub(crate) fn verification_recorded(root: &Path, verification: &cas_types::Verif
     event.title = task_title(root, &verification.task_id);
     event.actor = verification.agent_id.clone();
     let existing = cas_store::quality_events_for_task(root, &verification.task_id).unwrap_or_default();
-    if existing.iter().any(|old| matches!(&old.payload,
-        QualityPayload::CheckRun { review: Some(review), .. } if review.verification_id == verification.id)) {
-        return false;
-    }
-    if let Some(old) = existing.iter().find(|old| old.id == event.id()) {
+    let prior = existing.iter().rev().find(|old| matches!(&old.payload,
+        QualityPayload::CheckRun { review: Some(review), .. } if review.verification_id == verification.id));
+    if let Some(prior) = prior {
+        let QualityPayload::CheckRun { review: Some(old), .. } = &prior.payload else { unreachable!() };
+        let QualityPayload::CheckRun { review: Some(new), .. } = &mut event.payload else { unreachable!() };
+        let upgrade = old.provenance == "legacy" && new.provenance != "legacy"
+            || old.provenance == new.provenance && old.cycle_id.is_none() && new.cycle_id.is_some();
+        if !upgrade { return false }
+        new.supersedes = Some(prior.id.clone());
+        event.natural_key = format!("verifier_review|{}|{}|{}", verification.id, new.provenance,
+            new.cycle_id.as_deref().unwrap_or("unknown"));
+    } else if let Some(old) = existing.iter().find(|old| old.id == event.id()) {
         if let QualityPayload::CheckRun { review: Some(review), .. } = &mut event.payload {
             review.supersedes = Some(old.id.clone());
         }
@@ -921,7 +930,7 @@ mod tests {
         let mut verdict = cas_types::Verification::new("ver-round".into(), task.id.clone());
         verdict.provenance = cas_types::VerificationProvenance::TaskVerifier;
         verdict.status = cas_types::VerificationStatus::Rejected;
-        verdict.dispatch_id = Some(dispatch.id);
+        verdict.dispatch_id = Some(dispatch.id.clone());
         check_run(&root, Check { natural_key: format!("verifier|{}", verdict.id), check_id: "task_verifier",
             stage: CheckStage::Verifier, outcome: CheckOutcome::Fail, task_id: Some(&task.id),
             sha: None, minutes: None, link: None, actor: None });
@@ -941,6 +950,22 @@ mod tests {
         let QualityPayload::CheckRun { review: Some(review), .. } = &events[2].payload else { panic!("missing direct verdict") };
         assert_eq!(review.cycle_id, None);
         assert_eq!(review.provenance, "supervisor_direct");
+        verdict.id = "ver-peer".into();
+        verdict.provenance = cas_types::VerificationProvenance::PeerAttested;
+        assert!(verification_recorded(&root, &verdict));
+        let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
+        let QualityPayload::CheckRun { review: Some(peer), .. } = &events[3].payload else { panic!("missing peer verdict") };
+        assert_eq!(peer.provenance, "legacy");
+        verdict.provenance = cas_types::VerificationProvenance::TaskVerifier;
+        verdict.dispatch_id = Some(dispatch.id);
+        assert!(verification_recorded(&root, &verdict));
+        assert!(!verification_recorded(&root, &verdict));
+        let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
+        let QualityPayload::CheckRun { review: Some(enriched), .. } = &events[4].payload else { panic!("missing peer enrichment") };
+        assert_eq!(enriched.provenance, "independent");
+        assert_eq!(enriched.supersedes.as_deref(), Some(events[3].id.as_str()));
+        verdict.provenance = cas_types::VerificationProvenance::PeerAttested;
+        assert!(!verification_recorded(&root, &verdict));
     }
 
     #[test]

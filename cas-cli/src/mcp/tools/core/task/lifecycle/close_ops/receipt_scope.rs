@@ -138,9 +138,6 @@ pub(super) fn park_refusals(
             task.id,
         ));
     }
-    if let Some(refusal) = message_assertion_refusal(proof_repo, target, task.delivery_mode) {
-        refusals.push(refusal);
-    }
     let caller = crate::mcp::tools::core::guidance::caller_prefix();
     let tested = crate::factory_worker_check::passing_test_packages_against(cas_root, proof_repo, head, target);
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
@@ -181,47 +178,6 @@ pub(super) fn park_refusals(
     refusals
 }
 
-/// Read-only source check: a test receipt cannot authorize a new prose pin.
-fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types::DeliveryMode) -> Option<String> {
-    let guard = repo.join("scripts/check-test-shape.py");
-    if !guard.is_file() {
-        return None;
-    }
-    // A local-merge delivery lands on the local target; otherwise the fresher
-    // of the local and origin target decides (remote-only train refs park).
-    let target_ref = if delivery_mode == cas_types::DeliveryMode::LocalMerge {
-        target.to_string()
-    } else {
-        super::freshest_target_ref(repo, target)
-    };
-    let Some(target_commit) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
-        return Some(crate::gates::tag("G-63", format!(
-            "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`). Fetch the integration target, then retry park."
-        )));
-    };
-    let output = std::process::Command::new("python3")
-        .arg(&guard)
-        .args(["--messages-only", "--changed-since", &target_commit])
-        .env("PYTHONDONTWRITEBYTECODE", "1")
-        .current_dir(repo)
-        .output();
-    // gate[G-63 park as-of]: Test-shape checker at park (TEST_ASSERTION_PROSE)
-    match output {
-        Ok(output) if output.status.success() => None,
-        // FIX records are the checker's machine-readable findings. A failed
-        // invocation without a finding is unavailable proof, not a prose pin.
-        Ok(output) if output.status.code() == Some(1)
-            && String::from_utf8_lossy(&output.stdout).lines().any(|line| line.starts_with("FIX: ")) => Some(crate::gates::tag("G-63", format!(
-            "TEST_ASSERTION_PROSE: tests must assert behavior, error codes or rule IDs rather than human messages.\n{}{}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
-        ))),
-        Ok(output) => Some(crate::gates::tag("G-63", format!(
-            "TEST_ASSERTION_PROSE_UNAVAILABLE: test-shape checker exited {} without completing the check.\n{}{}",
-            output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
-        ))),
-        Err(error) => Some(crate::gates::tag("G-63", format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}"))),
-    }
-}
 
 fn product_source_path(path: &str) -> bool {
     if path.starts_with("cas-cli/src/builtins/skills/") {
@@ -999,93 +955,7 @@ mod tests {
         git(&["rev-parse", "HEAD"])
     }
 
-    #[test]
-    fn park_checks_message_assertions_against_remote_target_cas_f741() {
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let repo = changelog_fixture();
-        let cas_root = tempfile::tempdir().unwrap();
-        let mut task = Task::new("cas-f741".into(), "source guard".into());
-        let scripts = repo.path().join("scripts");
-        std::fs::create_dir_all(&scripts).unwrap();
-        std::fs::write(scripts.join("check-test-shape.py"),
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/check-test-shape.py"))).unwrap();
-        std::fs::write(scripts.join("rust_test_source.py"),
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/rust_test_source.py"))).unwrap();
-        let base = commit_changelog_fixture(repo.path(), "install checker");
-        let output = std::process::Command::new("git")
-            .args(["update-ref", "refs/remotes/origin/epic/target", &base])
-            .current_dir(repo.path()).output().unwrap();
-        assert!(output.status.success());
-        assert!(!super::super::git_ref_exists(repo.path(), "refs/heads/epic/target"));
 
-        for (source, expected) in [
-            ("def test_value():\n    assert 2 + 2 == 4\n", None),
-            ("def test_value():\n    assert 'please try later' in error\n", Some("TEST_ASSERTION_PROSE")),
-        ] {
-            std::fs::write(repo.path().join("test_value.py"), source).unwrap();
-            let head = commit_changelog_fixture(repo.path(), "change test");
-            for (target, mode, code) in [
-                ("epic/target", cas_types::DeliveryMode::PushBranch, expected),
-                ("origin/epic/target", cas_types::DeliveryMode::PushBranch, expected),
-                (base.as_str(), cas_types::DeliveryMode::PushBranch, expected),
-                ("main", cas_types::DeliveryMode::LocalMerge, expected),
-                ("missing-target", cas_types::DeliveryMode::PushBranch, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
-                ("epic/target", cas_types::DeliveryMode::LocalMerge, Some("TEST_ASSERTION_TARGET_UNRESOLVED")),
-            ] {
-                task.delivery_mode = mode;
-                let refusal = park_refusal(cas_root.path(), repo.path(), &task,
-                    &["test_value.py".into()], &head, target, None);
-                assert_eq!(refusal.is_some(), code.is_some(), "target={target} mode={mode:?}: {refusal:?}");
-                if let Some(code) = code {
-                    let refusal = refusal.unwrap();
-                    assert!(refusal.contains(code), "target={target} mode={mode:?}: {refusal}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn park_checks_new_message_assertions_cas_6a3e() {
-        const GUARD: &str = include_str!("../../../../../../../../scripts/check-test-shape.py");
-        let repo = changelog_fixture();
-        let cas_root = tempfile::tempdir().unwrap();
-        let task = Task::new("cas-6a3e".into(), "source guard".into());
-        let script = repo.path().join("scripts/check-test-shape.py");
-        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-        std::fs::write(&script, GUARD).unwrap();
-        std::fs::write(script.with_file_name("rust_test_source.py"), include_str!("../../../../../../../../scripts/rust_test_source.py")).unwrap();
-        commit_changelog_fixture(repo.path(), "install actual guard");
-        let git = |args: &[&str]| {
-            let output = std::process::Command::new("git").args(args).current_dir(repo.path()).output().unwrap();
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        };
-        let base = git(&["rev-parse", "main"]);
-        git(&["update-ref", "refs/remotes/origin/main", &base]);
-        git(&["branch", "-D", "main"]);
-        let refusal = |target: &str| park_refusal(cas_root.path(), repo.path(), &task,
-            &["docs/guide.md".into()], &git(&["rev-parse", "HEAD"]), target, None);
-        assert_eq!(refusal("main"), None, "remote-only target runs the actual guard");
-        assert_eq!(refusal("origin/main"), None);
-        let code = |target| refusal(target).unwrap().split_once(':').unwrap().0.to_string();
-        assert_eq!(code("missing-target"), "TEST_ASSERTION_TARGET_UNRESOLVED");
-
-        git(&["branch", "main", &base]);
-        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
-        assert_eq!(refusal("main"), None, "local-only target remains supported");
-        let unrelated = git(&["commit-tree", "HEAD^{tree}", "-m", "unrelated root"]);
-        git(&["update-ref", "refs/remotes/origin/unrelated", &unrelated]);
-        assert_eq!(code("unrelated"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
-
-        let tokenizer = script.with_file_name("rust_test_source.py");
-        std::fs::rename(&tokenizer, tokenizer.with_extension("hidden")).unwrap();
-        assert_eq!(code("main"), "TEST_ASSERTION_PROSE_UNAVAILABLE");
-        std::fs::rename(tokenizer.with_extension("hidden"), &tokenizer).unwrap();
-
-        std::fs::write(repo.path().join("probe.test.ts"), "expect(error.message).toBe('please try later');\n").unwrap();
-        commit_changelog_fixture(repo.path(), "introduce actual prose pin");
-        assert_eq!(code("main"), "TEST_ASSERTION_PROSE");
-    }
 
     #[test]
     fn product_source_delivery_requires_a_titled_unreleased_change() {

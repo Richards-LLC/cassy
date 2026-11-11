@@ -88,6 +88,21 @@ fn every_registered_refusal_site_emits_its_code() {
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{:?}", result.gaps);
     }
+    // Replay the unmarked worker authority refusal that escaped the original
+    // declaration/bypass inventory, even beside an unrelated registered tag.
+    let policy_dir = source_dir.join("cli");
+    std::fs::create_dir_all(&policy_dir).unwrap();
+    std::fs::remove_file(source_dir.join("probe.rs")).unwrap();
+    for (body, covered) in [
+        (r#"if role == Worker { anyhow::bail!("denied"); }"#, false),
+        (r#"if role == Worker { return Err("denied"); }"#, false),
+        (r#"if role == Worker { return Err(tag("G-01", "denied")); }"#, true),
+    ] {
+        let source = format!("fn probe(role: Role) {{ tag(\"G-01\", \"unrelated\"); {body} }}");
+        std::fs::write(policy_dir.join("gates_cmd.rs"), source).unwrap();
+        let result = gate_audit::scan(fixture.path(), &fixture_registry);
+        assert_eq!(result.gaps.is_empty(), covered, "{body}: {:?}", result.gaps);
+    }
     let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
     let root = crate::test_paths::crate_root().join("..");
     let audit = gate_audit::scan(&root, &registry);

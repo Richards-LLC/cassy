@@ -7,6 +7,93 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.14.0] - 2026-11-11
+
+### Fixed — Violet
+
+- **Keep managed mentions answerable on long threads** — Thread claims now request identity without a full digest. Failed claims after a managed mention record a coded blocker for the owning supervisor, and owner-routed wakes stay with that registration. Artifact and CLI upload paths retain retryable authority failures and named missing-authority refusals.
+- **Reachable post recovery** — Posting permission now includes caller-scoped outcome reconciliation with the same role and delegation restrictions. Request IDs require usable recovery; definitive no-post and pre-dispatch failures keep their original result. Recovery guidance retains the original ID for idempotent retries. Closes #1778.
+
+### Fixed — Commander
+
+- **Worker names open timelines** — Click or tap a worker’s name to open its timeline, replacing the extra Activity pill. Cards and timelines use the same reported state, and timeline task text has no wrapping separator. Closing the timeline returns keyboard focus to the worker’s name.
+- **Only real requests need your answer** — Tasks & progress and Team use unresolved conversation requests with durable request IDs and optional task links. Agent merge and blocked work stays in progress, terminal epics leave navigation, planned and paused work remains visible, and stale peer snapshots are marked last known.
+
+### Fixed — Factory
+
+- **Build overflow asks reach the peer machine** — When local build capacity is full, the staffing ask sent to another machine is now a short brief (task id, title, target, supervisor brief, and clipped description and acceptance criteria) instead of the whole task, so tasks with long notes are no longer refused by Cassy Cloud. A peer message longer than Cloud's 64,000-character limit is now refused before it is queued.
+- **Bound transcript delivery alarms to recent decisions** — Ask/blocker mirrors and answers linked to operator input get one batched alert only after five minutes without a device receipt and before an hour has passed. Old replay copies and informational turns stay quiet, with durable deduplication and outbox retries preserved.
+- **Parallel registry and documentation edits** — Factory merges keep disjoint journey registry entries by ID. Shared-file notices tell workers how to proceed with separate overview, codemap and registry entries without supervisor coordination. Code collisions still request coordination.
+- **Keep clean navigation files switchable** — Factory config projection leaves tracked CODEMAP files visible to Git. Clean legacy skip-worktree metadata is cleared before queued branch switches and during provisioning, while real edits remain protected. Closes #1784.
+- **Review current Commander bundles** — Pre-merge candidates regenerate committed output with the same repository script used for real merges, so reviews run the bundle that will ship. Failed regeneration holds review.
+
+### Added — Commander
+
+- **Quality sheet** — The command palette opens Quality for the selected conversation's project: the rubric that got worse by the largest factor since the last release leads with its trend line, every worker and supervisor rubric follows per merged delivery (per hour in each row's data), releases whose commits touched a skill, guard, `.claude/rules` rule or close/merge gate carry a change marker naming it, a release in any row's data opens the merged deliveries, friction (with links) and supervisor tokens by wake source behind it, and rubrics without a signal yet show whether they await session scoring or the AI judge. Supervisor tokens are broken down by wake source with the previous release's average.
+- **Ledger per supervisor** — `cas ledger report --json` adds `deliveries` and `merged` (distinct tasks whose delivery merged in the window, from the merge record, or unknown when the record does not cover it), `changes` (skills, guards, rules and gates changed between the release tags) and `turns_by_actor` (each supervisor's turns by wake channel), and the hub serves the last five releases plus work in progress read-only at `GET /v1/sessions/{session}/quality`.
+
+### Fixed — Factory delivery
+
+- **Watchdog sender and completion handling** — Delivery retries name the queued sender. A worker-check completion that has reached its worker no longer triggers another watchdog wake. Closes #1782.
+
+### Fixed — Worker Git scope
+
+- **Enforce commit scope inside nested shells** — Worker Git guards inspect plain shell `-c` commands and `eval` with the effective directory. Shells allow optional leading `-l`/`--login` and `--` after `-c`; other invocation forms fail closed. Outside-worktree commits and excessive nesting are refused. Child directory changes stay local; `eval` changes apply to following commands.
+
+### Fixed — Worker task queue
+
+- **Refresh an untouched successor's source branch** — Queued work resumed after a block records its fresh target branch and start base before the first commit, including after a release-train move. Prior deliveries, prepared branches and dirty work remain protected.
+
+### Added — Release
+
+- **Publishing or promoting a release closes it out once** — A cas-src publication (`cas release published`, run by the install-on-publish timer before installing) and a supervisor's staging-to-main promotion PR merge (which starts `cas release promoted --pr <N>` in the background) each run the release's one reconciliation exactly once. `cas release installed` and `cas release backfill` become recovery triggers that do nothing once that operation completes. Each release sends one supervisor notice naming every remaining task, held epic, inventory exception and unfinished issue, with its owner and next action. `cas qa ledger init --release-scope` writes the transformation and epic blocks into the release review ledger it publishes.
+
+### Fixed — Factory coordination
+
+- **Requested worker replies wake the supervisor** — The first settling answer to a supervisor's explicit ask bypasses the hourly wake cap and burst debounce even when `kind` is omitted or set to `status`. Replies to instructions, repeated answers and unsolicited status remain capped; explicit quiet intent stays quiet. Fixes GH #1780 part 1.
+- **Slack claim refusals retain the owner** — When a Slack source belongs to a supervisor registered elsewhere, task creation shows the owning supervisor and the claim refusal. Violet also documents its source status audit error.
+- **New tasks join the next release train** — After a train lands, standalone tasks join its successor while the prior train waits for release reconciliation.
+
+### Added — Release automation
+
+- **Shipped delivery inventory** — Read-only release inventory binds an exact shipped SHA to nested epic deliveries, earlier unclosed structured anchors and portable QA/review proof references, with explicit exceptions for missing evidence.
+
+### Fixed — Hooks
+
+- **Bash scratchpad staging** — Creating the current session's harness scratchpad before writing notes now follows the same workspace allowance as writing its files. Other sessions and bare temporary paths remain blocked. Addresses GH #1780 part 2.
+
+### Fixed — Tasks
+
+- **Derived priority refusals** — Task updates that request a priority conflicting with finding labels now return a typed error explaining the derivation and how to change it. The entire request is refused, so accompanying fields cannot save behind a misleading success response. Fixes #1781.
+
+### Fixed — Test-shape guard
+
+- **Structured command assertions** — Tests can assert executable redirects directly through command or redirect-command fields and accessors without treating them as prose. Assertions on rendered human error wording, including wrappers around command projections, remain refused.
+
+### Fixed — Release close
+
+- **Keep close evidence at the shipped commit** — Release finalization validates the captured delivery cycle and its complete effect against the immutable release, including reviewed view transformations and promoted changelog fragments. Later branch edits cannot change that release decision; missing source and independent holds still refuse close.
+
+### Fixed — Releases
+
+- **Close shipped GitHub fixes at release** — Published-release reconciliation closes issues once every referencing task is closed and shipped, comments with the version and commit, and records partial fixes and GitHub failures in its receipt. Replays skip issues already closed.
+
+### Added — Release completion
+
+- **Durable release closeout** — Record each close result in SQLite under the immutable project, release and shipped commit. Recovery reuses committed outcomes, preserves named exceptions and sync state, and exposes one stable notice intent to publication adapters. Finished epics and trains use ordinary lifecycle gates with explicitly bound independent epic acceptance; missing coverage retains one existing verification request. Task creation and installation no longer mark trains delivered directly.
+
+### Added — Factory
+
+- **Source Slack status reactions** — The owning supervisor reconciles source posts to eyes for acknowledged work, pick while work remains, and a green check only after every related task has closed and its recorded delivery reaches staging or main. Failed updates retain their receipts and retry schedule; `cas violet reactions` shows pending updates, observed mismatches and snapshot freshness. Confirmed terminal sources stop polling until task changes or explicit retry, and background reconciliation runs after mention admission and channel sweeps with one five-second budget.
+
+### Fixed — Violet CLI
+
+- **Trust confirmed thread parts** — `cas violet thread` reconciles success with every posted part, preserves one JSON result, and identifies the rejected root or reply plus any parts already posted when readability checks fail. Closes #1779.
+
+### Doc — Slack guidance
+
+- **Structured Violet posts** — The Violet and Slack-formatting skills now default to the shipped status, release-note thread and decision layouts, with native tables, compact bullets and a readable text fallback.
+
 ## [4.13.0] - 2026-11-10
 
 ### Fixed — QA evidence

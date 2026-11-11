@@ -1815,22 +1815,21 @@ check_registry_upkeep() {
     fi
     # Legacy impact omits modified-file ownership. Strict policy needs --base;
     # use the stricter header at base/HEAD, with local config as fallback.
-    if ! "$cas_bin" config get qa.registry.enforce | python3 -c '
-import subprocess, sys, yaml
-fallback = sys.stdin.read().strip()
-if fallback not in ("off", "observe", "enforce", "strict"):
-    sys.exit(1)
-for revision in (sys.argv[1], "HEAD"):
-    snapshot = subprocess.run(["git", "show", revision + ":docs/qa/journeys.yaml"],
-                              capture_output=True, text=True)
-    registry = yaml.safe_load(snapshot.stdout) or {}
-    if registry.get("enforce", fallback) == "strict":
-        sys.exit(1)
-' "$base"; then
-        printf 'journey-catalog: FAIL: strict registry policy requires a validator with --base support\n'
-        printf 'FIX: set CAS_BIN to a cas supporting qa journeys --check --base, then rerun\n'
-        return 1
-    fi
+    local fallback policy revision
+    fallback="$("$cas_bin" config get qa.registry.enforce)" || return 1
+    case "$fallback" in off|observe|enforce|strict) ;; *) return 1 ;; esac
+    for revision in "$base" HEAD; do
+        policy="$(git show "$revision:docs/qa/journeys.yaml" 2>/dev/null | sed -n 's/^enforce:[[:space:]]*//p')"
+        policy="${policy%%#*}"
+        policy="${policy//[[:space:]]/}"
+        policy="${policy//\"/}"
+        policy="${policy//\'/}"
+        if [[ "${policy:-$fallback}" == strict ]]; then
+            printf 'journey-catalog: FAIL: strict registry policy requires a validator with --base support\n'
+            printf 'FIX: set CAS_BIN to a cas supporting qa journeys --check --base, then rerun\n'
+            return 1
+        fi
+    done
     # Non-strict policy can use the new-file G1/G2 facts from legacy impact.
     "$cas_bin" qa impact "$base" --json | python3 -c '
 import json, sys

@@ -351,14 +351,18 @@ if [ "$1" = scripts/doc-fragments.py ] && [ "$2" = needs-upkeep ]; then
     echo no
     exit 1
 fi
-exec {shlex.quote(sys.executable)} "$@"
+exec {shlex.quote(sys.executable)} -S "$@"
 ''')
         selector.chmod(0o755)
         validator = tools / "cas"
         validator.write_text('''#!/bin/sh
 case "$*" in
-    'qa journeys --help') echo --base ;;
+    'qa journeys --help') [ "${LEGACY_VALIDATOR:-0}" = 1 ] || echo --base ;;
     'qa journeys --check'*) echo "$*" >> .git/validator-calls ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*)
+        echo "$*" >> .git/validator-calls
+        echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
     *) exit 1 ;;
 esac
 ''')
@@ -372,6 +376,12 @@ esac
         self.assertTrue(calls.exists(), result.stdout + result.stderr)
         self.assertEqual(calls.read_text().splitlines(),
                          ["qa journeys --check", "qa journeys --check --base " + self.base])
+        calls.unlink()
+        legacy = self.fast_from(self.base, CAS_BIN=str(validator), LEGACY_VALIDATOR="1",
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa impact " + self.base + " --json"])
 
     def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
         validator = self.repo / ".git" / "legacy-cas"

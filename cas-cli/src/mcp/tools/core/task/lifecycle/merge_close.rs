@@ -204,6 +204,48 @@ fn record_batch_close_outcome(
     Ok(note.into_owned())
 }
 
+/// One recorder-owned action after every member of this receipt has settled.
+/// Full gate details remain on each task; replay cannot create another wake.
+fn queue_batch_close_holds(
+    root: &std::path::Path,
+    receipt: &cas_store::QaBatchReceipt,
+    outcomes: &std::collections::BTreeMap<String, CassyMergeClose>,
+) -> Result<(), String> {
+    if crate::release_reconcile::active() { return Ok(()); }
+    #[derive(serde::Serialize)]
+    struct Hold<'a> { task_id: &'a str, reason: &'a str, next_action: String }
+    let mut groups = std::collections::BTreeMap::<String, Vec<Hold<'_>>>::new();
+    for (id, outcome) in outcomes {
+        let CassyMergeClose::Held(reason) = outcome else { continue; };
+        let heading = reason.lines().find(|line| !line.trim().is_empty()).unwrap_or("OTHER");
+        let kind = heading.split_once(':').map_or(heading, |(kind, _)| kind)
+            .trim_start_matches(|c: char| !c.is_ascii_alphanumeric()).trim();
+        let action = format!("task action=close id={id} commit_receipt={} reason=\"<gate proof>\"", receipt.task_heads[id]);
+        groups.entry(kind.to_string()).or_default().push(Hold { task_id: id, reason, next_action: action });
+    }
+    if groups.is_empty() { return Ok(()); }
+    let closed = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::Closed { .. })).count();
+    let already = outcomes.values().filter(|outcome| matches!(outcome, CassyMergeClose::AlreadyClosed)).count();
+    let held: usize = groups.values().map(Vec::len).sum();
+    let mut detail = format!("Receipt {} at {}: {closed} closed, {already} already closed, {held} held.\n", receipt.id, receipt.staging_sha);
+    for (kind, members) in &groups {
+        detail.push_str(&format!("\n{kind} ({}):\n", members.len()));
+        for member in members {
+            detail.push_str(&format!("- {}: {}\nSupervisor action: resolve this gate, then {}.\n",
+                member.task_id, member.reason, member.next_action));
+        }
+    }
+    detail.push_str("\nPer-member details are retained in task notes. No worker re-close is required.");
+    let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+        .list(None).map_err(|error| error.to_string())?;
+    let recipient = crate::supervisor_notices::resolve(&agents, Some(&receipt.recorder_agent_id), None);
+    crate::supervisor_notices::enqueue_keyed(root, &recipient, "batch_close_hold", &detail,
+        &format!("supervisor-notice:batch_close_hold:{}", receipt.id),
+        Some(serde_json::json!({"receipt_id": receipt.id, "closed_count": closed,
+            "already_closed_count": already, "held_by_kind": groups})))
+        .map_err(|error| error.to_string())
+}
+
 /// The shared, delivery-bound return path for synchronous close and durable QA decisions.
 pub(crate) fn return_merged_delivery_for_source_fix(
     cas_root: &std::path::Path, actor: &str, task: &Task,
@@ -686,7 +728,6 @@ impl CasCore {
                 }
             };
             let mut hold = |reason: &str| {
-                use sha2::Digest;
                 let detail = format!(
                     "Receipt {} covers {task_id} at {}. Ordinary finalization is held:\n{reason}\n\n\
                      Supervisor action: resolve the gate above, then retry ordinary close with \
@@ -695,26 +736,7 @@ impl CasCore {
                     receipt.id, receipt.staging_sha, receipt.task_heads[task_id],
                 );
                 record(&detail);
-                // A retired implementer cannot relay this hold. Address the
-                // recorder (or its live successor/operator) directly, using
-                // the existing idempotent supervisor outbox and wake class.
-                let notice = (|| -> Result<(), String> {
-                    if crate::release_reconcile::active() { return Ok(()); }
-                    let agents = crate::store::open_agent_store(&self.cas_root)
-                        .map_err(|error| error.to_string())?.list(None).map_err(|error| error.to_string())?;
-                    let recipient = crate::supervisor_notices::resolve(
-                        &agents, Some(&receipt.recorder_agent_id), None,
-                    );
-                    let occurrence = format!("{task_id}:{}:{:x}", receipt.task_heads[task_id], sha2::Sha256::digest(reason.as_bytes()));
-                    crate::supervisor_notices::enqueue(
-                        &self.cas_root, &recipient, "batch_close_hold", &detail, &occurrence,
-                    ).map_err(|error| error.to_string())
-                })();
-                let mut reason = reason.to_string();
-                if let Err(error) = notice {
-                    reason.push_str(&format!("; supervisor notice not queued: {error}"));
-                }
-                outcomes.insert(task_id.clone(), CassyMergeClose::Held(reason));
+                outcomes.insert(task_id.clone(), CassyMergeClose::Held(reason.to_string()));
             };
             let task = match store.get(task_id) {
                 Ok(task) => task,
@@ -808,6 +830,13 @@ impl CasCore {
                 )),
                 CassyMergeClose::NotEligible => {
                     hold("not parked, or merged under a CI override; it needs its own close")
+                }
+            }
+        }
+        if let Err(error) = queue_batch_close_holds(&self.cas_root, receipt, &outcomes) {
+            for outcome in outcomes.values_mut() {
+                if let CassyMergeClose::Held(reason) = outcome {
+                    reason.push_str(&format!("; supervisor notice not queued: {error}"));
                 }
             }
         }

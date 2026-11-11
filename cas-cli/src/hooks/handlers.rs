@@ -288,7 +288,7 @@ pub(crate) use handlers_session::{
 pub use handlers_session::{generate_session_title_sync, handle_session_end, handle_session_start};
 pub(crate) use handlers_state::{
     cleanup_agent_leases, cleanup_agent_leases_for_end, cleanup_orphaned_tasks, clear_session_files,
-    current_agent_id,
+    current_agent_id, owns_native_subagent,
     detect_significant_activity, extract_activity_entity_id, get_exit_blockers, session_handoff,
     track_session_file,
 };

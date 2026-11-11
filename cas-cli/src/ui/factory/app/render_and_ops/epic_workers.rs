@@ -8076,6 +8076,93 @@ mod tests {
         }
     }
 
+    /// Replay a start that finishes while recycle is stopping the old pane.
+    /// Releasing its lease before SIGTERM lets that in-flight call reclaim it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recycle_releases_late_start_lease_before_replacement_starts_cas_625c() {
+        use crate::mcp::{CasCore, tools::types::IdRequest};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir(&project).unwrap();
+        env.set_current_dir(&project);
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        let agents = open_agent_store(&root).unwrap();
+        let old = cas_types::Agent::new_with_role(
+            "old-session".into(), "recycled-worker".into(), cas_types::AgentRole::Worker,
+        );
+        agents.register(&old).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let task = task_with("cas-625c", Some(&old.name), TaskStatus::Open);
+        tasks.add(&task).unwrap();
+        let core = |id: &str| {
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(id.into());
+            core
+        };
+        let old_core = core(&old.id);
+        let start = || Parameters(IdRequest { id: task.id.clone() });
+        old_core.cas_task_start(start()).await.unwrap();
+
+        // The PTY acknowledges that SIGTERM was delivered, then waits for the
+        // in-flight MCP call to finish before it exits. No timing-based race.
+        let socket = root.join("stop.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let pty = cas_mux::Pty::spawn(&old.name, cas_mux::PtyConfig {
+            command: "python3".into(),
+            args: vec!["-c".into(), r#"
+import signal, socket, sys
+def connect():
+    stream = socket.socket(socket.AF_UNIX)
+    stream.connect(sys.argv[1])
+    return stream
+def stop(*_):
+    with connect() as stream:
+        stream.recv(1)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+connect().close()
+while True:
+    signal.pause()
+"#.into(), socket.display().to_string()],
+            cwd: Some(project), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let mut app = FactoryApp::for_test_at(root.clone());
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            &old.name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+            .await.unwrap().unwrap();
+        let late_start = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = old_core.cas_task_start(start()).await;
+            stream.writable().await.unwrap();
+            stream.try_write(&[1]).unwrap();
+            result.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (stopped, ()) = tokio::join!(
+                app.shutdown_worker_for_recycle(&old.name), late_start,
+            );
+            stopped.unwrap();
+        }).await.unwrap();
+        app.join_worker_worktree_cleanups();
+
+        let replacement = cas_types::Agent::new_with_role(
+            "new-session".into(), old.name.clone(), cas_types::AgentRole::Worker,
+        );
+        agents.register(&replacement).unwrap();
+        core(&replacement.id).cas_task_start(start()).await
+            .expect("the replacement must start without a manual lease release");
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, replacement.id);
+        let resumed = tasks.get(&task.id).unwrap();
+        assert_eq!(resumed.status, TaskStatus::InProgress);
+        assert_eq!(resumed.assignee.as_deref(), Some(old.name.as_str()));
+    }
+
     #[test]
     fn recycle_retirement_preserves_reassigned_snapshot_cas_35af() {
         let (_temp, cas_dir) = seeded_cas_dir();

@@ -618,7 +618,7 @@ pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::Publishe
 
 /// Recorded verdicts already validated their ledger and author. Publication
 /// consumes that immutable fact and never grants approval by itself.
-fn approved_at(root: &Path, task: &Task, anchor: &str, receipts: &[QaBatchReceipt]) -> Result<bool, String> {
+fn approved_at(root: &Path, repo: &Path, task: &Task, anchor: &str, published: &str, receipts: &[QaBatchReceipt]) -> Result<bool, String> {
     use rusqlite::OptionalExtension;
     let conn = read_connection(root)?;
     if conn.table_exists(None, "verification_dispatches").map_err(|e| e.to_string())? {
@@ -632,8 +632,21 @@ fn approved_at(root: &Path, task: &Task, anchor: &str, receipts: &[QaBatchReceip
                 "SELECT status FROM verifications WHERE dispatch_id=? AND task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
                 rusqlite::params![dispatch.id, task.id], |row| row.get(0),
             ).optional().map_err(|e| e.to_string())?;
-            if dispatch.state == cas_types::VerificationDispatchState::Resolved && head_matches && status.as_deref() == Some("approved") {
-                return Ok(true);
+            if dispatch.state == cas_types::VerificationDispatchState::Resolved && status.as_deref() == Some("approved") {
+                if head_matches { return Ok(true); }
+                // Local premerge verdicts review a synthetic commit. Its
+                // immutable manifest binds the delivery source and tree;
+                // only a reviewed tree in the published history grants close.
+                if let Some(candidate) = crate::mcp::tools::core::workflow::premerge_verification::candidate_for_dispatch(root, &dispatch)?
+                    && candidate.source_sha == anchor
+                {
+                    let trees = Command::new("git").current_dir(repo)
+                        .args(["log", "--format=%T", published, "--"])
+                        .output().map_err(|e| e.to_string())?;
+                    if trees.status.success() && String::from_utf8_lossy(&trees.stdout).lines().any(|tree| tree == candidate.tree) {
+                        return Ok(true);
+                    }
+                }
             }
         }
     }
@@ -689,7 +702,7 @@ pub(crate) fn reconcile_members(
                 if ancestor(repo, anchor, &inventory.scope.final_release_sha) != Some(true) {
                     return Err("RELEASE_ANCHOR_NOT_SHIPPED".into());
                 }
-                approved &= tier_zero || approved_at(root, &task, anchor, &receipts)?;
+                approved &= tier_zero || approved_at(root, repo, &task, anchor, &inventory.scope.final_release_sha, &receipts)?;
             }
             if !approved { return Err("REVIEW_MISSING".into()); }
             if write {

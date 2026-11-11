@@ -38,7 +38,7 @@ fn published_train_closes_members_independently_cas_734b() {
     train.task_type = cas_types::TaskType::Epic;
     train.status = TaskStatus::Closed;
     tasks.add(&train).unwrap();
-    for id in ["cas-approved", "cas-candidate", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"] {
+    for id in ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"] {
         let mut task = Task::new(id.into(), id.into());
         task.origin_project = Some("close-fixture".into());
         task.status = if id == "cas-closed" { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
@@ -100,30 +100,40 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
     // cas-0d3f: a local premerge verdict binds a synthetic commit, with the
     // delivery's source and reviewed tree in its immutable candidate manifest.
-    let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&(
-        "premerge-v1", "cas-candidate", &repo, "factory/cas-candidate", &anchor,
-        "main", &base, "fixture-context",
-    )).unwrap()));
     let tree = git(&["rev-parse", &format!("{anchor}^{{tree}}")]);
-    let synthetic = git(&["commit-tree", &tree, "-p", &base, "-m", &format!("CAS_PREMERGE_CANDIDATE_V1 {key}")]);
-    let candidate_proof = cas_types::RepositoryProofBoundary {
-        peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
-        head_commit: synthetic, state_digest: "fixture-digest".into(), target_branch: None, anchor_commits: vec![],
-    };
-    let candidate = crate::mcp::tools::core::workflow::premerge_verification::Candidate {
-        cas_root: root.clone(), task_id: "cas-candidate".into(), repository: repo.clone(),
-        source_branch: "factory/cas-candidate".into(), source_sha: anchor.clone(),
-        target_branch: "main".into(), target_sha: base.clone(), tree,
-        context_digest: "fixture-context".into(), proof: candidate_proof.clone(),
-        preparation_ms: 0, inherited_supervisor_call: None,
-    };
-    let manifest = root.join("verification-candidates").join(key).join("candidate.json");
-    std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
-    std::fs::write(&manifest, serde_json::to_vec(&candidate).unwrap()).unwrap();
-    let candidate_dispatch = cas_store::create_verification_dispatch_bound(&root, "cas-candidate", "worker", "supervisor",
-        &cas_types::VerificationProofBoundary::task_at(candidate_proof), chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
-    conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&candidate_dispatch.id]).unwrap();
-    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-candidate','cas-candidate','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), candidate_dispatch.id]).unwrap();
+    std::fs::write(repo.join("app.rs"), "fn never_shipped() {}\n").unwrap();
+    git(&["add", "app.rs"]);
+    let unshipped_tree = git(&["write-tree"]);
+    git(&["reset", "--hard", &published]);
+    for (id, source, tree) in [
+        ("cas-candidate", &anchor, &tree),
+        ("cas-unshipped", &anchor, &unshipped_tree),
+        ("cas-other-source", &base, &tree),
+    ] {
+        let key = format!("{:x}", Sha256::digest(serde_json::to_vec(&(
+            "premerge-v1", id, &repo, "factory/cas-candidate", source,
+            "main", &base, "fixture-context",
+        )).unwrap()));
+        let synthetic = git(&["commit-tree", &tree, "-p", &base, "-m", &format!("CAS_PREMERGE_CANDIDATE_V1 {key}")]);
+        let candidate_proof = cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
+            head_commit: synthetic, state_digest: "fixture-digest".into(), target_branch: None, anchor_commits: vec![],
+        };
+        let candidate = crate::mcp::tools::core::workflow::premerge_verification::Candidate {
+            cas_root: root.clone(), task_id: id.into(), repository: repo.clone(),
+            source_branch: "factory/cas-candidate".into(), source_sha: source.clone(),
+            target_branch: "main".into(), target_sha: base.clone(), tree: tree.clone(),
+            context_digest: "fixture-context".into(), proof: candidate_proof.clone(),
+            preparation_ms: 0, inherited_supervisor_call: None,
+        };
+        let manifest = root.join("verification-candidates").join(key).join("candidate.json");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(&manifest, serde_json::to_vec(&candidate).unwrap()).unwrap();
+        let candidate_dispatch = cas_store::create_verification_dispatch_bound(&root, id, "worker", "supervisor",
+            &cas_types::VerificationProofBoundary::task_at(candidate_proof), chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+        conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&candidate_dispatch.id]).unwrap();
+        conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES (?1,?2,'reviewer','task','approved','pass','[]',?3,?4)", rusqlite::params![format!("ver-{id}"), id, chrono::Utc::now().to_rfc3339(), candidate_dispatch.id]).unwrap();
+    }
     // A different head with no source binding must never approve this member.
     let mut unrelated = bound.clone();
     unrelated.head_commit = base.clone();
@@ -136,7 +146,7 @@ fn published_train_closes_members_independently_cas_734b() {
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
         release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
         promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],
-        included_task_ids: ["cas-approved", "cas-candidate", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
+        included_task_ids: ["cas-approved", "cas-candidate", "cas-unshipped", "cas-other-source", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
     // A preview must leave the store, artifact cache and operation directory
     // byte-for-byte unchanged. SQLite's transient reader locks live in -shm.
@@ -182,8 +192,10 @@ fn published_train_closes_members_independently_cas_734b() {
     }
     assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::AlreadyClosed)));
     assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
-    assert_eq!(result.residuals.len(), 1);
-    assert_eq!(result.residuals[0].task_id, "cas-unreviewed");
+    for id in ["cas-unshipped", "cas-other-source"] {
+        assert!(matches!(result.members.get(id), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+    }
+    assert_eq!(result.residuals.len(), 3);
     for id in &scope.included_task_ids {
         let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
         assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
@@ -192,7 +204,7 @@ fn published_train_closes_members_independently_cas_734b() {
     // an already-closed member's historical exception cannot hold the train.
     let mut later = receipt;
     later.id = "qab-later".into();
-    later.task_heads = BTreeMap::from([("cas-unreviewed".into(), anchor)]);
+    later.task_heads = ["cas-unreviewed", "cas-unshipped", "cas-other-source"].map(|id| (id.into(), anchor.clone())).into();
     cas_store::import_qa_batch_receipt(&root, &later).unwrap();
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     let complete = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,

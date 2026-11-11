@@ -64,9 +64,9 @@ const OPERATOR_LANE_EXCLUSION: &str =
     "lower(target) <> 'operator' AND lower(target) NOT LIKE 'commander:%'";
 // An actual selection starts the operator lane's own deadline. Never-selected
 // offline mail is deliberately outside it, as are successful device receipts.
-const UNATTEMPTED_OPERATOR_SELECTION: &str =
+const PENDING_OPERATOR_SELECTION: &str =
     "(lower(target) = 'operator' OR lower(target) LIKE 'commander:%')
-     AND selected_at IS NOT NULL AND delivery_attempts = 0
+     AND selected_at IS NOT NULL
      AND transport_delivered_at IS NULL AND acked_at IS NULL";
 // Completed supervisor transcript copies already exist in the local pane.
 // Expiring their queue replay never removes the independent delivery snapshot.
@@ -3694,10 +3694,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// Record that the daemon selected/peeked this message for a delivery attempt.
     fn record_selected(&self, prompt_id: i64) -> Result<()>;
 
-    /// Return a selected operator reply to the delivery queue after its client
-    /// disappears. No transport attempt is spent; first selection stays the
-    /// deadline anchor and the retry survives a daemon restart.
-    fn defer_operator_reply(&self, prompt_id: i64, retry_at: DateTime<Utc>) -> Result<()>;
+    /// Save the next operator-reply retry, counting an attempt only when the
+    /// daemon forwarded it to a connected transport. First selection stays the
+    /// deadline anchor, and the retry survives a daemon restart.
+    fn retry_operator_reply(&self, prompt_id: i64, retry_at: DateTime<Utc>, attempted: bool) -> Result<()>;
 
     /// Record a durable pending reason; advances highest_stage monotonically.
     fn record_pending_reason(
@@ -6228,8 +6228,7 @@ impl SqlitePromptQueueStore {
                AND (next_attempt_at IS NULL OR julianday(next_attempt_at) <= julianday(?3))
                AND (selected_at IS NULL OR next_attempt_at IS NOT NULL
                     OR julianday(selected_at) < julianday(?3, '-1 second'))
-               AND (delivery_attempts > 0 OR selected_at IS NULL
-                    OR julianday(selected_at) > julianday(?4))
+               AND (selected_at IS NULL OR julianday(selected_at) > julianday(?4))
              ORDER BY priority ASC, id ASC
              LIMIT ?2",
         )?;
@@ -6255,7 +6254,7 @@ impl SqlitePromptQueueStore {
                     "SELECT EXISTS(SELECT 1 FROM prompt_queue
                       WHERE processed_at IS NULL AND (
                         (created_at < ?1 AND ({OPERATOR_LANE_EXCLUSION} OR ({TRANSCRIPT_MIRROR})))
-                        OR ({UNATTEMPTED_OPERATOR_SELECTION} AND julianday(selected_at) <= julianday(?2))))"
+                        OR ({PENDING_OPERATOR_SELECTION} AND julianday(selected_at) <= julianday(?2))))"
                 ),
                 params![cutoff, selection_cutoff],
                 |row| row.get(0),
@@ -6266,15 +6265,15 @@ impl SqlitePromptQueueStore {
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
             let now = sweep_at.to_rfc3339();
 
-            // A selector can disappear before spending even one transport
-            // attempt. Its first selection still bounds the wait; returning it
-            // for a client reconnect does not extend that deadline. Settle and
+            // First selection bounds the wait for a device receipt, including
+            // when a selector disappears or a forwarded reply goes unreceived.
+            // Neither forwarding nor a reconnect extends that deadline. Settle and
             // notify in this transaction, before mirror alarms or retirement.
             let operator_expired: Vec<QueuedPrompt> = {
                 let mut stmt = tx.prepare_cached(&format!(
                     "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
                      FROM prompt_queue WHERE processed_at IS NULL
-                       AND {UNATTEMPTED_OPERATOR_SELECTION}
+                       AND {PENDING_OPERATOR_SELECTION}
                        AND julianday(selected_at) <= julianday(?) ORDER BY id"
                 ))?;
                 stmt.query_map(params![selection_cutoff], Self::prompt_from_row)?
@@ -9919,7 +9918,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
-    fn defer_operator_reply(&self, prompt_id: i64, retry_at: DateTime<Utc>) -> Result<()> {
+    fn retry_operator_reply(&self, prompt_id: i64, retry_at: DateTime<Utc>, attempted: bool) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
@@ -9929,12 +9928,24 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                    AND processed_at IS NULL AND acked_at IS NULL)",
                 params![prompt_id], |row| row.get(0),
             )?;
-            if !pending { return Ok(()); }
-            Self::atomic_stage_stamp_in_tx(
-                &tx, prompt_id, DeliveryStage::Gated,
-                AtomicStampOpts::reason(PendingReason::GatedNotReady,
-                    Some("Commander disconnected after selection; waiting to retry")),
-            )?;
+            // The device receipt can beat this asynchronous handoff stamp.
+            // Count the spent attempt without reopening a settled row.
+            if attempted {
+                tx.execute(
+                    "UPDATE prompt_queue SET delivery_attempts = delivery_attempts + 1,
+                        first_attempt_at = COALESCE(first_attempt_at, ?)
+                     WHERE id = ? AND lower(target) = 'operator' AND selected_at IS NOT NULL",
+                    params![Utc::now().to_rfc3339(), prompt_id],
+                )?;
+            }
+            if !pending { tx.commit()?; return Ok(()); }
+            let (reason, detail) = if attempted {
+                (PendingReason::AwaitingDelivery, "forwarded to Commander; waiting for a device receipt")
+            } else {
+                (PendingReason::GatedNotReady, "Commander disconnected after selection; waiting to retry")
+            };
+            Self::atomic_stage_stamp_in_tx(&tx, prompt_id, reason.implied_stage(),
+                AtomicStampOpts::reason(reason, Some(detail)))?;
             tx.execute(
                 "UPDATE prompt_queue SET next_attempt_at = ? WHERE id = ?",
                 params![retry_at.to_rfc3339(), prompt_id],
@@ -20849,7 +20860,7 @@ mod tests {
     fn selected_operator_without_clients_expires_once_cas_1962() {
         // Mirrors and explicit replies share the real selection/retry path.
         for mirror in [false, true] {
-            for state in ["selector_lost", "returned", "reconnected", "never_selected"] {
+            for state in ["selector_lost", "returned", "reconnected", "forwarded", "never_selected"] {
                 let (temp, selector) = create_test_store();
                 let id = selector.record_operator_turn(&OperatorTurn {
                     source: "supervisor", target: "operator", prompt: "reply body",
@@ -20864,24 +20875,25 @@ mod tests {
                 if state != "never_selected" { selector.record_selected(id).unwrap(); }
                 let selected = selector.message_delivery_report(id).unwrap().unwrap().selected_at;
                 let retry_at = start + chrono::Duration::seconds(2);
-                if matches!(state, "returned" | "reconnected") {
-                    selector.defer_operator_reply(id, retry_at).unwrap();
+                let attempted = state == "forwarded";
+                if matches!(state, "returned" | "reconnected" | "forwarded") {
+                    selector.retry_operator_reply(id, retry_at, attempted).unwrap();
                     assert!(selector.peek_operator_replies_at("factory-a", 10, start).unwrap().is_empty());
                 }
                 // Drop the selecting owner; no daemon-local retry state survives.
                 drop(selector);
                 let recovered = SqlitePromptQueueStore::open(temp.path()).unwrap();
-                if matches!(state, "returned" | "reconnected") {
+                if matches!(state, "returned" | "reconnected" | "forwarded") {
                     let report = recovered.message_delivery_report(id).unwrap().unwrap();
-                    assert_eq!(report.stage, DeliveryStage::Gated);
+                    assert_eq!(report.stage, if attempted { DeliveryStage::Selected } else { DeliveryStage::Gated });
                     assert_eq!(report.retry.next_attempt_at, Some(retry_at));
                     assert_eq!(report.selected_at, selected);
-                    assert_eq!(report.retry.delivery_attempts, 0);
+                    assert_eq!(report.retry.delivery_attempts, u32::from(attempted));
                     let first_attempt: Option<String> = recovered.conn.lock().unwrap().query_row(
                         "SELECT first_attempt_at FROM prompt_queue WHERE id = ?",
                         params![id], |row| row.get(0),
                     ).unwrap();
-                    assert!(first_attempt.is_none());
+                    assert_eq!(first_attempt.is_some(), attempted);
                 }
                 if state == "reconnected" {
                     let rows = recovered.peek_operator_replies_at("factory-a", 10, retry_at).unwrap();
@@ -20889,19 +20901,19 @@ mod tests {
                     recovered.record_selected(id).unwrap();
                     recovered.mark_transport_delivered(id).unwrap();
                     // A late return stamp cannot undo a successful receipt.
-                    recovered.defer_operator_reply(id, retry_at).unwrap();
+                    recovered.retry_operator_reply(id, retry_at, true).unwrap();
                     assert!(recovered.peek_operator_replies_at("factory-a", 10, retry_at).unwrap().is_empty());
                 }
                 let after_deadline = selected.unwrap_or(start)
                     + chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1);
                 recovered.expire_stale_pending_at(PROMPT_QUEUE_STALE_TTL_SECS, after_deadline).unwrap();
-                let failed = matches!(state, "selector_lost" | "returned");
+                let failed = matches!(state, "selector_lost" | "returned" | "forwarded");
                 let report = recovered.message_delivery_report(id).unwrap().unwrap();
                 assert_eq!(report.stage, if failed { DeliveryStage::Abandoned }
                     else if state == "reconnected" { DeliveryStage::Delivered } else { DeliveryStage::Enqueued }, "{mirror}/{state}");
                 if failed {
                     assert_eq!(report.pending_reason, Some(PendingReason::OperatorDeliveryExpired));
-                    assert_eq!(report.retry.delivery_attempts, 0);
+                    assert_eq!(report.retry.delivery_attempts, u32::from(attempted));
                     assert!(report.retry.next_attempt_at.is_none());
                 }
                 let notices = || recovered.peek_for_targets(&["supervisor"], Some("factory-a"), 50).unwrap();

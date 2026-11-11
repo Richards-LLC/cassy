@@ -51,10 +51,10 @@ impl SqlitePromptQueueStore {
                 params![prompt_id, factory_session, device_id, Utc::now().to_rfc3339()],
             )?;
             // Every authenticated viewer can store a reply. Only its addressee
-            // (or one viewer of a legacy broadcast) closes the delivery lane.
+            // (or one viewer of an unaddressed/"*" broadcast) closes the delivery lane.
             // Other devices replay durable history, with independent receipts.
             let closes = processed_at.is_none()
-                && recipient.as_deref().is_none_or(|recipient| recipient == device_id);
+                && recipient.as_deref().is_none_or(|recipient| recipient == "*" || recipient == device_id);
             if closes {
                 Self::atomic_stage_stamp_in_tx(
                     &tx,

@@ -8044,8 +8044,9 @@ impl FactoryDaemon {
             for reply in replies {
                 self.queue_jobs.stamp(
                     self.app.cas_dir(), reply.queued.id, "operator",
-                    super::prompt_queue_jobs::QueueStamp::OperatorReplyDeferred {
+                    super::prompt_queue_jobs::QueueStamp::OperatorReplyRetry {
                         retry_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+                        attempted: false,
                     },
                 );
             }
@@ -8095,6 +8096,13 @@ impl FactoryDaemon {
                 task_id: payload.task_id,
             };
             self.ws_broadcast(&reply);
+            self.queue_jobs.stamp(
+                self.app.cas_dir(), queued.id, "operator",
+                super::prompt_queue_jobs::QueueStamp::OperatorReplyRetry {
+                    retry_at: chrono::Utc::now() + chrono::Duration::seconds(delay.as_secs() as i64),
+                    attempted: true,
+                },
+            );
             tracing::info!(
                 target: "cas::coordination",
                 stage = "operator_reply_forwarded",
@@ -14245,6 +14253,9 @@ mod tests {
         daemon.flush_ws_client_output().await;
         assert!(client.next().await.unwrap().unwrap().is_binary());
         assert_eq!(log_count(), 1);
+        let forwarded = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(forwarded.retry.delivery_attempts, 1);
+        assert!(forwarded.retry.next_attempt_at.is_some());
         // Independently specified intervals, including repeated capped retries.
         let mut attempts = 1;
         for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
@@ -14377,10 +14388,18 @@ mod tests {
                 .processed_at
                 .is_some()
         );
-        daemon.handle_ws_message(0, crate::ui::factory::ClientMessage::OperatorReplyPersisted {
-            notification_id: id,
-            device_id: "paired-device".into(),
-        }).await;
+        // A receipt must survive the daemon pass spending its SQLite budget.
+        let writer = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let _spent = cas_store::wait_budget::bound_waits_for(Duration::ZERO);
+            daemon.handle_ws_message(0, crate::ui::factory::ClientMessage::OperatorReplyPersisted {
+                notification_id: id,
+                device_id: "paired-device".into(),
+            }).await;
+        }
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(super::super::store_worker::global().wait_idle(Duration::from_secs(5)));
         assert!(
             queue
                 .queued_prompt(id)

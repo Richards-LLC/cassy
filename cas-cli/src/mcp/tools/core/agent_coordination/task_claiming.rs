@@ -1279,7 +1279,7 @@ impl CasCore {
         if let Some(adoption) = &adoption {
             task.deliverables.record_handoff_branch(&adoption.source_branch);
             task.deliverables.parked_branch = Some(adoption.branch.clone());
-            task.deliverables.factory_branch_anchor = Some(adoption.tip.clone());
+            task.deliverables.mint_or_append(&adoption.tip);
             task.notes.push_str(&format!(
                 "\n[{timestamp}] BRANCH ADOPTED: {} -> {} at {} by {agent_id}",
                 adoption.source_branch, adoption.branch, adoption.tip,

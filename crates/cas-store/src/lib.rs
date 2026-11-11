@@ -52,6 +52,7 @@ mod code_vector_store;
 mod commit_link_store;
 pub mod communication_slo;
 mod delegation_receipt_store;
+mod delivery_cycle;
 mod delivery_store;
 mod entity_store;
 mod epic_split_store;
@@ -148,7 +149,12 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use delivery_cycle::{
+    DELIVERY_CYCLE_SCHEMA, DeliveryCycle, current_delivery_cycle, current_delivery_cycle_with_conn,
+    delivery_cycle_id, delivery_cycles,
+};
 pub use delivery_store::{
+    build_worker_completion_receipt_in_cycle,
     DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
     create_worker_delivery, create_worker_delivery_with_dispatch,
     create_worker_delivery_with_dispatch_for_lease, create_worker_delivery_with_dispatch_for_lease_at_repository, get_latest_worker_delivery,

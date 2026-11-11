@@ -360,12 +360,16 @@ impl SqliteTaskStore {
             // its next edit.
             let persisted_origin_project = task.origin_project.as_ref();
 
-            let prior: Option<(String, String)> = tx.query_row(
-                "SELECT notes, updated_at FROM tasks WHERE id = ?1",
+            let prior: Option<(String, String, Option<String>, Option<String>)> = tx.query_row(
+                "SELECT notes, updated_at,
+                        CASE WHEN json_valid(deliverables) AND json_type(deliverables) = 'object'
+                             THEN json_extract(deliverables, '$.factory_branch_anchor') END,
+                        origin_project
+                 FROM tasks WHERE id = ?1",
                 params![task.id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             ).optional()?;
-            let prior_notes = prior.as_ref().map(|(notes, _)| notes.as_str());
+            let prior_notes = prior.as_ref().map(|(notes, ..)| notes.as_str());
             let mut safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, prior_notes);
             // cas-3045: a start/spawn writer can hold a Task while another
             // writer successfully appends notes. Preserve that timeline inside
@@ -373,7 +377,7 @@ impl SqliteTaskStore {
             // any differing clock requires reconciliation, not just an older one.
             // Fresh edits and guarded/sync writes retain replacement semantics.
             if !from_sync && expected.is_none()
-                && let Some((notes, clock)) = prior.as_ref()
+                && let Some((notes, clock, ..)) = prior.as_ref()
                 && Self::parse_datetime(clock) != Some(task.updated_at)
                 && !crate::task_note_markers::contains_complete_lines(&safe_notes, notes)
             {
@@ -437,6 +441,35 @@ impl SqliteTaskStore {
         )?;
             if rows == 0 {
                 return Err(StoreError::TaskNotFound(task.id.clone()));
+            }
+            if !from_sync {
+                // cas-50b2: every anchor write mints or appends its delivery
+                // cycle in this transaction; a reopen ends the cycle first.
+                if reopening_terminal {
+                    crate::delivery_cycle::end_delivery_cycle_with_conn(&tx, &task.id, now)?;
+                }
+                let (prior_anchor, prior_project) = prior
+                    .as_ref()
+                    .map(|(_, _, anchor, project)| (anchor.as_deref(), project.as_deref()))
+                    .unwrap_or_default();
+                if let Some(anchor) = persisted_deliverables.factory_branch_anchor.as_deref()
+                    && !anchor.trim().is_empty()
+                    && prior_anchor != Some(anchor)
+                {
+                    let project = task.origin_project.as_deref()
+                        .or(prior_project)
+                        .or(self.origin_project.as_deref())
+                        .unwrap_or_default();
+                    crate::delivery_cycle::mint_or_append_with_conn(
+                        &tx,
+                        project,
+                        &task.id,
+                        anchor,
+                        persisted_deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+                        &serde_json::to_string(&persisted_deliverables.authorized_merge_sources)?,
+                        now,
+                    )?;
+                }
             }
 
             // Emit status change events only when status actually changed
@@ -698,6 +731,9 @@ impl SqliteTaskStore {
             return Err(StoreError::Parse(
                 "exact task reopen raced with another task mutation".to_string(),
             ));
+        }
+        if matches!(expected_status, TaskStatus::Closed | TaskStatus::Cancelled) && !task.is_terminal() {
+            crate::delivery_cycle::end_delivery_cycle_with_conn(conn, &task.id, task.updated_at)?;
         }
         Ok(())
     }

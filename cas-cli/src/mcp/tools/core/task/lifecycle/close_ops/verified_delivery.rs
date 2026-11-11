@@ -393,7 +393,7 @@ impl CasCore {
                 .record_park(Some(&branch), Some(head), Some(assignee));
             if next.deliverables.factory_branch_anchor.as_deref() != Some(head) {
                 next.deliverables.retain_factory_branch_anchor_as_history();
-                next.deliverables.factory_branch_anchor = Some(head.clone());
+                next.deliverables.mint_or_append(head);
             }
             next.notes.push_str(&format!(
                 "\n\n[{}] Reviewed correction: dispatch {} approved {head}; delivery now follows measured ref {pushed}, replacing merged anchor {previous}. Preservation refs were not pushed.",

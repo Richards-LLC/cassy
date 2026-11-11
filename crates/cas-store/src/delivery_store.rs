@@ -351,6 +351,18 @@ pub fn build_worker_completion_receipt(
     worker_name: &str,
     created_at: DateTime<Utc>,
 ) -> WorkerCompletionReceipt {
+    build_worker_completion_receipt_in_cycle(input, worker_name, created_at, 1)
+}
+
+/// cas-50b2: the receipt id hashes the task's delivery cycle, so two cycles
+/// parking the same commit get distinct receipts. Cycle 1 keeps the legacy id.
+pub fn build_worker_completion_receipt_in_cycle(
+    input: &WorkerCompletionReceiptInput,
+    worker_name: &str,
+    created_at: DateTime<Utc>,
+    cycle: u32,
+) -> WorkerCompletionReceipt {
+    let cycle = (cycle > 1).then(|| format!("cycle:{cycle}"));
     let mut parts = vec![
         &input.task_id,
         &input.worker_agent_id,
@@ -370,6 +382,7 @@ pub fn build_worker_completion_receipt(
     if let Some(path) = input.artifact_path.as_deref() {
         parts.push(path);
     }
+    parts.extend(cycle.as_deref());
     let hash = digest(&parts);
     WorkerCompletionReceipt {
         id: format!("wcr-{}", &hash[..24]),

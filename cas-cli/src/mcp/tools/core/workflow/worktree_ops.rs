@@ -5793,7 +5793,7 @@ impl CasCore {
                         let mut next = current.clone();
                         next.status = cas_types::TaskStatus::AwaitingMerge;
                         next.pending_worktree_merge = true;
-                        next.deliverables.factory_branch_anchor = Some(source.clone());
+                        next.deliverables.mint_or_append(&source);
                         next.deliverables.parked_branch = Some(worktree.branch.clone());
                         next.deliverables.delivery_pr_number = Some(pr.number);
                         next.updated_at = chrono::Utc::now();

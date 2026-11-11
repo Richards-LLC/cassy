@@ -1231,16 +1231,26 @@ impl TaskDeliverables {
         {
             self.record_handoff_branch(&previous);
             self.retain_factory_branch_anchor_as_history();
-            self.factory_branch_anchor = Some(tip.to_string());
+            self.mint_or_append(tip);
             self.parked_branch = Some(branch.to_string());
             return;
         }
-        if self.factory_branch_anchor.is_none() {
-            self.factory_branch_anchor = measured_tip.map(str::to_string);
+        if self.factory_branch_anchor.is_none()
+            && let Some(tip) = measured_tip
+        {
+            self.mint_or_append(tip);
         }
         if self.parked_branch.is_none() {
             self.parked_branch = branch;
         }
+    }
+
+    /// cas-50b2: the only production setter of `factory_branch_anchor`.
+    /// Persisting the task mints its `DeliveryCycle` row, or appends this tip
+    /// to the current cycle (`SqliteTaskStore`). A new cycle starts only after
+    /// request-changes or a reopen; every other anchor move appends.
+    pub fn mint_or_append(&mut self, tip: &str) {
+        self.factory_branch_anchor = Some(tip.to_string());
     }
 
     /// Move the active factory anchor out of close authority while retaining

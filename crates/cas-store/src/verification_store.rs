@@ -2653,6 +2653,9 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
     }
     let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
     let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
+    // cas-50b2: request-changes ends the delivery cycle; the corrective
+    // delivery's first anchor write mints the next one.
+    crate::delivery_cycle::end_delivery_cycle_with_conn(&tx, task_id, now)?;
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,

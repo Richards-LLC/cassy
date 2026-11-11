@@ -493,6 +493,8 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
         &["remote", "add", "origin", "git@github.com:org/cas8d38-observed.git"],
         &repo.root,
     );
+    let remote = TempDir::new().unwrap();
+    ci_check_run::local_ssh_origin(&repo.root, remote.path(), &["main", "integration"]);
     let cas_root = init_cas_dir(&repo.root).expect("init CAS");
     env.set(cas::github_issue_attach::GH_BIN_ENV, ci_check_run::green_ci(&cas_root));
     std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")

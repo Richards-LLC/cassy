@@ -1188,7 +1188,7 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
     .await;
     fx.reject(
         serde_json::json!({"ledger_artifact_id":"art-missing"}),
-        "not published in this project",
+        "artifact_metadata_unavailable",
     )
     .await;
     let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();

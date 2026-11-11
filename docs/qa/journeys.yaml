@@ -569,6 +569,10 @@ bug_families:
     title: Reboot recovery adopts an unassigned task's recorded source and exact delivery tip in one supervisor transfer
     tasks: [cas-fa05]
     journeys: [FACTORY-SPAWN]
+  published-release-receipt-historical-targets:
+    title: One release verdict retains the published SHA across historical epic targets while QA target containment and member ancestry remain required
+    tasks: [cas-bc58]
+    journeys: [FACTORY-QA-RECEIPT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

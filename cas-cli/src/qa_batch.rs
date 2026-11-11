@@ -853,7 +853,11 @@ pub(crate) fn prepare_receipt(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
-        if integration_state(&repo, &staging, &target) != Some(true) {
+        // A published release descends from the historical epic target. Its
+        // members are bound by anchor ancestry above, not by that ref's tip.
+        if schema != cas_store::RELEASE_VERDICT_SCHEMA
+            && integration_state(&repo, &staging, &target) != Some(true)
+        {
             return Err(format!(
                 "staging_sha is not on task {id}'s configured target {target}"
             ));

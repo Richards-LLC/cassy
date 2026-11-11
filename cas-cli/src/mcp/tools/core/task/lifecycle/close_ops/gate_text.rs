@@ -161,7 +161,7 @@ pub(crate) fn upkeep_message(
             && !warning.contains("attributed delivery base unavailable"))
         .map(|warning| format!("\n{warning}")).collect::<String>();
     format!(
-        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
+        "⚠️ {title}\n\n{detail}{warnings}\n\nNext: Fix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
 }
 

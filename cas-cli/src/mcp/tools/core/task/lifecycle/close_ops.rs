@@ -6,7 +6,7 @@ mod docs_upkeep;
 mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
-mod gate_preflight;
+pub(crate) mod gate_preflight;
 pub(crate) use gate_preflight::is_merge_handoff;
 use crate::mcp::tools::core::task::close_refusal;
 #[cfg(test)]

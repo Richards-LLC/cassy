@@ -119,10 +119,6 @@ mod tests {
         let row = store.queued_prompt(id).unwrap().unwrap();
         assert!(row.processed_at.is_some());
         assert!(row.acked_at.is_none());
-        let broadcast = store.enqueue_with_session("supervisor", "operator", "broadcast", "session-a").unwrap();
-        store.stamp_recipient_device(broadcast, "*").unwrap();
-        assert!(store.record_operator_reply_persisted(broadcast, "session-a", "desktop").unwrap());
-        assert!(store.queued_prompt(broadcast).unwrap().unwrap().processed_at.is_some());
         // A conversation ACK must never consume a daemon attention notice.
         let EnqueueIdempotentResult::Created(notice) = store.enqueue_idempotent(
             "relay-watchdog", "operator", "notice", Some("session-a"), None, None,

@@ -797,6 +797,86 @@ pub(super) mod tests {
         assert_eq!(serde_json::to_value(restored).unwrap()["release_scope"], scope);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_no_code_proof_tracks_and_closes_once_cas_2ecc() {
+        use crate::qa_batch::{ReleaseProofKind, ReleaseProofRef};
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, root, _, owner, mut args) = fixture();
+        let repo = temp.path();
+        fs::write(root.join("config.toml"), format!(
+            "[project]\ncanonical_id='release-fixture'\n[verification]\nenabled=false\n[factory]\nartifacts_root={:?}\n",
+            root.join("artifacts").display().to_string(),
+        )).unwrap();
+        env.set("CAS_AGENT_ID", &owner.id);
+        env.set("CAS_AGENT_NAME", &owner.name);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let tasks = open_task_store(&root).unwrap();
+        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
+            let mut task = Task::new(id.into(), "No-code report".into());
+            task.origin_project = Some("release-fixture".into());
+            task.execution_note = Some("no-code".into());
+            task.status = TaskStatus::AwaitingMerge;
+            task.risk = vec![cas_types::TaskRisk::None];
+            tasks.add(&task).unwrap();
+        }
+        let path = root.join("artifacts/cas-e3041/report.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "# Report\nRecorded findings.\n").unwrap();
+        let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+        let artifact = crate::artifacts::publish(&crate::artifacts::PublishContext {
+            store: &artifacts,
+            roots: crate::artifacts::paths::PublishRoots::new(&root, &root.join("artifacts"), "cas-e3041"),
+            task_id: "cas-e3041".into(), cloud: None,
+        }, &path).unwrap().artifact;
+        for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
+            let mut task = tasks.get(id).unwrap();
+            task.external_ref = Some(artifact.id.clone());
+            tasks.update(&task).unwrap();
+        }
+        let proof = ReleaseProofRef {
+            kind: ReleaseProofKind::Report, artifact_id: artifact.id.clone(),
+            sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+            reviewed_sha: args.commit.clone(), receipt_id: None,
+        };
+        let inputs = root.join("input-audit.json");
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+            "no_code_members": {"cas-e3041": [proof]},
+        })).unwrap()).unwrap();
+        args.inputs = Some(inputs);
+        let train = tasks.get("cas-a001").unwrap();
+        track_on_train(&args, &root, repo, &train).unwrap();
+        let context: ReleaseContext = serde_json::from_slice(
+            &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
+        ).unwrap();
+        let tag = format!("v{}", args.version);
+        git(repo, &["tag", &tag]).unwrap();
+        let mut scope = super::super::release_adapters::tag_scope(
+            &root, repo, Some(&context), &train.id, &tag, &args.commit,
+        ).unwrap();
+        assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof]));
+        // A legacy publication may already contain an explicitly included,
+        // unbound report. It remains a residual and cannot borrow external_ref.
+        scope.included_task_ids.push("cas-ef2b".into());
+        let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        assert!(!inventory.deliveries.iter().any(|d| d.task_id == "cas-undeclared"));
+        assert!(!inventory.exceptions.iter().any(|d| d.task_id == "cas-undeclared"));
+        let first = crate::release_reconcile::reconcile_release(
+            &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag },
+        ).await.unwrap();
+        assert!(matches!(first.members.get("cas-e3041"), Some(CassyMergeClose::Closed { .. })), "{first:?}");
+        assert!(first.residuals.iter().any(|r| r.task_id == "cas-ef2b" && r.gate.contains("MissingNoCodeProof")));
+        let closed = tasks.get("cas-e3041").unwrap();
+        assert_eq!(closed.status, TaskStatus::Closed);
+        let replay_inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
+        crate::release_reconcile::reconcile_release(
+            &root, &scope, &replay_inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
+        ).await.unwrap();
+        assert_eq!(tasks.get("cas-e3041").unwrap().closed_at, closed.closed_at);
+        assert_eq!(tasks.get("cas-ef2b").unwrap().status, TaskStatus::AwaitingMerge);
+    }
+
     #[test]
     fn release_inventory_resolves_nested_and_unclosed_structured_deliveries() {
         use crate::qa_batch::{

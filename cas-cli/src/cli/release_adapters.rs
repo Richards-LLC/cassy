@@ -199,7 +199,7 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str) -> 
 
 /// A published tag's scope: the tracked cut receipt's when present, else the
 /// train, its tracked inputs and the reviewed candidate the tag contains.
-fn tag_scope(
+pub(super) fn tag_scope(
     root: &Path,
     repo: &Path,
     context: Option<&ReleaseContext>,

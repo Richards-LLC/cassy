@@ -1085,12 +1085,10 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     // Keep the new managed-merge fixture's transport entirely local while
     // retaining a GitHub origin for its CI identity.
     let remote = TempDir::new().unwrap();
-    if implicit {
-        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
-        run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
-            "git@github.com:org/work-b.git"], &repo_b.root);
-        run_git(&["push", "origin", "main"], &repo_b.root);
-    }
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
+        "git@github.com:org/work-b.git"], &repo_b.root);
+    run_git(&["push", "origin", "main"], &repo_b.root);
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
     disable_system_a(&cas_root_a);
@@ -1359,6 +1357,11 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
             &repo.root,
         );
     }
+    let remote = TempDir::new().unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
+        "git@github.com:org/shared-work.git"], &repo_b.root);
+    run_git(&["push", "origin", "main"], &repo_b.root);
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init clone A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init clone B CAS");
     disable_system_a(&cas_root_a);
@@ -2355,6 +2358,21 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
             .expect("factory call should succeed");
         let text = get_text(&result);
 
+        if origin_only && !target_valid {
+            assert!(result.is_error.unwrap_or(false), "{text}");
+            let hook_log = std::fs::read_to_string(remote.path().join("push-tree.log")).unwrap();
+            let fields: Vec<_> = hook_log.split_whitespace().collect();
+            assert_eq!(fields.len(), 3, "{hook_log}");
+            assert_eq!(fields[0], fields[1], "the hook must inspect the pinned candidate");
+            assert_eq!(fields[2], "invalid");
+            for dir in [&repo.root, remote.path()] {
+                assert_eq!(Some(git_stdout(dir, &["rev-parse", "refs/heads/epic/foo"])), remote_before);
+            }
+            assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), original_head);
+            assert!(!git_stdout(&repo.root, &["ls-tree", "-r", "--name-only", "epic/foo"]).contains("alice-work.txt"));
+            continue;
+        }
+
         assert!(
             text.contains("Merged worktree") && text.contains("epic/foo"),
             "must merge into the task's epic branch (epic/foo), not trunk.\nGot:\n{text}"
@@ -2396,17 +2414,12 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 "the real pre-push hook must inspect exactly the pushed target, not supervisor HEAD; receipt: {text}"
             );
             let remote_after = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"]);
-            if target_valid {
-                assert_eq!(target_sha, remote_after, "unrelated supervisor failure must not block push: {text}");
-                assert!(!text.contains("NOT PUSHED") && !text.contains("PUSH NOT CONFIRMED"), "{text}");
-                assert_eq!(
-                    git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
-                    git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
-                );
-            } else {
-                assert_eq!(Some(remote_after), remote_before, "a failing target hook must not publish the merge");
-                assert!(text.contains("PUSH NOT CONFIRMED"), "an unrelated passing tree must not bypass target validation: {text}");
-            }
+            assert_eq!(target_sha, remote_after, "unrelated supervisor failure must not block push: {text}");
+            assert!(!text.contains("NOT PUSHED") && !text.contains("PUSH NOT CONFIRMED"), "{text}");
+            assert_eq!(
+                git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
+                git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
+            );
         }
     }
 }
@@ -2932,8 +2945,8 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
         assert!(!approved.is_error.unwrap_or(false), "{}", get_text(&approved));
         let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &dispatch.id).unwrap().unwrap();
         if overlaps_delivery {
-            // The real merge returns its own SHA, then a third writer advances
-            // the same target before the handler observes the landing.
+            // Advance the shared target while its detached merge is prepared,
+            // before validation can refuse the unpublished candidate.
             let race_tip = fixture.cas_root.join("third-writer-tip");
             #[cfg(unix)]
             if racing_writer {
@@ -2946,24 +2959,29 @@ async fn cas_015e_approval_uses_published_target_across_local_merge_rollback() {
                 let armed = bin.join("merged");
                 let script = format!(r#"#!/bin/sh
 real={real}
-[ "$1" = committed ] && [ ! -f {armed} ] || exit 0
-while read old new reference; do
-  if [ "$reference" = refs/heads/epic/rebound ] && [ ! -f {tip} ]; then
-    touch {armed}
-    printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
-    "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
-    "$real" -C {target} rev-parse HEAD > {tip}
-  fi
-done
+[ ! -f {armed} ] || exit 0
+touch {armed}
+printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
+(
+  unset $("$real" rev-parse --local-env-vars)
+  "$real" -C {target} add delivery.txt && "$real" -C {target} commit -qm 'Third writer' || exit $?
+  "$real" -C {target} rev-parse HEAD > {tip}
+)
 "#, real=quote(Path::new(real_git.trim())), target=quote(&target.canonicalize().unwrap()), armed=quote(&armed), tip=quote(&race_tip));
-                std::fs::write(bin.join("reference-transaction"), script).unwrap();
-                std::fs::set_permissions(bin.join("reference-transaction"), std::fs::Permissions::from_mode(0o755)).unwrap();
+                std::fs::write(bin.join("post-merge"), script).unwrap();
+                std::fs::set_permissions(bin.join("post-merge"), std::fs::Permissions::from_mode(0o755)).unwrap();
                 run_git(&["config", "core.hooksPath", bin.to_str().unwrap()], &fixture.repo.root);
             }
-            let refused = fixture.service.factory(Parameters(merge)).await.expect_err("unpublished overlapping content must fail the pre-push landing check");
+            let refused = match fixture.service.factory(Parameters(merge)).await {
+                Err(error) => error.to_string(),
+                Ok(response) => {
+                    assert!(response.is_error.unwrap_or(false), "{}", get_text(&response));
+                    get_text(&response)
+                }
+            };
 
             let expected_target = if racing_writer {
-                std::fs::read_to_string(&race_tip).expect("third writer ran after the owned merge").trim().to_string()
+                std::fs::read_to_string(&race_tip).expect("third writer ran during detached preparation").trim().to_string()
             } else { local_review_base.clone() };
             assert_eq!(git_stdout(&target, &["rev-parse", "HEAD"]), expected_target,
                 "refused landing may undo only its own merge, never a third writer: {refused}");
@@ -5203,6 +5221,11 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
     disable_system_a(&cas_root);
     run_git(&["branch", "staging"], &repo.root);
+    let remote = TempDir::new().unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
+        "git@github.com:org/staging-target.git"], &repo.root);
+    run_git(&["push", "origin", "main", "staging"], &repo.root);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
     let mut standalone_task = Task::new(
@@ -5480,11 +5503,10 @@ esac
     }
     let peer_tip = remote.path().join("peer-tip");
     if mode == "subsequent" {
-        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/post-merge"), &format!(r#"#!/bin/sh
-head=$(git rev-parse HEAD)
-tree=$(git rev-parse 'HEAD^{{tree}}')
-peer=$(git commit-tree "$tree" -p "$head" -m 'Subsequent target progress')
-git update-ref refs/heads/main "$peer" "$head"
+        cas::test_paths::warm_stub(&repo.root.join(".git/hooks/pre-push"), &format!(r#"#!/bin/sh
+tree=$(git rev-parse '{before}^{{tree}}')
+peer=$(git commit-tree "$tree" -p '{before}' -m 'Subsequent target progress')
+git update-ref refs/heads/main "$peer" '{before}' || exit $?
 printf '%s\n' "$peer" > '{}'
 "#, peer_tip.display()));
     }

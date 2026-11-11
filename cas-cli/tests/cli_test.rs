@@ -3636,7 +3636,7 @@ fn ledger_backfill_preserves_attested_manual_interventions() {
     task.notes = format!("LEDGER INTERVENTIONS: {facts}");
     store.add(&task).unwrap();
     for _ in 0..2 {
-        cas_cmd(root).current_dir(root).env("CAS_GH_BIN", "/nonexistent/gh")
+        cas_cmd(root).current_dir(root).env_remove("CAS_CLONE_PATH").env("CAS_GH_BIN", "/nonexistent/gh")
             .args(["ledger", "backfill", "--days", "36500"]).assert().success();
     }
     let events = cas_store::quality_events_between(&cas_root, None, None).unwrap();

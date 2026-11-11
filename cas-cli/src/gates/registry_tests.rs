@@ -1,3 +1,6 @@
+#[path = "../../gate_audit.rs"]
+mod gate_audit;
+
 use std::path::{Path, PathBuf};
 
 use cas_store::{EventStore, SqliteEventStore};
@@ -73,8 +76,6 @@ const NON_REFUSING: &[&str] = &["G-57"];
 /// code, so its refusals are recorded under that code and not as uncoded.
 #[test]
 fn every_registered_refusal_site_emits_its_code() {
-    let gaps=include_str!(concat!(env!("OUT_DIR"),"/gate_audit_gaps.txt"));
-    assert!(gaps.is_empty(), "mechanical gate audit gaps:\n{gaps}");
     for family in [Family::Gate, Family::Guard, Family::Watchdog, Family::Notice, Family::Ci] {
         assert!(REGISTRY.iter().any(|row| row.family() == family), "no {family:?} row registered");
     }
@@ -82,6 +83,14 @@ fn every_registered_refusal_site_emits_its_code() {
         eprintln!("SKIP gate emission scan: source checkout unavailable in this test archive");
         return;
     }
+    let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
+    let root = crate::test_paths::crate_root().join("..");
+    let audit = gate_audit::scan(&root, &registry);
+    let report = root.join("target/gate-audit.md");
+    std::fs::create_dir_all(report.parent().unwrap()).unwrap();
+    std::fs::write(&report, audit.markdown(REGISTRY.len())).unwrap();
+    std::fs::write(root.join("target/gate-audit-gaps.txt"), audit.gaps.join("\n")).unwrap();
+    assert!(audit.gaps.is_empty(), "mechanical gate audit gaps:\n{}", audit.gaps.join("\n"));
     let emitted = emitted_codes();
     let silent: Vec<&str> = REGISTRY
         .iter()

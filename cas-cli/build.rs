@@ -11,14 +11,11 @@ use std::{
 
 #[path = "src/hub/chunk_assets.rs"]
 mod chunk_assets;
-#[path = "gate_audit.rs"]
-mod gate_audit;
 
 fn main() {
     generate_commander_chunks();
     generate_archive_fixture_sources();
     generate_init_design_captures();
-    println!("cargo:rerun-if-changed=gate_audit.rs");
     generate_gate_registry();
     println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
     println!("cargo:rerun-if-changed=../hub-web/dist/app.js");
@@ -474,11 +471,7 @@ fn generate_gate_registry() {
     generated.push_str("];\n");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
     fs::write(out_dir.join("gate_registry.rs"), generated).expect("write generated gate registry");
-    let declarations=rows.iter().map(|r|(r.code.clone(),r.stage.clone(),r.title.clone(),r.source.clone())).collect::<Vec<_>>();
-    let audit=gate_audit::scan(&repo_root,&declarations);
-    fs::write(out_dir.join("gate_audit.md"),audit.markdown(rows.len())).expect("write generated gate audit");
-    fs::write(out_dir.join("gate_audit_gaps.txt"),audit.gaps.join("\n")).expect("write gate audit diagnostics");
-    println!("cargo:warning=gate audit: {} unclassified/uncovered rows",audit.gaps.len());
+
 }
 
 fn collect_gate_declarations(

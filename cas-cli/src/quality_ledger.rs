@@ -192,6 +192,7 @@ pub(crate) fn verification_recorded(root: &Path, verification: &cas_types::Verif
     if let Some(prior) = prior {
         let QualityPayload::CheckRun { review: Some(old), .. } = &prior.payload else { unreachable!() };
         let QualityPayload::CheckRun { review: Some(new), .. } = &mut event.payload else { unreachable!() };
+        if new.cycle_id.is_none() { new.cycle_id = old.cycle_id.clone(); }
         let upgrade = old.provenance == "legacy" && new.provenance != "legacy"
             || old.provenance == new.provenance && old.cycle_id.is_none() && new.cycle_id.is_some();
         if !upgrade { return false }
@@ -952,17 +953,19 @@ mod tests {
         assert_eq!(review.provenance, "supervisor_direct");
         verdict.id = "ver-peer".into();
         verdict.provenance = cas_types::VerificationProvenance::PeerAttested;
+        verdict.dispatch_id = Some(dispatch.id);
         assert!(verification_recorded(&root, &verdict));
         let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
         let QualityPayload::CheckRun { review: Some(peer), .. } = &events[3].payload else { panic!("missing peer verdict") };
         assert_eq!(peer.provenance, "legacy");
         verdict.provenance = cas_types::VerificationProvenance::TaskVerifier;
-        verdict.dispatch_id = Some(dispatch.id);
+        verdict.dispatch_id = None;
         assert!(verification_recorded(&root, &verdict));
         assert!(!verification_recorded(&root, &verdict));
         let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
         let QualityPayload::CheckRun { review: Some(enriched), .. } = &events[4].payload else { panic!("missing peer enrichment") };
         assert_eq!(enriched.provenance, "independent");
+        assert_eq!(enriched.cycle_id, peer.cycle_id);
         assert_eq!(enriched.supersedes.as_deref(), Some(events[3].id.as_str()));
         verdict.provenance = cas_types::VerificationProvenance::PeerAttested;
         assert!(!verification_recorded(&root, &verdict));

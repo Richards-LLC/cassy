@@ -935,8 +935,8 @@ mod tests {
             assert!(json.get("local_note").is_none());
             let peer = tempfile::tempdir().unwrap();
             wire.project_id = Some("peer-project".into());
-            import_quality_events(peer.path(), &[wire], "local-project").unwrap();
-            let imported = quality_events_after(peer.path(), 0, 20).unwrap();
+            assert_eq!(import_quality_events(peer.path(), &[wire], "local-project").unwrap(), (1, 0));
+            let imported = quality_events_between(peer.path(), None, None).unwrap();
             assert_eq!(serde_json::to_value(&imported[0].payload).unwrap()[field], expected);
         }
     }

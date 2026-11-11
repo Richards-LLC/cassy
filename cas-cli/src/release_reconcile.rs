@@ -483,8 +483,8 @@ pub(crate) fn validate_no_code_proofs(
         {
             return Err(format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}"));
         }
-        crate::artifacts::require_available(&artifact)
-            .map_err(|e| format!("RELEASE_NO_CODE_PROOF_REVOKED: {task_id}: {e}"))?;
+        crate::artifacts::proof::validate(&artifact, &artifact.task_id)
+            .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}: {e}"))?;
     }
     Ok(())
 }

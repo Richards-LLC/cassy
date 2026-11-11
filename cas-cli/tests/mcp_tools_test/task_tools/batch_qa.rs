@@ -862,7 +862,7 @@ async fn release_receipt_at_published_sha_cas_bc58() {
         git(&fx.repo, &["branch", target, &prep]);
         let mut task = tasks.get(id).unwrap();
         task.deliverables.work_target = Some(cas::types::WorkTarget {
-            repo_selector: "project:test".into(), target_branch: target.into(),
+            repo_selector: "project:batch-project".into(), target_branch: target.into(),
         });
         heads.insert(id.to_string(), task.deliverables.factory_branch_anchor.clone().unwrap());
         tasks.update(&task).unwrap();

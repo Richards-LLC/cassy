@@ -263,29 +263,9 @@ async fn resume(
             .get(&delivery.task_id)
             .is_some_and(&successful)
     });
-    for exception in &inventory.exceptions {
-        receipt.members.insert(
-            exception.task_id.clone(),
-            CassyMergeClose::Held(format!("RELEASE_MEMBER_HELD: {:?}", exception.code)),
-        );
-    }
-    for id in scope
-        .included_task_ids
-        .iter()
-        .chain(scope.no_code_members.keys())
-    {
-        if !inventory.deliveries.iter().any(|d| &d.task_id == id) {
-            receipt
-                .members
-                .entry(id.clone())
-                .or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
-        }
-    }
-    let mut refused: Vec<_> = inventory
-        .exceptions
-        .iter()
-        .map(|e| e.task_id.clone())
-        .collect();
+    // The member core owns exception outcomes too: a closed task remains
+    // AlreadyClosed even if its historical inventory has missing evidence.
+    let mut refused = Vec::new();
     for delivery in &pending.deliveries {
         if refused.contains(&delivery.task_id) {
             continue;
@@ -342,7 +322,6 @@ async fn resume(
     )?;
     receipt.residuals = effects.residuals(&receipt.members, &receipt.parents)?;
     receipt.complete = receipt.residuals.is_empty()
-        && receipt.exceptions.is_empty()
         && receipt.members.values().all(successful)
         && receipt
             .parents
@@ -426,6 +405,13 @@ pub(crate) async fn reconcile_release(
     RECONCILING
         .scope((), resume(root, scope, inventory, trigger, &mut effects))
         .await
+}
+
+/// Preview the exact member decisions without operation, task, outbox or cache writes.
+pub(crate) fn preview_release(
+    root: &Path, repo: &Path, inventory: &ReleaseInventory,
+) -> Result<BTreeMap<String, CassyMergeClose>> {
+    crate::qa_batch::release_close::reconcile_members(root, repo, inventory, false, &mut |_, _| Ok(()))
 }
 
 /// The sole authoritative completed-operation lookup. Partial/held operations
@@ -521,13 +507,13 @@ pub(crate) fn validate_no_code_proofs(
     if proofs.is_empty() {
         return Err(format!("RELEASE_NO_CODE_PROOF_MISSING: {task_id}"));
     }
-    let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    use cas_store::TaskStore;
+    let tasks = crate::qa_batch::release_close::read_tasks(root)?;
     for proof in proofs {
-        let artifact = crate::artifacts::proof::lookup_metadata(root, None, &proof.artifact_id)
+        let artifact = crate::qa_batch::release_close::read_artifact(root, &proof.artifact_id)
             .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}: {e}"))?;
         let owner = tasks.get(&artifact.task_id).map_err(|e| e.to_string())?;
-        if proof.reviewed_sha != scope.reviewed_sha
-            || proof.sha256.len() != 64 || !proof.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        if proof.sha256.len() != 64 || !proof.sha256.bytes().all(|b| b.is_ascii_hexdigit())
             || proof.sha256 != artifact.sha256 || proof.size_bytes == 0
             || proof.size_bytes != artifact.size_bytes
             || !crate::mcp::tools::core::task::task_owned_by_project(&owner, root, Some(&scope.project_id))
@@ -570,61 +556,8 @@ impl ReleaseEffects for CoreEffects<'_> {
         inventory: &ReleaseInventory,
         checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<()>,
     ) -> Result<()> {
-        use crate::qa_batch::{ReleaseMembership, release_close::ReleaseClose};
-        // Code-delivery finalization deliberately refuses anchorless reports.
-        // Keep that boundary and route explicit reports to their ordinary close.
-        let mut code = inventory.clone();
-        code.deliveries.retain(|d| d.membership != ReleaseMembership::ExplicitNoCode);
-        self.core.close_release_inventory_with_checkpoint(&code, checkpoint).await?;
-        let reports: Vec<_> = inventory.deliveries.iter()
-            .filter(|d| d.membership == ReleaseMembership::ExplicitNoCode).collect();
-        if reports.is_empty() { return Ok(()); }
-        let context = match ReleaseClose::prepare(self.root, &self.repo, inventory) {
-            Ok(context) => context,
-            Err(error) => {
-                for report in reports {
-                    checkpoint(&report.task_id, CassyMergeClose::Held(error.clone()))?;
-                }
-                return Ok(());
-            }
-        };
-        context.scope(async {
-            let tasks = crate::store::open_task_store(self.root).map_err(|e| e.to_string())?;
-            for report in reports {
-                let id = &report.task_id;
-                let task = tasks.get(id).map_err(|e| e.to_string())?;
-                let validation = crate::qa_batch::release_close::validate_task(self.root, &task)
-                    .and_then(|()| validate_no_code_proofs(self.root, &inventory.scope, id, &report.proof_refs));
-                let outcome = if task.status == cas_types::TaskStatus::Closed {
-                    CassyMergeClose::AlreadyClosed
-                } else if let Err(error) = validation {
-                    CassyMergeClose::Held(error)
-                } else {
-                    let request = crate::mcp::tools::TaskCloseRequest {
-                        id: id.clone(),
-                        reason: Some(task.deliverables.parked_close_reason.clone().unwrap_or_else(|| format!(
-                            "Release {}: explicitly bound report artifacts {}.", inventory.scope.release_id,
-                            report.proof_refs.iter().map(|p| p.artifact_id.as_str()).collect::<Vec<_>>().join(", "),
-                        ))),
-                        supervisor_override: None, no_delivery: None,
-                        stranded_branch_override: None, search_manifest: None, commit_receipt: None,
-                    };
-                    let close = crate::async_runtime::heap_future(|| self.core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)));
-                    let result = crate::mcp::tools::core::task::lifecycle::close_ops::as_cassy_merge_close(close).await;
-                    let text = match result {
-                        Ok(result) => result.content.iter().filter_map(|c| match &c.raw {
-                            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None,
-                        }).collect::<Vec<_>>().join("\n"),
-                        Err(error) => error.message.to_string(),
-                    };
-                    if tasks.get(id).is_ok_and(|t| t.status == cas_types::TaskStatus::Closed) {
-                        CassyMergeClose::Closed { notice: text }
-                    } else { CassyMergeClose::Held(text) }
-                };
-                checkpoint(id, outcome)?;
-            }
-            Ok(())
-        }).await
+        self.core.close_release_inventory_with_checkpoint(inventory, checkpoint).await?;
+        Ok(())
     }
     fn issues(
         &mut self,

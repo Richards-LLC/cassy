@@ -1,150 +1,155 @@
 use super::*;
-use cas_store::{NewArtifact, PublishedArtifact, SqliteArtifactStore};
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+use cas_types::{FactoryBranchStart, TaskStatus, WorkTarget};
 
-#[derive(Clone, Copy, Debug)]
-enum ProofCase {
-    Portable,
-    ForeignOwner,
-    TamperedDownload,
-    RevokedRemote,
-    UnavailableRemote,
-    ReceiptMismatch,
-    TamperedLocal,
-    RevokedLocal,
-}
-
-#[tokio::test]
-async fn imported_release_review_resolves_verified_peer_ledger_cas_52c1() {
-    for case in [
-        ProofCase::Portable,
-        ProofCase::ForeignOwner,
-        ProofCase::TamperedDownload,
-        ProofCase::RevokedRemote,
-        ProofCase::UnavailableRemote,
-        ProofCase::ReceiptMismatch,
-        ProofCase::TamperedLocal,
-        ProofCase::RevokedLocal,
-    ] {
-        let server = MockServer::start().await;
-        let body = "# Independent release review\n\nReviewed the shipped delivery.\n";
-        let view = match case {
-            ProofCase::RevokedRemote => ResponseTemplate::new(409)
-                .set_body_json(serde_json::json!({"error":"artifact_revoked"})),
-            ProofCase::UnavailableRemote => ResponseTemplate::new(503),
-            _ => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "artifact_id":"cloud-ledger", "url":format!("{}/ledger", server.uri()),
-                "expires_at":"2099-01-01T00:00:00Z", "name":"REVIEW.md",
-                "mime":"text/markdown", "size_bytes":body.len(),
-            })),
-        };
-        Mock::given(method("GET")).and(path("/api/artifacts/cloud-ledger/url"))
-            .respond_with(view).mount(&server).await;
-        let downloaded = if matches!(case, ProofCase::TamperedDownload) { "altered bytes" } else { body };
-        Mock::given(method("GET")).and(path("/ledger"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(downloaded))
-            .mount(&server).await;
-        let endpoint = server.uri();
-        tokio::task::spawn_blocking(move || {
-            let mut env = crate::test_support::TestEnvGuard::temp_home();
-            let repo = env.home().join("consumer");
-            std::fs::create_dir_all(&repo).unwrap();
-            let root = crate::store::init_cas_dir(&repo).unwrap();
-            env.set("CAS_ROOT", &root);
-            env.set("CAS_CLONE_PATH", &repo);
-            std::fs::write(root.join("config.toml"), format!(
-                "[project]\ncanonical_id='portable-review'\n[factory]\nartifacts_root={}\n",
-                serde_json::to_string(&env.home().join("artifacts")).unwrap(),
-            )).unwrap();
-            crate::cloud::CloudConfig {
-                endpoint, token: Some("test-fixture-token".into()), ..Default::default()
-            }.save_to_cas_dir(&root).unwrap();
-            let git = |args: &[&str]| {
-                let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
-                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-                String::from_utf8(out.stdout).unwrap().trim().to_string()
-            };
-            git(&["init", "-b", "main"]);
-            git(&["config", "user.name", "Fixture"]);
-            git(&["config", "user.email", "fixture@example.test"]);
-            git(&["remote", "add", "origin", "https://github.com/example/portable-review.git"]);
-            git(&["commit", "--allow-empty", "-m", "fixture"]);
-            let head = git(&["rev-parse", "HEAD"]);
-            let tasks = crate::store::open_task_store(&root).unwrap();
-            let mut owner = Task::new("cas-proof".into(), "Published release review".into());
-            owner.origin_project = Some(if matches!(case, ProofCase::ForeignOwner) {
-                "another-project"
-            } else { "portable-review" }.into());
-            tasks.add(&owner).unwrap();
-            let mut member = Task::new("cas-member".into(), "Shipped evidence".into());
-            member.origin_project = Some("portable-review".into());
-            member.execution_note = Some("no-code".into());
-            tasks.add(&member).unwrap();
-            let artifact = PublishedArtifact {
-                id: "art-peer-ledger".into(), task_id: owner.id.clone(), name: "REVIEW.md".into(),
-                mime: "text/markdown".into(), size_bytes: body.len() as u64,
-                sha256: format!("{:x}", Sha256::digest(body.as_bytes())),
-                cloud_artifact_id: Some("cloud-ledger".into()), status: "committed".into(),
-                cloud_url: None, slack_permalink: None, created_at: "2026-11-10T00:00:00Z".into(),
-                revocation: None,
-            };
-            tasks.append_trusted_note(&owner.id, &format!("ARTIFACT_PROOF: {}", serde_json::to_string(&artifact).unwrap())).unwrap();
-            let store = SqliteArtifactStore::open(&root).unwrap();
-            assert!(store.get(&artifact.id).unwrap().is_none());
-            let mut ledger_path = "/Users/producer/.cas/artifacts/release/REVIEW.md".to_string();
-            if matches!(case, ProofCase::TamperedLocal | ProofCase::RevokedLocal) {
-                store.record_local(&NewArtifact {
-                    id: artifact.id.clone(), task_id: owner.id.clone(), name: artifact.name.clone(),
-                    mime: artifact.mime.clone(), size_bytes: artifact.size_bytes, sha256: artifact.sha256.clone(),
-                }).unwrap();
-                store.mark_uploaded(&artifact.id, "cloud-ledger").unwrap();
-                store.mark_committed(&artifact.id, None).unwrap();
-                let file = repo.join("REVIEW.md");
-                std::fs::write(&file, if matches!(case, ProofCase::TamperedLocal) { "modified" } else { body }).unwrap();
-                ledger_path = file.to_string_lossy().into_owned();
-                if matches!(case, ProofCase::RevokedLocal) {
-                    store.revoke(&artifact.id, "reviewer", "fixture revocation").unwrap();
-                }
-            }
-            let hash = if matches!(case, ProofCase::ReceiptMismatch) { "0".repeat(64) } else { artifact.sha256.clone() };
-            let proof = ReleaseProofRef {
-                kind: ReleaseProofKind::Review, artifact_id: artifact.id.clone(), sha256: hash.clone(),
-                size_bytes: artifact.size_bytes, reviewed_sha: head.clone(), receipt_id: Some("qab-peer".into()),
-            };
-            let receipt = QaBatchReceipt {
-                schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-peer".into(),
-                project_id: "portable-review".into(), ledger_artifact_id: artifact.id.clone(),
-                ledger_path, ledger_sha256: hash, ledger_size_bytes: artifact.size_bytes,
-                staging_sha: head.clone(), task_heads: BTreeMap::from([(member.id.clone(), head.clone())]),
-                recorder_agent_id: "peer-supervisor".into(), recorded_at: "2026-11-10T00:00:00Z".into(),
-                release_tag: None, ledger_author_id: Some("independent-reviewer".into()),
-                ledger_author_role: Some("sub_agent".into()), author_overrides: BTreeMap::new(), imported: true,
-            };
-            cas_store::import_qa_batch_receipt(&root, &receipt).unwrap();
-            let scope = ReleaseScope {
-                project_id: "portable-review".into(), repository: "example/portable-review".into(),
-                release_id: "v9.99.0".into(), reviewed_sha: head.clone(), final_release_sha: head,
-                promotion_pr: None, release_tag: None, constituent_epic_ids: vec![],
-                included_task_ids: vec![member.id.clone()],
-                no_code_members: BTreeMap::from([(member.id.clone(), vec![proof.clone()])]),
-                proof_refs: vec![proof],
-            };
-            let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
-            assert_eq!(inventory.deliveries.len(), 1);
-            assert!(inventory.exceptions.is_empty());
-            let prepared = ReleaseClose::prepare(&root, &repo, &inventory);
-            if matches!(case, ProofCase::Portable) {
-                let prepared = prepared.unwrap_or_else(|error| panic!("{case:?}: {error}"));
-                assert_eq!(prepared.reviews.len(), 1);
-                assert_eq!(prepared.reviews[0].1, body);
-                assert_eq!(prepared.reviews[0].0, receipt);
-                assert!(prepared.member_error(&member.id).is_none());
-                assert_eq!(store.get(&artifact.id).unwrap().unwrap().sha256, artifact.sha256);
-            } else {
-                assert!(prepared.is_err(), "{case:?} must hold the release");
-            }
-            assert_eq!(tasks.get(&member.id).unwrap().status, member.status);
-            assert!(cas_store::get_qa_batch_receipt(&root, &receipt.id).unwrap().unwrap().imported);
-        }).await.unwrap();
+/// Publication of a later tree cannot turn one missing review into a train-wide hold.
+#[test]
+fn published_train_closes_members_independently_cas_734b() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let repo = env.home().join("release");
+    std::fs::create_dir_all(&repo).unwrap();
+    let root = crate::store::init_cas_dir(&repo).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='close-fixture'\n[verification]\nenabled=true\n").unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["remote", "add", "origin", "https://github.com/example/close-fixture.git"]);
+    git(&["commit", "--allow-empty", "-m", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn shipped() {}\n").unwrap();
+    git(&["add", "app.rs"]);
+    git(&["commit", "-m", "delivery"]);
+    let anchor = git(&["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("app.rs"), "fn shipped() {}\nfn later() {}\n").unwrap();
+    git(&["commit", "-am", "release changes after review"]);
+    let published = git(&["rev-parse", "HEAD"]);
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    git(&["tag", &tag]);
+    let tasks = crate::store::open_task_store(&root).unwrap();
+    assert!(crate::config::Config::load(&root).unwrap().verification_enabled());
+    let mut train = Task::new("cas-train".into(), "Published train".into());
+    train.origin_project = Some("close-fixture".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.status = TaskStatus::Closed;
+    tasks.add(&train).unwrap();
+    for id in ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"] {
+        let mut task = Task::new(id.into(), id.into());
+        task.origin_project = Some("close-fixture".into());
+        task.status = if id == "cas-closed" { TaskStatus::Closed } else { TaskStatus::AwaitingMerge };
+        if id == "cas-report" {
+            task.execution_note = Some("no-code".into());
+        } else {
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+                work_target: WorkTarget { repo_selector: "project:close-fixture".into(), target_branch: "main".into() },
+                branch: format!("factory/{id}"), assignee: "worker".into(),
+                base_sha: if id == "cas-equal" { anchor.clone() } else { base.clone() },
+            });
+        }
+        if id == "cas-closed" { task.deliverables.factory_branch_start = None; }
+        tasks.add(&task).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
+    let artifact = cas_store::PublishedArtifact {
+        id: "art-report".into(), task_id: "cas-report".into(), name: "report.md".into(),
+        mime: "text/markdown".into(), size_bytes: 10, sha256: "a".repeat(64),
+        cloud_artifact_id: Some("cloud-report".into()), status: "committed".into(),
+        cloud_url: None, slack_permalink: None, created_at: "2026-11-11T00:00:00Z".into(), revocation: None,
+    };
+    tasks.append_trusted_note("cas-report", &format!("ARTIFACT_PROOF: {}", serde_json::to_string(&artifact).unwrap())).unwrap();
+    let proof = ReleaseProofRef { kind: ReleaseProofKind::Report, artifact_id: artifact.id,
+        sha256: artifact.sha256, size_bytes: 10, reviewed_sha: anchor.clone(), receipt_id: None };
+    let receipt = QaBatchReceipt {
+        schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-review".into(),
+        project_id: "close-fixture".into(), ledger_artifact_id: "art-recorded".into(),
+        ledger_path: "/peer/recorded-review.md".into(), ledger_sha256: "b".repeat(64), ledger_size_bytes: 20,
+        staging_sha: anchor.clone(), task_heads: ["cas-report"].into_iter().map(|id| (id.into(), anchor.clone())).collect(),
+        recorder_agent_id: "supervisor".into(), recorded_at: "2026-11-11T00:00:00Z".into(),
+        release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
+        author_overrides: BTreeMap::new(), imported: true,
+    };
+    cas_store::import_qa_batch_receipt(&root, &receipt).unwrap();
+    let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+        peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
+        head_commit: anchor.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![anchor.clone()],
+    });
+    let dispatch = cas_store::create_verification_dispatch_bound(&root, "cas-approved", "worker", "supervisor", &boundary,
+        chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+    // Seed the durable verdict exactly as the verified recorder leaves it.
+    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
+    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
+        release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
+        promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],
+        included_task_ids: ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
+        no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
+    // A preview must leave the store, artifact cache and operation directory
+    // byte-for-byte unchanged. SQLite's transient reader locks live in -shm.
+    fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        if !path.exists() { return files; }
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() { files.extend(snapshot(&path)); }
+            else if !path.to_string_lossy().ends_with("-shm") { files.insert(path.clone(), std::fs::read(path).unwrap()); }
+        }
+        files
+    }
+    let revision = |id: &str| conn.query_row("SELECT revision FROM task_mutation_revisions WHERE entity_id=?", [id], |row| row.get::<_, i64>(0)).unwrap();
+    let revisions: BTreeMap<_, _> = scope.included_task_ids.iter().map(|id| (id.clone(), revision(id))).collect();
+    let before = snapshot(&root);
+    let cache = env.home().join(".cas/artifacts");
+    let cache_before = snapshot(&cache);
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    // Stale generations and unbound report approval hold only their member.
+    let mut stale = inventory.clone();
+    stale.deliveries.iter_mut().find(|d| d.task_id == "cas-approved").unwrap().generation = "stale".into();
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &stale).unwrap();
+    assert!(matches!(outcomes.get("cas-approved"), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_GENERATION_CHANGED"));
+    assert!(matches!(outcomes.get("cas-equal"), Some(CassyMergeClose::Closed { .. })));
+    let mut unbound = inventory.clone();
+    unbound.deliveries.iter_mut().find(|d| d.task_id == "cas-report").unwrap().proof_refs[0].size_bytes += 1;
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &unbound).unwrap();
+    assert!(matches!(outcomes.get("cas-report"), Some(CassyMergeClose::Held(reason)) if reason.split(':').next() == Some("RELEASE_NO_CODE_PROOF_BINDING")));
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
+        crate::release_reconcile::ReconcileTrigger::Publish { tag })).unwrap();
+    assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
+    for id in ["cas-approved", "cas-report", "cas-equal"] {
+        assert!(matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", result.members.get(id));
+        assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed);
+    }
+    assert!(matches!(result.members.get("cas-closed"), Some(CassyMergeClose::AlreadyClosed)));
+    assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
+    assert_eq!(result.residuals.len(), 1);
+    assert_eq!(result.residuals[0].task_id, "cas-unreviewed");
+    for id in &scope.included_task_ids {
+        let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
+        assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
+    }
+    // Adding only the missing exact-head approval completes the same operation;
+    // an already-closed member's historical exception cannot hold the train.
+    let mut later = receipt;
+    later.id = "qab-later".into();
+    later.task_heads = BTreeMap::from([("cas-unreviewed".into(), anchor)]);
+    cas_store::import_qa_batch_receipt(&root, &later).unwrap();
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let complete = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
+        crate::release_reconcile::ReconcileTrigger::Backfill)).unwrap();
+    assert!(complete.complete);
+    assert!(complete.residuals.is_empty());
+    assert!(!complete.exceptions.is_empty());
 }

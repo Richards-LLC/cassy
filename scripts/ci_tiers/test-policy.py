@@ -332,23 +332,33 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
 
-    def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
-        def valid(workflow):
+    def test_train_runs_finish_while_factory_runs_cancel_cas_43ab(self):
+        cases = [('push', 'refs/heads/factory/fixture', True, True),
+                 ('push', 'refs/heads/epic/release-train-fixture', False, True),
+                 ('push', 'refs/heads/epic/ordinary', False, False),
+                 ('push', 'refs/heads/main', False, False),
+                 ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False, False)]
+
+        def valid(workflow, routes):
+            import re
             concurrency = workflow.get('concurrency', {})
-            for event, ref, cancels in [('push', 'refs/heads/factory/fixture', True),
-                                        ('push', 'refs/heads/epic/release-train-fixture', True),
-                                        ('push', 'refs/heads/epic/ordinary', False),
-                                        ('push', 'refs/heads/main', False),
-                                        ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False)]:
+            def group(context):
+                return re.sub(r'\$\{\{.*?\}\}', lambda m: str(self.gh_value(m.group(), context)),
+                              concurrency.get('group', ''))
+            for event, ref, cancels, grouped in routes:
                 values = [{'github.event_name': event, 'github.ref': ref, 'github.run_id': str(run)} for run in [1, 2]]
                 if any(self.gh_expr(concurrency.get('cancel-in-progress', 'false'), v) != cancels for v in values):
                     return False
-                groups = [self.gh_value(concurrency.get('group', ''), v) for v in values]
-                if (groups[0] == groups[1]) != cancels:
+                groups = [group(v) for v in values]
+                if (groups[0] == groups[1]) != grouped:
                     return False
+            train_groups = [group({'github.event_name': 'push', 'github.ref': ref, 'github.run_id': '1'})
+                            for ref in ['refs/heads/epic/release-train-a', 'refs/heads/epic/release-train-b']]
+            if train_groups[0] == train_groups[1]:
+                return False
             return True
         workflow = self.ci()
-        self.assertTrue(valid(workflow))
+        self.assertTrue(valid(workflow, cases))
         for mutate in (
             lambda w: w.pop('concurrency'),
             lambda w: w['concurrency'].__setitem__('cancel-in-progress', True),
@@ -357,7 +367,15 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         ):
             changed = copy.deepcopy(workflow)
             mutate(changed)
-            self.assertFalse(valid(changed))
+            self.assertFalse(valid(changed, cases))
+
+        caller = copy.deepcopy(policy.load(self.root / '.github/workflows/full-validation.yml'))
+        routes = [cases[1], cases[-1]]
+        self.assertTrue(valid(caller, routes))
+        for field, value in [('cancel-in-progress', True), ('group', '${{ github.run_id }}')]:
+            changed = copy.deepcopy(caller)
+            changed['concurrency'][field] = value
+            self.assertFalse(valid(changed, routes))
 
     @staticmethod
     def gh_value(expression, context):

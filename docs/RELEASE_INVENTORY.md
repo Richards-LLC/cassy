@@ -33,7 +33,7 @@ Declare report proof explicitly in the draft's `CAS_RELEASE_INPUTS` JSON under
 `no_code_members`. The audit adds those task IDs to `included_task_ids` and
 carries the typed proof lists through `cas release track --inputs` to publication.
 Tracking refuses missing or mismatched report bindings before marking the train
-cut. Artifact owner/project, hash, size, reviewed commit and revocation are checked;
+cut. Artifact owner/project, hash, size and revocation are checked; the proof head need not equal the release review commit;
 a report reference does not supply QA or review approval. Existing receipts without
 this optional map remain readable. Promotion accepts the same audited JSON with
 `cas release promoted --pr <N> --inputs <audit.json>`; its `checked_sha` must name
@@ -50,7 +50,7 @@ evaluation. It deliberately errs on the side of invalidating stale work.
 Code membership is `ancestry` (the original anchor is reachable from the final
 SHA) or `squash_tree` (a commit in that exact SHA's history has the original
 anchor's complete tree). Squash matching requires a valid recorded start base
-strictly preceding the anchor. Structured merge receipts can identify a delivery
+preceding or equal to the anchor. Structured merge receipts can identify a delivery
 that has no factory anchor. A retired factory anchor never becomes active
 membership through a later merge receipt. No SQL `branch` value or commit-subject
 task mention is used. The source anchor and full start boundary remain intact;
@@ -70,8 +70,7 @@ A reachable anchor with no start base is still shipped, with a `missing_base`
 exception. Membership and close readiness are separate: full delivery-effect
 validation still needs that base. Unresolvable anchors, invalid bases and absent
 mappings remain explicit. Expected no-code reports enter only as
-`explicit_no_code`, with a nonempty portable proof list bound to the reviewed
-SHA; their anchor and shipped commit are null.
+`explicit_no_code`, with a nonempty portable proof list bound to an immutable approval head; their anchor and shipped commit are null.
 
 `exceptions[].code` is one of `missing_task`, `foreign_scope`, `not_epic`,
 `cancelled`, `missing_anchor`, `retired_anchor`, `missing_base`, `invalid_base`,
@@ -89,53 +88,33 @@ branch alias.
 ## Close at the shipped commit
 
 Trusted release adapters call `CasCore::close_release_inventory_outcomes` with
-this inventory. The consumer re-resolves membership, compares each delivery
-snapshot before acting, checks referenced receipts and runs ordinary close with
-`final_release_sha` as its evidence target. Stale or held members remain explicit
-exceptions while other deliveries continue. The ordinary optimistic write guard
-still rejects concurrent changes. Dedicated review, CI overrides and independent
-task holds remain gates. Explicit no-code deliveries retain their own close
-path; release reconciliation routes them through ordinary report/evidence close
-with the bound artifacts and every independent verification gate intact.
+this inventory. Each member closes independently when its approval-bound head
+is an ancestor of `final_release_sha` and its captured generation is unchanged.
+Approval is an approved verification at exactly that head, a recorded review or
+QA receipt naming that task and head, or a Tier 0 delivery. Published-tag shipping
+receipts never grant approval. A member without approval remains open as its own
+`REVIEW_MISSING` residual; it does not hold other members.
 
-The full recorded start-to-anchor effect is measured, including earlier commits
-and deletions. Changelog fragments use the existing promotion validator: their
-entries must survive in a released section of `CHANGELOG.md`. A maintained view
-has no unconditional filename exemption.
+The consumer makes one compare-and-swap task close write. It does not rerun the
+ordinary task-close stack, review-to-release diff mapping, ledger download or
+author validation already performed when recording the receipt. An intervening
+task mutation refuses that member. Already closed tasks count as already closed,
+including those with historical inventory exceptions.
 
-A release review may attach transformation evidence once, in its published
-Markdown/plain-text ledger, as one fenced `cassy-release-transformations` JSON
-block. Its object contains `project_id`, `release_id`, `reviewed_sha`,
-`final_release_sha` and `paths`. Each path object contains:
+Explicit no-code members use the same core. Their portable artifact metadata
+must match owner/project, hash, size and revocation, and their proof head must
+have approval and be contained in the release. The report head need not equal
+`scope.reviewed_sha`. Membership alone does not approve a report.
 
-| Field | Required evidence |
-| --- | --- |
-| `path` | `.claude/CODEMAP.md`, `docs/qa/journeys.yaml` or `docs/PRODUCT_OVERVIEW.md`. |
-| `input_blobs` | Exact Git blob IDs of the delivered view versions replaced. |
-| `output_blob` | Exact view blob at the final release; deletion is not a view transformation. |
-| `producing_commit` | Full reachable commit changing this path and establishing its final blob and mode. A supersession chain names its final producer. |
-| `producer` | The corresponding skill: `codemap`, `cas-qa-craft` or `project-overview`. |
-| `producer_blob` | Exact skill revision in `cas-cli/src/builtins/skills/<producer>/SKILL.md` or `.claude/skills/<producer>/SKILL.md` at the release. |
+`release_reconcile::preview_release(root, repo, inventory)` evaluates this same
+rule without writing tasks, operation receipts, sync queues or artifact caches.
+Its member map returns would-close (`Closed`), would-hold (`Held` with a reason),
+`AlreadyClosed` or `NotEligible`; inventory exceptions are included. Publication
+uses the same evaluator with writes enabled. Parent acceptance retains the
+explicit independent epic coverage described below.
 
-The scope's `review` proof reference binds artifact, digest, size, reviewed
-commit and recorded release-verdict receipt. Published bytes are checked locally
-and the author must be independent of the covered deliveries. The receipt must
-cover the original anchor. This represents a reviewed skill-authored view, not
-a claimed deterministic generator run. Ordinary source files cannot use this
-rule. Built-output regeneration retains its existing generator checks.
-
-The reviewed candidate and final release must have identical trees apart from
-explicitly reviewed maintained-view transformations. Adapters bind their review
-after release preparation; an unreviewed product/configuration change requires
-new affected proof rather than an ancestry-only transfer.
-
-QA walk receipts, independent review receipts and published-tag shipping
-verdicts keep their distinct kinds. The inventory close entry requires
-independent review; shipping alone never creates a review or a QA PASS.
-Missing bytes, bad bindings, changed task versions, unknown producers or lost
-source leave the delivery held. Existing receipt callbacks also pin ordinary
-close to their reviewed SHA; full inventory adapters additionally supply the
-validated release transformation manifest.
+Legacy release transformation blocks remain readable by existing receipt and
+parent consumers. They are no longer a whole-release member-close gate.
 
 ## GitHub issue outcomes after task reconciliation
 
@@ -261,8 +240,8 @@ exceptions, and partial or failed GitHub issues.
 
 The scope comes from the tracked cut receipt (cas-src) or the merged PR
 (promotion). The reviewed candidate is the newest recorded release review the
-final commit contains, plus every QA/review receipt at that candidate. With no
-review, closes hold as named residuals; publication never stands in for review.
+final commit contains, plus every QA/review receipt at that candidate. Members without their own approval or a receipt naming their head remain
+named residuals; publication never stands in for review.
 No CI job, poller or test rerun is added, and GitHub is read only as evidence.
 
 `cas qa ledger init --task <id> --release-scope scope.json` scaffolds the release

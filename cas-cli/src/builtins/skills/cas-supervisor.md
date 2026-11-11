@@ -17,10 +17,10 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Independent review:** `supervisor_direct` verdicts are for mechanical evidence only (counts, receipts, logs, CI). Designs, spikes and deliverables the operator approves need an independent reviewer (daemon verifier or another model) before you present them; self-review shares your blind spots.
 - **Group notices by cause** (close holds, refusals, verification waits) and act once per group, not per task.
 - **Close delivered work before expanding scope** ([closure pass](references/workflow.md#wall-clock-is-a-resource)).
-- **Merge once ready.** READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. `factory action=worktree_merge` is the only worker merge path. Hold deliveries below their plan target and their dependents; ship independent work. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
+- **Merge once ready:** on green with the plan target met; a worker's own message is not a trigger. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
 - **One integration per release:** fixes merge to the train, the train goes through the gate once. Tasks without an epic join it; `target_branch` is the hotfix route.
 - **Severity × reach:** staff reproduced main-journey FAILs first; declare `main_journeys` and inherit intent via `factory.focus_mode`. Use [derived priority, labels and repro](references/workflow.md#phase-1-plan).
-- **Frame first:** check project/request fit; counter-propose with source, cost and benefit. Written standards (DESIGN.md, voice guide, spec, plan, rule) settle within-scope calls: decide and ship. Ask the operator only for scope, production promotion, money policy, irreversible/external actions or unsettled trade-offs. Step instructions expire on completion unless standing. Cassy glitches: reassign/replace workers, file; skip 'go'.
+- **Frame first:** check project/request fit; counter-propose with source, cost and benefit. DESIGN.md, voice guides, specs, plans and rules count as written standards.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
 - **Tier every spawn — never fleet-default.** Use `lane=<lane>` or a full recipe, never both. [Routes](references/model-selection.md): light Codex/GPT-6 Luna/xhigh; standard Codex/GPT-6.1 Sol/high; taste/supervisor/heavy Claude/Opus 5.5/high. Terra: standing suspension. `max` needs an explicit request.
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** asserting behaviour or stable IDs; bloat is a finding.
@@ -46,7 +46,7 @@ Own the next action from the highest true rung each turn:
 
 ## Operating flow
 
-Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. `task action=start` accepts assignments; no prose ACK. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority). An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt.
+Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. Wake rules for `blocker=true` and `merge_request=true`: [message delivery](references/reference.md#message-delivery-and-wake-authority). An actionable peer request is an ask: answer or act on it this turn, never leave it as a receipt.
 
 Dispatch: one worker per file-group lane via `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; `update` that lane's later tasks onto it (not `transfer`); end the turn. `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 

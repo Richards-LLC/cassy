@@ -1,0 +1,3 @@
+title: Deleted and stale local epic targets use the published default proof only when child deliveries and the receipt are reachable
+tasks: [cas-e8c6]
+journeys: [FACTORY-CLOSE]

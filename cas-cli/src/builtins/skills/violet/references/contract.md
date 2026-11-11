@@ -259,6 +259,7 @@ or its error receipt, as one document, preserving additive fields. Every
 | `journal_error` | Local reply authority could not be read; no upload was begun |
 | `invalid_input` | a flag is missing or out of range, a path is empty or not a file, or more than 10 files per message or 20 replies |
 | `local_request_failed` | a file could not be read, or changed while being posted |
+| `source_audit_failed` | `cas violet reactions` could not read the project's source status; run `cas doctor` |
 | `not_configured` | no `[servers.violet]` registration here; run `cas integrate violet` |
 | `missing_credential` | a credential variable named by the registration is unset (named, never printed) |
 | `invalid_token` | HTTP 401: the hub rejected the bearer (or the Vercel bypass); run `cas integrate violet`, then `cas doctor` |

@@ -2011,15 +2011,24 @@ mod tests {
         let path = "docs/qa/journeys.yaml";
         std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
         commit_file(repo, ".gitattributes", "docs/qa/journeys.yaml merge=cas-journeys\n", "attributes");
-        let base = "version: 1\nupdated: '2026-11-07'\nenforce: enforce\nbug_families:\n  existing:\n    tasks: [cas-base]\njourneys: []\n";
+        let base = concat!(
+            "version: 1\nupdated: '2026-11-07'\nenforce: enforce\n",
+            "bug_families:\n  existing:\n    title: Existing case\n    tasks: [cas-base]\n",
+            "invariants:\n  BASE:\n    statement: Existing invariant\n    check: Read it back\n",
+            "journeys:\n- id: BASE\n  status: dark\n  status_reason: Fixture\n",
+        );
         commit_file(repo, path, base, "registry");
         let target = manager.create_epic_branch("Journey Merge").unwrap();
         manager.git().checkout(&target).unwrap();
         // Every worker forks the same tip, before either has landed.
         let mut lanes = Vec::new();
+        let add_entries = |key: &str| base
+            .replace("bug_families:\n", &format!("bug_families:\n  {key}:\n    title: Case {key}\n    tasks: [cas-{key}]\n    invariants: [{key}]\n    journeys: [{key}]\n"))
+            .replace("invariants:\n  BASE:", &format!("invariants:\n  {key}:\n    statement: Invariant {key}\n    check: Read it back\n  BASE:"))
+            .replace("journeys:\n- id: BASE", &format!("journeys:\n- id: {key}\n  status: dark\n  status_reason: Fixture\n  invariants: [{key}]\n- id: BASE"));
         for (name, date, body) in [
-            ("one", "2026-11-08", base.replace("bug_families:\n", "bug_families:\n  one:\n    tasks: [cas-one]\n")),
-            ("two", "2026-11-09", base.replace("bug_families:\n", "bug_families:\n  two:\n    tasks: [cas-two]\n")),
+            ("one", "2026-11-08", add_entries("one")),
+            ("two", "2026-11-09", add_entries("two")),
             ("same-a", "2026-11-08", base.replace("cas-base", "cas-a").replace("enforce: enforce", "enforce: warn")),
             ("same-b", "2026-11-09", base.replace("cas-base", "cas-b")),
             ("policy", "2026-11-09", base.replace("enforce: enforce", "enforce: off")),
@@ -2029,8 +2038,9 @@ mod tests {
             lanes.push(lane);
         }
         // A non-queued delivery builds its candidate before manager preflight.
-        git(repo, &["merge-tree", "--write-tree", &lanes[0].branch, &lanes[1].branch])
-            .expect("candidate preparation installs the registry driver too");
+        let preview = |left: &str, right: &str| git(repo, &["merge-tree", "--write-tree", left, right])
+            .expect("disjoint registry entries merge during candidate preparation");
+        assert_eq!(preview(&lanes[0].branch, &lanes[1].branch), preview(&lanes[1].branch, &lanes[0].branch));
         for lane in &mut lanes[..2] {
             // Independently prove manager preflight reinstalls the driver,
             // rather than inheriting the candidate preparation's config.
@@ -2044,6 +2054,12 @@ mod tests {
         for key in ["one", "two", "existing"] {
             assert!(registry.bug_families.contains_key(key));
         }
+        for key in ["one", "two", "BASE"] {
+            assert!(registry.invariants.contains_key(key));
+            assert!(registry.journeys.iter().any(|journey| journey.id == key));
+        }
+        let report = crate::qa_registry::check(repo, &repo.join(path)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
         manager.merge_and_cleanup(&mut lanes[2], false, false).unwrap();
         let before = manager.git().ref_sha(&target).unwrap();
         for lane in &mut lanes[3..] {

@@ -968,7 +968,7 @@ pub(super) mod tests {
         ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
         // Release close now requires an approval bound to the report's own
         // anchor, independently of the release-wide reviewed commit.
-        cas_store::import_qa_batch_receipt(&root, &crate::qa_batch::QaBatchReceipt {
+        cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
             schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-report-approved".into(),
             project_id: "release-fixture".into(), ledger_artifact_id: "art-review".into(),
             ledger_path: "/peer/report-review.md".into(), ledger_sha256: "b".repeat(64),

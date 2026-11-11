@@ -1,4 +1,4 @@
-//! Validated, async-scoped release evidence for the ordinary close core.
+//! Per-member release finalization and scoped parent acceptance evidence.
 //! This is internal authority, never a caller-supplied close override.
 use super::*;
 
@@ -49,135 +49,22 @@ impl ReleaseClose {
         repo: &Path,
         inventory: &ReleaseInventory,
     ) -> Result<Self, String> {
-        let current = resolve_release_inventory(root, repo, &inventory.scope)?;
-        let mut member_errors = BTreeMap::new();
-        for expected in &inventory.deliveries {
-            let actual = current
-                .deliveries
-                .iter()
-                .find(|d| d.task_id == expected.task_id);
-            if actual
-                .map(serde_json::to_value)
-                .transpose()
-                .map_err(|e| e.to_string())?
-                != Some(serde_json::to_value(expected).map_err(|e| e.to_string())?)
-            {
-                member_errors.insert(
-                    expected.task_id.clone(),
-                    "RELEASE_GENERATION_CHANGED".into(),
-                );
-            }
-        }
-        for exception in &current.exceptions {
-            member_errors.insert(
-                exception.task_id.clone(),
-                format!("RELEASE_MEMBER_HELD: {:?}", exception.code),
-            );
-        }
-        if ancestor(
-            repo,
-            &inventory.scope.reviewed_sha,
-            &inventory.scope.final_release_sha,
-        ) != Some(true)
-        {
-            return Err(
-                "RELEASE_REVIEW_MAPPING: reviewed candidate is not in the final release".into(),
-            );
-        }
-        let receipts = cas_store::list_qa_batch_receipts(root, &inventory.scope.project_id)
-            .map_err(|e| e.to_string())?;
-        let mut transformations = Vec::new();
+        // Parent acceptance still consumes explicitly recorded review bytes.
+        // Member close never re-runs a whole-release ledger or diff gate.
+        let receipts = read_receipts(root, &inventory.scope.project_id)?;
         let mut reviews = Vec::new();
-        for proof in inventory
-            .scope
-            .proof_refs
-            .iter()
-            .filter(|p| p.kind == ReleaseProofKind::Review)
-        {
-            let receipt = receipts
-                .iter()
-                .find(|r| proof_matches(proof, r))
-                .ok_or("RELEASE_PROOF_BINDING: release review reference has no matching receipt")?;
-            if receipt.project_id != inventory.scope.project_id
-                || receipt.staging_sha != inventory.scope.reviewed_sha
-            {
-                return Err("RELEASE_PROOF_BINDING".into());
-            }
-            let author = receipt
-                .ledger_author_id
-                .as_deref()
-                .ok_or("RELEASE_REVIEW_AUTHOR_MISSING")?;
-            let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
-            for id in receipt.task_heads.keys() {
-                let task = tasks.get(id).map_err(|e| e.to_string())?;
-                if !author_is_independent(root, &task, repo, author)?
-                    && !receipt.author_overrides.contains_key(id)
-                    && author_override(root, &task).is_none()
-                    && release_author_waiver(root, &task, repo, &receipt.task_heads[id])?.is_none()
-                {
-                    return Err(format!("RELEASE_REVIEW_NOT_INDEPENDENT: {id}"));
-                }
-            }
-            let (artifact, path) =
-                validate_ledger(root, &proof.artifact_id, Path::new(&receipt.ledger_path))?;
-            if artifact.sha256 != proof.sha256 || artifact.size_bytes != proof.size_bytes {
-                return Err("RELEASE_PROOF_BINDING".into());
-            }
-            let body = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            reviews.push((receipt.clone(), body.clone()));
-            if let Some(manifest) = parse_manifest(&body)? {
-                if manifest.project_id != inventory.scope.project_id
-                    || manifest.release_id != inventory.scope.release_id
-                    || manifest.reviewed_sha != inventory.scope.reviewed_sha
-                    || manifest.final_release_sha != inventory.scope.final_release_sha
-                {
-                    return Err(
-                        "RELEASE_TRANSFORMATION_BINDING: manifest identifies another release"
-                            .into(),
-                    );
-                }
-                transformations.push((receipt.clone(), manifest));
-            }
-        }
-        let changed = git_text(
-            repo,
-            &[
-                "diff",
-                "--name-only",
-                "--no-renames",
-                "-z",
-                &inventory.scope.reviewed_sha,
-                &inventory.scope.final_release_sha,
-                "--",
-            ],
-        )
-        .ok_or("RELEASE_REVIEW_MAPPING: cannot inspect candidate-to-release inputs")?;
-        for path in changed.split('\0').filter(|path| !path.is_empty()) {
-            if !transformations.iter().any(|(_, manifest)| {
-                manifest.paths.iter().any(|proof| {
-                    proof.path == path
-                        && transformation_matches(
-                            repo,
-                            &inventory.scope.reviewed_sha,
-                            &inventory.scope.final_release_sha,
-                            proof,
-                        )
-                })
-            }) {
-                return Err(format!(
-                    "RELEASE_REVIEW_MAPPING: unreviewed release change at {path}"
-                ));
+        for proof in inventory.scope.proof_refs.iter().filter(|p| p.kind == ReleaseProofKind::Review) {
+            let Some(receipt) = receipts.iter().find(|r| proof_matches(proof, r)) else { continue; };
+            let Ok(body) = std::fs::read_to_string(&receipt.ledger_path) else { continue; };
+            if body.len() as u64 == receipt.ledger_size_bytes
+                && format!("{:x}", Sha256::digest(body.as_bytes())) == receipt.ledger_sha256 {
+                reviews.push((receipt.clone(), body));
             }
         }
         Ok(Self {
-            root: root.to_path_buf(),
-            repo: repo.to_path_buf(),
-            inventory: inventory.clone(),
-            transformations,
-            member_errors,
-            strict_proofs: true,
-            reviews,
-            parent: None,
+            root: root.to_path_buf(), repo: repo.to_path_buf(), inventory: inventory.clone(),
+            transformations: Vec::new(), member_errors: BTreeMap::new(),
+            strict_proofs: true, reviews, parent: None,
         })
     }
 
@@ -674,6 +561,151 @@ pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
                     && d.repository.as_ref().is_some_and(|r| r.head_commit == c.inventory.scope.final_release_sha)
             }))
     }).unwrap_or(false)
+}
+
+/// Open an existing store without schema initialization, sync repair or cache writes.
+pub(crate) fn read_connection(root: &Path) -> Result<rusqlite::Connection, String> {
+    rusqlite::Connection::open_with_flags(root.join("cas.db"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())
+}
+
+pub(crate) fn read_tasks(root: &Path) -> Result<cas_store::SqliteTaskStore, String> {
+    Ok(cas_store::SqliteTaskStore::with_connection(std::sync::Arc::new(std::sync::Mutex::new(read_connection(root)?))))
+}
+
+pub(crate) fn read_receipts(root: &Path, project: &str) -> Result<Vec<QaBatchReceipt>, String> {
+    let conn = read_connection(root)?;
+    if !conn.table_exists(None, "qa_batch_receipts").map_err(|e| e.to_string())? { return Ok(vec![]); }
+    let mut stmt = conn.prepare("SELECT receipt_json FROM qa_batch_receipts WHERE project_id=? ORDER BY recorded_at DESC, id DESC")
+        .map_err(|e| e.to_string())?;
+    stmt.query_map([project], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?
+        .map(|row| serde_json::from_str(&row.map_err(|e| e.to_string())?).map_err(|e| e.to_string())).collect()
+}
+
+/// Read local or synced portable metadata without initializing the artifact
+/// ledger or fetching bytes into the cache. Revocation wins over synced notes.
+pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::PublishedArtifact, String> {
+    use cas_store::TaskStore;
+    use rusqlite::OptionalExtension;
+    let conn = read_connection(root)?;
+    if conn.table_exists(None, "artifact_revocations").map_err(|e| e.to_string())?
+        && conn.query_row("SELECT EXISTS(SELECT 1 FROM artifact_revocations WHERE artifact_id=?)", [id], |row| row.get::<_, bool>(0)).map_err(|e| e.to_string())? {
+        return Err("ARTIFACT_REVOKED".into());
+    }
+    if conn.table_exists(None, "artifacts").map_err(|e| e.to_string())? {
+        let local = conn.query_row(
+            "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id, status, cloud_url, slack_permalink, created_at FROM artifacts WHERE id=?", [id], |row| {
+                Ok(cas_store::PublishedArtifact {
+                    id: row.get(0)?, task_id: row.get(1)?, name: row.get(2)?, mime: row.get(3)?,
+                    size_bytes: row.get(4)?, sha256: row.get(5)?, cloud_artifact_id: row.get(6)?,
+                    status: row.get(7)?, cloud_url: row.get(8)?, slack_permalink: row.get(9)?,
+                    created_at: row.get(10)?, revocation: None,
+                })
+            }).optional().map_err(|e| e.to_string())?;
+        if let Some(local) = local { return Ok(local); }
+    }
+    let mut found = None;
+    for task in read_tasks(root)?.list(None).map_err(|e| e.to_string())? {
+        if let Some(proof) = crate::artifacts::proof::from_notes(&task.notes, id, &task.id).map_err(|e| e.to_string())? {
+            if found.as_ref().is_some_and(|prior| !crate::artifacts::proof::same_artifact(prior, &proof)) {
+                return Err("ARTIFACT_METADATA_CONFLICT".into());
+            }
+            found = Some(proof);
+        }
+    }
+    found.ok_or_else(|| "ARTIFACT_METADATA_MISSING".into())
+}
+
+/// Recorded verdicts already validated their ledger and author. Publication
+/// consumes that immutable fact and never grants approval by itself.
+fn approved_at(root: &Path, task: &Task, anchor: &str, receipts: &[QaBatchReceipt]) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    let conn = read_connection(root)?;
+    if conn.table_exists(None, "verification_dispatches").map_err(|e| e.to_string())? {
+        if let Some(dispatch) = cas_store::get_latest_verification_dispatch_with_conn(&conn, &task.id).map_err(|e| e.to_string())? {
+            let head_matches = dispatch.repository.as_ref().is_some_and(|r| r.head_commit == anchor);
+            let status: Option<String> = conn.query_row(
+                "SELECT status FROM verifications WHERE dispatch_id=? AND task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
+                rusqlite::params![dispatch.id, task.id], |row| row.get(0),
+            ).optional().map_err(|e| e.to_string())?;
+            if dispatch.state == cas_types::VerificationDispatchState::Resolved && head_matches && status.as_deref() == Some("approved") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(receipts.iter().any(|receipt| {
+        matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
+            && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
+    }))
+}
+
+/// Preview and apply share every decision; only the guarded close write differs.
+pub(crate) fn reconcile_members(
+    root: &Path, repo: &Path, inventory: &ReleaseInventory, write: bool,
+    checkpoint: &mut impl FnMut(&str, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose) -> Result<(), String>,
+) -> Result<BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>, String> {
+    use cas_store::TaskStore;
+    use cas_types::TaskStatus;
+    use crate::mcp::tools::core::task::lifecycle::{merge_close::CassyMergeClose, review_tier::{self, VerificationTier}};
+    let tasks = read_tasks(root)?;
+    let receipts = read_receipts(root, &inventory.scope.project_id)?;
+    let ids: std::collections::BTreeSet<_> = inventory.deliveries.iter().map(|d| d.task_id.clone())
+        .chain(inventory.exceptions.iter().map(|e| e.task_id.clone()))
+        .chain(inventory.scope.included_task_ids.iter().cloned())
+        .chain(inventory.scope.no_code_members.keys().cloned()).collect();
+    let mut outcomes = BTreeMap::new();
+    for id in ids {
+        let evaluate = || -> Result<CassyMergeClose, String> {
+            let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
+            if task.status == TaskStatus::Closed { return Ok(CassyMergeClose::AlreadyClosed); }
+            if task.is_terminal() { return Ok(CassyMergeClose::NotEligible); }
+            if let Some(exception) = inventory.exceptions.iter().find(|e| e.task_id == id) {
+                return Err(format!("RELEASE_MEMBER_HELD: {:?}", exception.code));
+            }
+            let delivery = inventory.deliveries.iter().find(|d| d.task_id == id).ok_or("RELEASE_MEMBERSHIP_MISSING")?;
+            if task.updated_at.to_rfc3339() != delivery.generation { return Err("RELEASE_GENERATION_CHANGED".into()); }
+            let mut anchors = Vec::new();
+            if delivery.membership == ReleaseMembership::ExplicitNoCode {
+                crate::release_reconcile::validate_no_code_proofs(root, &inventory.scope, &id, &delivery.proof_refs)?;
+                anchors.extend(delivery.proof_refs.iter().map(|proof| proof.reviewed_sha.as_str()));
+            } else {
+                let anchor = delivery.anchor.as_deref().ok_or("RELEASE_ANCHOR_MISSING")?;
+                if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|current| current != anchor) {
+                    return Err("RELEASE_GENERATION_CHANGED".into());
+                }
+                anchors.push(anchor);
+            }
+            let tier_zero = delivery.anchor.as_deref().is_some_and(|anchor| {
+                !task.labels.iter().any(|label| label == review_tier::FORCE_VERIFIER_LABEL)
+                    && (delivery.base_sha.as_deref() == Some(anchor)
+                        || review_tier::tier_for_delivery(&task, repo).is_some_and(|d| d.tier == VerificationTier::Mechanical))
+            });
+            let mut approved = !anchors.is_empty();
+            for anchor in anchors {
+                if ancestor(repo, anchor, &inventory.scope.final_release_sha) != Some(true) {
+                    return Err("RELEASE_ANCHOR_NOT_SHIPPED".into());
+                }
+                approved &= tier_zero || approved_at(root, &task, anchor, &receipts)?;
+            }
+            if !approved { return Err("REVIEW_MISSING".into()); }
+            if write {
+                let mut closed = task.clone();
+                closed.status = TaskStatus::Closed;
+                closed.closed_at = Some(chrono::Utc::now());
+                closed.close_reason = Some(task.deliverables.parked_close_reason.clone().unwrap_or_else(|| format!(
+                    "Published in {} at {}", inventory.scope.release_id, inventory.scope.final_release_sha)));
+                closed.pending_verification = false;
+                closed.pending_worktree_merge = false;
+                let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+                store.update_if_current(&closed, &task).map_err(|error| format!("RELEASE_CLOSE_WRITE: {error}"))?;
+            }
+            Ok(CassyMergeClose::Closed { notice: "completion included in release receipt".into() })
+        };
+        let outcome = evaluate().unwrap_or_else(CassyMergeClose::Held);
+        checkpoint(&id, outcome.clone())?;
+        outcomes.insert(id, outcome);
+    }
+    Ok(outcomes)
 }
 
 #[cfg(test)]

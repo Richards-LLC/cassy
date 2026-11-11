@@ -638,7 +638,7 @@ impl CasCore {
     }
 
     /// Trusted publish/promotion adapters pass the shared immutable inventory.
-    /// This reuses receipt finalization and every ordinary close gate; a stale
+    /// Each approval-bound member is finalized with one guarded write; a stale
     /// member is held while independent members continue.
     pub(crate) async fn close_release_inventory_outcomes(
         &self, inventory: &crate::qa_batch::ReleaseInventory,
@@ -656,58 +656,8 @@ impl CasCore {
         inventory: &crate::qa_batch::ReleaseInventory,
         checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<(), String>,
     ) -> Result<std::collections::BTreeMap<String, CassyMergeClose>, String> {
-        use crate::qa_batch::{self, release_close::ReleaseClose};
-        let mut outcomes: std::collections::BTreeMap<_, _> = inventory.exceptions.iter().map(|e|
-            (e.task_id.clone(), CassyMergeClose::Held(format!("RELEASE_MEMBER_HELD: {:?}", e.code)))).collect();
-        for id in inventory.scope.included_task_ids.iter().chain(inventory.scope.no_code_members.keys()) {
-            if !inventory.deliveries.iter().any(|d| &d.task_id == id) {
-                outcomes.entry(id.clone()).or_insert_with(|| CassyMergeClose::Held("RELEASE_MEMBERSHIP_MISSING".into()));
-            }
-        }
-        for (id, outcome) in &outcomes { checkpoint(id, outcome.clone())?; }
         let repo = self.cas_root.parent().unwrap_or(&self.cas_root);
-        let context = match ReleaseClose::prepare(&self.cas_root, repo, inventory) {
-            Ok(context) => context,
-            Err(error) => {
-                for delivery in &inventory.deliveries {
-                    let outcome = CassyMergeClose::Held(error.clone());
-                    checkpoint(&delivery.task_id, outcome.clone())?;
-                    outcomes.insert(delivery.task_id.clone(), outcome);
-                }
-                return Ok(outcomes);
-            }
-        };
-        context.clone().scope(async {
-            let store = self.open_task_store().map_err(|e| e.to_string())?;
-            for delivery in &inventory.deliveries {
-                let id = &delivery.task_id;
-                let outcome = if store.get(id).is_ok_and(|task| task.status == TaskStatus::Closed) {
-                    CassyMergeClose::AlreadyClosed
-                } else if let Some(error) = context.member_error(id) {
-                    CassyMergeClose::Held(error.into())
-                } else {
-                    let result = (|| {
-                        let task = store.get(id).map_err(|e| e.to_string())?;
-                        qa_batch::release_close::validate_task(&self.cas_root, &task)?;
-                        let (repo, target) = qa_batch::task_context(&self.cas_root, &task)?;
-                        let anchor = delivery.anchor.as_deref().ok_or("RELEASE_NO_CODE_REQUIRES_OWN_CLOSE")?;
-                        qa_batch::satisfying_release_verdict(&self.cas_root, &task, &repo, &target, anchor)?
-                            .ok_or_else(|| "RELEASE_REVIEW_MISSING: no bound independent release review".to_string())
-                    })();
-                    match result {
-                        Ok(mut receipt) => {
-                            receipt.task_heads.retain(|task, _| task == id);
-                            self.close_release_covered_delivery_outcomes(&receipt).await.remove(id)
-                                .unwrap_or(CassyMergeClose::NotEligible)
-                        }
-                        Err(error) => CassyMergeClose::Held(error),
-                    }
-                };
-                checkpoint(id, outcome.clone())?;
-                outcomes.insert(id.clone(), outcome);
-            }
-            Ok(outcomes)
-        }).await
+        crate::qa_batch::release_close::reconcile_members(&self.cas_root, repo, inventory, true, checkpoint)
     }
 
     /// cas-f497: a recorded release verdict closes the deliveries it owns. A QA

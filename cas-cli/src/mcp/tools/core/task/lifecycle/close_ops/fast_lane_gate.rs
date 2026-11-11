@@ -15,12 +15,6 @@ pub(super) enum LaneClose {
     Merged { lane: FastLaneConfig, merge: String, at: chrono::DateTime<chrono::Utc> },
 }
 
-impl LaneClose {
-    pub(super) fn on_lane(&self) -> bool {
-        !matches!(self, Self::Off)
-    }
-}
-
 /// A lane merge recorded for this delivery's merge, else park eligibility,
 /// recorded as a decision note naming the measured values or the refusal.
 pub(super) fn classify(

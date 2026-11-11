@@ -36,7 +36,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    rows. Each live journey in the QA task's journey table (or `cas qa impact --task <id>`) gets one
    row, walked from entry to goal with its `evidence_required` read-back, under the journey id and a
    verdict `qa_record` accepts ([journey rows](references/journeys.md#journey-rows)); score the
-   experience. Upkeep refusals and their escape tokens are in the
+   experience. Remaining refusals and their escapes are in the
    [escape vocabulary](references/journeys.md#escape-vocabulary). Multi-surface walks use `runSurfaceLanes` from the project's pinned kit: bounded parallel jobs, separate ledgers,
    browser profiles and personas per channel/viewport, never a serial 1440→390→SMS replay ([kit](references/verify-harness.md), [maintenance](references/maintain.md)).
 4. Run `cas qa ledger init --task <id>` and edit the printed project-scoped

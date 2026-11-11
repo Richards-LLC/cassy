@@ -15,7 +15,7 @@ Each array contains `{code, subject, message}` rows. `debt_summary` contains
 `total`, `by_kind` (counts keyed by debt code), `previous_total`, signed `delta`,
 `grew`, and `history_status`. The first recorded run has null comparison fields.
 The same loader and validator serve impact
-and upkeep consumers. Registry upkeep also runs automatically at task park.
+and upkeep consumers. Registry upkeep runs as a lane lint, not at task park.
 
 Checks retain their latest versioned receipt in the existing project
 `cas.db` metadata table, keyed by canonical checkout and registry paths. The
@@ -85,11 +85,11 @@ The loader combines immediate `.yaml` and `.yml` files with the optional legacy
 inline `bug_families` map before validation. Keys must be unique across both
 sources; duplicate keys and malformed files fail loading. Journey and invariant
 references resolve against the combined registry. Commit the family file with
-the fix: impact and close-time checks read the files from the same Git snapshot
-as the registry, including when the working tree differs. An unchanged old case
-does not satisfy the close gate for a new bug delivery. The registry header's
-`updated` date describes curation of the main file; adding a family file does
-not require editing that header.
+the fix: impact reads the files from the same Git snapshot as the registry,
+including when the working tree differs. Release prep folds the files into the
+inline map and deletes them. The registry header's `updated` date describes
+curation of the main file; adding a family file does not require editing that
+header.
 
 ### Parallel registry edits
 
@@ -190,7 +190,7 @@ remain a pure glob pass and do not launch the Python selector.
 Keep the Markdown narrative, stable IDs and YAML metadata aligned when a journey
 changes. Extend YAML owners when source dependencies change; the semantic selector
 tracks imports dynamically. cas-src deliberately leaves new, uncatalogued source
-files unowned so G2 requires ownership or an explicit decision in that delivery.
+files unowned so `cas qa impact` lists them for ownership in that delivery.
 
 ### Pending checkers and manual checks
 
@@ -409,58 +409,14 @@ first, and `cas qa post-release start` records the release's affected journeys i
 that order; post-release status and its gate message show them as "Watch first".
 That list is display only and never changes the verdict.
 
-## Registry upkeep at task park
+## Registry upkeep in the lane
 
-G1–G3 run before the merge request, using the committed delivery head and the task's
-attributed diff (including deletions and rename sources). They read Git snapshots;
-uncommitted changes do not repair a delivery. Missing registries disable these gates.
-
-After publication, upkeep reads the parked delivery's actual integration merge
-against its first parent. An automatic dist regeneration commit after that merge
-does not replace the source delta or hide its changed bug case. Incoming target
-work and later registry repairs are outside that integration delta; a missing
-or unchanged case still refuses the close.
-
-Header `enforce` accepts `off`, `observe`, `enforce`, or `strict`, and takes precedence
-over local `qa.registry.enforce`. At each revision the local setting is fallback
-only when the header has no policy; its default is `enforce`. A delivery uses the
-stricter policy from base and head (`off < observe < enforce < strict`), so a
-delivery cannot relax its own gates. A relaxed header takes effect for later
-deliveries. A local setting cannot downgrade a tracked policy, and uncommitted
-YAML cannot change a delivered policy.
-`observe` persists would-be refusals as task notes and passes. `strict` is explicit
-opt-in and also checks modified unowned surface files. The stage
-is operator-controlled; strict is never selected automatically. Existing
-projects get the one-release observe window described in
-[documentation upkeep](docs-upkeep.md#stages-and-adoption).
-
-| Gate | Refusal | Decision escape |
-| --- | --- | --- |
-| G1 | New schema/reference problems when the registry changed; deletion or rename that leaves a previously matching owner/group/surface glob or spec orphaned | `registry unchanged: <reason>` |
-| G2 | Added or renamed surface file without a journey owner, owner group or ignore match; strict also checks modified files | `no journey impact: <reason>` |
-| G3 | Bug task touches a live journey but has no changed bug-family entry naming the task in `tasks`, or changed invariant naming it in `bug.task` / `bug.tasks` | `no case: <reason>` |
-
-Own a new file in the same delivery to resolve G2. For G3, add or extend the case
-with the invariant that would have caught the incident; an unchanged historical
-case does not cover a new fix. Pre-existing validation debt warns without refusing
-unrelated deliveries. An untouched malformed registry still refuses a bug under
-G3 when its regression-case coverage cannot be evaluated.
-
-For an escape, copy the refusal's complete `task action=notes` command, retaining
-`<token> delivery=<sha> finding=<id>` and replacing `<reason>` with a non-empty
-reason. Record it after the delivery commit, then retry close. The decision
-applies only to that delivery and finding; an older decision or a token quoted in
-progress or warning text does not waive a gate.
-Authenticated `supervisor_override=true` with a non-empty close reason also waives
-these gates and records the refusal waived.
-
-Accounting is durable and deduplicated across retries: notes start with
-`UPKEEP OBSERVE G1|G2|G3:` or `UPKEEP ESCAPE G1|G2|G3:`. The original typed
-`✅ DECISION` remains available to the verifier. Status, QA descriptions and epic
-summaries can count these rows without executing a check again. Epic close appends
-`Upkeep escapes in this epic: <n> (<task: gate/token/reason>…)` across its descendants.
-Current warnings and observe summaries also appear in park and close receipts.
-
-Documentation upkeep gates G5/G6 run alongside these gates, including when no
-registry exists. See [documentation upkeep](docs-upkeep.md) for CODEMAP and
-PRODUCT_OVERVIEW conditions, stages, adoption and decision escapes.
+Task park no longer runs registry upkeep (cas-4b33). The `journey-catalog` fast
+row runs `python3 scripts/doc-fragments.py check` on lanes that change the
+registry or its bug-family files, and refuses YAML that does not parse,
+repeated journey IDs, duplicate or malformed families and family references
+that do not resolve. `cas qa journeys --check` remains the full validator, and
+`cas qa impact` lists unowned surface files and registry problems as advice.
+A bug fix that touches a live journey should still add a family file naming
+its task. See [documentation upkeep](docs-upkeep.md) for how release prep
+compiles the family files into this registry.

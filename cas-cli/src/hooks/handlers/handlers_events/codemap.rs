@@ -920,10 +920,6 @@ mod tests {
             }
             other => panic!("expected ordinary stale result, got {other:?}"),
         }
-
-        let reminder = codemap_stop_reminder(&cas_root)
-            .expect("the stop reminder must share the positive freshness path");
-        assert!(reminder.contains("1 pending structural change(s)"));
     }
 
     #[test]
@@ -1145,34 +1141,5 @@ mod tests {
             evaluation.staleness.is_none(),
             "fresh origin/main must win over the stale shared checkout: {evaluation:?}"
         );
-    }
-
-    #[test]
-    fn test_codemap_stop_reminder_no_file() {
-        let temp = std::env::temp_dir().join("test_codemap_stop_reminder");
-        let _ = std::fs::create_dir_all(&temp);
-        let result = codemap_stop_reminder(&temp);
-        assert!(result.is_none());
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn test_codemap_stop_reminder_with_pending() {
-        let temp = std::env::temp_dir().join("test_codemap_stop_with_pending");
-        let _ = std::fs::create_dir_all(&temp);
-
-        let pending_path = temp.join(CODEMAP_PENDING_FILE);
-        std::fs::write(
-            &pending_path,
-            r#"{"changes":[{"type":"A","path":"src/new.rs"},{"type":"D","path":"src/old.rs"}],"commit":"abc1234","recorded_at":"2026-04-03T18:00:00Z"}"#,
-        )
-        .unwrap();
-
-        let result = codemap_stop_reminder(&temp);
-        assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.contains("2 pending structural change(s)"));
-
-        let _ = std::fs::remove_dir_all(&temp);
     }
 }

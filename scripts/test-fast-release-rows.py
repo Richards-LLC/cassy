@@ -96,7 +96,7 @@ class FastRows(unittest.TestCase):
                        "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
-                       "release-diary-thread.py"):
+                       "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
             for source in (ROOT / source_dir).glob("*.sql"):
@@ -107,6 +107,7 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/qa/journeys.yaml", "version: 1\njourneys:\n- id: J1\n")
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
@@ -288,6 +289,8 @@ class FastRows(unittest.TestCase):
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            # cas-4b33: registry upkeep moved from park to this lane lint.
+            ("journey-catalog", "docs/qa/bug-families/ghost.yaml", "title: Ghost case\njourneys: [MISSING]\n"),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
              VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",

@@ -1772,11 +1772,19 @@ lane_touches() {
 }
 
 check_journey_catalog() {
-    if ! lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
-        printf 'journey-catalog: no journey catalog or spec change\n'
-        return 0
+    local ran=false
+    if lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
+        python3 scripts/journeys-for-diff.py --check || return 1
+        ran=true
     fi
-    python3 scripts/journeys-for-diff.py --check
+    # cas-4b33: journey registry upkeep (formerly a park gate) and the per-task
+    # doc fragments that release prep compiles.
+    if lane_touches docs/qa/journeys.yaml docs/qa/bug-families docs/product-overview.d \
+        docs/PRODUCT_OVERVIEW.md scripts/doc-fragments.py; then
+        python3 scripts/doc-fragments.py check || return 1
+        ran=true
+    fi
+    [[ "$ran" == true ]] || printf 'journey-catalog: no journey catalog, registry, fragment or spec change\n'
 }
 
 check_builtin_skill_limits() {
@@ -2407,7 +2415,7 @@ else
 fi
 gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+gate_row journey-catalog 'journeys-for-diff.py --check (catalog steps match test.step titles); doc-fragments.py check (registry and doc fragments)' \
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
@@ -2446,7 +2454,7 @@ fast_row_fix() {
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
         builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;
-        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles (python3 scripts/journeys-for-diff.py --check) and fix what python3 scripts/doc-fragments.py check reports' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
         migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
         ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;

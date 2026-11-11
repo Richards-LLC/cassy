@@ -23,7 +23,7 @@ This document provides the raw technical details of CAS in response to a review 
 
 **Scale**: ~14,300 Rust source files, ~3.8M lines of Rust (including vendor/generated), 16 workspace crates, 150 database migrations.
 
-```
+```text
 cas-src/
 ├── cas-cli/                    # Main binary crate
 │   ├── src/
@@ -266,6 +266,7 @@ pub enum ServerMessage {
 ```
 
 **Key design choices:**
+
 - Row-level dirty tracking (not cell-level) — server renders via `ghostty_vt`, sends only changed rows as `StyleRun` spans
 - Supports scrollback caching — client requests `cache_window` extra rows
 - Sequence numbers for detecting missed updates on reconnect
@@ -422,7 +423,7 @@ pub struct VerificationIssue {
 
 Branch strategy in factory mode:
 
-```
+```text
 main ──────────────────────────► (stays clean)
        \
         └── factory/worker-1 ──► (worker's isolated branch)
@@ -430,6 +431,7 @@ main ─────────────────────────
 ```
 
 After a worker completes a task:
+
 1. Worker closes task (triggers verification)
 2. Supervisor reviews changes in the worker worktree
 3. Supervisor merges worker branch: `git merge factory/<worker-name>`
@@ -482,7 +484,7 @@ pub fn generate_prompt(event: &DirectorEvent, ...) -> Option<Prompt> {
 
 Every injected prompt includes response instructions:
 
-```
+```text
 ---
 To respond to this message, use: `mcp__cas__coordination action=message target=<name> message="..."`
 ```
@@ -509,6 +511,7 @@ Workers are Claude Code instances that receive:
 3. **Auto-injected task assignment** from the Director when the supervisor assigns them work
 
 Worker workflow (from the cas-worker skill):
+
 1. Receive task assignment notification
 2. `mcp__cas__task action=show id=<task-id>` — read full details
 3. `mcp__cas__task action=start id=<task-id>` — mark in-progress
@@ -524,7 +527,7 @@ Worker workflow (from the cas-worker skill):
 
 ### Spawn Path
 
-```
+```text
 User: `cas -w 3`
   → cli/factory/lifecycle.rs
     → FactoryConfig { workers: 3, enable_worktrees: true, ... }
@@ -543,7 +546,7 @@ User: `cas -w 3`
 
 ### Task Assignment Path
 
-```
+```text
 Supervisor calls: mcp__cas__task action=update id=cas-1234 assignee=swift-fox
   → MCP tool handler: task_update()
     → task_store.update(task)           // SQLite write
@@ -615,7 +618,7 @@ Tantivy-based BM25 search index alongside SQLite:
 
 150 forward-only migrations, auto-detected and applied on startup:
 
-```
+```text
 m001_entries_base.rs → m150_*.rs
 ```
 
@@ -625,7 +628,7 @@ Each migration has: unique sequential ID, `up` SQL, and a `detect` query (for in
 
 Stores are composed with decorator layers:
 
-```
+```text
 SqliteStore (raw DB operations)
   → NotifyingStore (emits change events to socket)
     → SyncingStore (syncs rules/skills to .claude/ filesystem)
@@ -682,6 +685,7 @@ Multiple factory-coordinated optimization passes:
 #### MCP Proxy (7 commits)
 
 New `cas-mcp-proxy` crate — aggregates multiple MCP servers behind a single connection:
+
 - Config-aware hot-reload
 - Keyword-based search across servers
 - JSON dispatch with dot-call syntax (`server.tool` addressing)

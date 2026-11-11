@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  published-release-receipt-historical-targets:
+    title: One release verdict retains the published SHA across historical epic targets while QA target containment and member ancestry remain required
+    tasks: [cas-bc58]
+    journeys: [FACTORY-QA-RECEIPT]
   queued-blocked-successor-source:
     title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
     tasks: [cas-57df]

@@ -14205,6 +14205,8 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
+        // Completed supervisor mirrors persist the broadcast marker explicitly.
+        queue.stamp_recipient_device(id, "*").unwrap();
         let reply = super::read_operator_replies(
             &root,
             queue.as_ref(),
@@ -14375,7 +14377,10 @@ mod tests {
                 .processed_at
                 .is_some()
         );
-        daemon.acknowledge_operator_reply(id, "*").unwrap();
+        daemon.handle_ws_message(0, crate::ui::factory::ClientMessage::OperatorReplyPersisted {
+            notification_id: id,
+            device_id: "paired-device".into(),
+        }).await;
         assert!(
             queue
                 .queued_prompt(id)
@@ -14384,6 +14389,10 @@ mod tests {
                 .processed_at
                 .is_some()
         );
+        daemon.queue_jobs.apply_completions();
+        let delivered = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(delivered.stage, cas_store::DeliveryStage::Delivered);
+        assert!(delivered.retry.delivery_attempts > 0);
     }
     #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {

@@ -5836,7 +5836,24 @@ impl CasCore {
             unpublished_merge_base = attempted_target_tip.clone();
             let merge_result = if publish_before_ref {
                 let branch = worktree.parent_branch.clone();
-                let mut publish = |head: &str, _base: &str| {
+                let mut publish = |head: &str, base: &str| {
+                    if let Some((receipt, _)) = transactional_delivery.as_ref() {
+                        if base != receipt.target_sha {
+                            return Err(crate::worktree::GitError::TargetTipChanged {
+                                branch: branch.clone(), expected: receipt.target_sha.clone(), actual: base.into(),
+                            });
+                        }
+                        if !manager.git().is_ancestor(&receipt.commit_sha, head)
+                            || !matches!(crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                                &cwd, &receipt.commit_sha, head,
+                            ), crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. })
+                        {
+                            return Err(crate::worktree::GitError::CommandFailed(
+                                "Transactional delivery candidate does not preserve its receipt content".into(),
+                            ));
+                        }
+                    }
                     if let Some(approval) = premerge_approval.as_ref() {
                         approval.verify_landing(head).map_err(crate::worktree::GitError::CommandFailed)?;
                     }

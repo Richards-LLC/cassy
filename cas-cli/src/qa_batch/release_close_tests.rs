@@ -77,14 +77,36 @@ fn published_train_closes_members_independently_cas_734b() {
     cas_store::import_qa_batch_receipt(&root, &receipt).unwrap();
     let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
         peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
-        head_commit: anchor.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![anchor.clone()],
+        head_commit: published.clone(), state_digest: String::new(), target_branch: None, anchor_commits: vec![anchor.clone()],
     });
     let dispatch = cas_store::create_verification_dispatch_bound(&root, "cas-approved", "worker", "supervisor", &boundary,
         chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+    let mut bound = boundary.repository.clone().unwrap();
+    // The peer recorder binds the source anchor but records the landed head.
+    bound.peer_premerge = Some(cas_types::PeerPremergeAttestation {
+        message_id: "peer-message".into(), sender_machine_id: "peer".into(), sender_session: "peer-session".into(),
+        receipt: cas_types::PeerPremergeReceipt {
+            status: cas_types::VerificationStatus::Approved, project_id: "close-fixture".into(),
+            supervisor_id: "supervisor".into(), task_id: "cas-approved".into(),
+            source_branch: "factory/cas-approved".into(), source_sha: anchor.clone(), target_branch: "main".into(),
+            target_sha: base.clone(), candidate_tree: git(&["rev-parse", "HEAD^{tree}"]), landed_sha: published.clone(),
+            dispatch_id: dispatch.id.clone(), verdict_id: "ver-approved".into(), plan_digest: "fixture-plan".into(),
+        },
+    });
     // Seed the durable verdict exactly as the verified recorder leaves it.
     let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-    conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
-    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    conn.execute("UPDATE verification_dispatches SET state='resolved', repository_proof=?1 WHERE id=?2",
+        rusqlite::params![serde_json::to_string(&bound).unwrap(), dispatch.id]).unwrap();
+    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    // A different head with no source binding must never approve this member.
+    let mut unrelated = bound.clone();
+    unrelated.head_commit = base.clone();
+    unrelated.anchor_commits.clear();
+    unrelated.peer_premerge = None;
+    let unbound_dispatch = cas_store::create_verification_dispatch_bound(&root, "cas-unreviewed", "worker", "supervisor",
+        &cas_types::VerificationProofBoundary::task_at(unrelated), chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+    conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&unbound_dispatch.id]).unwrap();
+    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-unbound','cas-unreviewed','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), unbound_dispatch.id]).unwrap();
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
         release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
         promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],

@@ -623,7 +623,11 @@ fn approved_at(root: &Path, task: &Task, anchor: &str, receipts: &[QaBatchReceip
     let conn = read_connection(root)?;
     if conn.table_exists(None, "verification_dispatches").map_err(|e| e.to_string())? {
         if let Some(dispatch) = cas_store::get_latest_verification_dispatch_with_conn(&conn, &task.id).map_err(|e| e.to_string())? {
-            let head_matches = dispatch.repository.as_ref().is_some_and(|r| r.head_commit == anchor);
+            // Peer admission records the landed head and binds the approved
+            // source in anchor_commits; that immutable source is the delivery.
+            let head_matches = dispatch.repository.as_ref().is_some_and(|r| {
+                r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
+            });
             let status: Option<String> = conn.query_row(
                 "SELECT status FROM verifications WHERE dispatch_id=? AND task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
                 rusqlite::params![dispatch.id, task.id], |row| row.get(0),

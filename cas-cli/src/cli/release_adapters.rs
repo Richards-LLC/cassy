@@ -770,7 +770,7 @@ mod tests {
             let context = crate::artifacts::PublishContext {
                 store: &artifacts,
                 roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), &review.id),
-                task_id: &review.id, cloud: None,
+                task_id: review.id.clone(), cloud: None,
             };
             let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
             let receipt = cas_store::QaBatchReceipt {

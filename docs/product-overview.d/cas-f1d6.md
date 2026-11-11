@@ -1,1 +1,3 @@
+## Core Concepts
+
 Factory-check cleanup retires duplicated test-shape validation at park and CI prose pins, merges proof-scope and independent-QA code identities. Train dispatch holds remain where candidate-review exemptions would otherwise skip a pending verdict. Publication hooks remain until every post route has an equivalent server-side enforcer. Messaging to recorded native child IDs preserves factory-peer coordination policy. The mechanical task audit records removed rows, retained checks without equivalent enforcement, and the measured registry reduction; generated shared docs refresh at the release cut.

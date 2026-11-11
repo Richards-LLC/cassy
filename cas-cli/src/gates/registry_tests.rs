@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use cas_store::{EventStore, SqliteEventStore};
 use chrono::Utc;
 
-use super::{Family, REGISTRY, UNCODED, facts, find, tag, codes_in};
+use super::{Family, REGISTRY, UNCODED, facts, find, tag, override_tag, codes_in};
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -82,6 +82,22 @@ fn every_registered_refusal_site_emits_its_code() {
     if !crate::test_paths::crate_root().join("src/gates").is_dir() {
         eprintln!("SKIP gate emission scan: source checkout unavailable in this test archive");
         return;
+    }
+    // The same inventory that audits the checkout must reject a new bypass
+    // without a code, and a declared bypass without its successful tag.
+    let fixture = tempfile::tempdir().unwrap();
+    let source_dir = fixture.path().join("cas-cli/src");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    let fixture_registry = vec![("G-01".into(), "park".into(), "Fixture policy".into(), "cas-cli/src/probe.rs:1".into())];
+    for (refusal, accepted, covered) in [
+        (r#"Err("REFUSED")"#, r#"Ok("accepted")"#, false),
+        (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok("accepted")"#, false),
+        (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok(override_tag("G-01", "accepted"))"#, true),
+    ] {
+        let source = format!("// gate-audit[supervisor_override]: bypass G-01 Accepts an otherwise refused request.\nfn probe(supervisor_override: bool) {{ if !supervisor_override {{ {refusal} }} else {{ {accepted} }} }}");
+        std::fs::write(source_dir.join("probe.rs"), source).unwrap();
+        let result = gate_audit::scan(fixture.path(), &fixture_registry);
+        assert_eq!(result.gaps.is_empty(), covered, "{:?}", result.gaps);
     }
     let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
     let root = crate::test_paths::crate_root().join("..");

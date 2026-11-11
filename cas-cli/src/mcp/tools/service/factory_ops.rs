@@ -3175,7 +3175,7 @@ impl CasService {
             ));
         }
         let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
-        if force_build_guard && !build_guard.violations().is_empty() {
+        if build_guard.disabled || (force_build_guard && !build_guard.violations().is_empty()) {
             build_guard_notice = crate::gates::override_tag("G-135", build_guard_notice);
         }
         let throttle_notice =

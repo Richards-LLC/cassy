@@ -606,6 +606,7 @@ fn macos_available_memory() -> Option<u64> {
     (u64::from(stats.free_count) + u64::from(stats.inactive_count)).checked_mul(page_size)
 }
 
+// gate-audit[forward]: Returns the operator env switch; successful spawn or capped-build admission emits G-135. Hard OS builder slots remain mandatory.
 fn build_guard_disabled_override() -> bool {
     std::env::var("CAS_FACTORY_BUILD_GUARD")
         .ok()

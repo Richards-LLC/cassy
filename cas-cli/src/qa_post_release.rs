@@ -793,7 +793,12 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
 // gate[G-120 epic-close]: Post-release watch before epic close or release notes
-pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+#[cfg(test)]
+pub(crate) fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+    gate_with_overrides(cas_root, epic, release_notes, &mut Vec::new())
+}
+
+pub fn gate_with_overrides(cas_root: &Path, epic: &Task, release_notes: bool, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();
     let waiting = fs::read(
@@ -831,7 +836,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
     }
     if let Some(reason) = recent_override(&epic.notes, now) {
         if let Ok(store) = crate::store::open_task_store(cas_root) {
-            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { return None; }
+            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { accepted_override_codes.push("G-120"); return None; }
         }
     }
     let state = if verdict == Verdict::Pending {

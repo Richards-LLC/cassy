@@ -7792,13 +7792,14 @@ impl CasCore {
         {
             return Ok(close_refusal::gate("phase_outcome_gate", "provide_outcome_receipt", message));
         }
+        let mut accepted_override_codes = Vec::new();
         if task.task_type == TaskType::Epic && !task.is_terminal() {
             if let Ok(actor) = self.get_agent_id() {
                 if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {
                     tracing::warn!(%error,epic=%task.id,"could not arm post-release fallback");
                 }
             }
-            if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
+            if let Some(reason) = crate::qa_post_release::gate_with_overrides(&self.cas_root,&task,false,&mut accepted_override_codes) {
                 return Ok(close_refusal::gate("post_release_gate", "complete_post_release_check", reason));
             }
             // An override use appends an audit note; do not overwrite it later.
@@ -7853,7 +7854,6 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
-        let mut accepted_override_codes = Vec::new();
 
         // This is a declaration for one attempt, never a sticky methodology
         // or a new close disposition. Delivered keeps its verification and

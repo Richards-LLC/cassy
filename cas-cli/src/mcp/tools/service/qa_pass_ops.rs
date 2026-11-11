@@ -83,9 +83,12 @@ impl CasService {
             }
         }
         let closes = self.inner.close_release_covered_deliveries(&receipt).await;
-        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
+        let response = format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
-            receipt.ledger_artifact_id, receipt.ledger_path)))
+            receipt.ledger_artifact_id, receipt.ledger_path);
+        Ok(Self::success(if receipt.author_overrides.is_empty() { response } else {
+            crate::gates::override_tag("G-116", response)
+        }))
     }
 
     // gate[G-118 release-verdict]: qa_record verdict validation

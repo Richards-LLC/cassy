@@ -232,6 +232,8 @@ pub fn hook_denial(output: &cas_core::hooks::HookOutput) -> Option<&str> {
 pub fn observe_hook_output(cas_root: &Path, output: &cas_core::hooks::HookOutput) {
     if let Some(reason) = hook_denial(output) {
         observe_refusal(cas_root, None, reason);
+    } else if let Some(message) = output.system_message.as_deref() {
+        observe_cli_output(cas_root, message);
     }
 }
 

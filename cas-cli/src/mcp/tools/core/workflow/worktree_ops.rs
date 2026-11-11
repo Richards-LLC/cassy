@@ -4333,10 +4333,10 @@ impl CasCore {
     }
 
     // gate[G-95 merge-admission]: Unanswered peer ask
-    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>) -> Option<String> {
+    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
         let caller = self.get_agent_id().ok()?;
         let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
-        crate::peer_ask_gate::merge_refusal(
+        crate::peer_ask_gate::merge_refusal_with_overrides(
             &self.cas_root,
             &caller,
             agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
@@ -4344,6 +4344,7 @@ impl CasCore {
             &crate::peer_ask_gate::MergeSubject {
                 task_id: task_id.map(str::to_string), pr, any_pr: false,
             },
+            accepted_override_codes,
         )
         .map(|refusal| crate::gates::tag("G-95", refusal))
     }
@@ -4432,6 +4433,28 @@ impl CasCore {
         reason: Option<&str>,
         expected_delivery: Option<&crate::factory_ci_retry::Retry>,
         train_queue: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut accepted_override_codes = Vec::new();
+        let mut result = crate::async_runtime::heap_future(|| self.worktree_merge_attempt(
+            id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, expected_delivery, train_queue,
+            &mut accepted_override_codes,
+        )).await?;
+        crate::gates::append_override_tags(&mut result, &accepted_override_codes);
+        Ok(result)
+    }
+
+    async fn worktree_merge_attempt(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+        train_queue: Option<&str>,
+        accepted_override_codes: &mut Vec<&'static str>,
     ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
@@ -4576,7 +4599,7 @@ impl CasCore {
             // peer about this task or its PR holds the merge until answered or
             // visibly overridden.
             let pr = scoped_task.as_deref().and_then(|task| task.deliverables.delivery_pr_number);
-            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr) {
+            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr, accepted_override_codes) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
             }
         }
@@ -5844,7 +5867,7 @@ impl CasCore {
                         store.update_if_current(&next, &current)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
-                    super::protected_pr::arm(self, &cwd, &pr, task_id)
+                    super::protected_pr::arm(self, &cwd, &pr, task_id, accepted_override_codes)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                     return Ok(Self::success(format!(
                         "{ci_prefix}PR queued: {} (source {} at {source}, target {}). Auto-merge enabled for this exact head; no local merge or default-branch push was attempted. Source worktree retained. The merge queue owns landing; Cassy reconciles the task after publication.",

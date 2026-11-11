@@ -153,14 +153,17 @@ pub fn execute(
     let raw_args: Vec<String> = std::env::args_os()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
+    let accepted_override_codes = std::cell::RefCell::new(Vec::new());
     let gate = |post: &Value| {
+        let mut accepted = accepted_override_codes.borrow_mut();
         if post.get("kind").and_then(Value::as_str) == Some("message") {
-            return crate::hooks::handlers::handlers_events::violet_post_release_denial(post,cas_root);
+            return crate::hooks::handlers::handlers_events::violet_post_release_denial(post,cas_root,&mut accepted);
         }
-        crate::hooks::handlers::handlers_events::violet_publication_denial(
+        crate::hooks::handlers::handlers_events::violet_publication_check(
             "violet_post",
             Some(post),
             cas_root,
+            &mut accepted,
         )
         .map(|reason| if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason })
     };
@@ -179,7 +182,12 @@ pub fn execute(
         connect: &mut connect,
         reply_claim: &reply_claim,
     };
-    run_violet(&args.command, &mut context, &mut out).map_err(|error| {
+    let result = run_violet(&args.command, &mut context, &mut out);
+    if result.is_ok() && let Some(root) = cas_root {
+        let tags = accepted_override_codes.borrow().iter().fold(String::new(), |tags, code| crate::gates::override_tag(code, tags));
+        crate::gates::facts::observe_cli_output(root, &tags);
+    }
+    result.map_err(|error| {
         let error = anyhow::Error::new(error);
         if cli.json {
             // run_violet already emitted the final receipt, including errors.

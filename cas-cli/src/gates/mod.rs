@@ -124,3 +124,12 @@ fn tagged_codes(text: &str, prefix: &str) -> Vec<&'static str> {
     }
     codes
 }
+
+/// Carry accepted policy exceptions through a successful MCP response.
+/// The common observer deduplicates codes; a later refusal consumes none.
+pub(crate) fn append_override_tags(result: &mut rmcp::model::CallToolResult, codes: &[&'static str]) {
+    if result.is_error != Some(true) && !codes.is_empty() {
+        let text = codes.iter().fold(String::new(), |text, code| override_tag(code, text));
+        result.content.push(rmcp::model::Content::text(text));
+    }
+}

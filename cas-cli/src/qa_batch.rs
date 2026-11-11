@@ -624,6 +624,7 @@ pub(crate) fn validate_ledger(
 
 /// The operator's recorded override for this task, if any (cas-26ac). Only
 /// the operator-written file counts; task notes never do.
+// gate-audit[forward]: Stored operator approval is returned to receipt admission (G-116); coverage lookups replay evidence and do not mint an override.
 pub(crate) fn author_override(root: &Path, task: &Task) -> Option<String> {
     crate::qa_author_override::for_task(root, &task.id)
 }

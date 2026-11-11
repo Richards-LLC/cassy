@@ -55,6 +55,7 @@ struct Function {
     policy: bool,
     annotations: BTreeMap<String, String>,
     producer: Option<&'static str>,
+    emissions: Vec<(String, &'static str, usize)>,
 }
 
 fn candidate(name: &str) -> bool {
@@ -131,8 +132,10 @@ impl<'ast> Visit<'ast> for Body<'_> {
                 if matches!(name.as_str(), "tag" | "refusal_tag" | "override_tag") {
                     if let Some(code) = expr.args.first().and_then(literal) {
                         if name != "override_tag" {
+                            self.function.emissions.push((code.clone(), "refusal", expr.span().start().line));
                             self.function.refused.insert(code);
                         } else {
+                            self.function.emissions.push((code.clone(), "override", expr.span().start().line));
                             self.function.overridden.insert(code);
                         }
                     }
@@ -149,6 +152,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
             && path.path.is_ident("accepted_override_codes")
             && let Some(code) = expr.args.first().and_then(literal)
         {
+            self.function.emissions.push((code.clone(), "override", expr.span().start().line));
             self.function.overridden.insert(code);
         }
         visit::visit_expr_method_call(self, expr);
@@ -206,8 +210,10 @@ impl<'ast> Visit<'ast> for Body<'_> {
                             && let Ok(code) = syn::parse_str::<syn::LitStr>(&lit.to_string())
                         {
                             if name == "override_tag" {
+                                body.function.emissions.push((code.value(), "override", ident.span().start().line));
                                 body.function.overridden.insert(code.value());
                             } else {
+                                body.function.emissions.push((code.value(), "refusal", ident.span().start().line));
                                 body.function.refused.insert(code.value());
                             }
                         }
@@ -223,6 +229,11 @@ impl<'ast> Visit<'ast> for Body<'_> {
     }
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
         let s = lit.value();
+        for (prefix, kind) in [("", "refusal"), ("override ", "override")] {
+            for code in bracket_codes(&s, prefix) {
+                self.function.emissions.push((code, kind, lit.span().start().line));
+            }
+        }
         self.function.refused.extend(bracket_codes(&s, ""));
         self.function
             .overridden
@@ -270,21 +281,8 @@ struct Functions<'a> {
     output: &'a mut Vec<Function>,
 }
 impl Functions<'_> {
-    fn function(
-        &mut self,
-        name: String,
-        signature: &syn::Signature,
-        block: &syn::Block,
-        span: proc_macro2::Span,
-    ) {
-        let start = span.start().line;
-        let end = block.span().end().line;
-        let mut f = Function {
-            name,
-            site: format!("{}:{start}", self.path),
-            ..Default::default()
-        };
-        // Semantic exceptions are local, reasoned annotations, never an external allowlist.
+    fn annotations(&self, start: usize, end: usize) -> BTreeMap<String, String> {
+        let mut annotations = BTreeMap::new();
         let mut annotation_start = start.saturating_sub(1);
         while annotation_start > 0
             && (self.lines[annotation_start - 1]
@@ -299,10 +297,27 @@ impl Functions<'_> {
                 && let Some((key, reason)) = declaration.split_once("]:")
                 && !reason.trim().is_empty()
             {
-                f.annotations
+                annotations
                     .insert(key.trim().into(), reason.trim().into());
             }
         }
+        annotations
+    }
+    fn function(
+        &mut self,
+        name: String,
+        signature: &syn::Signature,
+        block: &syn::Block,
+        span: proc_macro2::Span,
+    ) {
+        let start = span.start().line;
+        let end = block.span().end().line;
+        let mut f = Function {
+            name,
+            site: format!("{}:{start}", self.path),
+            ..Default::default()
+        };
+        f.annotations = self.annotations(start, end);
         let output = &signature.output;
         // The actual type paths, rather than spelling in comments, identify producers.
         struct Types(BTreeSet<String>);
@@ -351,6 +366,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
             site: format!("{}:{}", self.path, item.span().start().line),
             ..Default::default()
         };
+        f.annotations = self.annotations(item.span().start().line, item.span().end().line);
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }
@@ -373,6 +389,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
             site: format!("{}:{}", self.path, item.span().start().line),
             ..Default::default()
         };
+        f.annotations = self.annotations(item.span().start().line, item.span().end().line);
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }
@@ -401,7 +418,7 @@ fn files(directory: &Path, output: &mut Vec<PathBuf>) {
             ) {
                 files(&p, output);
             }
-        } else if !name.contains("test")
+        } else if !name.ends_with("_tests.rs") && name != "tests.rs"
             && p.extension()
                 .is_some_and(|x| matches!(x.to_str(), Some("rs" | "sh" | "py" | "registry")))
         {
@@ -508,6 +525,18 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
             }
         }
     }
+    for f in &functions {
+        for (code, kind, line) in &f.emissions {
+            let path = f.site.rsplit_once(':').unwrap().0;
+            audit.rows.push([
+                format!("direct {kind} emission ({})", f.name),
+                format!("{path}:{line}"), code.clone(),
+                if *kind == "refusal" { "[CODE]" } else { "—" }.into(),
+                if *kind == "override" { "[override CODE]" } else { "—" }.into(),
+                "producer tag; consumed at request boundary".into(),
+            ]);
+        }
+    }
     loop {
         let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
         let mut occurrences = BTreeMap::<String, usize>::new();
@@ -560,7 +589,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                 boundary.into(),
             ]);
         }
-        if f.name.contains("false_positive") {
+        if f.name.contains("false_positive") || f.calls.contains("record_false_positive") {
             audit.rows.push([
                 format!("false-positive path {}", f.name),
                 f.site.clone(),

@@ -477,6 +477,23 @@ fn handle_pre_tool_use_inner(
     prepared_cargo_input: Option<serde_json::Value>,
     turn_cwd: &Path,
 ) -> Result<HookOutput, MemError> {
+    let mut accepted_override_codes = Vec::new();
+    let mut output = handle_pre_tool_use_checked(input, cas_root, prepared_cargo_input, turn_cwd, &mut accepted_override_codes)?;
+    if crate::gates::facts::hook_denial(&output).is_none() {
+        for code in accepted_override_codes {
+            output.system_message = Some(crate::gates::override_tag(code, output.system_message.take().unwrap_or_default()));
+        }
+    }
+    Ok(output)
+}
+
+fn handle_pre_tool_use_checked(
+    input: &HookInput,
+    cas_root: Option<&Path>,
+    prepared_cargo_input: Option<serde_json::Value>,
+    turn_cwd: &Path,
+    accepted_override_codes: &mut Vec<&'static str>,
+) -> Result<HookOutput, MemError> {
     let tool_name = match &input.tool_name {
         Some(name) => name.as_str(),
         None => return Ok(HookOutput::empty()),
@@ -494,7 +511,7 @@ fn handle_pre_tool_use_inner(
     // verification passes, for every harness and role.
     // gate[H-07 pre-tool]: Publication gate
     if let Some(reason) =
-        super::publication_gate::denial(tool_name, input.tool_input.as_ref(), cas_root)
+        super::publication_gate::denial_with_overrides(tool_name, input.tool_input.as_ref(), cas_root, accepted_override_codes)
     {
         // A post-release hold already carries its own gate code (G-120).
         let reason = if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason };
@@ -827,7 +844,6 @@ fn handle_pre_tool_use_inner(
                 // session could neither push nor pass its close's merge check.
                 // gate[H-23 pre-tool]: Local-merge push deny
                 if looks_like_git_push_to_origin(cmd)
-                    && !local_merge_push_override()
                     && effective_worker_delivery_mode(
                         worker_delivery_mode(),
                         &cas_root
@@ -838,10 +854,14 @@ fn handle_pre_tool_use_inner(
                             .unwrap_or_default(),
                     ) == cas_types::DeliveryMode::LocalMerge
                 {
+                    if local_merge_push_override() {
+                        accepted_override_codes.push("H-23");
+                    } else {
                     return Ok(HookOutput::with_pre_tool_permission(
                         "deny",
                         &crate::gates::tag("H-23", "🚫 LOCAL-MERGE DELIVERY: git push origin is disabled for this factory session. Commit locally; the supervisor merges your local factory branch. Set CAS_FACTORY_LOCAL_MERGE_PUSH_OVERRIDE=1 only when explicitly authorized by the supervisor."),
                     ));
+                }
                 }
                 // gate[H-22 pre-tool]: Worker commit guard / git scope (layer 1)
                 if looks_like_git_write_op(cmd) {
@@ -924,13 +944,14 @@ fn handle_pre_tool_use_inner(
             .tool_input
             .as_ref()
             .and_then(|ti| ti.get("command").and_then(|v| v.as_str()))
-        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal(
+        && let Some(refusal) = crate::peer_ask_gate::github_merge_refusal_with_overrides(
             root,
             std::path::Path::new(&input.cwd),
             cmd,
             &crate::hooks::handlers::handlers_state::current_agent_id(input),
             &std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".into()),
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+            accepted_override_codes,
         )
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-26", refusal)));

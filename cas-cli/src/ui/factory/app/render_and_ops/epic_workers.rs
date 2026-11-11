@@ -3418,6 +3418,8 @@ impl FactoryApp {
         self.shutdown_worker_inner(name, false, true).await.map(|_| ())
     }
 
+    // gate-audit[force]: selector Chooses SIGKILL instead of SIGTERM; this operation has no active-task refusal to waive. MCP admission owns G-136.
+    // gate-audit[preserve_worktree]: selector Recycle retains the worktree; does not suppress shutdown authorization.
     async fn shutdown_worker_inner(
         &mut self,
         name: &str,

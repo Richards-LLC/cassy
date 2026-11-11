@@ -1,5 +1,6 @@
 //! Release script adapters. Train selection and notice delivery stay in core.
-use crate::qa_batch::{ReleaseInventory, ReleaseScope};
+use crate::qa_batch::{ReleaseInventory, ReleaseProofRef, ReleaseScope};
+use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -60,6 +61,20 @@ pub struct BackfillArgs {
     #[arg(long)]
     dry_run: bool,
 }
+/// Audited declaration carried unchanged from cut inputs into publication.
+/// Unknown audit metadata is retained for older receipts and producer extensions.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(super) struct ReleaseInputs {
+    #[serde(default)]
+    pub(super) checked_sha: String,
+    #[serde(default)]
+    pub(super) included_task_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) no_code_members: BTreeMap<String, Vec<ReleaseProofRef>>,
+    #[serde(flatten)]
+    metadata: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct ReleaseContext {
     pub(super) train_id: String,
@@ -73,7 +88,7 @@ pub(super) struct ReleaseContext {
     landing_reminder: Option<i64>,
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) release_inputs: Option<serde_json::Value>,
+    pub(super) release_inputs: Option<ReleaseInputs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) release_scope: Option<ReleaseScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -252,9 +267,9 @@ fn track_on_train(
         );
     }
     if let Some(path) = &args.inputs {
-        let audit: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-        let checked = audit.get("checked_sha").and_then(|value| value.as_str())
-            .context("release input audit has no checked_sha")?;
+        let audit: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
+        let checked = audit.checked_sha.as_str();
+        ensure!(!checked.is_empty(), "release input audit has no checked_sha");
         ensure!(checked == args.commit || git(repo, &["rev-parse", &format!("{}^1", args.commit)])
             .ok().as_deref() == Some(checked), "release input audit is stale; rerun release.sh");
         expected.release_inputs = Some(audit);
@@ -277,6 +292,27 @@ fn track_on_train(
         expected.first_child_epoch =
             Some(git(&repo, &["show", "-s", "--format=%ct", &args.first_child])?.parse()?);
         expected.first_child_commit = Some(args.first_child.clone());
+    }
+    // Refuse missing or mismatched explicit report bindings before freezing the
+    // lane. Old code-only audits do not need report preflight.
+    if let Some(inputs) = &expected.release_inputs {
+        let tasks = open_task_store(root)?;
+        let reports: std::collections::BTreeSet<_> = inputs.included_task_ids.iter()
+            .chain(inputs.no_code_members.keys())
+            .filter(|id| tasks.get(id).is_ok_and(|t|
+                crate::qa_pass::is_no_code(&t) || t.deliverables.evidence_only.is_some()))
+            .cloned().chain(inputs.no_code_members.keys().cloned()).collect();
+        if !reports.is_empty() {
+            let mut scope = super::release_adapters::tag_scope(
+                root, repo, Some(&expected), &train.id, &format!("v{}", args.version), &args.commit,
+            )?;
+            scope.release_tag = None; // The cut has not published a tag yet.
+            for id in reports {
+                crate::release_reconcile::validate_no_code_proofs(root, &scope, &id,
+                    inputs.no_code_members.get(&id).map(Vec::as_slice).unwrap_or_default())
+                    .map_err(anyhow::Error::msg)?;
+            }
+        }
     }
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
@@ -844,8 +880,40 @@ pub(super) mod tests {
             "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
             "no_code_members": {"cas-e3041": [proof]},
         })).unwrap()).unwrap();
-        args.inputs = Some(inputs);
+        args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
+        let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
+        let mut size = proof.clone(); size.size_bytes += 1;
+        let mut reviewed = proof.clone(); reviewed.reviewed_sha = "0".repeat(40);
+        let mut missing = proof.clone(); missing.artifact_id = "art-absent".into();
+        for (id, proofs) in [
+            ("cas-e3041", vec![]), ("cas-e3041", vec![hash]),
+            ("cas-e3041", vec![size]), ("cas-e3041", vec![reviewed]),
+            ("cas-e3041", vec![missing]), ("cas-ef2b", vec![proof.clone()]),
+        ] {
+            fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+                "checked_sha": args.commit, "included_task_ids": [id],
+                "no_code_members": {id: proofs},
+            })).unwrap()).unwrap();
+            assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
+                .starts_with("RELEASE_NO_CODE_PROOF"));
+            assert!(!receipt_path(&root, &args.version).unwrap().exists());
+            assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
+                &tasks.get(&train.id).unwrap()));
+        }
+        fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
+            "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
+            "no_code_members": {"cas-e3041": [proof]},
+        })).unwrap()).unwrap();
+        let mut foreign = tasks.get("cas-e3041").unwrap();
+        foreign.origin_project = Some("other-project".into());
+        tasks.update(&foreign).unwrap();
+        assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
+            .starts_with("RELEASE_NO_CODE_PROOF_BINDING"));
+        assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
+            &tasks.get(&train.id).unwrap()));
+        foreign.origin_project = Some("release-fixture".into());
+        tasks.update(&foreign).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
         let context: ReleaseContext = serde_json::from_slice(
             &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
@@ -855,15 +923,29 @@ pub(super) mod tests {
         let mut scope = super::super::release_adapters::tag_scope(
             &root, repo, Some(&context), &train.id, &tag, &args.commit,
         ).unwrap();
-        assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof]));
+        assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof.clone()]));
         // A legacy publication may already contain an explicitly included,
         // unbound report. It remains a residual and cannot borrow external_ref.
         scope.included_task_ids.push("cas-ef2b".into());
         let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == "cas-undeclared"));
         assert!(!inventory.exceptions.iter().any(|d| d.task_id == "cas-undeclared"));
+        let mut legacy = scope.clone();
+        legacy.no_code_members.clear();
+        let unbound = crate::qa_batch::resolve_release_inventory(&root, repo, &legacy).unwrap();
+        let held = crate::release_reconcile::reconcile_release(
+            &root, &legacy, &unbound, crate::release_reconcile::ReconcileTrigger::Publish { tag },
+        ).await.unwrap();
+        assert_eq!(tasks.get("cas-e3041").unwrap().status, TaskStatus::AwaitingMerge);
+        assert!(held.residuals.iter().any(|r| r.task_id == "cas-e3041"));
+        let mut undeclared = scope.clone();
+        undeclared.no_code_members.insert("cas-undeclared".into(), vec![proof.clone()]);
+        let extra = crate::qa_batch::resolve_release_inventory(&root, repo, &undeclared).unwrap();
+        assert_eq!(crate::release_reconcile::reconcile_release(
+            &root, &undeclared, &extra, crate::release_reconcile::ReconcileTrigger::Backfill,
+        ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
         let first = crate::release_reconcile::reconcile_release(
-            &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Publish { tag },
+            &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();
         assert!(matches!(first.members.get("cas-e3041"), Some(CassyMergeClose::Closed { .. })), "{first:?}");
         assert!(first.residuals.iter().any(|r| r.task_id == "cas-ef2b" && r.gate.contains("MissingNoCodeProof")));
@@ -1177,7 +1259,7 @@ pub(super) mod tests {
         let recorded: ReleaseContext =
             serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
                 .unwrap();
-        assert_eq!(recorded.release_inputs, Some(audit));
+        assert_eq!(recorded.release_inputs.map(|i| serde_json::to_value(i).unwrap()), Some(audit));
         assert_eq!(recorded.first_child_commit.as_deref(), Some(sha.as_str()));
         assert_eq!(
             recorded.first_child_epoch,

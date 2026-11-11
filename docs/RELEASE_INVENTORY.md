@@ -29,6 +29,17 @@ batch QA and release review receipts are collected only when `task_heads` names
 the exact original anchor; published-tag receipts never become QA/review proof.
 Per-round local ledger paths cannot substitute for portable artifact references.
 
+Declare report proof explicitly in the draft's `CAS_RELEASE_INPUTS` JSON under
+`no_code_members`. The audit adds those task IDs to `included_task_ids` and
+carries the typed proof lists through `cas release track --inputs` to publication.
+Tracking refuses missing or mismatched report bindings before marking the train
+cut. Artifact owner/project, hash, size, reviewed commit and revocation are checked;
+a report reference does not supply QA or review approval. Existing receipts without
+this optional map remain readable. Promotion accepts the same audited JSON with
+`cas release promoted --pr <N> --inputs <audit.json>`; its `checked_sha` must name
+the promotion head or merge commit. Recovery keeps frozen membership and commit
+identity; an unbound legacy report remains a named residual.
+
 The result includes the original `scope`, sorted `deliveries` and sorted
 `exceptions`. Each delivery has `task_id`, `generation`, `anchor`, `base_sha`,
 `shipped_commit`, `membership`, and `proof_refs`. `generation` is the captured
@@ -80,7 +91,8 @@ snapshot before acting, checks referenced receipts and runs ordinary close with
 exceptions while other deliveries continue. The ordinary optimistic write guard
 still rejects concurrent changes. Dedicated review, CI overrides and independent
 task holds remain gates. Explicit no-code deliveries retain their own close
-path; this code-delivery entry reports that limitation.
+path; release reconciliation routes them through ordinary report/evidence close
+with the bound artifacts and every independent verification gate intact.
 
 The full recorded start-to-anchor effect is measured, including earlier commits
 and deletions. Changelog fragments use the existing promotion validator: their

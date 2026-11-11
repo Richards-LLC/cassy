@@ -1,0 +1,3 @@
+title: Explicit release reports retain audited portable proof and close once through ordinary gates; missing or mismatched bindings hold before cut
+tasks: [cas-2ecc]
+journeys: [CLI-RELEASE, FACTORY-CLOSE]

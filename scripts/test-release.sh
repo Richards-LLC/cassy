@@ -648,12 +648,11 @@ cut_preview_gate() {
     [[ "$status" != 0 ]] &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        ! grep -q '^pr merge ' "$FAKE_GH_LOG" &&
-        [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] || return 1
+        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     : >"$FAKE_CAS_LOG"
     FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
     [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
-        ! grep -q '^qa candidate build ' "$FAKE_CAS_LOG" &&
+        [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track .* --preview ' "$FAKE_CAS_LOG"
 }

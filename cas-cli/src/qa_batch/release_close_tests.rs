@@ -29,7 +29,8 @@ fn published_train_closes_members_independently_cas_734b() {
     std::fs::write(repo.join("app.rs"), "fn shipped() {}\nfn later() {}\n").unwrap();
     git(&["commit", "-am", "release changes after review"]);
     let published = git(&["rev-parse", "HEAD"]);
-    git(&["tag", "v9.99.0"]);
+    let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
+    git(&["tag", &tag]);
     let tasks = crate::store::open_task_store(&root).unwrap();
     assert!(crate::config::Config::load(&root).unwrap().verification_enabled());
     let mut train = Task::new("cas-train".into(), "Published train".into());
@@ -85,8 +86,8 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
-        release_id: "v9.99.0".into(), reviewed_sha: base, final_release_sha: published,
-        promotion_pr: None, release_tag: Some("v9.99.0".into()), constituent_epic_ids: vec![train.id.clone()],
+        release_id: tag.clone(), reviewed_sha: base, final_release_sha: published,
+        promotion_pr: None, release_tag: Some(tag.clone()), constituent_epic_ids: vec![train.id.clone()],
         included_task_ids: ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
     // A preview must leave the store, artifact cache and operation directory
@@ -125,7 +126,7 @@ fn published_train_closes_members_independently_cas_734b() {
     assert_eq!(snapshot(&cache), cache_before);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
-        crate::release_reconcile::ReconcileTrigger::Publish { tag: "v9.99.0".into() })).unwrap();
+        crate::release_reconcile::ReconcileTrigger::Publish { tag })).unwrap();
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
     for id in ["cas-approved", "cas-report", "cas-equal"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", result.members.get(id));

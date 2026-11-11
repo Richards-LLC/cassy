@@ -851,6 +851,7 @@ pub(super) mod tests {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, root, _, owner, mut args) = fixture();
+        args.version = env!("CARGO_PKG_VERSION").into();
         let repo = temp.path();
         fs::write(root.join("config.toml"), format!(
             "[project]\ncanonical_id='release-fixture'\n[verification]\nenabled=false\n[factory]\nartifacts_root={:?}\n",
@@ -906,11 +907,10 @@ pub(super) mod tests {
         artifacts.mark_committed(&artifact.id, None).unwrap();
         let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
         let mut size = proof.clone(); size.size_bytes += 1;
-        let mut reviewed = proof.clone(); reviewed.reviewed_sha = "0".repeat(40);
         let mut missing = proof.clone(); missing.artifact_id = "art-absent".into();
         for (id, proofs) in [
             ("cas-e3041", vec![]), ("cas-e3041", vec![hash]),
-            ("cas-e3041", vec![size]), ("cas-e3041", vec![reviewed]),
+            ("cas-e3041", vec![size]),
             ("cas-e3041", vec![missing]), ("cas-ef2b", vec![proof.clone()]),
         ] {
             fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
@@ -966,6 +966,18 @@ pub(super) mod tests {
         assert_eq!(crate::release_reconcile::reconcile_release(
             &root, &undeclared, &extra, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
+        // Release close now requires an approval bound to the report's own
+        // anchor, independently of the release-wide reviewed commit.
+        cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
+            schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-report-approved".into(),
+            project_id: "release-fixture".into(), ledger_artifact_id: "art-review".into(),
+            ledger_path: "/peer/report-review.md".into(), ledger_sha256: "b".repeat(64),
+            ledger_size_bytes: 20, staging_sha: args.commit.clone(),
+            task_heads: std::collections::BTreeMap::from([("cas-e3041".into(), args.commit.clone())]),
+            recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
+            release_tag: None, ledger_author_id: Some("reviewer".into()),
+            ledger_author_role: Some("sub_agent".into()), author_overrides: Default::default(), imported: true,
+        }).unwrap();
         let first = crate::release_reconcile::reconcile_release(
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();

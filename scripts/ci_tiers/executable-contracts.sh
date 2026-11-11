@@ -343,8 +343,12 @@ else
 fi
 rm -f "$unknown_base_output"
 
+# These fixtures exercise explicit path comparisons. A calling factory push
+# widens its own comparison to the delivery fork, so give each fixture the
+# pull-request event it is modeling instead of inheriting the outer lane.
 bridge_touched_output="$(mktemp)"
-if BASE_SHA="c070753a^" \
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/fixture/merge \
+    BASE_SHA="c070753a^" \
     GITHUB_OUTPUT="$bridge_touched_output" \
     bash < <(python3 "$policy_parser" action-run .github/actions/classify-required-diff/action.yml); then
     require_text "$(<"$bridge_touched_output")" 'bridge-check-needed=true' 'a diff touching slack-bridge runs the bridge checks'
@@ -355,7 +359,8 @@ fi
 rm -f "$bridge_touched_output"
 
 bridge_untouched_output="$(mktemp)"
-if BASE_SHA="HEAD" \
+if GITHUB_EVENT_NAME=pull_request GITHUB_REF=refs/pull/fixture/merge \
+    BASE_SHA="HEAD" \
     GITHUB_OUTPUT="$bridge_untouched_output" \
     bash < <(python3 "$policy_parser" action-run .github/actions/classify-required-diff/action.yml); then
     require_text "$(<"$bridge_untouched_output")" 'bridge-check-needed=false' 'a diff that leaves slack-bridge alone skips the bridge checks'

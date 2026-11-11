@@ -158,6 +158,7 @@ Stopped-session draft regression (cas-45b8): type in two conversations, leave on
 #### Expected experience
 
 - Recent turns appear without any action, grouped by speaker and day.
+- A reader parked above the tail keeps their top line across a connection drop and reconnect; a reader following the latest turn stays at the tail when a file's connection note wraps onto another line.
 - Loading earlier keeps the reading position; scrolling up to the button survives an intervening render even while a tail pin is pending, and the button shows progress.
 - A short status with a callout, heading or list renders it as a full message, and inline Markdown renders in the quiet status box, so no marker shows at any length. Short status tables retain native headers, cells and both copy controls while adjacent plain progress remains quiet (cas-2656). Tables expose native headers and cells; escaped pipes remain in one cell and fenced pipe rows stay source. Copy Markdown retains the original table source; Copy CSV exports displayed cells with comma, quote and newline quoting, prefixing formula-leading cells with an apostrophe. Success feedback clears after two seconds; clipboard refusal offers a persistent visible retry. Long paths wrap at phone width without widening the page (cas-4800).
 - The end of history is stated, not implied.

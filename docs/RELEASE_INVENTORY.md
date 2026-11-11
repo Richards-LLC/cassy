@@ -17,7 +17,7 @@ The scope is portable; the repository argument is the local checkout to inspect.
 | `reviewed_sha` | Full immutable candidate commit. It need not equal the release commit. |
 | `final_release_sha` | Full immutable shipped commit. Moving main/epic refs never decide membership. |
 | `promotion_pr`, `release_tag` | Optional PR number and tag. A supplied local tag must resolve to the final SHA. Publication/PR authenticity belongs to the trusted adapter. |
-| `constituent_epic_ids` | Declared epics; recursively include their descendants, including terminal deliveries. |
+| `constituent_epic_ids` | Declared epics whose descendants are searched for shipped deliveries, including terminal rows. |
 | `included_task_ids` | Explicit expected deliveries, including terminal rows outside the declared epics. |
 | `no_code_members` | Map of explicitly included no-code task IDs to portable proof references. |
 | `proof_refs` | Release-level QA/review references for the subsequent proof consumer. They do not imply per-task coverage. |
@@ -28,6 +28,17 @@ identities to validate, not an attestation created by this resolver. Existing
 batch QA and release review receipts are collected only when `task_heads` names
 the exact original anchor; published-tag receipts never become QA/review proof.
 Per-round local ledger paths cannot substitute for portable artifact references.
+
+Declare report proof explicitly in the draft's `CAS_RELEASE_INPUTS` JSON under
+`no_code_members`. The audit adds those task IDs to `included_task_ids` and
+carries the typed proof lists through `cas release track --inputs` to publication.
+Tracking refuses missing or mismatched report bindings before marking the train
+cut. Artifact owner/project, hash, size, reviewed commit and revocation are checked;
+a report reference does not supply QA or review approval. Existing receipts without
+this optional map remain readable. Promotion accepts the same audited JSON with
+`cas release promoted --pr <N> --inputs <audit.json>`; its `checked_sha` must name
+the promotion head or merge commit. Recovery keeps frozen membership and commit
+identity; an unbound legacy report remains a named residual.
 
 The result includes the original `scope`, sorted `deliveries` and sorted
 `exceptions`. Each delivery has `task_id`, `generation`, `anchor`, `base_sha`,
@@ -47,8 +58,12 @@ task mention is used. The source anchor and full start boundary remain intact;
 squashes produce `missing_mapping`; patch/content similarity is not approval.
 
 Beyond the explicit scope, live project deliveries with structured recorded
-anchors/merge receipts are considered, so already-shipped close debt is included.
-Terminal rows outside explicit scope are omitted. Foreign project/repository
+anchors/merge receipts are searched for proven shipped close debt. Descendant
+discovery alone does not declare an unstarted or unshipped task as a release
+obligation. `included_task_ids` and `no_code_members` keep missing declared
+members visible even when their mapping fails. A shipped historical anchor
+can retain a hold for an unresolved earlier cycle without rebinding the current
+delivery to that anchor. Terminal rows outside explicit scope are omitted. Foreign project/repository
 rows, cancelled tasks and retired anchors are exceptions, never close authority.
 
 A reachable anchor with no start base is still shipped, with a `missing_base`
@@ -80,7 +95,8 @@ snapshot before acting, checks referenced receipts and runs ordinary close with
 exceptions while other deliveries continue. The ordinary optimistic write guard
 still rejects concurrent changes. Dedicated review, CI overrides and independent
 task holds remain gates. Explicit no-code deliveries retain their own close
-path; this code-delivery entry reports that limitation.
+path; release reconciliation routes them through ordinary report/evidence close
+with the bound artifacts and every independent verification gate intact.
 
 The full recorded start-to-anchor effect is measured, including earlier commits
 and deletions. Changelog fragments use the existing promotion validator: their
@@ -181,10 +197,20 @@ contains `members`, `issue_outcomes`, `parents`, inventory `exceptions` (includi
 stage timestamps. Completion never asserts peer synchronization. Every live
 member or parent has a named residual; independent exceptions remain visible.
 
+On retry, obsolete discovery holds for missing anchors, mappings or undeclared
+no-code proofs are removed when the fresh inventory excludes the task and no
+saved close intent binds its cycle. Their residual and sync-pending references
+are retired together. Frozen declarations, current obligations and committed
+close intents retain their holds.
+
 The operation persists `notice_intent {key, recipient, fingerprint}` and sends
 no notice. The publication/promotion adapter alone enqueues that intent using
 its stable key and bound recipient. Retry and supervisor turnover reuse the
-same intent rather than double-send. A completed lookup is the adapter's no-op
+same intent rather than double-send. The notice context stores
+`closeout_counts` with `closed`, `already_closed`, `held`, `not_eligible`,
+`residual` and `complete`, derived from the persisted receipt. The headline and
+CLI summary use those outcome counts; an attempted or held member is never
+reported as a successful close. A completed lookup is the adapter's no-op
 check; partial operations remain resumable.
 
 An independently authored, published release review may additionally carry

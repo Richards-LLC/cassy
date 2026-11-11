@@ -1103,6 +1103,55 @@ impl GitOperations {
         self.publish_branch_to_origin(branch)
     }
 
+    /// Publish a detached merge against the observed origin tip. Peer
+    /// reconciliation stays detached too, and gets at most one retry.
+    pub(crate) fn publish_merge_candidate(
+        &self,
+        branch: &str,
+        head: &str,
+        reconcile_peer: bool,
+    ) -> TargetPushOutcome {
+        let _phase = crate::mcp::tools::service::mutation_receipt::phase("push");
+        if !self.has_origin_remote() {
+            return TargetPushOutcome::NoRemote;
+        }
+        let remote_ref = format!("origin/{branch}");
+        let expected = match self.resolve_commit(&remote_ref) {
+            Some(tip) => tip,
+            None if self.origin_lacks_branch(branch, FETCH_TIMEOUT) => return TargetPushOutcome::RemoteBranchAbsent,
+            None => match self.fetch_merge_target_bounded(branch, FETCH_TIMEOUT) {
+                Ok(tip) => tip,
+                Err(error) => return TargetPushOutcome::NotPushed {
+                    sha: Some(head.into()), remote_sha: None, reason: error.to_string(),
+                },
+            },
+        };
+        let publish = |head: &str, expected: &str| {
+            if !self.is_ancestor(expected, head) {
+                return TargetPushOutcome::NonFastForward {
+                    sha: head.into(), remote_sha: Some(expected.into()),
+                    reason: "the merge does not contain the observed origin tip".into(),
+                };
+            }
+            self.publish_pinned_source_with_lease(branch, head, Some(expected), PUSH_TIMEOUT)
+        };
+        let first = publish(head, &expected);
+        if !reconcile_peer || !matches!(first, TargetPushOutcome::NonFastForward { .. }) {
+            return first;
+        }
+        let retry = (|| -> Result<TargetPushOutcome> {
+            let remote = self.fetch_merge_target_bounded(branch, FETCH_TIMEOUT)?;
+            let checkout = self.add_temp_worktree(head)?;
+            let merged = self.merge_branch_in_dir(checkout.path(), None, &remote, true)?
+                .unwrap_or_else(|| head.to_string());
+            Ok(publish(&merged, &remote))
+        })();
+        retry.unwrap_or_else(|error| TargetPushOutcome::NotPushed {
+            sha: Some(head.into()), remote_sha: self.resolve_commit(&remote_ref),
+            reason: format!("peer publication retry refused: {error}"),
+        })
+    }
+
     /// Whether the repository root currently has `branch` checked out.
     fn branch_is_checked_out_here(&self, branch: &str) -> bool {
         Command::new("git")
@@ -1198,6 +1247,16 @@ impl GitOperations {
         head: &str,
         timeout: Duration,
     ) -> TargetPushOutcome {
+        self.publish_pinned_source_with_lease(branch, head, None, timeout)
+    }
+
+    fn publish_pinned_source_with_lease(
+        &self,
+        branch: &str,
+        head: &str,
+        expected: Option<&str>,
+        timeout: Duration,
+    ) -> TargetPushOutcome {
         let remote_ref = format!("origin/{branch}");
         let Some(local_sha) = self.resolve_commit(head) else {
             return TargetPushOutcome::NotPushed {
@@ -1237,8 +1296,11 @@ impl GitOperations {
                 }
             }
         }
+        cmd.arg("push");
+        if let Some(expected) = expected {
+            cmd.arg(format!("--force-with-lease=refs/heads/{branch}:{expected}"));
+        }
         cmd.args([
-            "push",
             "origin",
             // Pin the source to the validated commit even if the local ref
             // moves while a hook runs; fully qualify the destination so

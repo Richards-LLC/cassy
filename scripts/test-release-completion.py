@@ -189,12 +189,16 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text())["included_task_ids"], ["cas-a111", "cas-a444"])
         f.git("merge", "--no-ff", "epic/included", "-m", "include late delivery")
         inputs["deferred_tasks"] = {}
+        proof = {"kind": "report", "artifact_id": "art-report", "sha256": "a" * 64,
+                 "size_bytes": 42, "reviewed_sha": first, "receipt_id": None}
+        inputs["no_code_members"] = {"cas-e3041": [proof]}
         draft = f.root / "draft.md"
         draft.write_text("<!-- CAS_RELEASE_INPUTS\n" + json.dumps(inputs) + "\n-->\n")
         inputs = {}
         included = audit("--notes", str(draft), "--report", str(report))
         self.assertEqual(included.returncode, 0, included.stderr)
-        self.assertEqual(json.loads(included.stdout.split("=", 1)[1]), ["cas-a111", "cas-a222", "cas-a444"])
+        self.assertEqual(json.loads(included.stdout.split("=", 1)[1]), ["cas-a111", "cas-a222", "cas-a444", "cas-e3041"])
+        self.assertEqual(json.loads(report.read_text())["no_code_members"], {"cas-e3041": [proof]})
 
     def test_complete_contains_both_session_changes_and_clean_installed_build(self):
         result = self.f.gate()

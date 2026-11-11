@@ -5352,11 +5352,12 @@ impl CasCore {
         // workers default to preserving the worktree mid-session.
         let mut do_cleanup =
             resolve_worktree_merge_cleanup(cleanup, is_system_b, wt_config.cleanup_on_close);
+        let publish_before_ref = manager.git().has_origin_remote()
+            && !scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
         // A default-branch publication may require a PR even without a task
         // verifier. Keep its source until publication, including cleanup=true.
         let defer_reviewed_cleanup = transactional_delivery.is_none()
-            && (premerge_approval.is_some() || (manager.git().has_origin_remote()
-                && worktree.parent_branch == manager.git().detect_default_branch()));
+            && (premerge_approval.is_some() || publish_before_ref);
 
         // Inspect the delivery range before Git changes the target. Never poll
         // for unfinished CI or let a docs-only tip mask earlier code.
@@ -5561,6 +5562,7 @@ impl CasCore {
         let mut reconcile_note = String::new();
         let mut pushed_source_note = String::new();
         let mut unpublished_merge_base = None;
+        let mut early_target_push = None;
         let mut merge_commit = if reconciled_delivery {
             crate::mcp::tools::core::task::lifecycle::close_ops::resolve_branch_sha(
                 &cwd,
@@ -5832,8 +5834,63 @@ impl CasCore {
                 .or(dirty_pushed_anchor);
             let attempted_target_tip = manager.git().resolve_commit(&worktree.parent_branch);
             unpublished_merge_base = attempted_target_tip.clone();
-            let merge_result = if let Some(anchor) = pushed_anchor {
-                let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor);
+            let merge_result = if publish_before_ref {
+                let branch = worktree.parent_branch.clone();
+                let mut publish = |head: &str, base: &str| {
+                    if let Some((receipt, _)) = transactional_delivery.as_ref() {
+                        if base != receipt.target_sha {
+                            return Err(crate::worktree::GitError::TargetTipChanged {
+                                branch: branch.clone(), expected: receipt.target_sha.clone(), actual: base.into(),
+                            });
+                        }
+                        if !manager.git().is_ancestor(&receipt.commit_sha, head)
+                            || !matches!(crate::mcp::tools::core::task::lifecycle::close_ops::delivery_content_presence_on_target(
+                                &cwd, &receipt.commit_sha, head,
+                            ), crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Present { .. }
+                                | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. })
+                        {
+                            return Err(crate::worktree::GitError::CommandFailed(
+                                "Transactional delivery candidate does not preserve its receipt content".into(),
+                            ));
+                        }
+                    }
+                    if let Some(approval) = premerge_approval.as_ref() {
+                        approval.verify_landing(head).map_err(crate::worktree::GitError::CommandFailed)?;
+                    }
+                    let outcome = manager.git().publish_merge_candidate(
+                        &branch, head, premerge_approval.is_none() && transactional_delivery.is_none(),
+                    );
+                    let published = match &outcome {
+                        crate::worktree::git::TargetPushOutcome::Pushed { sha }
+                        | crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha } => sha.clone(),
+                        _ => head.to_string(),
+                    };
+                    let confirmed = outcome.is_published();
+                    let message = describe_target_push_state(&branch, &outcome);
+                    early_target_push = Some((branch.clone(), outcome));
+                    if confirmed {
+                        Ok(published)
+                    } else {
+                        Err(crate::worktree::GitError::CommandFailed(message))
+                    }
+                };
+                if let Some(anchor) = pushed_anchor {
+                    let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, Some(&mut publish));
+                    if result.is_ok() {
+                        pushed_source_note = format!(
+                            "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
+                            worktree.branch,
+                        );
+                    }
+                    result
+                } else {
+                    let source = parked_source_tip.as_deref().unwrap_or(&worktree.branch).to_string();
+                    manager.merge_preserving_worktree_at_with_publication(
+                        &mut worktree, force, do_cleanup, &source, Some(&mut publish),
+                    )
+                }
+            } else if let Some(anchor) = pushed_anchor {
+                let result = manager.merge_pushed_delivery_preserving_worktree(&mut worktree, anchor, None);
                 if result.is_ok() {
                     pushed_source_note = format!(
                         "\nSource: pushed ref origin/{} @ {anchor}; worker worktree left untouched (isolated merge, cleanup=false).",
@@ -5866,6 +5923,11 @@ impl CasCore {
             // seam is testable: append_stale_checkout_notes is what the
             // operator's receipt is built from.
             append_stale_checkout_notes(&mut reconcile_note, &manager);
+            if let Some((branch, outcome)) = early_target_push.as_ref()
+                && !outcome.is_published()
+            {
+                return Ok(Self::tool_error(format!("{ci_prefix}{}", describe_target_push_state(branch, outcome))));
+            }
             match merge_result {
                 Ok(commit) => commit,
                 // cas-4702: the ephemeral-worktree merge lost its
@@ -6116,7 +6178,9 @@ impl CasCore {
                         manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
                     )))?;
             }
-            let push_outcome = if let Some((_, published)) = reconciled_publication.as_ref() {
+            let push_outcome = if let Some((_, outcome)) = early_target_push.take() {
+                outcome
+            } else if let Some((_, published)) = reconciled_publication.as_ref() {
                 crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha: published.clone() }
             } else { match pr_landed_sha {
                 Some(sha) => crate::worktree::git::TargetPushOutcome::AlreadyCurrent { sha },
@@ -6290,6 +6354,9 @@ impl CasCore {
             Some(landed)
         } else { None };
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {
+            if let Some(published) = early_target_push.take() {
+                return published;
+            }
             let branch = worktree.parent_branch.clone();
             // Peer reconciliation would change the reviewed tree. A reviewed
             // candidate publishes exactly once; a raced push holds its lane.

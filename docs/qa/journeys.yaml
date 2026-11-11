@@ -551,6 +551,20 @@ bug_families:
     tasks: [cas-0d5e]
     journeys: [HUB-J17, HUB-J25, HUB-J26]
     invariants: [HUB-WORKER-TIMELINE-HEADER]
+  approved-epic-integration-parent:
+    title: An active integration parks with its exact supervisor-approved merge parent and pushed-tip proof while other side history stays subject to attribution
+    tasks: [cas-8a0f]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  late-close-park-refusals:
+    title: A late close reports every failed park gate and links to the complete refusal
+    tasks: [cas-5c77]
+    invariants: [FACTORY-CLOSE-LATE-PARK]
+    journeys: [FACTORY-CLOSE]
+  supervisor-context-clear-skip:
+    title: Explain why a supervisor wake over the ledger cap did not clear context
+    tasks: [cas-253c]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-CONTEXT-CLEAR-SKIP]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -659,10 +673,6 @@ invariants:
   FACTORY-CAPACITY-NOTICES:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
-  CLI-RELEASE-INSTALLED-RECONCILER:
-    statement: A publication reconciles after installing and verifying its release binary; pending older publications retain their receipts and retry after newer installations with bounded work and successful replay deduplication.
-    check: Run scripts/test-install-on-publish.sh. Observe install then matching version check then publication. Start with a failed older publication whose installed notice succeeds, publish a newer release, and require the newer install and verification before both publication retries. A failed install retains the receipt and performs no publication reconciliation; another tick does not repeat successful publication work.
-    bug: {task: cas-bca3}
   FACTORY-RELEASE-CLOSEOUT:
     statement: Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle.
     check: Run release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
@@ -1335,6 +1345,18 @@ invariants:
     statement: Missing Claude SessionStart canaries refuse admission while retaining bounded redacted boot output and worker/request identity; inspection does not invent process liveness or grant mutation authority, and only completed teardown releases a matching task binding.
     check: Run canary_failure_retains_boot_diagnostics_cas_4cdd through the real daemon with completed and unconfirmed teardown, debug and JSON is-wedged by worker/request; run launch_without_registration_records_failed_with_reason for retained lookup and fresh-retry identity.
     bug: {task: cas-4cdd}
+  CLI-RELEASE-INSTALLED-RECONCILER:
+    statement: A publication reconciles after installing and verifying its release binary; pending older publications retain their receipts and retry after newer installations with bounded work and successful replay deduplication.
+    check: Run scripts/test-install-on-publish.sh. Observe install then matching version check then publication. Start with a failed older publication whose installed notice succeeds, publish a newer release, and require the newer install and verification before both publication retries. A failed install retains the receipt and performs no publication reconciliation; another tick does not repeat successful publication work.
+    bug: {task: cas-bca3}
+  FACTORY-CONTEXT-CLEAR-SKIP:
+    statement: An over-cap wake ledger total with latest-call occupancy below the context threshold leaves one quiet explanation for the supervisor. The occupancy threshold still controls checkpoint and clear.
+    check: Replay cached_wake_replay_uses_latest_call_and_reported_window through the turn scanner. Verify one passive notice on a fresh ledger event, no duplicate on replay, no reset from repeated cache reads, and a handoff when latest-call occupancy crosses the reported-window threshold.
+    bug: {task: cas-253c}
+  FACTORY-RELEASE-PORTABLE-LEDGER:
+    statement: Imported release reviews resolve committed artifact metadata and verified bytes on the consuming machine while preserving owner project, revocation, receipt hash and size bindings.
+    check: Run imported_release_review_resolves_verified_peer_ledger_cas_52c1 through ReleaseClose.prepare with a producer path absent on the consumer; require imported receipt and task state retention, cold metadata hydration, and holds for foreign owner, altered remote or local bytes, local or remote revocation, unavailable Cloud and receipt mismatch.
+    bug: {task: cas-52c1}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1354,7 +1376,7 @@ journeys:
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
   owners: [cas-cli/src/ui/factory/director/events.rs, cas-cli/src/ui/factory/director/supervisor_stall_tests.rs, cas-cli/src/ui/factory/app/assignment_evidence_tests.rs, cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs, cas-cli/src/mcp/tools/core/memory.rs, cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs, cas-cli/src/mcp/server/mod.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SCOPED-IDLE-STAFFING, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
+  invariants: [FACTORY-CONTEXT-CLEAR-SKIP, FACTORY-FINDING-PRIORITY, FACTORY-SCOPED-IDLE-STAFFING, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE
@@ -1398,8 +1420,8 @@ journeys:
   kind: cli
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Resolve exact-SHA shipped deliveries and proof references, Read the release publication receipt]
-  owners: [scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, scripts/release.sh, cas-cli/src/finding_triage.rs]
-  invariants: [CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  owners: [cas-cli/src/qa_batch.rs, cas-cli/src/qa_batch/release_close.rs, cas-cli/src/qa_batch/release_close_tests.rs, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, cas-cli/src/cli/release_adapters.rs, scripts/release.sh, scripts/release_changelog.py, scripts/test-release-completion.py, cas-cli/src/finding_triage.rs]
+  invariants: [CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN

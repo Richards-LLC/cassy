@@ -446,6 +446,17 @@ impl WorktreeManager {
         will_cleanup: bool,
         source_sha: &str,
     ) -> WorktreeResult<Option<String>> {
+        self.merge_preserving_worktree_at_with_publication(worktree, force, will_cleanup, source_sha, None)
+    }
+
+    pub(crate) fn merge_preserving_worktree_at_with_publication(
+        &self,
+        worktree: &mut Worktree,
+        force: bool,
+        will_cleanup: bool,
+        source_sha: &str,
+        publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
+    ) -> WorktreeResult<Option<String>> {
         let source = if self.config.auto_merge {
             self.git.resolve_commit(source_sha).ok_or_else(|| {
                 WorktreeError::Git(GitError::CommandFailed(format!(
@@ -559,16 +570,20 @@ impl WorktreeManager {
             // sync); otherwise it runs in an ephemeral detached worktree and
             // the branch ref is advanced by compare-and-swap, so the
             // supervisor's next commit still lands where they were.
-            let merge_result = match self.merge_venue(&worktree.parent_branch) {
-                MergeVenue::SharedCheckout => {
-                    self.git
-                        .merge_branch(&worktree.parent_branch, &source, true)
-                }
-                MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
-                    &worktree.parent_branch,
-                    &source,
-                    true,
+            let merge_result = match publication {
+                Some(publish) => self.git.merge_branch_with_publication(
+                    &worktree.parent_branch, &source, publish,
                 ),
+                None => match self.merge_venue(&worktree.parent_branch) {
+                    MergeVenue::SharedCheckout => {
+                        self.git.merge_branch(&worktree.parent_branch, &source, true)
+                    }
+                    MergeVenue::TempWorktree => self.git.merge_branch_via_temp_worktree(
+                        &worktree.parent_branch,
+                        &source,
+                        true,
+                    ),
+                },
             };
 
             // The pre-flight above should make the conflicting case
@@ -613,6 +628,7 @@ impl WorktreeManager {
         &self,
         worktree: &mut Worktree,
         anchor: &str,
+        publication: Option<&mut crate::worktree::git::MergePublication<'_>>,
     ) -> WorktreeResult<Option<String>> {
         let refuse = |detail: String| WorktreeError::UncommittedChanges(format!(
             "dirty source checkout retained: pushed delivery proof required; {detail}. No merge was attempted"
@@ -631,6 +647,9 @@ impl WorktreeManager {
             || self.git.resolve_commit(&source_ref).as_deref() != Some(anchor.as_str())
         {
             return Err(refuse("pushed ref or local source tip does not match the parked anchor".into()));
+        }
+        if publication.is_some() {
+            return self.merge_preserving_worktree_at_with_publication(worktree, true, false, &anchor, publication);
         }
         match self.git.merge_branch_via_temp_worktree(&worktree.parent_branch, &anchor, true) {
             Ok(commit) => {

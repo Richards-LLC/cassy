@@ -1315,10 +1315,9 @@ mod tests {
         ).unwrap();
         let current = task_store.get(&task.id).unwrap();
         assert_eq!(current.status, TaskStatus::Open);
-        // A synced park from another machine mints the same deterministic
+        // A synced anchor from another machine mints the same deterministic
         // cycle there and here: the cycle number travels with the row.
         let mut synced = current.clone();
-        synced.status = TaskStatus::AwaitingMerge;
         synced.deliverables.mint_or_append(&"e".repeat(40));
         synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
         task_store.update_from_sync(&synced, &current).unwrap().unwrap();

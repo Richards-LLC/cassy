@@ -144,6 +144,25 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     // per-task observer cannot make the boundary test pass.
     use rmcp::ServiceExt;
     let core = crate::mcp::CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+    use cas_store::{AgentStore, TaskStore};
+    use cas_types::{Agent, AgentRole, Task, TaskStatus, Priority};
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_FACTORY_MODE", "1");
+    std::fs::write(dir.path().join("config.toml"), "[verification]\nenabled=true\n[qa]\nmode='per_task'\n").unwrap();
+    crate::store::open_store(dir.path()).unwrap().init().unwrap();
+    crate::store::open_rule_store(dir.path()).unwrap().init().unwrap();
+    crate::store::open_skill_store(dir.path()).unwrap().init().unwrap();
+    let agents = crate::store::open_agent_store(dir.path()).unwrap();
+    agents.init().unwrap();
+    agents.register(&Agent::new_with_role("gate-supervisor".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+    core.set_agent_id_for_testing("gate-supervisor".into());
+    let tasks = crate::store::open_task_store(dir.path()).unwrap();
+    tasks.init().unwrap();
+    let mut task = Task::new("cas-override".into(), "External repair measured".into());
+    task.priority = Priority(0);
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some("https://example.test/proof".into());
+    tasks.add(&task).unwrap();
     let service = crate::mcp::tools::service::CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
@@ -156,6 +175,17 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let response = client.call_tool(request).await;
     assert!(response.is_err());
     assert!(codes_in(&format!("{response:?}")).contains(&"G-116"));
+    // The real task-close producer must identify the verification gate it
+    // waived, and the common MCP observer must persist exactly one fact.
+    let request = serde_json::from_value(serde_json::json!({
+        "name":"task", "arguments":{"action":"close", "id":task.id,
+            "supervisor_override":true, "reason":"External repair measured"},
+    })).unwrap();
+    let response = client.call_tool(request).await.unwrap();
+    assert_ne!(response.is_error, Some(true), "{response:?}");
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+    assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }));
     client.cancel().await.unwrap();
     server.await.unwrap();
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),

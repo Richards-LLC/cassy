@@ -1,33 +1,6 @@
 use crate::hooks::handlers::*;
 use cas_store::PromptQueueStore;
 
-/// Build the per-turn supervisor reminder (≤512 bytes).
-///
-/// Emitted by `handle_user_prompt_submit` when `is_factory_agent && role==supervisor`.
-/// Refreshes Hard Rules every turn to prevent mid-session drift where supervisors
-/// forget their role and use incorrect tools (e.g. `AskUserQuestion` for workers,
-/// or `SendMessage` instead of coordination).
-///
-/// Identity is resolved at call time from process env vars set by the factory daemon:
-/// - `CAS_AGENT_NAME` → supervisor name (e.g. "loyal-bear-96")
-/// - `CAS_FACTORY_SESSION` → team/session name (e.g. "cas-src-wild-dragon-82")
-///
-/// EPIC cas-8888 (cas-fd9f): the coordination tool mention was hardcoded to
-/// Claude's `mcp__cas__` prefix — this reminder fires every turn for every
-/// factory supervisor, so a Grok (or Codex) supervisor was told a tool call
-/// it can't make on every single turn. Now uses `harness_policy::own_tool_prefix()`.
-pub(crate) fn build_supervisor_reminder() -> String {
-    let name = std::env::var("CAS_AGENT_NAME").unwrap_or_else(|_| "supervisor".to_string());
-    let team = std::env::var("CAS_FACTORY_SESSION").unwrap_or_else(|_| "team".to_string());
-    let prefix = crate::harness_policy::own_tool_prefix();
-    format!(
-        "[supervisor reminder]\n\
-         You are {name}, supervisor of team {team}. Hard rules:\n\
-         \u{2022} AskUserQuestion is BLOCKED: answer the operator in the pane and end your turn; ask unprompted with kind=ask; teammates \u{2192} {prefix}coordination action=message.\n\
-         \u{2022} Never SendMessage. Never close worker tasks. Never implement tasks yourself.\n\
-         \u{2022} Never poll/monitor/sleep. End your turn after assigning. Wait for messages."
-    )
-}
 
 /// Combine the factory turn-start context with whatever the normal capture
 /// path produced (cas-7a01).
@@ -110,18 +83,13 @@ pub fn handle_user_prompt_submit(
     input: &HookInput,
     cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    // === FACTORY TURN-START CONTEXT (cas-55ac reminder + cas-7a01 surfacing) ===
+    // === FACTORY TURN-START INBOX CONTEXT (cas-7a01) ===
     //
     // cas-7a01 (GH #155): this is the *only* place in Cassy that reads the
     // prompt queue back and puts it in front of a recipient. Before it existed
     // the daemon's delivery had no counterpart, so a non-urgent message to an
     // idle Claude worker was written to an inbox file and never surfaced —
     // across turns the worker took.
-    //
-    // The supervisor reminder now APPENDS rather than returning early. Its
-    // early return was a second, quieter half of the same bug: it made the
-    // supervisor the one factory role whose mail could never be surfaced here,
-    // because the handler returned before any queue read could happen.
     //
     // cas-78d3 (GH #165): this block now runs BEFORE the empty-prompt early
     // return, which used to sit at the top of this function. That ordering was
@@ -135,20 +103,12 @@ pub fn handle_user_prompt_submit(
     // taking, and mail withheld from it is mail withheld indefinitely.
     let is_factory = crate::harness_policy::is_factory_agent(input);
     let is_supervisor = is_factory && crate::harness_policy::is_supervisor(input);
-    let mut factory_context = String::new();
-    // gate[N-81 notice]: Supervisor reminder per prompt
-    if is_supervisor {
-        factory_context.push_str(&build_supervisor_reminder());
-    }
     // gate[N-82 notice]: Inbox turn-start block
-    if is_factory {
-        if let Some(mail) = super::factory_inbox::surface_factory_inbox(cas_root, input) {
-            if !factory_context.is_empty() {
-                factory_context.push_str("\n\n");
-            }
-            factory_context.push_str(&mail);
-        }
-    }
+    let factory_context = if is_factory {
+        super::factory_inbox::surface_factory_inbox(cas_root, input).unwrap_or_default()
+    } else {
+        String::new()
+    };
     // cas-a1ed: a turn whose prompt is a Teams copy Claude Code rendered
     // delivered that row. Record it after the "already shown" read above, so
     // no later tool boundary shows it again (cas-7bfa does the same for a

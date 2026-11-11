@@ -114,8 +114,17 @@ fn test_detect_repo_root() {
     let detected = GitOperations::detect_repo_root(&repo_path).unwrap();
     // Canonicalize both paths to handle macOS /var -> /private/var symlinks
     let detected_canon = detected.canonicalize().unwrap_or(detected);
-    let repo_canon = repo_path.canonicalize().unwrap_or(repo_path);
+    let repo_canon = repo_path.canonicalize().unwrap_or(repo_path.clone());
     assert_eq!(detected_canon, repo_canon);
+
+    // cas-bfa4: a Git child that never exits cannot hold the caller.
+    let mut hung = Command::new("sh");
+    hung.args(["-c", "sleep 30", "git"]);
+    let started = std::time::Instant::now();
+    let timeout = std::time::Duration::from_millis(200);
+    let error = super::toplevel_within(hung, &repo_path, timeout).unwrap_err();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(matches!(error, GitError::CommandFailed(_)), "{error:?}");
 }
 
 #[test]

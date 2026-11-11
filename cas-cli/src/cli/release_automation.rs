@@ -939,15 +939,11 @@ pub(super) mod tests {
     #[test]
     fn release_inventory_contract_roundtrip() {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-        let (temp, _, train, _, args) = fixture();
+        let (temp, root, train, _, mut args) = fixture();
         let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
-        let scope = serde_json::json!({
-            "project_id": "release-fixture", "repository": "Example/Repo",
-            "release_id": "v9.99.2", "reviewed_sha": args.commit,
-            "final_release_sha": args.commit, "promotion_pr": null, "release_tag": "v9.99.2",
-            "constituent_epic_ids": [], "included_task_ids": [], "no_code_members": {}, "proof_refs": []
-        });
+        let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
         value["release_scope"] = scope.clone();
+        assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
         let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
             ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
@@ -965,7 +961,14 @@ pub(super) mod tests {
         save(&receipt, &restored).unwrap();
         let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(restored.close_preview.as_ref().unwrap().review_missing, ["cas-0001"]);
-        assert_eq!(serde_json::to_value(restored).unwrap()["release_scope"], scope);
+        assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
+        let candidate_preview = root.join("candidate-preview.json");
+        fs::write(&candidate_preview, serde_json::to_vec(restored.close_preview.as_ref().unwrap()).unwrap()).unwrap();
+        args.preview = Some(candidate_preview);
+        track_on_train(&args, &root, temp.path(), &train).unwrap();
+        let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
+        assert_eq!(cut.close_preview.unwrap().review_missing, ["cas-0001"]);
+        assert!(cut.release_scope.is_none()); // Queue landing may have a different final SHA.
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1029,11 +1032,10 @@ pub(super) mod tests {
         artifacts.mark_committed(&artifact.id, None).unwrap();
         let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
         let mut size = proof.clone(); size.size_bytes += 1;
-        let mut reviewed = proof.clone(); reviewed.reviewed_sha = "0".repeat(40);
         let mut missing = proof.clone(); missing.artifact_id = "art-absent".into();
         for (id, proofs) in [
             ("cas-e3041", vec![]), ("cas-e3041", vec![hash]),
-            ("cas-e3041", vec![size]), ("cas-e3041", vec![reviewed]),
+            ("cas-e3041", vec![size]),
             ("cas-e3041", vec![missing]), ("cas-ef2b", vec![proof.clone()]),
         ] {
             fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
@@ -1421,7 +1423,7 @@ pub(super) mod tests {
         let repo = temp.path();
         let sha = args.commit.clone();
         let audit = serde_json::json!({"checked_sha": sha, "epic_refs": ["origin/epic/constituent"],
-            "deferred_tasks": {"cas-0002": "next release"}, "included_task_ids": ["cas-0001"]});
+            "deferred_tasks": {"cas-0002": "next release"}, "included_task_ids": []});
         let audit_path = root.join("input-audit.json");
         fs::write(&audit_path, serde_json::to_vec(&audit).unwrap()).unwrap();
         args.inputs = Some(audit_path);

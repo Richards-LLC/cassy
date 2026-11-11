@@ -461,6 +461,7 @@ preview_cut() {
         build_seconds=$((SECONDS - build_start))
         candidate="$("$cas_bin" qa candidate path --task "$task")"
     fi
+    release_candidate="$candidate"
     local train_args=()
     "$train_tracking" && train_args=(--train "$task")
     "$candidate" release preview --commit "$sha" --version "$version" \
@@ -538,7 +539,7 @@ done
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+    if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
         --inputs "$release_input_report" --first-child "$first_child" --preview "$release_close_preview" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"

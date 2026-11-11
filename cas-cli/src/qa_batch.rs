@@ -509,15 +509,36 @@ pub(crate) fn integration_state(repo: &Path, head: &str, target: &str) -> Option
     }
 }
 
-/// cas-4b22: a parked task's ACTIVE delivery anchor once it is integrated on
-/// its own target, as close's merge gate measures it. History never counts: a
-/// task reopened for rework after an earlier merge has not shipped its rework.
+/// An integrated active delivery, or its recorded batch-pending recovery.
+/// A restarted/reused branch is never delivery identity. Genuine new work and
+/// explicit review rejection still hold dependents.
 pub(crate) fn shipped_anchor(root: &Path, task: &Task) -> Option<String> {
-    if task.status != cas_types::TaskStatus::AwaitingMerge {
-        return None;
-    }
     let (repo, target) = task_context(root, task).ok()?;
-    let anchor = commit(&repo, task.deliverables.factory_branch_anchor.as_deref()?)?;
+    let anchor = if task.status == cas_types::TaskStatus::AwaitingMerge {
+        commit(&repo, task.deliverables.factory_branch_anchor.as_deref()?)?
+    } else {
+        if task.status != cas_types::TaskStatus::Blocked
+            || task.deliverables.factory_branch_anchor.is_some()
+            || !cas_store::has_qa_batch_deferral(root, &task.id).ok()?
+        {
+            return None;
+        }
+        let anchor = delivery_anchor(&repo, task)?;
+        let observed = cas_store::observed_delivery_merges_into(root, &target).ok()?
+            .into_iter().rev().find(|merge| merge.task_id == task.id)?;
+        if observed.source_commit_sha != anchor
+            || integration_state(&repo, &observed.merge_commit_sha, &target) != Some(true)
+        {
+            return None;
+        }
+        if let Some(dispatch) = cas_store::get_latest_verification_dispatch(root, &task.id).ok()?
+            && let Some(verdict) = cas_store::get_verification_for_dispatch(root, &dispatch.id).ok()?
+            && verdict.status == cas_types::VerificationStatus::Rejected
+        {
+            return None;
+        }
+        anchor
+    };
     (integration_state(&repo, &anchor, &target) == Some(true)).then_some(anchor)
 }
 

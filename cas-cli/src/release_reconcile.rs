@@ -287,7 +287,6 @@ async fn resume(
     )?;
     receipt.residuals = effects.residuals(&receipt.members, &receipt.parents)?;
     receipt.complete = receipt.residuals.is_empty()
-        && receipt.exceptions.is_empty()
         && receipt.members.values().all(successful)
         && receipt
             .parents

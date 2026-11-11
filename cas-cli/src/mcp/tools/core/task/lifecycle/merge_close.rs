@@ -649,7 +649,7 @@ impl CasCore {
     }
 
     /// The durable release controller commits each result before this loop
-    /// proceeds. A failed checkpoint stops effects; the ordinary close remains
+    /// proceeds. A failed checkpoint stops effects; the guarded close remains
     /// replayable if it committed just before the process died.
     pub(crate) async fn close_release_inventory_with_checkpoint(
         &self,

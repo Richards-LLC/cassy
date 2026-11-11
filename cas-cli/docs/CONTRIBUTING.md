@@ -4190,7 +4190,13 @@ The example uses the latest saved publication. Confirm its `tag_name` identifies
 the release being repaired. Older failed publications are retained under
 `install-on-publish.published.pending.d/v<version>.json` in the same state
 directory. A held operation retries its remaining gates while retaining
-successful closes. A completed operation reuses its recorded result.
+successful closes. Operation receipts include `reconciler_version` and
+`reconciler_stale`. A binary older than the release tag records a stale refusal
+without running close effects. A binary at or above the tag replays an unstamped
+or older-binary operation once, preserving the release identity, saved delivery
+cycles and notice key. A receipt stamped at or above the tag reuses its completed
+result even after a later binary upgrade. Unversioned promotion operations retain
+their existing replay behavior.
 
 Recovery and dry runs: `gh workflow run release.yml -f dry_run=false` on
 `main` republishes after a failed run and refuses an existing release. On any

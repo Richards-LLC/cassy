@@ -711,6 +711,8 @@ mod tests {
                     fingerprint: "fixture".into(),
                 }),
                 key,
+                reconciler_version: Some(env!("CARGO_PKG_VERSION").into()),
+                reconciler_stale: false,
                 scope: scope.clone(),
                 triggers: vec![trigger],
                 members: BTreeMap::from([("cas-0001".into(), CassyMergeClose::AlreadyClosed)]),

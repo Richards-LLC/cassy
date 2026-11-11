@@ -88,6 +88,19 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
     assert_eq!(counts[UNCODED].refused, 1);
 
+    // Replay the denied CLI command through its parser, handler and existing
+    // shared refusal observer; the authority refusal must count exactly once.
+    use clap::Parser;
+    env.set("CAS_AGENT_ROLE", "worker");
+    let cli = crate::cli::Cli::try_parse_from([
+        "cas", "gates", "false-positive", code, "--reason", "fixture",
+    ]).unwrap();
+    let Some(crate::cli::Commands::Gates(command)) = &cli.command else { panic!("not a gates command"); };
+    let error = crate::cli::gates_cmd::execute(command, &cli, Some(dir.path())).unwrap_err();
+    facts::observe_refusal(dir.path(), None, &format!("{error:#}"));
+    assert_eq!(facts::summarize(&store, before).unwrap().get("G-153"),
+        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+
     // Exercise the real MCP transport/router with a non-task tool, so a
     // per-task observer cannot make the boundary test pass.
     use rmcp::ServiceExt;

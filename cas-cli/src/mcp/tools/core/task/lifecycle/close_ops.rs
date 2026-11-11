@@ -369,7 +369,7 @@ pub(crate) fn delivery_audit_text_rejection(value: &str) -> Option<&'static str>
     None
 }
 
-// gate[G-32 park]: No-code intent and proof (code proof required, code intent violated, inline note rejected)
+// gate[G-32 park integrity]: No-code intent and proof (code proof required, code intent violated, inline note rejected)
 // gate-audit[has_reviewable_code]: input Measured delivery content decides whether the no-code declaration is truthful; not an override.
 fn no_code_close_proof<'a>(
     task_id: &str,
@@ -2879,7 +2879,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     build_proofs: BuildProofs,
     scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
-    // gate[G-76 park]: Loaded proof for risk=concurrency
+    // gate[G-76 park as-of]: Loaded proof for risk=concurrency
     if task.risk.contains(&TaskRisk::Concurrency)
         && build_proofs != BuildProofs::DeferredToAssembly
         && !has_loaded_proof_note(&task.notes)
@@ -2890,7 +2890,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
             task.id,
         )));
     }
-    // gate[G-77 park]: Blast-radius proof_targets narrower than diff
+    // gate[G-77 park as-of]: Blast-radius proof_targets narrower than diff
     if task.risk.contains(&TaskRisk::BlastRadius) {
         let (uncovered, notice) =
             uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
@@ -2913,7 +2913,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     // cas-90e8 (L3 P2): platform proof needs a macOS cargo/xcodebuild run a
     // factory worker is forbidden to make, so a worker close defers it to
     // assembly with the build proofs; every other close still owes it here.
-    // gate[G-78 park]: Platform proof and platform-risk plausibility
+    // gate[G-78 park as-of]: Platform proof and platform-risk plausibility
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
         let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -2944,7 +2944,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     if build_proofs == BuildProofs::ScopedByMergeQueue {
         return Ok(());
     }
-    // gate[G-79 park]: Scoped integration-test proof (targets, base, surface)
+    // gate[G-79 park as-of]: Scoped integration-test proof (targets, base, surface)
     let required_targets = required_scoped_proof_targets(
         proof_repo,
         target_repo,
@@ -4943,7 +4943,7 @@ fn validate_negative_result_reference(reference: &str) -> Result<(), TaskLifecyc
     Ok(())
 }
 
-// gate[G-88 close-after-merge]: request_changes role gate (supervisor only)
+// gate[G-88 close-after-merge integrity]: request_changes role gate (supervisor only)
 // gate-audit[is_supervisor]: input Derived authenticated role enforcing G-128, not an optional bypass.
 fn request_changes_role_gate(
     is_supervisor: bool,
@@ -4960,7 +4960,7 @@ fn request_changes_role_gate(
     }
 }
 
-// gate[G-22 park]: supervisor_override authority and non-empty reason
+// gate[G-22 park integrity]: supervisor_override authority and non-empty reason
 // gate-audit[is_supervisor]: input Validates that a requested waiver has live supervisor authority.
 // gate-audit[requested]: input Validates waiver authority/reason; the final close separately records each check actually waived.
 pub(crate) fn validate_supervisor_override(
@@ -5553,7 +5553,7 @@ impl CasCore {
         Ok(caller)
     }
 
-    // gate[G-26 park]: Gate task close needs a recorded DECISION note
+    // gate[G-26 park as-of]: Gate task close needs a recorded DECISION note
     // gate-audit[forward]: G-26 Typed validation error; close_task_with_dispositions_inner emits its code.
     fn validate_gate_decision_close(
         &self,
@@ -5577,7 +5577,7 @@ impl CasCore {
         Ok(())
     }
 
-    // gate[G-24 park]: Non-integration close authority and receipt fields (evidence_only, negative_result)
+    // gate[G-24 park integrity]: Non-integration close authority and receipt fields (evidence_only, negative_result)
     // gate-audit[forward]: G-24 Typed non-integration receipt validation; close producer tags the refusal.
     fn validate_nonintegration_close(
         &self,
@@ -5665,7 +5665,7 @@ impl CasCore {
         }))
     }
 
-    // gate[G-27 park]: External verification receipt rejected
+    // gate[G-27 park integrity]: External verification receipt rejected
     // gate-audit[forward]: G-27 External proof validation; close producer tags the refusal.
     fn validate_external_verification_close(
         &self,
@@ -5805,7 +5805,7 @@ impl CasCore {
         }))
     }
 
-    // gate[G-87 close-after-merge]: Task cancel supervisor authority (TASK CANCEL REJECTED)
+    // gate[G-87 close-after-merge integrity]: Task cancel supervisor authority (TASK CANCEL REJECTED)
     fn cancellation_supervisor(&self) -> Result<cas_types::Agent, String> {
         self.resolve_live_supervisor_authority()
             .map_err(|error| crate::gates::tag("G-87", match error {
@@ -5825,7 +5825,7 @@ impl CasCore {
             }))
     }
 
-    // gate[G-28 park]: Delivery receipt rejected (worker completion receipt lease, identity, shape, tip, base)
+    // gate[G-28 park integrity]: Delivery receipt rejected (worker completion receipt lease, identity, shape, tip, base)
     async fn submit_worker_completion_receipt(
         &self,
         raw_receipt: &str,
@@ -7501,7 +7501,7 @@ impl CasCore {
     /// commit anchor. Reopen clears the anchor, so terminal evidence cannot
     /// authorize a later cycle. This guard must not advance, repair, or fail a
     /// transaction; those transitions belong to the delivery path.
-    // gate[G-86 close-after-merge]: Direct update status=closed guards (delivery state, merge predicate)
+    // gate[G-86 close-after-merge integrity]: Direct update status=closed guards (delivery state, merge predicate)
     // gate-audit[forward]: G-86 Typed direct-close guard; task-update callers emit the refusal code.
     pub(crate) fn guard_direct_update_close_delivery_state(
         &self,
@@ -7860,7 +7860,7 @@ impl CasCore {
                     None => held.push(blocker),
                 }
             }
-            // gate[G-21 park]: Open blocks dependency at close (shipped-blocker exemption)
+            // gate[G-21 park as-of]: Open blocks dependency at close (shipped-blocker exemption)
             if !held.is_empty() {
                 return Ok(Self::tool_error(crate::gates::tag("G-21", format!(
                     "Cannot close task {}: blocking dependencies are still open: {}. Close those blocker tasks first, \
@@ -7889,7 +7889,7 @@ impl CasCore {
             if req.reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
                 return Ok(Self::tool_error(crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: no_delivery=true requires a non-empty reason for this attempt.")));
             }
-            // gate[G-23 park]: Close-disposition exclusivity
+            // gate[G-23 park integrity]: Close-disposition exclusivity
             if req.commit_receipt.is_some() || completion_receipt.is_some()
                 || external_verification_receipt.is_some() || negative_result.is_some()
                 || evidence_only.is_some() || inline_execution_note.is_some()
@@ -7997,7 +7997,7 @@ impl CasCore {
         {
             return Ok(Self::success(already_closed_message(&task)));
         }
-        // gate[G-30 park]: Cancelled task cannot be closed
+        // gate[G-30 park integrity]: Cancelled task cannot be closed
         if task.status == TaskStatus::Cancelled {
             return Ok(Self::tool_error(crate::gates::tag("G-30", format!(
                 "TASK CLOSE REJECTED: {} is cancelled without delivery, not closed/delivered. Reopen it first if work should resume; otherwise leave its cancellation history intact.",
@@ -8022,7 +8022,7 @@ impl CasCore {
                 .unwrap_or_else(|| {
                     self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
                 });
-            // gate[G-31 park]: Proof claim receipt required
+            // gate[G-31 park integrity]: Proof claim receipt required
             if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
                 let message = crate::gates::tag("G-31", message);
                 if !park_gated {
@@ -8051,7 +8051,7 @@ impl CasCore {
         if supervisor_override && is_supervisor_from_env() && req.reason.as_deref().is_some_and(|reason|
             tmpfs_receipt_path_in_close_reason(reason, close_reason_artifacts_root(&self.cas_root).as_deref()).is_some())
         { accepted_override_codes.push("G-33"); }
-        // gate[G-33 park]: Tmpfs proof receipt rejected
+        // gate[G-33 park as-of]: Tmpfs proof receipt rejected
         if !(supervisor_override && is_supervisor_from_env())
             && let Some(reason) = req.reason.as_deref()
             && let Some(path) = tmpfs_receipt_path_in_close_reason(
@@ -8071,7 +8071,7 @@ impl CasCore {
         // cas-d8b2: an exact release verdict recorded after an expired Tier 1
         // cycle can satisfy it. Resolve this before the timeout early return;
         // it never waives integration/content, QA, or dedicated-review gates.
-        // gate[G-35 park]: Release verdict supersedes stale dispatch / shipped-timeout waiver
+        // gate[G-35 park as-of]: Release verdict supersedes stale dispatch / shipped-timeout waiver
         let superseding_release_verdict = if close_disposition.requires_delivery_gates() {
             match crate::qa_batch::release_supersedes_stale_dispatch(&self.cas_root, &task) {
                 Ok(receipt) => receipt,
@@ -8110,7 +8110,7 @@ impl CasCore {
             && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
-            // gate[G-34 park]: Exact verification dispatch must resolve (pending, claimed, unreadable, timed out)
+            // gate[G-34 park as-of]: Exact verification dispatch must resolve (pending, claimed, unreadable, timed out)
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", format!(
@@ -8293,7 +8293,7 @@ impl CasCore {
                         task.status,
                         self.caller_is_task_assignee(&task),
                     );
-                    // gate[G-36 park]: Work halted (urgent stop)
+                    // gate[G-36 park integrity]: Work halted (urgent stop)
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
                     {
@@ -8342,7 +8342,7 @@ impl CasCore {
                 let caller_id = self.get_agent_id().ok();
                 let caller_name = std::env::var("CAS_AGENT_NAME").ok();
                 let caller_session = std::env::var("CAS_SESSION_ID").ok();
-                // gate[G-37 epic-close]: Epic verification owner gate
+                // gate[G-37 epic-close integrity]: Epic verification owner gate
                 if let Err(msg) = epic_close_owner_gate(
                     &req.id,
                     &owner,
@@ -8419,7 +8419,7 @@ impl CasCore {
                     target,
                 ) {
                     Ok(context) => Some(context),
-                    // gate[G-38 park]: Close repo/target resolution fail-closed (repo context, git repository, default branch)
+                    // gate[G-38 park integrity]: Close repo/target resolution fail-closed (repo context, git repository, default branch)
                     Err(message) => return Ok(close_refusal::gate("work_target_gate", "resolve_work_target",
                         gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-38", message)))),
                 }
@@ -8517,7 +8517,7 @@ impl CasCore {
         {
             match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
                 (Some(context), Some(receipt)) => {
-                    // gate[G-39 close-after-merge]: Pushed task receipt rejected (retired implementer recovery)
+                    // gate[G-39 close-after-merge integrity]: Pushed task receipt rejected (retired implementer recovery)
                     match validate_pushed_task_receipt(&task, context, receipt) {
                         Ok(boundary) => Some(boundary),
                         Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-39", message)))),
@@ -8580,7 +8580,7 @@ impl CasCore {
             }
             measured
         });
-        // gate[G-42 park]: Task commit identity resolution
+        // gate[G-42 park integrity]: Task commit identity resolution
         let mut task_commit_identity = match task_commit_identity_in_repo(
             &close_project_root,
             no_delivery_task.as_ref().unwrap_or(&task),
@@ -8685,7 +8685,7 @@ impl CasCore {
                 ))),
                 data: None,
             })?;
-            // gate[G-127 epic-close]: Gone epic branch fallback and child retarget
+            // gate[G-127 epic-close integrity]: Gone epic branch fallback and child retarget
             let published = (task.delivery_mode != cas_types::DeliveryMode::LocalMerge)
                 .then(|| epic_autoclose::published_retired_epic_target(
                     &close_project_root, &target_branch, req.commit_receipt.as_deref(), &subtasks,
@@ -8705,7 +8705,7 @@ impl CasCore {
                 .unwrap_or(target_branch);
             let unmerged =
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
-            // gate[G-124 epic-close]: Epic unmerged worker branches (epic-id namespace check)
+            // gate[G-124 epic-close integrity]: Epic unmerged worker branches (epic-id namespace check)
             if !unmerged.is_empty() {
                 let branch_list = unmerged.join("\n  - ");
                 let fallback = |message: String| if gone_epic_branch.is_some() { crate::gates::tag("G-127", message) } else { message };
@@ -8793,7 +8793,7 @@ impl CasCore {
                         return Ok(close_refusal::gate("epic_close_merge_gate", "reconcile_child_deliveries",
                             gate_preflight::refusal_reply(gate_refusals, msg)));
                     };
-                    // gate[G-126 epic-close]: Epic close override rejected (stranded_branch_override)
+                    // gate[G-126 epic-close integrity]: Epic close override rejected (stranded_branch_override)
                     let narrative = match validate_stranded_branch_override_reason(reason) {
                         Ok(narrative) => narrative,
                         Err(error) => {
@@ -8964,7 +8964,7 @@ impl CasCore {
             Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
             Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
         };
-        // gate[G-25 park]: Evidence-only measurement (never-merge proof, workflow paths only)
+        // gate[G-25 park integrity]: Evidence-only measurement (never-merge proof, workflow paths only)
         let measured_evidence = if let Some(receipt) = evidence_only_receipt.as_ref() {
             match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch, &receipt.reference) {
                 Ok(measured) => Some(measured),
@@ -8983,7 +8983,7 @@ impl CasCore {
             let landed = super::super::integration_batch::landed_batch_squash(
                 &task, &close_project_root, &resolved_parent_branch, Some(receipt),
             );
-            // gate[G-44 close-after-merge]: Integration batch receipt rejected (receipt must be the recorded squash)
+            // gate[G-44 close-after-merge integrity]: Integration batch receipt rejected (receipt must be the recorded squash)
             if supplied.is_none() || supplied != landed {
                 return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-44", "INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"))));
             }
@@ -9004,7 +9004,7 @@ impl CasCore {
         // prevents is false assurance in the audit trail rather than a
         // premature close. Ancestry, diff and work-cycle checks stay with the
         // gates below; this asks only whether the receipt is ours to verify.
-        // gate[G-43 park]: commit_receipt repo binding (receipt not found in this repository)
+        // gate[G-43 park integrity]: commit_receipt repo binding (receipt not found in this repository)
         if let Some(receipt) = req.commit_receipt.as_deref()
             && close_repo_verified
             && let Some(message) = commit_receipt_repo_binding_error(
@@ -9117,13 +9117,13 @@ impl CasCore {
                     );
                     None
                 }
-                // gate[G-45 park]: Parked anchor resolution (parked delivery unresolved, own-commit check)
+                // gate[G-45 park integrity]: Parked anchor resolution (parked delivery unresolved, own-commit check)
                 Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-45", message)))),
             }
         } else {
             None
         };
-        // gate[G-46 park]: Stale or prior commit_receipt at fresh park
+        // gate[G-46 park integrity]: Stale or prior commit_receipt at fresh park
         if let Some(receipt) = req.commit_receipt.as_deref()
             && let Some(refusal) = self.stale_fresh_park_receipt_refusal(
                 task_store.as_ref(), &task, &close_project_root,
@@ -9138,7 +9138,7 @@ impl CasCore {
         // an explicit fresh declaration plus positive absence measurements
         // can exempt a helper from delivery gates. Audit notes grant nothing
         // on the next attempt, and no methodology or synthetic receipt is set.
-        // gate[G-47 park]: No delivery close rejected (declaration and absence measurement)
+        // gate[G-47 park integrity]: No delivery close rejected (declaration and absence measurement)
         let empty_delivery = if no_delivery_declared {
             if recovery_branch.is_some() || !(close_repo_verified || worker_worktree_path.is_some()) {
                 return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required."))));
@@ -9268,7 +9268,7 @@ impl CasCore {
             // park no longer re-judges shared docs (G-50 removed).
             // cas-5d07: a report reaches the operator only as the report the
             // skill describes; not deferred by the fast lane.
-            // gate[G-51 park]: Report not ready for the operator (report quality)
+            // gate[G-51 park as-of]: Report not ready for the operator (report quality)
             match report_quality::at_park(
                 &mut close_notes, &mut task, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
@@ -9308,7 +9308,7 @@ impl CasCore {
                             fast_lane_receipt_passed = true;
                             Some(Ok(Vec::new()))
                         }
-                        // gate[G-54 close-after-merge]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
+                        // gate[G-54 close-after-merge as-of]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
                         fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(crate::gates::tag("G-54", message))),
                         fast_lane_gate::ReceiptGate::Failed(message) => {
                             let recovery = self.return_merged_delivery_for_source_fix(
@@ -9320,7 +9320,7 @@ impl CasCore {
                     }
                 }
             };
-            // gate[G-53 park]: QA evidence rejected (implementer evidence bundle, pair coverage, batch deferral)
+            // gate[G-53 park as-of]: QA evidence rejected (implementer evidence bundle, pair coverage, batch deferral)
             match fast_lane_qa.unwrap_or_else(|| super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -9462,7 +9462,7 @@ impl CasCore {
                     // commit origin lacks can never be the delivery anchor.
                     // The anchor checks below judge a pushed tip, so they wait
                     // for the push; the tip's receipts can be read already.
-                    // gate[G-59 park]: Unpushed delivery tip (close refused at park)
+                    // gate[G-59 park integrity]: Unpushed delivery tip (close refused at park)
                     let unpushed_refusal = measured_branch.as_deref().zip(anchor.as_deref()).and_then(|(branch, tip)| {
                         unpushed_delivery_tip(&close_project_root, branch, tip, task.delivery_mode)
                             .map(|pushed| crate::gates::tag("G-59", unpushed_delivery_tip_refusal(branch, tip, &pushed)))
@@ -9507,7 +9507,7 @@ impl CasCore {
                                 let receipt_was_tip = req.commit_receipt.as_deref()
                                     .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
                                     .is_some_and(|receipt| commit_ids_match(&receipt, tip));
-                                // gate[G-60 park]: Park anchor absent, unattributable advance or persisted anchor unreadable
+                                // gate[G-60 park integrity]: Park anchor absent, unattributable advance or persisted anchor unreadable
                                 gate_refusals.push(crate::gates::tag("G-60", if receipt_was_tip {
                                     format!(
                                         "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit or work after a sibling's lease), or this is a rewritten delivery. No park or anchor change was recorded. Do not retry the same receipt; ask the supervisor to review the delivery and request changes or rebind the branch.",
@@ -9921,7 +9921,7 @@ impl CasCore {
             && no_verification_on_record
             && verification_tier.is_some()
             && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
-        // gate[G-67 close-after-merge]: Waiting for release verdict (Tier 1 in qa.mode=batch)
+        // gate[G-67 close-after-merge as-of]: Waiting for release verdict (Tier 1 in qa.mode=batch)
         if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers && parent_release_review.is_none()) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,
@@ -9963,7 +9963,7 @@ impl CasCore {
                 }
             }
         }
-        // gate[G-68 park]: Verification jail (VERIFICATION REQUIRED / FAILED / timed out)
+        // gate[G-68 park as-of]: Verification jail (VERIFICATION REQUIRED / FAILED / timed out)
         if verification_enabled
             && !skip_verification
             && !depth_light
@@ -10035,7 +10035,7 @@ impl CasCore {
                     typed_dispatch = None;
                 }
 
-                // gate[G-69 close-after-merge]: Repository-proof revalidation after verdict
+                // gate[G-69 close-after-merge integrity]: Repository-proof revalidation after verdict
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Some(repository) = dispatch.repository.as_ref()
                     && !reviewed_delivery.as_ref().is_some_and(|reviewed| {
@@ -10444,7 +10444,7 @@ impl CasCore {
                             return Ok(Self::tool_error(message));
                         }
 
-                        // gate[G-70 close-after-merge]: Pre-merge approval missing for a merged factory delivery
+                        // gate[G-70 close-after-merge as-of]: Pre-merge approval missing for a merged factory delivery
                         if !is_epic && !empty_delivery
                             && !(supervisor_tier_two_recovery && merged_receipt.is_some())
                             && task.deliverables.factory_branch_anchor.is_some()
@@ -10895,7 +10895,7 @@ impl CasCore {
                             && worktree.status == WorktreeStatus::Active
                             && worktree.merged_at.is_none();
 
-                        // gate[G-72 epic-close]: Worktree merge required jail (System-A worktree)
+                        // gate[G-72 epic-close integrity]: Worktree merge required jail (System-A worktree)
                         if needs_merge {
                             // Set pending_worktree_merge flag to enable worktree jail
                             let agent_id = self.get_agent_id().ok();
@@ -11029,7 +11029,7 @@ impl CasCore {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 let receipt = clean_tree_receipt(worker_wt);
                 let uncommitted = &receipt.tracked_dirty;
-                // gate[G-73 park]: Uncommitted work in isolated worktree
+                // gate[G-73 park integrity]: Uncommitted work in isolated worktree
                 if !uncommitted.is_empty() {
                     let file_list = uncommitted
                         .iter()
@@ -11130,7 +11130,7 @@ impl CasCore {
         // to a legacy `git diff HEAD` path on the main worktree — that
         // path has been deleted in this commit because it reintroduced
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
-        // gate[G-74 park]: Execution-note diff contracts (additive-only / value-only)
+        // gate[G-74 park integrity]: Execution-note diff contracts (additive-only / value-only)
         if close_disposition.requires_delivery_gates()
             && task.execution_note.as_deref() == Some("additive-only")
         {
@@ -11367,7 +11367,7 @@ impl CasCore {
                     epic_has_recorded_delivery |= receipt.is_some();
                 }
             }
-            // gate[G-71 epic-close]: Epic delivery tip and epic build basis required
+            // gate[G-71 epic-close integrity]: Epic delivery tip and epic build basis required
             let delivered_tip = match close_task_delivery_tip(
                 &task,
                 proof_repo,
@@ -11549,7 +11549,7 @@ impl CasCore {
             // cas-74cb: an epic's own close answers with its assembly when it
             // has one; otherwise its scoped proof stays required.
             let closing_epic = task.task_type == TaskType::Epic;
-            // gate[G-80 epic-close]: Build proof / ASSEMBLY_PROOF for the epic tip
+            // gate[G-80 epic-close as-of]: Build proof / ASSEMBLY_PROOF for the epic tip
             let build_proofs = close_build_proofs(
                 is_factory_worker,
                 assembly_proof.is_some(),
@@ -11788,7 +11788,7 @@ impl CasCore {
                     ).is_ok());
                 // cas-7efe: single close-time resolver, not a bare "main".
                 if !integrated_delivery {
-                    // gate[G-81 park]: Merge reality check (zero commits, never pushed)
+                    // gate[G-81 park integrity]: Merge reality check (zero commits, never pushed)
                     match check_factory_branch_merge_reality_with_delivery_mode(
                         &close_project_root,
                         assignee,
@@ -12140,7 +12140,7 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
-        // gate[G-84 close-after-merge]: Final-write compare-and-swap (changed while running)
+        // gate[G-84 close-after-merge integrity]: Final-write compare-and-swap (changed while running)
         let close_refused = |change: &str| {
             let caller = crate::mcp::tools::core::guidance::caller_prefix();
             Self::tool_error(crate::gates::tag("G-84", format!(
@@ -12320,7 +12320,7 @@ impl CasCore {
                     super::supervisor_push::LifecycleTransition::Closed,
                     &occurrence,
                 );
-                // gate[G-85 close-after-merge]: Closed lifecycle outbox push failure
+                // gate[G-85 close-after-merge integrity]: Closed lifecycle outbox push failure
                 return Err(Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     crate::gates::tag("G-85", super::supervisor_push::lifecycle_push_failure_message(
@@ -12808,7 +12808,7 @@ impl CasCore {
     /// exactly the "closed while uncommitted / never-pushed" data-loss
     /// near-miss from BUG-merge-gate-inconsistent-close-without-integration.
     /// This fix adds System B as a fallback so those gates actually run.
-    // gate[G-40 park]: Worker worktree resolution (close hook context rejected)
+    // gate[G-40 park integrity]: Worker worktree resolution (close hook context rejected)
     pub(crate) fn resolve_worker_worktree_path(
         &self,
         task: &cas_types::Task,
@@ -15894,7 +15894,7 @@ fn validated_delivery_content_review(
 /// outcome.
 const CHILD_CONTENT_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
 
-// gate[G-56 close-after-merge]: Delivery content presence (content dropped, unverifiable, timed out, review rejected)
+// gate[G-56 close-after-merge integrity]: Delivery content presence (content dropped, unverifiable, timed out, review rejected)
 fn anchored_delivery_content_gate(
     task: &Task,
     repo_path: &std::path::Path,
@@ -17133,7 +17133,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     run_factory_branch_merge_gate_for_delivery(task, req, parent_branch, repo_path, attribution, None)
 }
 
-// gate[G-55 park]: Delivery merged into its target before close (factory-branch merge state)
+// gate[G-55 park integrity]: Delivery merged into its target before close (factory-branch merge state)
 // gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
 // gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn run_factory_branch_merge_gate_for_delivery(
@@ -17664,7 +17664,7 @@ fn run_factory_branch_merge_gate_for_delivery(
                         // A divergent epic stays fail-closed: advancing it needs
                         // an explicit conflict/authority decision, not a close
                         // gate side effect.
-                        // gate[G-57 close-after-merge]: Lagging epic integration receipt
+                        // gate[G-57 close-after-merge integrity]: Lagging epic integration receipt
                         if let Some(note) = validate_lagging_epic_receipt_on_integration_branch(
                             repo_path,
                             receipt,
@@ -20980,7 +20980,7 @@ fn supervisor_merge_commit_for_receipt(
     ancestor_candidate
 }
 
-// gate[G-58 park]: Invalid task commit receipt
+// gate[G-58 park integrity]: Invalid task commit receipt
 fn commit_receipt_rejection(
     repo_path: &std::path::Path,
     task_id: &str,
@@ -21134,7 +21134,7 @@ pub(crate) fn check_zero_commit_close(
     commit_receipt: Option<&str>,
     commit_receipt_window: Option<&TaskCommitReceiptWindow>,
 ) -> ZeroCommitCloseOutcome {
-    // gate[G-82 park]: Zero-commit / no-diff ambiguity on a code task
+    // gate[G-82 park integrity]: Zero-commit / no-diff ambiguity on a code task
     // Not a code-expecting task type → no ambiguity.
     if !matches!(
         task_type,
@@ -23501,7 +23501,7 @@ fn branch_content_direction_against_ref_with_snapshot(
 /// [`run_factory_branch_merge_gate`]: this is a data-state guard,
 /// not a review gate. The close route is selected from the epic's persisted
 /// delivery mode.
-// gate[G-125 epic-close]: Per-child epic merge gate (EPIC CLOSE CHECK INCOMPLETE / BLOCKED)
+// gate[G-125 epic-close integrity]: Per-child epic merge gate (EPIC CLOSE CHECK INCOMPLETE / BLOCKED)
 pub(crate) fn run_epic_close_merge_gate(
     task: &Task,
     req: &TaskCloseRequest,
@@ -25327,7 +25327,7 @@ fn pre_close_unreachable_rejection(
     )
 }
 
-// gate[G-41 park]: Declared pre-close hook (pre-close hook failed, unreachable, target-only, stale anchor)
+// gate[G-41 park as-of]: Declared pre-close hook (pre-close hook failed, unreachable, target-only, stale anchor)
 // gate-audit[supervisor_override]: selector Selects a separately validated pushed-receipt recovery context; the declared pre-close hook still runs.
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,

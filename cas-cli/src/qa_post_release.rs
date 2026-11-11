@@ -792,7 +792,7 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
     })
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
-// gate[G-120 epic-close]: Post-release watch before epic close or release notes
+// gate[G-120 epic-close as-of]: Post-release watch before epic close or release notes
 #[cfg(test)]
 pub(crate) fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
     gate_with_overrides(cas_root, epic, release_notes, &mut Vec::new())

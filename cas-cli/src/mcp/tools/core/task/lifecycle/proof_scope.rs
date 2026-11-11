@@ -253,7 +253,7 @@ fn approved_repository_is_unchanged(cas_root: &Path, task: &Task) -> bool {
 /// This guard must run immediately after loading the task, before receipt
 /// parsing, repository resolution, hook execution, dependency writes, or task
 /// projection updates.
-// gate[G-29 park]: Delivery proof scope locked
+// gate[G-29 park integrity]: Delivery proof scope locked
 pub(crate) fn guard_task_proof_scope(
     cas_root: &Path,
     task: &Task,

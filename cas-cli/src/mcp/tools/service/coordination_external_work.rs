@@ -368,7 +368,13 @@ fn surface_claim_refusal(
     let owner_id = result.pointer("/receipt/visible_owner/registration_id").and_then(Value::as_str)
         .or(cached_owner).unwrap_or(&agent.id);
     let owner = if owner_id == agent.id { agent.clone() } else {
-        crate::store::open_agent_store(root)?.get(owner_id)?
+        match crate::store::open_agent_store(root)?.get(owner_id) {
+            Ok(owner) => owner,
+            // A foreign Cloud owner has no local recipient for the notice.
+            // Keep the original claim refusal and its owner details.
+            Err(cas_store::StoreError::NotFound(_)) => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
     };
     if owner.role != cas_types::AgentRole::Supervisor { return Ok(()); }
     let Some(session) = owner.factory_session.as_deref() else { return Ok(()) };

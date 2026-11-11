@@ -156,6 +156,7 @@ pub(crate) fn ask(
         options: vec!["Revert".into(), "Fix-forward".into()],
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     };
     let queue = crate::store::open_prompt_queue_store(root)?;
     let key = format!("fast-lane-walk:{}:{merge}", task.id);

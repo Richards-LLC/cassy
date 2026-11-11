@@ -844,6 +844,7 @@ pub(super) fn execute_message(
             options,
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         })?;
         let queue = crate::store::open_prompt_queue_store(&cas_root)?;
         queue.record_operator_turn(&cas_store::OperatorTurn {

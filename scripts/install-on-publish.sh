@@ -20,7 +20,9 @@
 # the release timer in the GitHub release notes: release.yml writes
 # "PR #N opened -> published" with a marker; the first host to install adds
 # "-> installed", the one timer from PR opened to installed. A failed install
-# is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600).
+# is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600). Each newly seen
+# publication first runs `cas release published` once (the release's one
+# reconciliation); `cas release installed` after it is recovery only.
 #
 # Environment: CAS_RELEASE_REPO (default Richards-LLC/cassy), CAS_BIN (cas),
 # GH_BIN (gh), XDG_STATE_HOME, RELEASE_INSTALL_NOW (epoch, tests),
@@ -242,7 +244,22 @@ deliver_notice() {
         my $status = $?;
         alarm 0;
         exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
-    ' "$notice_timeout" "$cas_bin" release installed --receipt "$1" --repo "$repo"
+    ' "$notice_timeout" "$cas_bin" release "$1" --receipt "$2" --repo "$repo"
+}
+
+# Reconcile the publication before installation, using the same adapter deadline.
+notify_published() {
+    local tag="$1"
+    if [[ -r "$state_dir/install-on-publish.published" ]] &&
+       [[ "$(cat "$state_dir/install-on-publish.published")" == "$tag" ]]; then
+        return 0
+    fi
+    if deliver_notice published "$state_dir/install-on-publish.pending.json"; then
+        printf '%s\n' "$tag" >"$state_dir/install-on-publish.published.tmp"
+        mv "$state_dir/install-on-publish.published.tmp" "$state_dir/install-on-publish.published"
+    else
+        log "publish reconciliation pending for $tag; retrying on the next tick"
+    fi
 }
 
 notify_installed() {
@@ -252,7 +269,7 @@ notify_installed() {
         rm -f "$pending_dir/$tag.json"
         return 0
     fi
-    if deliver_notice "$pending_dir/$tag.json"; then
+    if deliver_notice installed "$pending_dir/$tag.json"; then
         touch "$notified_dir/$tag"
         rm -f "$pending_dir/$tag.json"
         printf '%s\n' "$tag" >"$state_dir/install-on-publish.notified.tmp"
@@ -292,6 +309,7 @@ run_once() {
     preserve_pending "$current"
     printf '%s\n' "$publication" >"$state_dir/install-on-publish.pending.json.tmp"
     mv "$state_dir/install-on-publish.pending.json.tmp" "$state_dir/install-on-publish.pending.json"
+    notify_published "$tag"
     if [[ -n "$current" ]] && ! version_greater "$latest" "$current"; then
         if [[ "$current" == "$latest" ]]; then
             queue_notice "$tag" "$state_dir/install-on-publish.pending.json"
@@ -345,6 +363,6 @@ case "${1:---once}" in
         fi
         run_once
         ;;
-    -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//' ;;
+    -h|--help) sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//' ;;
     *) printf 'usage: %s [--install | --uninstall | --once]\n' "$0" >&2; exit 2 ;;
 esac

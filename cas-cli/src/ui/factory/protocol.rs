@@ -200,6 +200,9 @@ pub struct OperatorReplyPayload {
     /// thread and only quotes the earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_session: Option<String>,
+    /// Optional task linkage; the enclosing notification ID identifies the operator request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// A durable operator message replayed into the Commander conversation.
@@ -282,6 +285,9 @@ pub struct ConversationHistoryReply {
     /// thread and only quotes the earlier one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_session: Option<String>,
+    /// Optional task linkage; the enclosing notification ID identifies the operator request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /// Version of the [`WorkEvent`] schema; documented in
@@ -755,6 +761,9 @@ pub enum DaemonMessage {
         /// Session of the answered turn when it is another session's (cas-e829).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply_to_session: Option<String>,
+        /// Optional task linkage; the enclosing notification ID identifies the operator request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
 
     /// A system notice delivered earlier is over (cas-e829): the relay it
@@ -1425,6 +1434,7 @@ mod tests {
             r#"{"schema_version":1,"reply_to":41,"message":"ready","summary":"reply","device_id":"device-7"}"#,
         )
         .unwrap();
+        assert_eq!(legacy.task_id, None);
         assert_eq!(legacy.reply_to, Some(41));
         assert_eq!(legacy.kind, OperatorTurnKind::Answer);
         assert!(legacy.attachments.is_empty());
@@ -1447,6 +1457,7 @@ mod tests {
                 sha256: "ab".repeat(32),
             }],
             reply_to_session: None,
+            task_id: None,
         };
         let encoded = serde_json::to_string(&current).unwrap();
         assert!(!encoded.contains("reply_to_session"), "{encoded}");
@@ -1479,9 +1490,11 @@ mod tests {
             "summary": "Choose the next step",
             "device_id": "*",
             "kind": "ask",
+            "task_id": "cas-operator-decision",
             "options": ["Keep testing", "Stop testing"]
         }))
         .unwrap();
+        assert_eq!(ask.task_id.as_deref(), Some("cas-operator-decision"));
         assert_eq!(
             serde_json::to_value(&ask).unwrap()["options"],
             serde_json::json!(["Keep testing", "Stop testing"])

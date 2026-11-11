@@ -179,6 +179,19 @@ fn handle_post_tool_use_with_guardrail(
         }
     }
 
+    if tool_name == "Bash"
+        && let Some(command) = input.tool_input.as_ref().and_then(|ti| ti.get("command")).and_then(|v| v.as_str())
+        && let Some(note) = crate::cli::release_adapters::observe_promotion_merge(
+            cas_root,
+            Path::new(&input.cwd),
+            command,
+            &input.session_id,
+        )
+    {
+        let context = merge_post_tool_contexts(tmpfs_guardrail_warning.as_ref(), note);
+        return Ok(HookOutput::with_post_tool_context(context));
+    }
+
     if let Some(output) = tmpfs_guardrail_warning {
         return Ok(output);
     }

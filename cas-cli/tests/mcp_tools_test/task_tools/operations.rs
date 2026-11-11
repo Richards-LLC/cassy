@@ -5645,7 +5645,8 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
         let expected = format!("factory/{}-{}", receiver.name, task.id);
         assert_eq!(git(destination.path(), &["branch", "--show-current"]), expected);
         assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), tip);
-        assert_eq!(std::fs::read_to_string(destination.path().join("delivery.txt")).unwrap(), "inherited work");
+        assert_eq!(std::fs::read(destination.path().join("delivery.txt")).unwrap(),
+            std::fs::read(root.join("delivery.txt")).unwrap());
         assert_eq!(git(root, &["rev-parse", &format!("refs/remotes/origin/{recorded}")]), tip);
         let after = tasks.get(&task.id).unwrap();
         assert_eq!(after.assignee.as_deref(), Some(receiver.name.as_str()));

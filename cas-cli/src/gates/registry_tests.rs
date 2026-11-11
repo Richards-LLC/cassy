@@ -29,7 +29,7 @@ fn every_registered_refusal_site_emits_its_code() {
         (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok("accepted")"#, false),
         (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok(override_tag("G-01", "accepted"))"#, true),
     ] {
-        let source = format!("fn unrelated() {{ override_tag(\"G-01\", \"accepted\"); }}\n// gate-audit[supervisor_override]: bypass G-01 Accepts an otherwise refused request.\nfn probe(supervisor_override: bool) {{ if !supervisor_override {{ {refusal} }} else {{ {accepted} }} }}");
+        let source = format!("fn status(verbose: bool) {{ if verbose {{ println!(\"REFUSED\"); }} }}\nfn unrelated() {{ override_tag(\"G-01\", \"accepted\"); }}\n// gate-audit[supervisor_override]: bypass G-01 Accepts an otherwise refused request.\nfn probe(supervisor_override: bool) {{ if !supervisor_override {{ {refusal} }} else {{ {accepted} }} }}");
         std::fs::write(source_dir.join("probe.rs"), source).unwrap();
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{:?}", result.gaps);

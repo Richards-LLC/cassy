@@ -50,6 +50,7 @@ fi
 if [[ "$1 $2" == "release installed" ]]; then
     notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
     if [[ "${6:-}" == example/repo && "${7:-}" == --failed-attempts ]]; then
+        [[ "${FAKE_FAILURE_REPORT_FAILS:-}" == 1 ]] && exit 1
         printf 'failed-notice=%s:%s\n' "$notice_tag" "$8" >>"$FAKE_LOG"
         exit 0
     fi
@@ -189,7 +190,7 @@ PY_ORDER
     for tick in 1 2 3 4 5; do
         # Replay legacy discovery across timer restarts as well as ordinary retries.
         cp "$tmp/legacy-publication.json" "$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
-        FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+        FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 FAKE_FAILURE_REPORT_FAILS=$((tick == 3)) "$installer" --once >/dev/null
     done
     python3 - "$FAKE_LOG" "$XDG_STATE_HOME/cassy" <<'PY_EXHAUSTED'
 import json, pathlib, sys
@@ -201,6 +202,7 @@ assert not (state / "install-on-publish.pending.d/v9.99.2.json").exists()
 failed = list((state / "install-on-publish.failed.d").glob("*.json"))
 assert len(failed) == 1, failed
 assert json.loads(failed[0].read_text())["tag_name"] == "v9.99.2"
+assert json.loads(failed[0].read_text())["installer_notice_attempts"] == 3
 PY_EXHAUSTED
 ) && ok 'an exhausted older notice stops at the cap with one failure report' || bad 'an exhausted older notice stops at the cap with one failure report'
 

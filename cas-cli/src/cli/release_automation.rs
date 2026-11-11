@@ -54,6 +54,9 @@ pub struct InstalledArgs {
     receipt: PathBuf,
     #[arg(long)]
     repo: String,
+    /// Report exhausted installer attempts once, without retrying reconciliation
+    #[arg(long)]
+    failed_attempts: Option<std::num::NonZeroU32>,
 }
 #[derive(Debug, Args)]
 pub struct BackfillArgs {
@@ -721,9 +724,18 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
     );
     let mut delivered = 0;
     for root in release_roots(current_root)? {
-        delivered += usize::from(installed_at_root(&root, &args.repo, &version)?);
+        delivered += usize::from(if let Some(attempts) = args.failed_attempts {
+            super::release_notice_failure::record(&root, &args.repo, &version, attempts, &args.receipt)?
+        } else {
+            installed_at_root(&root, &args.repo, &version)?
+        });
     }
-    println!("Post-release notice recorded for v{version} ({delivered} project(s))");
+    if args.failed_attempts.is_some() {
+        ensure!(delivered > 0, "no tracked release owner found for {version}; keep the failed receipt for reporting");
+        println!("Post-release failure recorded for v{version} ({delivered} project(s))");
+    } else {
+        println!("Post-release notice recorded for v{version} ({delivered} project(s))");
+    }
     Ok(())
 }
 
@@ -1337,7 +1349,7 @@ pub(super) mod tests {
         let before = open_task_store(&root).unwrap().get(&train.id).unwrap();
         for _ in 0..2 {
             installed(&InstalledArgs {
-                receipt: publication_path.clone(), repo: "example/repo".into(),
+                receipt: publication_path.clone(), repo: "example/repo".into(), failed_attempts: None,
             }, Some(&root)).unwrap();
         }
         let after = open_task_store(&root).unwrap().get(&train.id).unwrap();
@@ -1359,7 +1371,7 @@ pub(super) mod tests {
             "tag_name": "v999.0.0", "draft": false, "published_at": "2026-11-05T23:00:00Z",
         })).unwrap()).unwrap();
         assert!(installed(&InstalledArgs {
-            receipt: publication_path, repo: "example/repo".into(),
+            receipt: publication_path, repo: "example/repo".into(), failed_attempts: None,
         }, Some(&root)).is_err());
     }
 

@@ -1086,7 +1086,6 @@ impl TeamsManager {
             // Native child events supply and retire the positive ownership
             // evidence used by worker SendMessage. They grant no CAS identity.
             "SubagentStart": [{"hooks": [{"type": "command", "command": "cas hook SubagentStart", "timeout": 2000}]}],
-            "SubagentStop": [{"hooks": [{"type": "command", "command": "cas hook SubagentStop", "timeout": 2000}]}],
             "UserPromptSubmit": [
                 {
                     "hooks": [
@@ -3379,9 +3378,7 @@ mod tests {
                 .get("hooks")
                 .unwrap_or_else(|| panic!("{role} settings missing `hooks` block: {body}"));
 
-            for event in ["SubagentStart", "SubagentStop"] {
-                assert_eq!(hooks[event][0]["hooks"][0]["command"], format!("cas hook {event}"));
-            }
+            assert_eq!(hooks["SubagentStart"][0]["hooks"][0]["command"], "cas hook SubagentStart");
 
             let pre = hooks
                 .get("PreToolUse")

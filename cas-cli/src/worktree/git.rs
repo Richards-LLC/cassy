@@ -517,6 +517,33 @@ pub struct GitOperations {
     stale_checkout_notes: std::sync::Mutex<Vec<String>>,
 }
 
+/// `rev-parse --show-toplevel` answers in milliseconds. A Git child that blocks
+/// (a LaunchAgent reading ~/Documents) held `cas release installed` for 4h40m.
+const REPO_ROOT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn toplevel_within(mut command: Command, from: &Path, timeout: std::time::Duration) -> Result<PathBuf> {
+    use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
+    command.args(["rev-parse", "--show-toplevel"]).current_dir(from);
+    let output = match run_command(&mut command, Deadline::after(timeout), timeout) {
+        Ok(output) => output,
+        Err(BoundedCommandError::TimedOut) => {
+            return Err(GitError::CommandFailed(format!(
+                "git rev-parse --show-toplevel in {} timed out after {}s",
+                from.display(),
+                timeout.as_secs_f32()
+            )));
+        }
+        Err(BoundedCommandError::Io) => {
+            return Err(GitError::GitNotAvailable("could not run git rev-parse".into()));
+        }
+    };
+    if !output.status.success() {
+        return Err(GitError::NotAGitRepo);
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok(PathBuf::from(path))
+}
+
 impl GitOperations {
     /// Create a new GitOperations instance for a repository
     pub fn new(repo_root: PathBuf) -> Self {
@@ -528,17 +555,7 @@ impl GitOperations {
 
     /// Detect the repository root from a path
     pub fn detect_repo_root(from: &Path) -> Result<PathBuf> {
-        let output = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(from)
-            .output()?;
-
-        if !output.status.success() {
-            return Err(GitError::NotAGitRepo);
-        }
-
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(PathBuf::from(path))
+        toplevel_within(Command::new("git"), from, REPO_ROOT_PROBE_TIMEOUT)
     }
 
     /// Check if git is available

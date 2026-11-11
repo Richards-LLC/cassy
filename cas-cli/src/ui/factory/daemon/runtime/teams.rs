@@ -1004,7 +1004,6 @@ impl TeamsManager {
     pub(crate) fn factory_pre_tool_intercept_list() -> &'static [&'static str] {
         &[
             "SendMessage",
-            "AskUserQuestion",
             "Agent",
             crate::config::hooks::SLACK_POLICY_MATCHER,
         ]
@@ -1023,7 +1022,7 @@ impl TeamsManager {
     /// Defaults mirror `cli/hook/config_gen.rs`: 2000ms timeout for every
     /// command hook in this compact factory set.
     /// `PreToolUse` matcher covers the filesystem allow list plus
-    /// intercept-only tools like `SendMessage` and `AskUserQuestion`; those
+    /// intercept-only tools like `SendMessage` and `Agent`; those
     /// intercept-only tools are deliberately omitted from `permissions.allow`.
     fn factory_hooks_block() -> serde_json::Value {
         let matcher = Self::factory_allow_list()
@@ -1084,10 +1083,9 @@ impl TeamsManager {
             // and still never run for the exact population that needed it —
             // the workers whose messages were being silently stranded.
             //
-            // Deliberately the ONLY event added here. `cli/hook/config_gen.rs`
-            // installs fourteen for non-factory sessions; auditing that
-            // difference is separate work, and widening this block further
-            // would change factory behaviour well beyond the delivery bug.
+            // Native child events supply and retire the positive ownership
+            // evidence used by worker SendMessage. They grant no CAS identity.
+            "SubagentStart": [{"hooks": [{"type": "command", "command": "cas hook SubagentStart", "timeout": 2000}]}],
             "UserPromptSubmit": [
                 {
                     "hooks": [
@@ -3350,7 +3348,7 @@ mod tests {
                 "worker allowlist must include {tool}, got {names:?}"
             );
         }
-        for tool in ["SendMessage", "AskUserQuestion", "Agent"] {
+        for tool in ["SendMessage", "Agent"] {
             assert!(
                 !names.contains(&tool),
                 "worker allowlist must not auto-allow intercept-only tool {tool}: {names:?}"
@@ -3379,6 +3377,8 @@ mod tests {
             let hooks = body
                 .get("hooks")
                 .unwrap_or_else(|| panic!("{role} settings missing `hooks` block: {body}"));
+
+            assert_eq!(hooks["SubagentStart"][0]["hooks"][0]["command"], "cas hook SubagentStart");
 
             let pre = hooks
                 .get("PreToolUse")
@@ -3409,7 +3409,6 @@ mod tests {
                 "Bash",
                 "NotebookEdit",
                 "SendMessage",
-                "AskUserQuestion",
                 "Agent",
             ] {
                 assert!(

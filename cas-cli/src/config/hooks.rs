@@ -267,7 +267,6 @@ pub(crate) fn default_pre_tool_use_matcher() -> Vec<String> {
         "WebSearch".into(),
         "Task".into(),            // For verification jail unjailing
         "SendMessage".into(),     // Blocked in factory mode → use coordination message
-        "AskUserQuestion".into(), // Blocked in factory mode → ask in plain text / coordination
         "Agent".into(),           // Current Claude Code spelling of the subagent tool.
     ]
 }
@@ -755,7 +754,7 @@ mod tests {
     #[test]
     fn default_pre_tool_use_matcher_covers_factory_intercepts() {
         let matcher = default_pre_tool_use_matcher();
-        for tool in ["SendMessage", "AskUserQuestion", "Agent"] {
+        for tool in ["SendMessage", "Agent"] {
             assert!(
                 matcher.iter().any(|entry| entry == tool),
                 "PreToolUse matcher must include factory intercept tool {tool}: {matcher:?}"
@@ -767,7 +766,7 @@ mod tests {
     fn legacy_matcher_versions_converge_to_one_canonical_projection() {
         let canonical = default_pre_tool_use_matcher();
         for omitted in [
-            vec![SLACK_POLICY_MATCHER, "AskUserQuestion", "Agent"],
+            vec![SLACK_POLICY_MATCHER, "Agent"],
             vec![SLACK_POLICY_MATCHER, "Agent"],
             vec!["Agent"],
             Vec::new(),

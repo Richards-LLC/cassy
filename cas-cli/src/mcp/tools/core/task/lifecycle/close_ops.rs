@@ -2890,12 +2890,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
             task.id,
         )));
     }
-    // gate[G-77 park as-of]: Blast-radius proof_targets narrower than diff
+    // The same G-61 scope rule also protects closes without a factory park.
     if task.risk.contains(&TaskRisk::BlastRadius) {
         let (uncovered, notice) =
             uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
-            return Err(crate::gates::tag("G-77", format!(
+            return Err(crate::gates::tag("G-61", format!(
                 "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}{}. {}",
                 task.id,
                 uncovered.join(", "),
@@ -3600,7 +3600,7 @@ mod risk_proof_tests {
     }
 
     #[test]
-    fn blast_radius_close_guides_supervisor_proof_target_widening() {
+    fn focused_proof_close_guides_supervisor_scope_widening() {
         let mut task = Task::new("cas-d86d-guidance".into(), "proof guidance".into());
         task.risk = vec![TaskRisk::BlastRadius];
         task.proof_targets = vec!["lifecycle".into()];
@@ -7767,7 +7767,7 @@ impl CasCore {
         result
     }
 
-    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-76,G-77,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
     // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
     // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
@@ -11660,7 +11660,7 @@ impl CasCore {
                 for code in crate::gates::codes_in(&message) {
                     match code {
                         "G-76" => accepted_override_codes.push("G-76"),
-                        "G-77" => accepted_override_codes.push("G-77"),
+                        "G-61" => accepted_override_codes.push("G-61"),
                         "G-78" => accepted_override_codes.push("G-78"),
                         _ => {},
                     }

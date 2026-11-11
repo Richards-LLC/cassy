@@ -660,24 +660,31 @@ pub(crate) fn get_exit_blockers(
     Ok(blockers)
 }
 
+fn native_subagent_marker(root: &Path, parent: &str, child: &str) -> Option<std::path::PathBuf> {
+    if parent.trim().is_empty() || child.trim().is_empty() || parent == child {
+        return None;
+    }
+    use sha2::Digest;
+    Some(root.join("native-subagents").join(format!("{:x}-{:x}",
+        sha2::Sha256::digest(parent.as_bytes()), sha2::Sha256::digest(child.as_bytes()))))
+}
+
+pub(crate) fn owns_native_subagent(root: &Path, parent: &str, child: &str) -> bool {
+    native_subagent_marker(root, parent, child).is_some_and(|path| path.is_file())
+}
+
 /// Handle SubagentStop hook - minimal cleanup for subagent completion
 ///
 /// Called when a Claude Code subagent (Task tool call) finishes.
 ///
-/// IMPORTANT: The session_id in SubagentStop is the PARENT's session_id, not the
-/// subagent's. We do NOT have the subagent's agent ID, and subagents spawned via
-/// Task tool may not even be registered as Cassy agents. Therefore, we do NOT
-/// perform any agent cleanup here - that would incorrectly shut down the parent!
-///
-/// Only the parent's Stop hook should clean up agents and PID mappings.
+/// Completion preserves the parent/child ownership recorded at SubagentStart:
+/// native SendMessage can resume a completed child by its ID. These markers
+/// grant no CAS identity or verifier authority. Never clean up the parent's
+/// CAS identity here; only the parent's Stop hook owns that cleanup.
 pub fn handle_subagent_stop(
     _input: &HookInput,
-    cas_root: Option<&Path>,
+    _cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    if cas_root.is_none() {
-        return Ok(HookOutput::empty());
-    }
-
     // NOTE: Do NOT call cleanup_subagent_leases or any agent cleanup here!
     // The session_id is the parent's, not the subagent's.
 
@@ -734,6 +741,13 @@ pub fn handle_subagent_start(
         Some(root) => root,
         None => return Ok(HookOutput::empty()),
     };
+
+    if let Some(child) = input.agent_id.as_deref()
+        && let Some(path) = native_subagent_marker(cas_root, &input.session_id, child)
+    {
+        let _ = std::fs::create_dir_all(path.parent().expect("marker directory"))
+            .and_then(|()| std::fs::write(path, b""));
+    }
 
     // Official SubagentStart carries the parent session plus distinct child
     // agent_id/agent_type, but no Agent prompt or PreToolUse tool_use_id. Bind

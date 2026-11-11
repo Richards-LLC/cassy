@@ -53,4 +53,4 @@ and failure-weighted recall per role. Compare workflow/job wall times over equal
 factory/PR sample windows to evaluate the CI-time acceptance criterion; fixture
 runtime or fewer selected modules alone is not evidence of a faster CI median.
 Run `python3 scripts/test-ci-test-impact.py` and `scripts/test-ci-test-tiers.sh`
-for Git/transport/execution fixtures and policy pins without compiling Rust.
+for Git/transport/execution fixtures without compiling Rust.

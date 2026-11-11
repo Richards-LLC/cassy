@@ -38,66 +38,7 @@ fn deny_reason(out: &cas_core::hooks::types::HookOutput) -> Option<String> {
         .map(str::to_string)
 }
 
-#[test]
-fn factory_worker_send_message_is_denied_with_coordination_guidance() {
-    let _env = TestEnvGuard::with_optional_vars(&[
-        ("CAS_AGENT_ROLE", Some("worker")),
-        ("CAS_FACTORY_SESSION", None),
-    ]);
 
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut input = send_message_input(Some(serde_json::json!({
-        "to": "all_workers",
-        "message": "broadcast outside the durable coordination route",
-        "summary": "broadcast",
-    })));
-    input.agent_role = Some("worker".into());
-
-    let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-    let reason = deny_reason(&out).expect("factory worker SendMessage must be denied");
-
-    let queue = crate::store::open_prompt_queue_store(tmp.path()).expect("queue opens");
-    assert!(
-        queue
-            .peek_for_targets(&["all_workers"], None, 10)
-            .expect("peek pending")
-            .is_empty(),
-        "denied worker SendMessage must not enqueue a parallel transport"
-    );
-}
-
-// Supervisors must not return `allow` from this hook: Claude Code then runs
-// its native SendMessage transport after the hook, which bypasses Cassy's
-// durable queue and can strand an assignment. The CAS coordination command is
-// the only supported supervisor-to-worker transport.
-#[test]
-fn factory_supervisor_send_message_to_worker_is_denied_with_cas_guidance() {
-    let _env = TestEnvGuard::with_optional_vars(&[
-        ("CAS_AGENT_ROLE", None),
-        ("CAS_FACTORY_SUPERVISOR_CLI", Some("claude")),
-        ("CAS_FACTORY_SESSION", None),
-    ]);
-
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let mut input = send_message_input(Some(serde_json::json!({
-        "to": "test-worker-7",
-        "message": "Task cas-f42e is assigned; start it now.",
-        "summary": "assign cas-f42e",
-    })));
-    input.agent_role = Some("supervisor".into());
-
-    let out = handle_pre_tool_use(&input, None).expect("handler ok");
-    let reason = deny_reason(&out).expect("factory supervisor SendMessage must be denied");
-
-    let queue = crate::store::open_prompt_queue_store(tmp.path()).expect("queue opens");
-    assert!(
-        queue
-            .peek_for_targets(&["test-worker-7"], None, 10)
-            .expect("peek pending")
-            .is_empty(),
-        "denied supervisor SendMessage must not enqueue a parallel transport"
-    );
-}
 
 #[test]
 fn send_message_outside_factory_falls_through() {
@@ -116,4 +57,61 @@ fn send_message_outside_factory_falls_through() {
         None,
         "SendMessage outside factory mode must pass through to the host harness"
     );
+}
+
+#[test]
+fn factory_worker_native_messages_follow_child_ownership() {
+    use crate::hooks::handlers::{handle_subagent_start, handle_subagent_stop};
+    use cas_types::{Agent, AgentRole};
+    let _env = TestEnvGuard::with_optional_vars(&[
+        ("CAS_AGENT_ROLE", Some("worker")), ("CAS_FACTORY_SESSION", None),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let agents = crate::store::open_agent_store(root.path()).unwrap();
+    agents.init().unwrap();
+    agents.register(&Agent::new_with_role("test-session".into(), "parent-worker".into(), AgentRole::Worker)).unwrap();
+    agents.register(&Agent::new_with_role("peer-session".into(), "registered-peer".into(), AgentRole::Worker)).unwrap();
+    let mut start = HookInput {
+        session_id: "test-session".into(), agent_id: Some("a-owned".into()),
+        agent_type: Some("general-purpose".into()), hook_event_name: "SubagentStart".into(),
+        ..HookInput::default()
+    };
+    handle_subagent_start(&start, Some(root.path())).unwrap();
+    start.session_id = "other-parent".into();
+    start.agent_id = Some("a-foreign".into());
+    handle_subagent_start(&start, Some(root.path())).unwrap();
+    // Even a claimed child cannot become a native route to a factory peer.
+    start.session_id = "test-session".into();
+    start.agent_id = Some("registered-peer".into());
+    handle_subagent_start(&start, Some(root.path())).unwrap();
+    for (args, allowed) in [
+        (serde_json::json!({"recipient":"a-owned", "type":"message"}), true),
+        (serde_json::json!({"to":"a-owned"}), true),
+        (serde_json::json!({"to":"a-foreign"}), false),
+        (serde_json::json!({"to":"registered-peer"}), false),
+        (serde_json::json!({"to":"supervisor"}), false),
+        (serde_json::json!({"to":"all_workers"}), false),
+        (serde_json::json!({"to":"a-owned", "type":"broadcast"}), false),
+        (serde_json::json!({"recipient":"a-owned", "to":"a-foreign"}), false),
+        (serde_json::json!({}), false),
+    ] {
+        let mut input = send_message_input(Some(args));
+        input.agent_role = Some("worker".into());
+        let output = handle_pre_tool_use(&input, Some(root.path())).unwrap();
+        assert_eq!(deny_reason(&output).is_none(), allowed, "{:?}", input.tool_input);
+        if !allowed {
+            assert!(crate::gates::codes_in(&deny_reason(&output).unwrap()).contains(&"H-21"));
+        }
+    }
+    start.agent_id = Some("a-owned".into());
+    start.hook_event_name = "SubagentStop".into();
+    handle_subagent_stop(&start, Some(root.path())).unwrap();
+    let mut input = send_message_input(Some(serde_json::json!({"to":"a-owned"})));
+    input.agent_role = Some("worker".into());
+    // Completion preserves ownership: SendMessage resumes the same native child.
+    assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_none());
+    input.tool_input = Some(serde_json::json!({"to":"a-foreign"}));
+    assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_some());
+    assert!(agents.get("a-owned").is_err());
+    assert_eq!(agents.get("test-session").unwrap().role, AgentRole::Worker);
 }

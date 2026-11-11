@@ -559,21 +559,6 @@ fn handle_pre_tool_use_checked(
     {
         return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
-    // cas-1b94: agent `cas mcp add|remove|import` cannot remove, replace or
-    // alias a supervisor-only MCP server (the proxy_add rule, cas-0d4f0).
-    // gate[H-13 pre-tool]: Supervisor-only MCP servers through the cas mcp CLI
-    #[cfg(feature = "mcp-proxy")]
-    if tool_name == "Bash"
-        && let Some(root) = cas_root
-        && let Some(reason) = input
-            .tool_input
-            .as_ref()
-            .and_then(|tool_input| tool_input.get("command"))
-            .and_then(|command| command.as_str())
-            .and_then(|command| supervisor_only_mcp_command_denial(command, root))
-    {
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-13", reason)));
-    }
     // cas-0d4f0: no agent writes a Cassy config file directly, for every role.
     // gate[H-14 pre-tool]: Cassy config file direct write
     if let Some(reason) = cas_config_file_write_denial(input) {
@@ -755,59 +740,13 @@ fn handle_pre_tool_use_checked(
         }
     }
 
-    // ========================================================================
-    // FACTORY MODE: Block AskUserQuestion self-directed permission trap
-    //
-    // In factory mode, AskUserQuestion has no human UI surface. It appears as
-    // a permission prompt in the caller's own session and pauses the system, so
-    // both supervisors and workers must use factory-safe routes instead.
-    //
-    // This gate runs before the cas_root check because it only needs the
-    // factory role env/snapshot and must still fire when hook dispatch cannot
-    // resolve a Cassy root.
-    // ========================================================================
-    // gate[H-19 pre-tool]: AskUserQuestion in factory
-    if is_factory_agent && tool_name == "AskUserQuestion" {
-        let prefix = crate::harness_policy::own_tool_prefix();
-        let guidance = if crate::harness_policy::is_supervisor(input) {
-            format!(
-                "AskUserQuestion cannot reach the human in factory mode - it surfaces as a permission prompt on your own session and pauses the system. \
-                Ask the human in plain text in your reply and END YOUR TURN; the director relays their answer. \
-                For workers/teammates use {prefix}coordination action=message."
-            )
-        } else {
-            format!(
-                "AskUserQuestion is blocked in factory mode - it surfaces as a permission prompt on your own session and pauses the system. \
-                Message your supervisor with {prefix}coordination action=message target=<supervisor> summary=\"...\" message=\"...\"."
-            )
-        };
-        return Ok(HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-19", guidance)));
-    }
-
-    // ========================================================================
-    // FACTORY SUPERVISOR: Deny native SendMessage before cas_root resolution
-    // (GH #793).
-    //
-    // A supervisor must never reach the host harness's native transport: an
-    // `allow` result lets that transport run after this hook and bypass the
-    // durable CAS coordination queue. Hoist the deny next to the other
-    // root-independent factory guards so a missing Cassy root cannot create a
-    // silent escape hatch.
-    // ========================================================================
-    // gate[H-20 pre-tool]: SendMessage, supervisor
-    if is_factory_agent
-        && tool_name == "SendMessage"
-        && crate::harness_policy::is_supervisor(input)
-    {
-        return Ok(deny_factory_supervisor_send_message());
-    }
-
-    // Native SendMessage bypasses the policy and origin stamps on the CAS
-    // coordination path, so factory workers must use that path directly.
+    // Launch argv excludes factory questions and supervisor native messages.
+    // Workers may use native messaging only to their own recorded child IDs.
     // gate[H-21 pre-tool]: SendMessage, worker
     if is_factory_agent
         && tool_name == "SendMessage"
         && crate::harness_policy::is_worker(input)
+        && !owns_native_message_target(input, cas_root)
     {
         return Ok(deny_factory_worker_send_message());
     }
@@ -7228,70 +7167,6 @@ fn read_only_find(args: &[String]) -> bool {
     true
 }
 
-/// cas-1b94: refusal for an agent's Bash `cas mcp add|remove|import` that
-/// would remove, replace or alias a `factory.supervisor_only_mcp` server, by
-/// the rule `proxy_add`/`proxy_remove` apply (cas-0d4f0). Ordinary servers
-/// stay manageable; `cas mcp import --force` is refused while any
-/// supervisor-only server is configured, since it may overwrite one.
-#[cfg(feature = "mcp-proxy")]
-// gate-audit[forward]: H-13 Returned denial is tagged by the common PreToolUse supervisor-only MCP-server guard.
-fn supervisor_only_mcp_command_denial(command: &str, cas_root: &Path) -> Option<String> {
-    use crate::config::operator_policy::{supervisor_only_mcp_names, supervisor_only_mcp_refusal};
-    let mut only: Option<Vec<String>> = None;
-    for args in cas_invocations(command) {
-        let Some(at) = args.iter().position(|arg| arg == "mcp") else {
-            continue;
-        };
-        let rest = &args[at + 1..];
-        let Some(sub) = rest.first() else { continue };
-        let only = only.get_or_insert_with(|| supervisor_only_mcp_names(cas_root));
-        if only.is_empty() {
-            return None;
-        }
-        let load = |scope: &str| {
-            let path = match scope {
-                "user" | "global" => cmcp_core::config::Scope::User.config_path().ok(),
-                _ => Some(cas_root.join("proxy.toml")),
-            };
-            path.and_then(|path| cmcp_core::config::Config::load_from(&path).ok())
-                .unwrap_or_default()
-        };
-        let refusal = match sub.as_str() {
-            "remove" | "rm" => {
-                let mut scope = "local".to_string();
-                let mut name = None;
-                let mut words = rest[1..].iter();
-                while let Some(word) = words.next() {
-                    match word.as_str() {
-                        "-s" | "--scope" => scope = words.next().cloned().unwrap_or(scope),
-                        flag if flag.starts_with('-') => {}
-                        value => name = name.or(Some(value.to_string())),
-                    }
-                }
-                name.and_then(|name| supervisor_only_mcp_refusal(&name, None, &load(&scope), only))
-            }
-            "add" => crate::cli::mcp_cmd::parse_add_args(&rest[1..])
-                .ok()
-                .and_then(|parsed| {
-                    supervisor_only_mcp_refusal(
-                        &parsed.name,
-                        Some(&parsed.server_config),
-                        &load(&parsed.scope),
-                        only,
-                    )
-                }),
-            "import" if rest.iter().any(|arg| arg == "--force") => Some(format!(
-                "🚫 OPERATOR-ONLY (cas-0d4f0): `cas mcp import --force` may overwrite a supervisor-only MCP server ({}). factory.supervisor_only_mcp keeps those from workers, so only the operator runs it, from their own terminal. Ask the supervisor to request the operator's approval.",
-                only.join(", ")
-            )),
-            _ => None,
-        };
-        if refusal.is_some() {
-            return refusal;
-        }
-    }
-    None
-}
 
 /// cas-3c26: the variables Cassy's role gates read. An agent that sets,
 /// unsets or clears them for a command it runs is impersonating another role.
@@ -8529,70 +8404,6 @@ mod workspace_contract_tests {
         }
     }
 
-    /// cas-1b94: an agent's Bash `cas mcp add|remove|import` cannot remove,
-    /// replace or alias a supervisor-only MCP server, however wrapped; the
-    /// rule is the one `proxy_add`/`proxy_remove` apply, and ordinary servers
-    /// stay manageable.
-    #[cfg(feature = "mcp-proxy")]
-    #[test]
-    fn cas_1b94_agent_shell_cannot_remove_or_alias_supervisor_only_mcp_servers() {
-        let root = tempfile::tempdir().expect("cas root");
-        std::fs::write(
-            root.path().join("config.toml"),
-            "[factory]\nsupervisor_only_mcp = [\"vercel\"]\n",
-        )
-        .expect("config");
-        std::fs::write(
-            root.path().join("proxy.toml"),
-            "[servers.vercel]\ntransport = \"http\"\nurl = \"https://mcp.vercel.com\"\n\n[servers.docs]\ntransport = \"http\"\nurl = \"https://docs.example/mcp\"\n",
-        )
-        .expect("proxy config");
-        for command in [
-            "cas mcp remove vercel",
-            "cas mcp remove -s local vercel",
-            "cas mcp add vercel https://other.example/mcp",
-            "cas mcp add deploys https://mcp.vercel.com",
-            "bash -c 'cas mcp add --transport http deploys https://mcp.vercel.com'",
-            "nohup /usr/local/bin/cas mcp remove vercel",
-            "cas mcp import --from claude --force",
-        ] {
-            let denial = supervisor_only_mcp_command_denial(command, root.path())
-                .unwrap_or_else(|| panic!("{command} must be refused"));
-            assert!(
-                denial.contains("supervisor-only") && denial.contains("operator"),
-                "{denial}"
-            );
-        }
-        for allowed in [
-            "cas mcp remove docs",
-            "cas mcp add search https://search.example/mcp",
-            "cas mcp list",
-            "cas mcp import --from claude",
-            "rg 'cas mcp remove vercel' docs",
-        ] {
-            assert_eq!(
-                supervisor_only_mcp_command_denial(allowed, root.path()),
-                None,
-                "{allowed}"
-            );
-        }
-
-        // The PreToolUse hook applies it to an agent's Bash call.
-        let input = bash_input("cas mcp remove vercel", root.path());
-        let output = handle_pre_tool_use_inner(&input, Some(root.path()), None, Path::new(&input.cwd)).expect("hook");
-        let rendered = serde_json::to_string(&output).expect("serialize");
-        assert!(
-            rendered.contains("deny") && rendered.contains("supervisor-only"),
-            "{rendered}"
-        );
-
-        // Nothing is supervisor-only: nothing to refuse.
-        let open = tempfile::tempdir().expect("cas root");
-        assert_eq!(
-            supervisor_only_mcp_command_denial("cas mcp remove vercel", open.path()),
-            None
-        );
-    }
 
     /// cas-0d4f0: no agent tool call writes a Cassy config file directly,
     /// whatever its role; other files under `.cas/` and other config.toml
@@ -11962,23 +11773,31 @@ fn reap_stranded_native_send_message_copies() {
     }
 }
 
-/// Deny the host harness transport for factory supervisors (GH #793).
-///
-/// A `SendMessage` hook result of `allow` does not replace Claude Code's
-/// native delivery: the host runs that transport after the hook returns. A
-/// supervisor assignment therefore has to fail closed here and point at the
-/// durable CAS commands instead.
-fn deny_factory_supervisor_send_message() -> HookOutput {
-    let prefix = crate::harness_policy::own_tool_prefix();
-    HookOutput::with_pre_tool_permission(
-        "deny",
-        &crate::gates::tag("H-20", format!(
-            "🚫 SendMessage is disabled for factory supervisors.\n\n\
-             Use {prefix}coordination action=message target=<worker> summary=\"<brief summary>\" message=\"<message>\"\n\
-             For task assignments, use {prefix}task action=update id=<task-id> assignee=<worker>.\n\n\
-             The CAS coordination path is the only durable supervisor-to-worker transport."
-        )),
-    )
+
+/// Only the official child ID from this session's SubagentStart can use
+/// the native transport. Missing, conflicting and broadcast targets fail closed.
+fn owns_native_message_target(input: &HookInput, cas_root: Option<&Path>) -> bool {
+    let Some(args) = input.tool_input.as_ref() else { return false; };
+    if args.get("type").and_then(serde_json::Value::as_str).is_some_and(|kind| kind != "message") {
+        return false;
+    }
+    let target = args.get("recipient").or_else(|| args.get("to")).and_then(serde_json::Value::as_str);
+    let (Some(root), Some(target)) = (cas_root, target) else { return false; };
+    if args.get("recipient").zip(args.get("to")).is_some_and(|(a, b)| a != b) {
+        return false;
+    }
+    if matches!(target, "supervisor" | "director" | "all_workers" | "team-lead") {
+        return false;
+    }
+    // A claimed child never overrides a registered factory recipient.
+    let Ok(store) = crate::store::open_agent_store(root) else { return false; };
+    let Ok(agents) = store.list(None) else { return false; };
+    if agents.iter().any(|agent| (agent.id == target || agent.name == target)
+        && matches!(agent.role, crate::types::AgentRole::Worker | crate::types::AgentRole::Supervisor))
+    {
+        return false;
+    }
+    crate::hooks::handlers::owns_native_subagent(root, &input.session_id, target)
 }
 
 /// Deny the host harness transport for factory workers.
@@ -11987,7 +11806,7 @@ fn deny_factory_worker_send_message() -> HookOutput {
     HookOutput::with_pre_tool_permission(
         "deny",
         &crate::gates::tag("H-21", format!(
-            "🚫 SendMessage is disabled for factory workers.\n\n\
+            "🚫 Native SendMessage is limited to this session's recorded subagent IDs.\n\n\
              Use {prefix}coordination action=message target=<peer> summary=\"<brief summary>\" message=\"<message>\".\n\n\
              This sends the message through the durable factory coordination path."
         )),

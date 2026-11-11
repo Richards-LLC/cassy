@@ -1454,10 +1454,14 @@ impl PtyConfig {
             // Factory agents cannot route AskUserQuestion to the human: under
             // native Agent Teams it becomes a self-directed permission prompt.
             // Remove it from Claude's model-visible tool surface up front.
-            // The PreToolUse denial remains wired as defense in depth for
-            // stale/replayed sessions or harnesses that bypass this argv path.
+            // Supervisors also use Cassy's durable transport for messaging;
+            // workers retain native messaging only to their own subagents.
             args.push("--disallowedTools".to_string());
-            args.push("AskUserQuestion".to_string());
+            args.push(if role == "supervisor" {
+                "AskUserQuestion,SendMessage".to_string()
+            } else {
+                "AskUserQuestion".to_string()
+            });
         }
 
         // cas-0bf4: optionally lower the worker's scheduling priority so
@@ -5944,7 +5948,7 @@ echo SMOKE_DONE
             config
                 .args
                 .windows(2)
-                .any(|pair| pair == ["--disallowedTools", "AskUserQuestion"]),
+                .any(|pair| pair == ["--disallowedTools", "AskUserQuestion,SendMessage"]),
             "factory supervisor spawn must remove AskUserQuestion from Claude's tool surface"
         );
     }

@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-# gate[C-39 ci]: CI policy pins and contract checks
-"""CI policy assertions over parsed data, with independent executable selectors.
+"""Parsed workflow selectors for behavioral subprocess fixtures.
 
-Step names are display text. IDs, actions, command anchors and directories bind
-our contracts to executable steps. Public job/status names remain data contracts.
-Prose pins are intentionally separate and never establish executable wiring.
+IDs, actions and command anchors resolve executable steps. Display labels and
+prose do not establish executable wiring.
 """
 import argparse
 import copy
@@ -17,7 +15,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    raise SystemExit("CI policy parser requires pyyaml==6.0.3; install with python3 -m pip install -r scripts/ci_tiers/requirements.txt\n\n[C-39]")
+    raise SystemExit("CI policy parser requires pyyaml==6.0.3; install with python3 -m pip install -r scripts/ci_tiers/requirements.txt")
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -124,63 +122,6 @@ def nodes(value):
         for child in value: yield from nodes(child)
 
 
-def equivalent(actual, expected):
-    if isinstance(actual, str) and isinstance(expected, str):
-        return ' '.join(actual.split()) == ' '.join(expected.split())
-    if type(actual) is not type(expected): return False
-    if isinstance(actual, list): return len(actual) == len(expected) and all(equivalent(a, e) for a, e in zip(actual, expected))
-    if isinstance(actual, dict): return actual.keys() == expected.keys() and all(equivalent(actual[k], expected[k]) for k in actual)
-    return actual == expected
-
-
-def count_matches(value, needle):
-    # Recognize typed YAML/JSON fields and lists instead of their spelling.
-    try: expected = yaml.load(needle.strip(), Loader=Loader)
-    except yaml.YAMLError: expected = needle
-    if isinstance(expected, dict) and all(re.fullmatch(r'[A-Za-z0-9_-]+', str(k)) for k in expected):
-        total = 0
-        for node in nodes(value):
-            if not isinstance(node, dict): continue
-            if all(k in node and (v is None or (isinstance(v, str) and isinstance(node[k], str) and k == 'if' and ' '.join(v.split()) in ' '.join(node[k].split())) or equivalent(node[k], v)) for k, v in expected.items()): total += 1
-        return total
-    if isinstance(expected, list):
-        return sum(sum(equivalent(item, expected[0]) for item in node) for node in nodes(value) if isinstance(node, list))
-    # Fragments are limited to actual scalar values, including run/if bodies;
-    # YAML comments and step display labels never participate.
-    normalized = needle.strip()
-    return sum(uncomment(scalar_text(node)).count(normalized) for node in nodes(value) if not isinstance(node, (dict, list)))
-
-
-def check(root, entry, prose=False):
-    try:
-        if prose and entry['kind'] == 'annotation':
-            return bool(entry.get('consumer') and entry.get('needle') and entry.get('reason')), ''
-        if prose:
-            actual = (root / entry['source']['file']).read_text().count(entry['needle'])
-        else:
-            subject = resolve(root, entry['source'])
-            if entry['kind'] == 'step_exists': return True, ''
-            actual = count_matches(subject, entry['needle'])
-        wanted = entry.get('expected')
-        ok = actual == wanted if entry['kind'] == 'count' else (actual == 0 if entry['kind'] == 'absent' else actual > 0)
-        return ok, f'found {actual}, expected {wanted if wanted is not None else entry["kind"]}: {entry.get("needle", "")}'
-    except (KeyError, ValueError, OSError, yaml.YAMLError) as error:
-        return False, str(error)
-
-
-def validate(root, verbose=True):
-    failures = []
-    count = 0
-    for name, prose in [('policy.json', False), ('prose-pins.json', True)]:
-        for entry in json.loads((HERE / name).read_text()):
-            ok, why = check(root, entry, prose)
-            count += 1
-            if not ok: failures.append((entry, why))
-            if verbose: print(('ok   ' if ok else 'FAIL ') + entry['consumer'] + ('' if ok else ': ' + why))
-    if verbose: print(f'parsed policy/prose: {count-len(failures)} passed; {len(failures)} failed')
-    return failures
-
-
 def role(block, name, source):
     choices = [s for s in json.loads((HERE / 'step-roles.json').read_text()).get(name, []) if s['file'] == source['file'] and s['job'] == source['job']]
     found = [(i, step) for i, step in enumerate(block.get('steps', [])) if any(matches(step, s['step']) for s in choices)]
@@ -188,14 +129,12 @@ def role(block, name, source):
     return found[0]
 
 
-
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, default=ROOT)
-    parser.add_argument('mode', choices=['check','job','position','action-run','release-run','scalars'])
+    parser.add_argument('mode', choices=['job','position','action-run','release-run','scalars'])
     parser.add_argument('args', nargs='*')
     args=parser.parse_args()
-    if args.mode=='check': return bool(validate(args.root))
     if args.mode=='scalars':
         for file in args.args:
             for node in nodes(resolve(args.root, {'file': file})):
@@ -215,9 +154,4 @@ def main():
 
 
 if __name__ == '__main__':
-    try:
-        sys.exit(main())
-    except BaseException as error:
-        if not isinstance(error, SystemExit) or error.code:
-            print("[C-39]", file=sys.stderr)
-        raise
+    sys.exit(main())

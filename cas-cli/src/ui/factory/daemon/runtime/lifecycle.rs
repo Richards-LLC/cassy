@@ -467,28 +467,6 @@ pub(super) fn enqueue_usage_limit_relay(
         |_| detail.to_owned(), occurrence, None, &[], true).0
 }
 
-/// Surface a terminal harness-side refusal even when its MCP child continues
-/// heartbeating. The evidence is collected from the harness artifact, not
-/// inferred from heartbeat age.
-// gate[N-09 notice]: Worker-unavailable relay helper (test-only callers)
-pub(super) fn enqueue_worker_unavailable_relay(
-    cas_dir: &std::path::Path,
-    worker: &str,
-    occurrence: &str,
-) -> WorkerAttentionRelayOutcome {
-    let detail = format!(
-        "Worker {worker}'s harness reported a terminal unavailable state while its process may still heartbeat."
-    );
-    enqueue_worker_attention_relay_detail(
-        cas_dir,
-        "worker_unavailable",
-        worker,
-        None,
-        None,
-        &detail,
-        occurrence,
-    )
-}
 
 /// cas-2ffe (GH #915): several workers' harnesses exited within the
 /// correlation window. One wake names every worker and its exit status, keyed
@@ -2406,12 +2384,8 @@ mod worker_attention_tests {
             },
         );
         let _ = enqueue_worker_delivery_stalled_relay(&cas_dir, "silent-codex", 42, chrono::Utc::now());
-        let _ = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
-        let replay = enqueue_worker_unavailable_relay(&cas_dir, "limited-codex", "episode-1");
-        assert!(matches!(
-            replay,
-            WorkerAttentionRelayOutcome::Persisted { .. }
-        ));
+        let _ = enqueue_usage_limit_relay(&cas_dir, "limited", "episode-2",
+            "Worker limited, task cas-held: usage limit; waiting for reset. No restart queued.");
         let _ = enqueue_worker_attention_relay(
             &cas_dir,
             &crate::ui::factory::director::DirectorEvent::WorkerStalled {
@@ -2426,7 +2400,7 @@ mod worker_attention_tests {
             "Worker limited, task cas-held: usage limit; waiting for reset. No restart queued.");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
+        assert_eq!(rows.len(), 4, "a persisted occurrence replays idempotently");
         // pin: find the limit notice by its worker subject before checking recovery guidance.
         let limited = rows.iter().find(|row| row.prompt.contains("Worker limited,")).unwrap();
         // pin: a stopped worker must retain supervisor recovery guidance.
@@ -2447,11 +2421,6 @@ mod worker_attention_tests {
             row.prompt.contains("kind=\"worker_delivery_stalled\"")
                 && row.prompt.contains("silent-codex")
                 && row.prompt.contains("normal message 42")
-        }));
-        assert!(rows.iter().any(|row| {
-            row.prompt.contains("kind=\"worker_unavailable\"")
-                && row.prompt.contains("limited-codex")
-                && row.prompt.contains("terminal unavailable state")
         }));
         // Only the escalated stall is an intervention, and replays are one row.
         let alerts = cas_store::quality_interventions_since(

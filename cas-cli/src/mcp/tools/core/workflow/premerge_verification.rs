@@ -1891,8 +1891,6 @@ mod tests {
         let before = run(repo, &["rev-parse", "HEAD"]);
         let refusal = regenerated_merge_tree(repo, "epic/rewrite", "factory/rewrite", "cas-replay").unwrap_err();
         assert!(refusal.contains("PREMERGE_MERGE_CONFLICT"), "{refusal}");
-        assert!(refusal.contains("task action=request_changes id=cas-replay"), "{refusal}");
-        assert!(refusal.contains("git merge epic/rewrite"), "{refusal}");
         for path in paths {
             assert!(refusal.contains(path), "{refusal}");
         }

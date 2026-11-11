@@ -31,6 +31,12 @@ fn published_train_closes_members_independently_cas_734b() {
     let published = git(&["rev-parse", "HEAD"]);
     git(&["tag", "v9.99.0"]);
     let tasks = crate::store::open_task_store(&root).unwrap();
+    assert!(crate::config::Config::load(&root).unwrap().verification_enabled());
+    let mut train = Task::new("cas-train".into(), "Published train".into());
+    train.origin_project = Some("close-fixture".into());
+    train.task_type = cas_types::TaskType::Epic;
+    train.status = TaskStatus::Closed;
+    tasks.add(&train).unwrap();
     for id in ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"] {
         let mut task = Task::new(id.into(), id.into());
         task.origin_project = Some("close-fixture".into());
@@ -47,6 +53,7 @@ fn published_train_closes_members_independently_cas_734b() {
         }
         if id == "cas-closed" { task.deliverables.factory_branch_start = None; }
         tasks.add(&task).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(id.into(), train.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
     }
     let artifact = cas_store::PublishedArtifact {
         id: "art-report".into(), task_id: "cas-report".into(), name: "report.md".into(),
@@ -61,7 +68,7 @@ fn published_train_closes_members_independently_cas_734b() {
         schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-review".into(),
         project_id: "close-fixture".into(), ledger_artifact_id: "art-recorded".into(),
         ledger_path: "/peer/recorded-review.md".into(), ledger_sha256: "b".repeat(64), ledger_size_bytes: 20,
-        staging_sha: anchor.clone(), task_heads: ["cas-report", "cas-equal"].into_iter().map(|id| (id.into(), anchor.clone())).collect(),
+        staging_sha: anchor.clone(), task_heads: ["cas-report"].into_iter().map(|id| (id.into(), anchor.clone())).collect(),
         recorder_agent_id: "supervisor".into(), recorded_at: "2026-11-11T00:00:00Z".into(),
         release_tag: None, ledger_author_id: Some("reviewer".into()), ledger_author_role: Some("sub_agent".into()),
         author_overrides: BTreeMap::new(), imported: true,
@@ -79,7 +86,7 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
     let scope = ReleaseScope { project_id: "close-fixture".into(), repository: "example/close-fixture".into(),
         release_id: "v9.99.0".into(), reviewed_sha: base, final_release_sha: published,
-        promotion_pr: None, release_tag: Some("v9.99.0".into()), constituent_epic_ids: vec![],
+        promotion_pr: None, release_tag: Some("v9.99.0".into()), constituent_epic_ids: vec![train.id.clone()],
         included_task_ids: ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
     // A preview must leave the store, artifact cache and operation directory
@@ -94,6 +101,8 @@ fn published_train_closes_members_independently_cas_734b() {
         }
         files
     }
+    let revision = |id: &str| conn.query_row("SELECT revision FROM task_mutation_revisions WHERE entity_id=?", [id], |row| row.get::<_, i64>(0)).unwrap();
+    let revisions: BTreeMap<_, _> = scope.included_task_ids.iter().map(|id| (id.clone(), revision(id))).collect();
     let before = snapshot(&root);
     let cache = env.home().join(".cas/artifacts");
     let cache_before = snapshot(&cache);
@@ -126,4 +135,20 @@ fn published_train_closes_members_independently_cas_734b() {
     assert!(matches!(result.members.get("cas-unreviewed"), Some(CassyMergeClose::Held(reason)) if reason == "REVIEW_MISSING"));
     assert_eq!(result.residuals.len(), 1);
     assert_eq!(result.residuals[0].task_id, "cas-unreviewed");
+    for id in &scope.included_task_ids {
+        let closed_now = matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. }));
+        assert_eq!(revision(id) - revisions[id], i64::from(closed_now));
+    }
+    // Adding only the missing exact-head approval completes the same operation;
+    // an already-closed member's historical exception cannot hold the train.
+    let mut later = receipt;
+    later.id = "qab-later".into();
+    later.task_heads = BTreeMap::from([("cas-unreviewed".into(), anchor)]);
+    cas_store::import_qa_batch_receipt(&root, &later).unwrap();
+    let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let complete = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
+        crate::release_reconcile::ReconcileTrigger::Backfill)).unwrap();
+    assert!(complete.complete);
+    assert!(complete.residuals.is_empty());
+    assert!(!complete.exceptions.is_empty());
 }

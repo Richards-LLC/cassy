@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use cas_store::{EventStore, SqliteEventStore};
 use chrono::Utc;
 
-use super::{Family, REGISTRY, UNCODED, facts, find, tag};
+use super::{Family, REGISTRY, UNCODED, facts, find, tag, codes_in};
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
@@ -13,7 +13,7 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
             if path.file_name().is_some_and(|name| name != "target") {
                 rust_sources(&path, out);
             }
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "sh" | "py"))) {
             out.push(path);
         }
     }
@@ -26,6 +26,7 @@ fn emitted_codes() -> std::collections::BTreeSet<String> {
     let mut files = Vec::new();
     rust_sources(&manifest.join("src"), &mut files);
     rust_sources(&manifest.join("../crates"), &mut files);
+    rust_sources(&manifest.join("../scripts"), &mut files);
     let mut emitted = std::collections::BTreeSet::new();
     for file in files {
         if file.starts_with(manifest.join("src/gates")) {
@@ -34,7 +35,7 @@ fn emitted_codes() -> std::collections::BTreeSet<String> {
         let source = std::fs::read_to_string(&file).unwrap();
         let code_text: String = source
             .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with('#'))
             .collect::<Vec<_>>()
             .join("\n");
         for (start, _) in code_text.match_indices("gates::tag(") {
@@ -75,11 +76,34 @@ fn every_registered_refusal_site_emits_its_code() {
     let emitted = emitted_codes();
     let silent: Vec<&str> = REGISTRY
         .iter()
-        .filter(|row| matches!(row.family(), Family::Gate | Family::Guard) && row.source.contains(".rs:"))
+        .filter(|row| (matches!(row.family(), Family::Gate | Family::Guard) && row.source.contains(".rs:"))
+            || row.source.contains(".sh:") || row.source.contains(".py:"))
         .filter(|row| !emitted.contains(row.code) && !NON_REFUSING.contains(&row.code))
         .map(|row| row.source)
         .collect();
     assert!(silent.is_empty(), "refusing checks that never emit their code: {silent:#?}");
+
+    // Replay the two uncoded script boundaries from the rejected delivery.
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = fixture.path();
+    assert!(std::process::Command::new("git").args(["init", "-q"]).arg(repo).status().unwrap().success());
+    assert!(std::process::Command::new("git").current_dir(repo)
+        .args(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "fixture"])
+        .status().unwrap().success());
+    assert!(std::process::Command::new("git").current_dir(repo).args(["checkout", "--detach", "-q"]).status().unwrap().success());
+    let scripts = crate::test_paths::crate_root().join("../scripts");
+    let release = std::process::Command::new("bash").arg(scripts.join("release.sh"))
+        .current_dir(repo).output().unwrap();
+    assert!(!release.status.success());
+    assert!(codes_in(&String::from_utf8_lossy(&release.stderr)).contains(&"C-34"));
+    let mut hook = std::process::Command::new("bash").arg(scripts.join("fast-rows-pre-push.sh"))
+        .current_dir(repo).env_remove("CAS_SKIP_FAST_ROWS")
+        .stdin(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    use std::io::Write;
+    writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();
+    let hook = hook.wait_with_output().unwrap();
+    assert!(!hook.status.success());
+    assert!(codes_in(&String::from_utf8_lossy(&hook.stderr)).contains(&"H-38"));
 }
 
 /// A refusal, its override and a declared false positive are counted under

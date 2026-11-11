@@ -1,5 +1,5 @@
 import type { FleetAgent } from "./fleet-ops";
-import { workerProgress, workerState, releaseProgress, taskGroups, statusClass, statusLabel, type ProgressTask, type ReleaseEpic } from "./progress-model";
+import { workerProgress, workerState, releaseProgress, statusClass, statusLabel, type OperatorAction, type ProgressTask, type ReleaseEpic } from "./progress-model";
 import { releaseHeader } from "./progress-view";
 import { avatarLetters, providerAvatarMarkup, type AvatarState } from "./provider-mark";
 
@@ -11,9 +11,7 @@ export interface TeamSnapshot {
   readonly epics: readonly ReleaseEpic[];
   readonly focused: string | null;
   readonly supervisors: readonly string[];
-  readonly asks: number;
-  /** The question itself when exactly one is open, so the control names it. */
-  readonly askLabel?: string;
+  readonly actions: readonly OperatorAction[];
   readonly stale?: string;
   readonly unavailable?: string;
 }
@@ -45,7 +43,7 @@ export function updateTeamElapsed(root: HTMLElement, now = Date.now()): void {
 }
 
 /** Pure rendering of the same session-scoped model used by Tasks & progress. */
-export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttention: () => void, openProgress: () => void): void {
+export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttention: (requestId: number) => void): void {
   const document = root.ownerDocument;
   const priorWorkerFocus = (document.activeElement as HTMLElement | null)?.dataset.worker;
   const priorFocus = (document.activeElement as HTMLElement | null)?.dataset.teamAction;
@@ -60,12 +58,10 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
     return { worker, state, reason, priority: trouble || blocked ? 2 : reason ? 1 : 0 };
   }).sort((a, b) => b.priority - a.priority);
   const release = releaseProgress(snapshot.epics, snapshot.focused, snapshot.tasks, snapshot.supervisors);
-  const needs = taskGroups(snapshot.tasks, snapshot.epics, workers.map(worker => worker.name), false, snapshot.supervisors, snapshot.focused)[0].tasks;
-  const attention = lanes.filter(lane => lane.reason);
-  const decisions = snapshot.asks + needs.length + attention.filter(lane => !needs.some(task => task.id === lane.worker.currentTask)).length;
+  const decisions = snapshot.actions.length;
   // Heartbeats and raw activity are not rendered. They cannot remount lanes,
   // restart their animation, or replace a control under the pointer.
-  const signature = JSON.stringify([snapshot.asks, snapshot.askLabel, snapshot.stale, snapshot.unavailable, release, needs.map(task => [task.id, task.status]),
+  const signature = JSON.stringify([snapshot.actions, snapshot.stale, snapshot.unavailable, release,
     workers.map(worker => [worker.name, worker.work, workerState(worker, snapshot.tasks), lanes.find(lane => lane.worker === worker)?.reason, worker.agent?.harness, worker.agent?.model, worker.agent?.task_started_at, worker.agent?.recent_trail])]);
   if (root.dataset.signature === signature) { updateTeamElapsed(root); return; }
   root.dataset.signature = signature;
@@ -92,20 +88,11 @@ export function renderTeam(root: HTMLElement, snapshot: TeamSnapshot, openAttent
   const action = (label: string, key: string, run: () => void): HTMLButtonElement => {
     const button = priorButtons.get(key) ?? document.createElement("button"); button.type = "button"; button.textContent = label; button.dataset.teamAction = key; button.onclick = run; strip.append(button); return button;
   };
-  if (snapshot.asks) action(snapshot.asks === 1 && snapshot.askLabel ? snapshot.askLabel : `${snapshot.asks} supervisor ask${snapshot.asks === 1 ? " or blocker" : "s or blockers"}`, "asks", openAttention);
-  const blockers = needs.filter(task => statusClass(task.status) === "blocked").length;
-  const merges = needs.filter(task => statusClass(task.status) === "awaiting-merge").length;
-  if (blockers) action(`${blockers} blocker${blockers === 1 ? "" : "s"}`, "blockers", openProgress);
-  if (merges) {
-    const owner = attention.filter(lane => lane.priority === 1);
-    action(merges === 1 && owner.length === 1 ? `${owner[0].worker.name} · Merge waiting` : `${merges} merges waiting`, "merges", openProgress);
-  }
-  for (const lane of attention.filter(lane => lane.priority === 2)) {
-    const button = action(`${lane.worker.name} · ${lane.reason}`, `worker:${lane.worker.name}`, () => {
-      const target = [...root.querySelectorAll<HTMLElement>(".team-lane")].find(node => node.dataset.worker === lane.worker.name);
-      target?.focus({ preventScroll: true }); target?.scrollIntoView?.({ block: "nearest" });
-    });
-    button.dataset.urgency = lane.priority === 2 ? "critical" : "waiting";
+  for (const item of snapshot.actions) {
+    const button = action(item.request.summary || item.request.message, `request:${item.request_id}`, () => openAttention(item.request_id));
+    button.dataset.owner = item.owner;
+    button.dataset.requestId = String(item.request_id);
+    if (item.task_id) button.dataset.taskId = item.task_id;
   }
   strip.dataset.active = String(decisions > 0);
   if (!decisions) strip.append(text("p", "Nothing needs you."));

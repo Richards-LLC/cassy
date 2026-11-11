@@ -1,4 +1,5 @@
 pub(crate) mod ci_watch;
+mod violet_reactions;
 pub(crate) mod external_wake;
 pub(crate) mod merge_queue_ejection;
 #[cfg(test)]

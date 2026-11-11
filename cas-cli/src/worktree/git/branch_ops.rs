@@ -17,6 +17,7 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// hang on a configured-but-unreachable remote. Slightly larger than the fetch
 /// bound because a push uploads objects.
 const PUSH_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEMAP_PATH: &str = ".claude/CODEMAP.md";
 
 /// What happened when a merge target ref was published to its remote
 /// (cas-5ee0 / GH #137).
@@ -1289,12 +1290,44 @@ impl GitOperations {
         }
     }
 
-    /// Mark .claude/, CLAUDE.md, and .mcp.json as skip-worktree in a worktree
+    /// Clear the legacy CODEMAP flag only when the worktree bytes and index
+    /// still match the commit. Git status cannot see changes hidden by this flag.
+    pub(super) fn clear_clean_codemap_skip_worktree(&self, worktree_path: &Path) -> Result<()> {
+        let git = |args: &[&str]| Command::new("git").args(args).current_dir(worktree_path).output();
+        let flags = git(&["ls-files", "-v", "--", CODEMAP_PATH])?;
+        if !flags.status.success() || !matches!(flags.stdout.first(), Some(b'S' | b's')) {
+            return Ok(());
+        }
+
+        let path = worktree_path.join(CODEMAP_PATH);
+        if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            return Ok(());
+        }
+        let Ok(bytes) = std::fs::read(path) else { return Ok(()) };
+        let index = git(&["show", &format!(":{CODEMAP_PATH}")])?;
+        if !index.status.success() || index.stdout != bytes {
+            return Ok(());
+        }
+        let staged = git(&["diff", "--cached", "--quiet", "HEAD", "--", CODEMAP_PATH])?;
+        if !staged.status.success() {
+            return Ok(());
+        }
+
+        let cleared = git(&["update-index", "--no-skip-worktree", "--", CODEMAP_PATH])?;
+        if !cleared.status.success() {
+            return Err(GitError::CommandFailed(String::from_utf8_lossy(&cleared.stderr).into_owned()));
+        }
+        Ok(())
+    }
+
+    /// Mark projected configuration files as skip-worktree in a worktree.
     ///
     /// This prevents workers from accidentally staging and committing Cassy-synced
     /// changes to these tracked config files. The files remain in the worktree
     /// (Claude Code works normally) but git ignores local modifications.
+    /// CODEMAP is tracked documentation that must follow branch switches.
     pub fn mark_config_skip_worktree(&self, worktree_path: &Path) -> Result<()> {
+        self.clear_clean_codemap_skip_worktree(worktree_path)?;
         let output = Command::new("git")
             .args(["ls-files", ".claude/", "CLAUDE.md", ".mcp.json"])
             .current_dir(worktree_path)
@@ -1305,7 +1338,9 @@ impl GitOperations {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let files: Vec<&str> = stdout.lines().filter(|line| !line.is_empty()).collect();
+        let files: Vec<&str> = stdout.lines()
+            .filter(|line| !line.is_empty() && *line != CODEMAP_PATH)
+            .collect();
 
         if files.is_empty() {
             return Ok(());

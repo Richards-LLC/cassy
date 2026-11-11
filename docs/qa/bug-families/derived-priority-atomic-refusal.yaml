@@ -1,0 +1,4 @@
+title: Conflicting finding priority requests return a typed refusal before any accompanying fields save
+tasks: [cas-76eb]
+invariants: [FACTORY-FINDING-PRIORITY]
+journeys: [FACTORY-CLOSE]

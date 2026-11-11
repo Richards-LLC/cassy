@@ -34,7 +34,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         await tab.focus(); await page.keyboard.press("ArrowRight");
         await expect(page.getByRole("tab", { name: "Team", exact: true })).toBeFocused();
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
-        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1, 1]);
+        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
         expect(await page.evaluate(() => document.documentElement.scrollHeight - innerHeight)).toBeLessThanOrEqual(0);
         await expect(panel.locator(".team-lane")).toHaveCount(4);
         await panel.locator(".team-lane").last().scrollIntoViewIfNeeded();
@@ -77,8 +77,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
           return (Math.max(line, card) + 0.05) / (Math.min(line, card) + 0.05);
         });
         expect(connector).toBeGreaterThanOrEqual(3);
-        const merges = panel.locator('[data-team-action="merges"]');
-        expect(await merges.evaluate(node => getComputedStyle(node).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
         await expect(page.locator("#conversation-composer-slot")).toBeHidden();
         expect(hub.frames.filter(frame => ["ScrollbackRequest", "WorkEventsRequest", "WorkEventDetailRequest"].includes(frame.kind))).toEqual([]);
       });
@@ -89,9 +88,9 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
         const panel = page.getByRole("tabpanel", { name: "Team", exact: true });
         await expect(panel.locator(".team-lane").first()).toHaveAttribute("data-worker", "brisk-wren-9");
         await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"] .team-state')).toHaveText("Blocked");
-        await panel.getByRole("button", { name: "brisk-wren-9 · Blocked", exact: true }).click();
-        await expect(panel.locator('.team-lane[data-worker="brisk-wren-9"]')).toBeFocused();
-        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1, 2]);
+        await expect(panel.locator("[data-team-action]")).toHaveCount(0);
+        await expect(panel.locator(".team-needs")).toHaveAttribute("data-active", "false");
+        await expectNumbers(panel.getByRole("heading", { level: 2 }), [1, 2, 1]);
       });
       await journey.stage("A lifecycle event updates staffing without reloading", async () => {
         fleet.tasks[2].status = "in_progress";
@@ -194,7 +193,7 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         const tabs = (await page.locator(".conversation-tabs").boundingBox())!;
         expect(tabs.y + tabs.height).toBeLessThanOrEqual((await page.locator("#conversation-pane-slot").boundingBox())!.y);
         if (width === 390) await clickConversationHeaderAction(page, "#conversation-fleet");
-        await expect(epics.getByRole("heading", { name: "Live epics · 2" })).toBeVisible();
+        await expectNumbers(epics.getByRole("heading", { level: 3 }).first(), [3]);
         expect(await status.evaluate(root => Boolean(root.querySelector(".release-progress")!.compareDocumentPosition(root.querySelector(".live-epics")!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
         await expectRun(status.locator(".release-progress"), [1, 5]);
         await expectRun(status.locator(".release-progress"), [3, 1, 1]);
@@ -205,11 +204,11 @@ for (const width of [1280, 390] as const) for (const colorScheme of ["light", "d
         await expectRun(rail, [4, 2, 6, 1]);
         await expect(rail.getByRole("img", { name: "Commander progress rail: 4 open · 2 in progress · 6 merged" })).toBeVisible();
         // Blocked work leads; the train, untitled and foreign epics never appear.
-        await expect(epics.locator(".live-epic-title")).toHaveText(["Commander progress rail", "Follow-ups"]);
+        expect(await epics.locator(".live-epic-toggle").evaluateAll(nodes => nodes.map(node => (node as HTMLElement).dataset.fleetFocus))).toEqual(["epic:rail", "epic:follow-ups", "epic:quiet"]);
         await expect(status).not.toContainText("Gabber voice");
         await expect(status).not.toContainText("EPIC");
         await expect(status).not.toContainText("—/—");
-        await expectRun(epics.locator(".live-epics-footer"), [1]);
+        await expect(epics.locator(".live-epics-footer")).toHaveCount(0);
         // cas-da546: each project card reads its own project's status, so the foreign project is read for its card only.
         expect(statusReads).toContain("gabber-session");
         expect(statusReads).toContain("remote-session");

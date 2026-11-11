@@ -5,12 +5,15 @@
  * sheet on a phone, the same frame as Raw output. Agent text is set only as
  * `textContent`, except published reasoning rendered through safe Markdown.
  */
-import { workerState, type WorkEventStream } from "./work-events";
+import type { WorkEventStream } from "./work-events";
+import { statusClass, statusLabel } from "./progress-model";
 import { refocus, workRows, type WorkRowsContext } from "./work-rows-view";
 
 export interface WorkerTimelineSubject {
   readonly worker: string;
   readonly status?: string;
+  /** The same lifecycle/liveness projection painted on the worker card. */
+  readonly stateLabel?: string;
   readonly task?: string;
   readonly taskTitle?: string;
   /** Why the timeline cannot be read, when it cannot. */
@@ -23,9 +26,6 @@ export interface WorkerTimelineHandlers {
   /** The terminal fallback. */
   rawOutput?(): void;
 }
-
-const STATE_WORDS = { working: "Working", waiting: "Waiting", parked: "Parked", idle: "Idle" } as const;
-const STATE_TONES = { working: "active", waiting: "blocked", parked: "idle", idle: "idle" } as const;
 
 /** The one dialog; it lives on document.body so a shell rebuild never closes it. */
 export function workerTimelineDialog(document: Document, handlers: WorkerTimelineHandlers): HTMLDialogElement {
@@ -58,9 +58,9 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   const document = dialog.ownerDocument;
   const active = document.activeElement instanceof HTMLElement && dialog.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
   dialog.querySelector<HTMLElement>("#worker-timeline-title")!.textContent = `${subject.worker} timeline`;
-  const state = workerState(subject.status, subject.task);
+  const state = subject.stateLabel ?? statusLabel(subject.status);
   const line = dialog.querySelector<HTMLElement>("#worker-timeline-subject")!;
-  const chip = document.createElement("span"); chip.className = `status-chip status-chip--${STATE_TONES[state]}`; chip.textContent = STATE_WORDS[state];
+  const chip = document.createElement("span"); chip.className = `status-chip status-chip--${statusClass(state)}`; chip.textContent = state;
   line.replaceChildren();
   line.title = subject.task ?? "";
   if (subject.task) line.append(subject.taskTitle?.trim() || "Task title not reported", " ", chip);
@@ -102,4 +102,15 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   body.replaceChildren(...children);
   for (const detail of body.querySelectorAll<HTMLElement>(".work-detail[data-focus-key]")) detail.scrollTop = scroll.get(detail.dataset.focusKey) ?? 0;
   if (active) refocus(dialog, active);
+}
+
+/** A worker's timeline opener, shared with its rail row. */
+export function workerTimelineButton(document: Document, worker: string, open: () => void): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button"; button.className = "status-identifier status-timeline"; button.dataset.worker = worker;
+  button.setAttribute("aria-haspopup", "dialog");
+  button.setAttribute("aria-label", `${worker} timeline`);
+  button.textContent = worker;
+  button.onclick = open;
+  return button;
 }

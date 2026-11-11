@@ -43,6 +43,12 @@ pub struct VioletArgs {
 pub enum VioletCommand {
     /// List this project's configured, Violet and Cloud channel bindings
     Channels(channels::ChannelsArgs),
+    /// Audit source-post status snapshots; optionally rearm failed updates
+    Reactions {
+        /// Let the owning supervisor retry failed updates on its next tick
+        #[arg(long)]
+        retry: bool,
+    },
     /// Post a message, or local files by path, to a channel
     Post(PostArgs),
     /// Post a top-level message and its ordered replies as one thread
@@ -172,7 +178,15 @@ pub fn execute(
         connect: &mut connect,
         reply_claim: &reply_claim,
     };
-    run_violet(&args.command, &mut context, &mut out).map_err(anyhow::Error::new)
+    run_violet(&args.command, &mut context, &mut out).map_err(|error| {
+        let error = anyhow::Error::new(error);
+        if cli.json {
+            // run_violet already emitted the final receipt, including errors.
+            anyhow::Error::new(crate::cli::JsonReportedFailure(error))
+        } else {
+            error
+        }
+    })
 }
 
 /// cas-8239: the reply intent this session registered for the thread, read
@@ -211,6 +225,7 @@ pub fn run_violet(
     out: &mut dyn Write,
 ) -> Result<(), VioletError> {
     let result = match command {
+        VioletCommand::Reactions { retry } => run_reactions(*retry, context, out),
         VioletCommand::Channels(args) => {
             let report = match channels::inspect(context.cas_root, args) {
                 Ok(report) => report,
@@ -242,6 +257,27 @@ pub fn run_violet(
         }
     }
     result
+}
+
+fn run_reactions(retry: bool, context: &RunContext<'_>, out: &mut dyn Write) -> Result<(), VioletError> {
+    let root = context.cas_root.ok_or_else(|| VioletError::local("project_required", "Run in a Cassy project"))?;
+    let statuses = crate::coordination::source_reactions::audit(root, retry)
+        .map_err(|_| VioletError::local("source_audit_failed", "Cannot read source status; run cas doctor"))?;
+    if context.json {
+        print_json(out, &json!({"ok":true,"sources":statuses}));
+    } else {
+        let pending = statuses.iter().filter(|status| status.pending).count();
+        let _ = writeln!(out, "{} — {pending}/{} source posts pending", if pending == 0 { "PASS" } else { "ATTENTION" }, statuses.len());
+        for status in statuses {
+            let _ = writeln!(out, "{}  expected={}  observed={}  owner={}  observed_at={}  error={}",
+                status.source, status.desired.as_deref().unwrap_or("none"), status.observed.join(","),
+                status.owner.as_deref().unwrap_or("unclaimed"),
+                status.observed_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "never".into()),
+                status.error.as_ref().and_then(|e| e.pointer("/error/code")).and_then(Value::as_str).unwrap_or("none"));
+        }
+        let _ = writeln!(out, "-> Snapshots include Violet reaction receipts; the factory refreshes them while running. Use --retry after repairing a permanent refusal.");
+    }
+    Ok(())
 }
 
 fn print_json(out: &mut dyn Write, value: &Value) {
@@ -644,21 +680,32 @@ fn run_thread(
             files: inspect_all(&spec.files)?,
         });
     }
-    let mut drafts = vec![draft_check::DraftMessage {
+    let mut drafts = vec![(0, draft_check::DraftMessage {
         label: Some("top-level".to_string()),
         text: &text,
         attached: Vec::new(),
-    }];
+    })];
     for (index, reply) in replies.iter().enumerate() {
         if let Some(reply_text) = &reply.text {
-            drafts.push(draft_check::DraftMessage {
+            drafts.push((index + 1, draft_check::DraftMessage {
                 label: Some(format!("reply {}", index + 1)),
                 text: reply_text,
                 attached: reply.files.iter().map(|file| file.filename.clone()).collect(),
-            });
+            }));
         }
     }
-    draft_check::check(&drafts)?;
+    for (index, draft) in drafts {
+        draft_check::check(&[draft]).map_err(|mut error| {
+            let mut receipt = error.to_json();
+            receipt["kind"] = json!("thread");
+            receipt["channel"] = json!({"name": channel});
+            receipt["posted"] = json!([]);
+            receipt["failed_index"] = json!(index);
+            receipt["resume_safe"] = json!(false);
+            error.envelope = Some(receipt);
+            thread_readability_error(error, index)
+        })?;
+    }
     let shares_files = replies.iter().any(|reply| !reply.files.is_empty());
     let mut post = json!({"channel":channel,"kind":"thread","text":text,"release_notes":args.release_notes,"epic_id":args.epic});
     if shares_files {
@@ -746,8 +793,61 @@ pub fn post_thread(
         "idempotency_key": idempotency_key,
         "replies": entries,
     });
-    let receipt = call_ok(hub, "violet_post", args).map_err(|error| with_begun(error, &begun))?;
+    let receipt = hub.call("violet_post", args).map_err(|error| with_begun(error, &begun))?;
+    let receipt = reconcile_thread(receipt, channel, replies.len() + 1)
+        .map_err(|error| with_begun(error, &begun))?;
     confirm_reply_files(receipt, channel, replies).map_err(|error| with_begun(error, &begun))
+}
+
+/// Reconcile only the returned receipts. Never retry a write to resolve a
+/// stale outer flag, and never claim success from that flag alone.
+fn reconcile_thread(mut receipt: Value, channel: &str, parts: usize) -> Result<Value, VioletError> {
+    let posted = receipt["posted"].as_array().cloned().unwrap_or_default();
+    let confirmed = |index: usize| {
+        let mut matches = posted.iter().filter(|part| part["index"].as_u64() == Some(index as u64));
+        matches.next().is_some_and(|part| part["message_id"].as_str().is_some_and(|id| !id.trim().is_empty()))
+            && matches.next().is_none()
+    };
+    let missing = (0..parts).find(|&index| !confirmed(index));
+    if missing.is_none() && posted.len() == parts {
+        receipt["ok"] = json!(true);
+        receipt["failed_index"] = Value::Null;
+        receipt["resume_safe"] = json!(true);
+        receipt.as_object_mut().expect("hub receipt object").remove("error");
+        return Ok(receipt);
+    }
+    if receipt["ok"] == true {
+        receipt["error"] = json!({"code":"thread_parts_unconfirmed", "retryable":false,
+            "message":"part receipts incomplete; read the thread first"});
+        receipt["resume_safe"] = json!(false);
+    }
+    let failed = receipt["failed_index"].as_u64()
+        .filter(|&index| index < parts as u64 && !confirmed(index as usize))
+        .map(|index| index as usize)
+        .or(missing)
+        .unwrap_or(0);
+    receipt["ok"] = json!(false);
+    receipt["kind"] = json!("thread");
+    if receipt["channel"].is_null() { receipt["channel"] = json!({"name":channel}); }
+    if receipt["posted"].is_null() { receipt["posted"] = json!([]); }
+    receipt["failed_index"] = json!(failed);
+    if receipt["resume_safe"].is_null() { receipt["resume_safe"] = json!(false); }
+    Err(thread_readability_error(VioletError::from_receipt(receipt), failed))
+}
+
+fn thread_readability_error(mut error: VioletError, index: usize) -> VioletError {
+    if error.code != "format_unreadable" { return error; }
+    let part = if index == 0 { "top-level".to_string() } else { format!("reply {index}") };
+    let mut receipt = error.to_json();
+    let posted: Vec<u64> = receipt["posted"].as_array().into_iter().flatten()
+        .filter(|part| part["message_id"].as_str().is_some_and(|id| !id.trim().is_empty()))
+        .filter_map(|part| part["index"].as_u64()).collect();
+    receipt["error"]["detail"]["part_index"] = json!(index);
+    receipt["error"]["detail"]["part"] = json!(part);
+    receipt["error"]["detail"]["posted_indices"] = json!(posted);
+    error.message = format!("{part} unreadable; {} part(s) already posted", posted.len());
+    error.envelope = Some(receipt);
+    error
 }
 
 /// GH #1251: a reply sent with files is confirmed only when its receipt,
@@ -1052,6 +1152,14 @@ fn render_thread(out: &mut dyn Write, receipt: &Value) {
 fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
     render_contact_warning(out, envelope);
     if envelope.get("kind").and_then(Value::as_str) != Some("thread") {
+        return;
+    }
+    if str_at(envelope, "/error/code") == Some("format_unreadable")
+        && envelope["posted"].as_array().is_none_or(Vec::is_empty)
+    {
+        let part = str_at(envelope, "/error/detail/part").unwrap_or("thread part");
+        let _ = writeln!(out, "[FAILED] {part} unreadable; nothing posted");
+        let _ = writeln!(out, "  -> rewrite the rejected part and rerun the original command");
         return;
     }
     let failed = envelope

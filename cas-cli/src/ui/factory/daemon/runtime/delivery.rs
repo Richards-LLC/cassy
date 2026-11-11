@@ -164,6 +164,7 @@ fn queue_team_tree_incident(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     })?;
     let result = queue.enqueue_idempotent(
         "teams-recovery",

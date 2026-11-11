@@ -102,6 +102,7 @@ impl SqlitePromptQueueStore {
         prompt_id: i64,
         recipients: &[String],
         reply_prompt_id: Option<i64>,
+        reply_wake_suffix: Option<&str>,
     ) -> Result<()> {
         if recipients.is_empty() {
             return Err(StoreError::Other(
@@ -125,6 +126,23 @@ impl SqlitePromptQueueStore {
                     return Err(StoreError::Other(
                         "reply endpoints do not match message".into(),
                     ));
+                }
+            }
+            if let (Some(reply_id), Some(suffix)) = (reply_prompt_id, reply_wake_suffix) {
+                let mut first_reply = true;
+                for recipient in recipients {
+                    let answered: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM prompt_queue_recipient_ack
+                         WHERE prompt_id=?1 AND recipient=?2 AND reply_prompt_id IS NOT NULL)",
+                        params![prompt_id, recipient], |row| row.get(0),
+                    )?;
+                    first_reply &= !answered;
+                }
+                if first_reply {
+                    tx.execute(
+                        "UPDATE prompt_queue SET prompt=prompt || ?2, next_attempt_at=NULL WHERE id=?1",
+                        params![reply_id, suffix],
+                    )?;
                 }
             }
             let now = Utc::now().to_rfc3339();
@@ -163,6 +181,49 @@ impl SqlitePromptQueueStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_reply_wake_is_atomic_and_survives_restart_cas_6c32() {
+        use std::sync::{Arc, Barrier};
+        for already_answered in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let store = Arc::new(SqlitePromptQueueStore::open(temp.path()).unwrap());
+            store.init().unwrap();
+            let ask = store.enqueue("supervisor", "worker-a", "Evidence?").unwrap();
+            if already_answered {
+                let quiet = store.enqueue("worker-a", "supervisor", "Quiet answer").unwrap();
+                store.acknowledge_for_recipients(ask, &["worker-a".into()], Some(quiet)).unwrap();
+            }
+            let replies: Vec<_> = (0..2).map(|n| {
+                store.enqueue("worker-a", "supervisor", &format!("Answer {n}")).unwrap()
+            }).collect();
+            let barrier = Arc::new(Barrier::new(2));
+            std::thread::scope(|scope| {
+                for &reply in &replies {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        barrier.wait();
+                        store.acknowledge_reply_with_wake(
+                            ask, &["worker-a".into()], reply, "\n<first-answer/>",
+                        ).unwrap();
+                    });
+                }
+            });
+            let granted = replies.iter().filter(|&&id| {
+                store.queued_prompt(id).unwrap().unwrap().prompt.ends_with("<first-answer/>")
+            }).count();
+            assert_eq!(granted, usize::from(!already_answered));
+            drop(store);
+            let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+            store.init().unwrap();
+            let later = store.enqueue("worker-a", "supervisor", "Later answer").unwrap();
+            store.acknowledge_reply_with_wake(
+                ask, &["worker-a".into()], later, "\n<first-answer/>",
+            ).unwrap();
+            assert!(!store.queued_prompt(later).unwrap().unwrap().prompt.ends_with("<first-answer/>"));
+        }
+    }
 
     #[test]
     fn recipient_state_survives_restart_without_inventing_body_observations() {

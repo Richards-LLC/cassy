@@ -293,6 +293,76 @@ fn docs_upkeep_product_change_requires_overview_or_reason() {
 }
 
 #[test]
+fn docs_upkeep_attributes_live_journeys_after_target_merge() {
+    let mut f = Fixture::new();
+    let repo = f.repo.path();
+    let registry = crate::qa_registry::DEFAULT_PATH;
+    let historic_journeys = "journeys:\n  - {id: signup, status: dead}\n";
+    let historic = format!("version: 1\n{historic_journeys}");
+    write(repo, registry, &historic);
+    let base = commit(repo);
+    git(repo, &["checkout", "-qb", "factory/worker"]);
+    let metadata = "version: 1\nupdated: '2026-10-21'\n";
+    write(repo, registry, &format!("{metadata}{historic_journeys}"));
+    let worker_commit = commit(repo);
+    git(repo, &["checkout", "main"]);
+    let target_journeys =
+        "journeys:\n  - {id: signup, status: live}\n  - {id: help, status: live}\n";
+    write(repo, registry, &format!("version: 1\n{target_journeys}"));
+    commit(repo);
+    git(repo, &["checkout", "factory/worker"]);
+    // Set the merge parents and install the resolved registry with both edits.
+    git(repo, &["merge", "--no-commit", "-s", "ours", "main"]);
+    let resolved = format!("{metadata}{target_journeys}");
+    write(repo, registry, &resolved);
+    let merged = commit(repo);
+
+    git(repo, &["checkout", "main"]);
+    write(repo, registry, &historic);
+    commit(repo);
+    git(repo, &["checkout", "factory/worker"]);
+    let window = TaskCommitReceiptWindow {
+        supervisor_override_reason: None,
+        not_before: chrono::DateTime::UNIX_EPOCH,
+        task_floor: chrono::DateTime::UNIX_EPOCH,
+        basis: "fixture",
+        identity: TaskCommitIdentity {
+            start_base: Some(base),
+            task_id: Some(f.task.id.clone()),
+            known_commits: vec![worker_commit],
+        },
+    };
+    let mut park = |head| {
+        at_park(
+            &mut CloseNoteTracker::new(&f.store, &f.task),
+            &mut f.task,
+            f.db.path(),
+            repo,
+            "main",
+            Some(&window),
+            Some(head),
+            None,
+        )
+    };
+    let result = park(&merged);
+    assert!(result.is_ok(), "{result:?}");
+
+    write(
+        repo,
+        registry,
+        &format!("{resolved}  - {{id: profile, status: live}}\n"),
+    );
+    let authored = commit(repo);
+    assert!(park(&authored).is_err());
+
+    // Retiring signup changes its status relative to the merged target even
+    // though this registry is byte-identical to the historic base.
+    write(repo, registry, &historic);
+    let retired = commit(repo);
+    assert!(park(&retired).is_err());
+}
+
+#[test]
 fn docs_upkeep_overview_watch_targets_come_from_the_tracked_overview() {
     // cas-src shape: .cas/ is ignored, so no config travels with the delivery.
     let overview = "# Product\n<!-- cas:project-overview\ndomain_paths = ['crates/cas-types/src/task.rs']\nwatch_dirs = ['cas-cli/src/cli']\n-->\n";

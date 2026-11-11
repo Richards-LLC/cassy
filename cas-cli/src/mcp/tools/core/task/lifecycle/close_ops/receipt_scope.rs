@@ -148,7 +148,7 @@ pub(super) fn park_refusals(
     // one cannot be judged yet; running its tests may already cover the module.
     if !untested.is_empty() {
         refusals.push(format!(
-            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours. At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
+            "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
         ));
@@ -279,7 +279,7 @@ fn changelog_refusal(
         .map(|ranges| format!("{ranges:?}"))
         .unwrap_or_else(|| format!("first-parent history relative to {target}"));
     Some(format!(
-        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}. {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
+        "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}.\n\nNext: {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
     ))
 }

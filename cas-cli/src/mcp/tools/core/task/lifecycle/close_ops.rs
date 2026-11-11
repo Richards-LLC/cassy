@@ -6,7 +6,7 @@ mod docs_upkeep;
 mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
-mod gate_preflight;
+pub(crate) mod gate_preflight;
 pub(crate) use gate_preflight::is_merge_handoff;
 use crate::mcp::tools::core::task::close_refusal;
 #[cfg(test)]
@@ -8569,6 +8569,7 @@ impl CasCore {
         // proven on the default branch; that branch's tip then stands in for
         // the hand-supplied commit_receipt the delivery-tip gate needs.
         let mut gone_epic_branch_receipt: Option<String> = None;
+        let mut published_epic_proof = None;
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
@@ -8589,21 +8590,24 @@ impl CasCore {
                 }
                 None => "master".to_string(),
             };
-            // cas-7f60 (GH #1232): an epic branch deleted after it merged
-            // resolves neither locally nor on origin. Measure the epic and
-            // the children that targeted it against the default branch
-            // instead: their content must be there, or the gate refuses.
-            // Only with children whose recorded deliveries the gate can then
-            // prove there; a gone branch with nothing to prove stays
-            // fail-closed (cas-04c6).
-            let gone = (req.commit_receipt.is_none())
-                .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
-                .flatten()
-                .filter(|_| {
-                    task_store
-                        .get_subtasks(&req.id)
-                        .is_ok_and(|children| epic_autoclose::children_prove_delivery(&children))
-                });
+            let subtasks = task_store.get_subtasks(&req.id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "epic-close merge gate: failed to read subtasks of {}: {error}", req.id,
+                )),
+                data: None,
+            })?;
+            let published = (task.delivery_mode != cas_types::DeliveryMode::LocalMerge)
+                .then(|| epic_autoclose::published_retired_epic_target(
+                    &close_project_root, &target_branch, req.commit_receipt.as_deref(), &subtasks,
+                ))
+                .flatten();
+            // Preserve the existing no-receipt recovery for legacy epics.
+            let gone = published.as_ref().map(|(branch, _)| branch.clone()).or_else(|| {
+                (req.commit_receipt.is_none() && epic_autoclose::children_prove_delivery(&subtasks))
+                    .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
+                    .flatten()
+            });
             let (target_branch, gone_epic_branch) = match gone {
                 Some(default) => (default, Some(target_branch)),
                 None => (target_branch, None),
@@ -8641,23 +8645,6 @@ impl CasCore {
             // epic branch. Bypass-immune (data-state guard, not a
             // review gate). Diagnostic surface for in-flight queries
             // is `mcp__cas__factory action=epic_status id=<epic>`.
-            //
-            // Errors from `get_subtasks` MUST surface as a hard error,
-            // never a silent empty-list pass. Round-1 cas-code-review
-            // (correctness P1) caught the `unwrap_or_default()` failure
-            // mode: a transient SQLite error would map to "no children"
-            // and the gate would Proceed — defeating the entire
-            // enforcement that this task adds. Mirror the conservative
-            // pattern at line ~869 (`epic_subtask_receipts_cover`)
-            // where a store error is treated as gate-blocking.
-            let subtasks = task_store.get_subtasks(&req.id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "epic-close merge gate: failed to read subtasks of {epic_id}: {e}",
-                    epic_id = req.id
-                )),
-                data: None,
-            })?;
             let subtasks = if crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id).is_some() {
                 subtasks.into_iter().map(|mut child| {
                     if let Some(target) = child.deliverables.work_target.as_mut() { target.target_branch = target_branch.clone(); }
@@ -8760,19 +8747,25 @@ impl CasCore {
                     ));
                 }
             }
-            // cas-7f60: the gate proved every child on the default branch.
+            // Carry the same published boundary through verification and
+            // pre-close lint. The task's persisted WorkTarget remains intact.
+            if let Some((branch, proof)) = published {
+                if let Some(context) = declared_repo_context.as_mut() {
+                    context.target_branch = branch;
+                }
+                published_epic_proof = Some(proof);
+            }
             if let Some(gone) = gone_epic_branch.as_deref() {
-                gone_epic_branch_receipt =
+                gone_epic_branch_receipt = published_epic_proof.clone().or_else(|| {
                     epic_autoclose::default_branch_ref(&close_project_root).and_then(|reference| {
                         resolve_branch_sha(&close_project_root, &format!("{reference}^{{commit}}"))
-                    });
+                    })
+                });
                 close_notes.record(
                     &mut task,
                     &format!(
-                        "decision: epic branch `{gone}` is gone locally and on origin, so this \
-                         close measured the epic and its children against the default branch \
-                         `{target_branch}`, and used that branch's tip as the epic's delivery \
-                         (cas-7f60)."
+                        "decision: epic branch `{gone}` is retired. Close measured the epic and \
+                         its children against the default branch `{target_branch}`."
                     ),
                 );
             }
@@ -10330,7 +10323,9 @@ impl CasCore {
                         // Epics have no worker delivery transaction. Their declared
                         // target (or legacy epic branch) is the verification tree,
                         // even while the supervisor checkout carries unrelated work.
-                        let epic_proof_ref = if is_epic
+                        let epic_proof_ref = if published_epic_proof.is_some() {
+                            published_epic_proof.clone()
+                        } else if is_epic
                             && crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(&close_project_root)
                         {
                             let branch = if gone_epic_branch_receipt.is_some() {
@@ -10876,7 +10871,7 @@ impl CasCore {
                 &task,
                 context,
                 worker_worktree_path.as_deref(),
-                req.commit_receipt.as_deref(),
+                published_epic_proof.as_deref().or(req.commit_receipt.as_deref()),
                 supervisor_override,
             ) {
                 Ok(evidence) => Some(evidence),
@@ -25145,7 +25140,7 @@ pub(crate) fn run_declared_pre_close_hook(
     // authority. Only an epic's proven release merge gets the default-branch door.
     let target_contains = |repo: &std::path::Path, commit: &str| {
         released_receipt == Some(commit)
-            || if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            || if task.task_type == TaskType::Epic || task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
                 git_commit_is_ancestor(repo, commit, &live_target_ref)
             } else {
                 commit_is_merged_into_parent(repo, commit, &repo_context.target_branch)

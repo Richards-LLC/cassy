@@ -1401,7 +1401,7 @@ pub(crate) fn parse_worker_action_envelope(prompt: &str) -> Option<WorkerActionE
     })
 }
 
-const VERIFIER_CALLER_GUIDANCE: &str = "Native Codex children share the parent's MCP caller and cannot independently record this verdict. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to this exact dispatch. If no separate reviewer is available, the registered supervisor may review the evidence and submit directly; provenance remains supervisor_direct. Do not register a native child on the shared connection.";
+const VERIFIER_CALLER_GUIDANCE: &str = "Native Codex children share the parent's MCP caller and cannot independently record this verdict. Use Cassy's daemon-owned verifier for candidate reviews or a separately registered verifier bound to this exact dispatch. Do not register a native child on the shared connection.";
 
 /// Build the verification-dispatch handoff CAS enqueues for the supervisor
 /// when a worker's close creates a dispatch (cas-8725).

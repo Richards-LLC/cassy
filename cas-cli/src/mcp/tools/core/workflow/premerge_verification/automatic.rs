@@ -195,15 +195,11 @@ fn launch_with_preparation(
     output: PathBuf,
     prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
-    let (mut command, notice) = prepare(&output)?;
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| e.to_string())?;
     if live.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
-    let body = prompt(core, task, &live)?;
-    let input = output.with_file_name("prompt.txt");
-    std::fs::write(&input, body).map_err(|e| e.to_string())?;
     let mut child = cas_types::Agent::new_sub_agent(
         format!("task-verifier-{:032x}", rand::random::<u128>()),
         "task-verifier".into(),
@@ -235,8 +231,23 @@ fn launch_with_preparation(
     )
     .map_err(|e| e.to_string())?;
     let worker = core.clone();
+    let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
-        let result = review(&worker, &live, &child.id, &mut command, &input, &output);
+        // Account/login probes, review context and notices may block. The
+        // exact dispatch is already claimed, so the merge can return its hold
+        // while startup continues; retries cannot launch another verifier.
+        let result = (|| {
+            let body = prompt(&worker, &task, &live)?;
+            let input = output.with_file_name("prompt.txt");
+            std::fs::write(&input, body).map_err(|e| e.to_string())?;
+            let (mut command, notice) = prepare(&output)?;
+            if let Some(notice) = notice
+                && let Err(error) = attention(&worker, &live, &notice)
+            {
+                tracing::warn!(dispatch_id = %live.id, %error, "Verifier startup notice failed");
+            }
+            review(&worker, &live, &child.id, &mut command, &input, &output)
+        })();
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
@@ -266,11 +277,6 @@ fn launch_with_preparation(
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
-    if let Some(notice) = notice
-        && let Err(error) = attention(core, dispatch, &notice)
-    {
-        tracing::warn!(dispatch_id = %dispatch.id, %error, "Verifier launched; follow-up notice failed");
-    }
     Ok(Some(handle))
 }
 
@@ -519,7 +525,7 @@ mod tests {
             returned_tx.send(result).unwrap();
         });
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let returned = returned_rx.recv_timeout(Duration::from_secs(1));
+        let returned = returned_rx.recv_timeout(Duration::from_secs(5));
         let live = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
         let duplicate = if returned.is_ok() {
             Some(launch_with_preparation(

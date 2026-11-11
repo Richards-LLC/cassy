@@ -4893,7 +4893,8 @@ mod related_recall_response_tests {
         let before = git(&["rev-parse", "HEAD"]);
         let root = crate::store::init_cas_dir(repo).unwrap();
         std::fs::write(root.join("config.toml"),
-            "[factory]\nwarn_stale_assignment=true\nblock_stale_assignment=true\nstale_threshold_commits=1\n").unwrap();
+            "[project]\ncanonical_id=\"github.com/acme/fixture\"\n[factory]\nwarn_stale_assignment=true\nblock_stale_assignment=true\nstale_threshold_commits=1\n").unwrap();
+        assert_eq!(crate::mcp::tools::count_unheld_behind(repo, "epic/fixture"), Some(1));
         let core = CasCore::with_daemon(root.clone(), None, None);
         let agents = core.open_agent_store().unwrap();
         let caller = Agent::new_with_role("caller-id".into(), "filing-worker".into(), AgentRole::Worker);

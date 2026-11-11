@@ -97,7 +97,7 @@ fn published_train_closes_members_independently_cas_734b() {
     let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
     conn.execute("UPDATE verification_dispatches SET state='resolved', repository_proof=?1 WHERE id=?2",
         rusqlite::params![serde_json::to_string(&bound).unwrap(), dispatch.id]).unwrap();
-    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2)", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
     // A different head with no source binding must never approve this member.
     let mut unrelated = bound.clone();
     unrelated.head_commit = base.clone();
@@ -148,7 +148,7 @@ fn published_train_closes_members_independently_cas_734b() {
     assert_eq!(snapshot(&cache), cache_before);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
-        crate::release_reconcile::ReconcileTrigger::Publish { tag: tag.clone() })).unwrap();
+        crate::release_reconcile::ReconcileTrigger::Publish { tag })).unwrap();
     assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
     for id in ["cas-approved", "cas-report", "cas-equal"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", result.members.get(id));

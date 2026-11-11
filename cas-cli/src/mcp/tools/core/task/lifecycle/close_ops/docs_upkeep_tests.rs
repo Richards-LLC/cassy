@@ -327,6 +327,7 @@ fn docs_upkeep_attributes_live_journeys_after_target_merge() {
         task_floor: chrono::DateTime::UNIX_EPOCH,
         basis: "fixture",
         identity: TaskCommitIdentity {
+            approved_merge_parents: Vec::new(),
             start_base: Some(base),
             task_id: Some(f.task.id.clone()),
             known_commits: vec![worker_commit],

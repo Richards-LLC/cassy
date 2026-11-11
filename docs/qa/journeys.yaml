@@ -659,6 +659,10 @@ invariants:
   FACTORY-CAPACITY-NOTICES:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
+  CLI-RELEASE-INSTALLED-RECONCILER:
+    statement: A publication reconciles after installing and verifying its release binary; pending older publications retain their receipts and retry after newer installations with bounded work and successful replay deduplication.
+    check: Run scripts/test-install-on-publish.sh. Observe install then matching version check then publication. Start with a failed older publication whose installed notice succeeds, publish a newer release, and require the newer install and verification before both publication retries. A failed install retains the receipt and performs no publication reconciliation; another tick does not repeat successful publication work.
+    bug: {task: cas-bca3}
   FACTORY-RELEASE-CLOSEOUT:
     statement: Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle.
     check: Run release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
@@ -1395,7 +1399,7 @@ journeys:
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train, Verify the final tree, Resolve exact-SHA shipped deliveries and proof references, Read the release publication receipt]
   owners: [scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, scripts/release.sh, cas-cli/src/finding_triage.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  invariants: [CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN

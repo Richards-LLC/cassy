@@ -4164,12 +4164,31 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    `cas update --yes --version x.y.z` when it is newer, and completes the
    release timer in the notes after verifying the installed version: PR
    opened to the first host's actual installation, the one latency figure.
+   Publication reconciliation runs after that version check. Pending older
+   publications retain per-version receipts and retry after the latest install,
+   with one bounded older publication retry per tick.
    On macOS, inspect `launchctl print gui/$(id -u)/dev.cassy.install-on-publish`
    and `~/.local/state/cassy/install-on-publish.log` (under `XDG_STATE_HOME`
    when set); `--uninstall` unloads and removes the per-user scheduler.
 8. Derive announcement digests from the published bytes with
    `./scripts/release-published-receipt.sh vx.y.z`; it fails closed while
    either asset is missing or a digest disagrees with GitHub.
+
+To resume a release closeout that ran on an older binary, first verify that
+`cas --version` reports the release version or a newer one. Run the existing
+publication command once with that release's saved GitHub publication JSON:
+
+```bash
+cas release published \
+  --receipt "${XDG_STATE_HOME:-$HOME/.local/state}/cassy/install-on-publish.pending.json" \
+  --repo Richards-LLC/cassy
+```
+
+The example uses the latest saved publication. Confirm its `tag_name` identifies
+the release being repaired. Older failed publications are retained under
+`install-on-publish.published.pending.d/v<version>.json` in the same state
+directory. A held operation retries its remaining gates while retaining
+successful closes. A completed operation reuses its recorded result.
 
 Recovery and dry runs: `gh workflow run release.yml -f dry_run=false` on
 `main` republishes after a failed run and refuses an existing release. On any

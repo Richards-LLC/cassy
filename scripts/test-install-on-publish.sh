@@ -262,6 +262,7 @@ FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2000 "$installer" --
 status=$?
 set -e
 check '[[ $status -ne 0 ]] && grep -q "^cas update --yes --version 9.99.3$" "$FAKE_LOG"' 'a failed install exits non-zero'
+check '! grep -q "^publish=" "$FAKE_LOG" && [[ -r "$XDG_STATE_HOME/cassy/install-on-publish.published.pending.d/v9.99.3.json" ]]' 'an unverified install keeps its publication pending without reconciling'
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2100 "$installer" --once >/dev/null || true
 check '! grep -q "update" "$FAKE_LOG"' 'a failed version is not retried inside the back-off'

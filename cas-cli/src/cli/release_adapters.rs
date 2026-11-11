@@ -746,6 +746,70 @@ mod tests {
     }
 
     #[test]
+    fn current_release_adapter_rejects_prior_review_and_binds_generation_cas_5709() {
+        use cas_types::{FactoryBranchStart, Task, TaskStatus, WorkTarget};
+        let (temp, root, train, _, _) = super::super::release_automation::tests::release_fixture();
+        let repo = temp.path();
+        let commit = |paths: &[&str]| {
+            for path in paths { git(repo, &["add", path]).unwrap(); }
+            git(repo, &["commit", "-m", "fixture snapshot"]).unwrap();
+            git(repo, &["rev-parse", "HEAD"]).unwrap()
+        };
+        fs::create_dir_all(repo.join(".claude")).unwrap();
+        fs::write(repo.join(".claude/CODEMAP.md"), "previous release\n").unwrap();
+        fs::write(repo.join("source.rs"), "previous source\n").unwrap();
+        let old = commit(&[".claude/CODEMAP.md", "source.rs"]);
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut review = Task::new("cas-review".into(), "Independent release review".into());
+        review.origin_project = Some("release-fixture".into());
+        tasks.add(&review).unwrap();
+        let publish = |id: &str, candidate: &str, body: &str, heads: BTreeMap<String, String>| {
+            let ledger = repo.join(format!("{id}.md"));
+            fs::write(&ledger, body).unwrap();
+            let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+            let context = crate::artifacts::PublishContext {
+                store: &artifacts,
+                roots: crate::artifacts::paths::PublishRoots::new(&root, &repo.join("artifacts"), &review.id),
+                task_id: &review.id, cloud: None,
+            };
+            let artifact = crate::artifacts::publish(&context, &ledger).unwrap().artifact;
+            let receipt = cas_store::QaBatchReceipt {
+                schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: id.into(),
+                project_id: "release-fixture".into(), ledger_artifact_id: artifact.id,
+                ledger_path: ledger.display().to_string(), ledger_sha256: artifact.sha256,
+                ledger_size_bytes: artifact.size_bytes, staging_sha: candidate.into(), task_heads: heads,
+                recorder_agent_id: "supervisor".into(), recorded_at: format!("2026-11-11T00:00:{id}Z"),
+                release_tag: None, ledger_author_id: Some("independent-reviewer".into()),
+                ledger_author_role: Some("sub_agent".into()), author_overrides: BTreeMap::new(), imported: false,
+            };
+            cas_store::record_qa_batch_receipt(&root, &receipt).unwrap();
+        };
+        publish("00", &old, "# Previous release review\n", BTreeMap::from([(review.id.clone(), old.clone())]));
+        fs::write(repo.join("source.rs"), "current source\n").unwrap();
+        fs::write(repo.join(".claude/CODEMAP.md"), "current delivery map\n").unwrap();
+        let anchor = commit(&["source.rs", ".claude/CODEMAP.md"]);
+        let mut member = Task::new("cas-current".into(), "Current delivery".into());
+        member.origin_project = Some("release-fixture".into());
+        member.status = TaskStatus::AwaitingMerge;
+        member.deliverables.factory_branch_anchor = Some(anchor.clone());
+        member.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget { repo_selector: "project:release-fixture".into(), target_branch: "main".into() },
+            branch: "factory/current".into(), assignee: "implementer".into(), base_sha: old,
+        });
+        tasks.add(&member).unwrap();
+        fs::write(repo.join("version.txt"), "current release\n").unwrap();
+        let cut = commit(&["version.txt"]);
+        git(repo, &["tag", "v9.99.2"]).unwrap();
+        assert!(tag_scope(&root, repo, None, &train.id, "v9.99.2", &cut).is_err());
+        publish("01", &cut, "# Current independent release review\n",
+            BTreeMap::from([(member.id.clone(), anchor)]));
+        let scope = tag_scope(&root, repo, None, &train.id, "v9.99.2", &cut).unwrap();
+        assert_eq!(scope.reviewed_sha, cut);
+        assert!(scope.proof_refs.iter().any(|proof| proof.receipt_id.as_deref() == Some("01")));
+        assert!(!scope.proof_refs.iter().any(|proof| proof.receipt_id.as_deref() == Some("00")));
+    }
+
+    #[test]
     fn publish_and_promotion_reconcile_once_and_installed_is_a_no_op() {
         let (temp, root, train, owner, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();

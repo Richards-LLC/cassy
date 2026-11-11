@@ -117,6 +117,11 @@ import sys
 assert sys.argv[1:] == ['-p', 'require("@playwright/test").chromium.executablePath()'], sys.argv
 print('/locked/chromium')
 ''')
+        self.write('bin/ldd', '''#!/usr/bin/env python3
+import sys
+assert sys.argv[1:] == ['/locked/chromium'], sys.argv
+print('libfixture.so => /lib/libfixture.so')
+''')
         # The journey step hands the shard to the real queue-flake runner,
         # which needs a clean tracked tree; outside the queue it runs the
         # journeys once through the same locked npm.
@@ -125,18 +130,16 @@ print('/locked/chromium')
         bodies = [step['run'] for job in workflow['jobs'].values()
                   for step in job.get('steps', []) if 'playwright install' in step.get('run', '')]
         self.assertTrue(bodies, 'no browser install steps found')
-        for sudo in (0, 1):
-            self.write('bin/sudo', f'#!/bin/sh\nexit {sudo}\n')
-            for name in ('npm', 'npx', 'node', 'sudo'):
-                (self.repo / 'bin' / name).chmod(0o755)
-            self.commit()
-            for body in bodies:
-                with self.subTest(sudo=sudo, body=body):
-                    result = subprocess.run(['bash', '-eu', '-c', body], cwd=self.repo / 'hub-web',
-                                            env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'], SHARD='1',
-                                                     GITHUB_WORKSPACE=str(self.repo), GITHUB_EVENT_NAME='pull_request'),
-                                            text=True, capture_output=True)
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name in ('npm', 'npx', 'node', 'ldd'):
+            (self.repo / 'bin' / name).chmod(0o755)
+        self.commit()
+        for body in bodies:
+            with self.subTest(body=body):
+                result = subprocess.run(['bash', '-eu', '-c', body], cwd=self.repo / 'hub-web',
+                                        env=dict(os.environ, PATH=str(self.repo / 'bin') + os.pathsep + os.environ['PATH'], SHARD='1',
+                                                 GITHUB_WORKSPACE=str(self.repo), GITHUB_EVENT_NAME='pull_request'),
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_visual_qa_drift_fails_named_row(self):
         self.write('scripts/visual-qa.mjs', 'drift\n')

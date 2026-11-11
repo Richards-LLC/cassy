@@ -439,7 +439,9 @@ print(json.dumps(state))\n");
         let wakes = || crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
             .into_iter().filter(|row| row.prompt.contains("release_cut_ready")).count();
         observe(&root, "session").unwrap();
-        assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor");
+        assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor; state {:?}; train {:?}",
+            std::fs::read_to_string(directory(&root, "cas-train").unwrap().join("state.json")),
+            crate::store::open_task_store(&root).unwrap().get("cas-train").map(|t| (t.status, t.labels)));
         observe(&root, "session").unwrap();
         assert_eq!(wakes(), 1, "once per tip");
     }

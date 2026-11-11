@@ -53,9 +53,10 @@ pub fn registry_version_in_force() -> RegistryVersion {
 
 /// Decide against the supplied approval stamp; this performs no approval lookup.
 /// Missing stamps preserve existing checks, and unknown codes fail closed.
-pub fn check_applies(code: &str, _stamp: Option<&RegistryVersion>) -> anyhow::Result<bool> {
-    find(code).ok_or_else(|| anyhow::anyhow!("unregistered gate: {code}"))?;
-    Ok(true)
+pub fn check_applies(code: &str, stamp: Option<&RegistryVersion>) -> anyhow::Result<bool> {
+    let row = find(code).ok_or_else(|| anyhow::anyhow!("unregistered gate: {code}"))?;
+    Ok(row.approval_policy != Some(ApprovalPolicy::AsOf)
+        || stamp.is_none_or(|version| version.0.contains(code)))
 }
 
 impl GateRow {

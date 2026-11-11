@@ -94,6 +94,7 @@
 
 ## MCP, storage and delivery gates
 
+- `cas-cli/src/gates/`, `cas-cli/build.rs` - generated check registry, explicit delivery integrity/as-of classifications, registry membership stamps and the approval-stamp applicability API; approval persistence belongs to the cycle approval writer.
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.

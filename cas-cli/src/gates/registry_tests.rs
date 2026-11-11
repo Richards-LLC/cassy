@@ -18,9 +18,9 @@ fn approval_stamp_applies_registry_policy_and_survives_carry_cas_278a() {
     // The registry itself supplies both the new checks and expected policy;
     // no handwritten gate list can conceal an unclassified delivery row.
     for policy in [ApprovalPolicy::AsOf, ApprovalPolicy::Integrity] {
-        let added = REGISTRY.iter().find(|row| row.approval_policy == Some(policy)).unwrap();
-        old.0.remove(added.code);
+        assert!(REGISTRY.iter().any(|row| row.approval_policy == Some(policy)));
     }
+    old.0.retain(|code| super::find(code).unwrap().approval_policy.is_none());
     let approved = Approval { stamp: old };
     let carried = approved.clone();
     let persisted = serde_json::to_string(&approved.stamp).unwrap();

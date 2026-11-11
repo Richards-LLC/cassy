@@ -420,6 +420,7 @@ print(json.dumps(state))\n");
         git(&["switch", "-q", lane]);
 
         let root = crate::store::init_cas_dir(repo).unwrap();
+        std::fs::write(root.join("config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
         owner.factory_session = Some("session".into());
         crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
@@ -439,9 +440,7 @@ print(json.dumps(state))\n");
         let wakes = || crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
             .into_iter().filter(|row| row.prompt.contains("release_cut_ready")).count();
         observe(&root, "session").unwrap();
-        assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor; state {:?}; train {:?}",
-            std::fs::read_to_string(directory(&root, "cas-train").unwrap().join("state.json")),
-            crate::store::open_task_store(&root).unwrap().get("cas-train").map(|t| (t.status, t.labels)));
+        assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor");
         observe(&root, "session").unwrap();
         assert_eq!(wakes(), 1, "once per tip");
     }

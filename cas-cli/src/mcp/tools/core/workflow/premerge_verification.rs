@@ -1810,6 +1810,70 @@ mod tests {
         assert!(overview.contains("added by factory/a") && overview.contains("added by factory/b"));
     }
 
+    /// Replay same-anchor upkeep additions through candidate preparation and
+    /// the real merge, then replay the competing CODEMAP edit from 0a3f7cce2.
+    #[test]
+    fn worktree_merge_parallel_upkeep_cas_2426e() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let paths = [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md"];
+        commit_file(repo, ".gitattributes",
+            ".claude/CODEMAP.md merge=cas-upkeep\ndocs/PRODUCT_OVERVIEW.md merge=cas-upkeep\n", "attributes");
+        // Exact competing row from 22fa7d738 and 47acd2191 (Nov 10 incident).
+        let row = "- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, portable report proof binding and ordinary no-code close, explicit parent acceptance, ordinary parent closure and SQLite operation records.\n";
+        let other = row.replace("portable report proof binding and ordinary no-code close", "retirement of unproven discovery holds");
+        let body = format!("# Upkeep\n\n{row}");
+        for path in paths {
+            commit_file(repo, path, &body, "base upkeep");
+        }
+        let base = run(repo, &["rev-parse", "HEAD"]);
+        for (branch, addition) in [
+            ("factory/a", "- `src/a.rs` - A.\n"),
+            ("factory/b", "- `src/b.rs` - B.\n"),
+            ("factory/conflict", "- `src/a.rs` - Competing A.\n"),
+        ] {
+            run(repo, &["checkout", "-q", "-b", branch, &base]);
+            for path in paths {
+                commit_file(repo, path, &body.replace(row, &format!("{addition}{row}")), "upkeep addition");
+            }
+        }
+        run(repo, &["checkout", "-q", "main"]);
+        let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+        for branch in ["factory/a", "factory/b"] {
+            let target = run(repo, &["rev-parse", "main"]);
+            let tree = regenerated_merge_tree(repo, &target, branch).unwrap();
+            assert!(operations.preflight_merge_conflicts(&target, branch).unwrap().is_empty());
+            operations.merge_branch("main", branch, true).unwrap();
+            assert_eq!(run(repo, &["rev-parse", "HEAD^{tree}"]), tree);
+        }
+        let expected = format!("# Upkeep\n\n- `src/a.rs` - A.\n- `src/b.rs` - B.\n{row}");
+        for path in paths {
+            assert_eq!(std::fs::read_to_string(repo.join(path)).unwrap(), expected);
+        }
+        // Two new entries with the same identity cannot be unioned either.
+        assert_eq!(operations.preflight_merge_conflicts("main", "factory/conflict").unwrap(), paths);
+        run(repo, &["checkout", "-q", "-b", "factory/rewrite", &base]);
+        for path in paths {
+            commit_file(repo, path, &body.replace(row, &other), "competing rewrite");
+        }
+        run(repo, &["checkout", "-q", "-b", "epic/rewrite", &base]);
+        for path in paths {
+            commit_file(repo, path, &body.replace(row, &row.replace("portable report proof binding and ordinary no-code close", "explicit portable report proof")), "independent rewrite");
+        }
+        let before = run(repo, &["rev-parse", "HEAD"]);
+        let refusal = git(repo, &["merge-tree", "--write-tree", "epic/rewrite", "factory/rewrite"]).unwrap_err();
+        assert!(refusal.contains("PREMERGE_MERGE_CONFLICT"), "{refusal}");
+        for path in paths {
+            assert!(refusal.contains(path), "{refusal}");
+        }
+        assert_eq!(operations.preflight_merge_conflicts("epic/rewrite", "factory/rewrite").unwrap(), paths);
+        assert_eq!(run(repo, &["rev-parse", "HEAD"]), before);
+        assert_eq!(run(repo, &["status", "--porcelain"]), "");
+    }
+
     #[test]
     fn overlapping_code_still_holds_candidate_cas_e79d() {
       for path in ["src/lib.rs", "docs/PRODUCT_OVERVIEW.md"] {

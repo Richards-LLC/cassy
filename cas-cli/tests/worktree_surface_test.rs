@@ -3010,13 +3010,12 @@ printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
     }
 }
 
-/// cas-d4b7 replays the six manual rebinds (cas-d1fe, cas-015e, cas-8aa1,
-/// cas-cff4 twice, cas-62c3): after approval the target edits a file the
-/// delivery also edits, so the reviewed tree no longer recomputes, yet the
-/// patch the merge adds is unchanged. A far edit rebinds the one approval
-/// with a receipt and the task closes on it. An edit inside a delivered
-/// hunk's context changes the full-context patch-id (a zero-context id would
-/// hide an `if ok` -> `if !ok` beside the hunk), so it gets a fresh review.
+/// cas-d4b7, cas-0208 replay the manual rebinds and the Nov 10 re-reviews
+/// (cas-bcf0, cas-36cb, cas-0d5e): after approval a sibling lands an edit
+/// beside a delivered hunk, so the reviewed tree no longer recomputes, yet
+/// the delivery's own patch-id is unchanged and the merge is clean. The one
+/// approval rebinds with a receipt and the task closes on it. A change to
+/// the delivered patch itself gets a fresh review.
 #[tokio::test]
 async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
     let mut env = test_env();
@@ -3027,9 +3026,9 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
             .collect::<String>()
     };
     let cases: [(&str, &[(usize, &str)]); 2] = [
-        ("full-context", &[(18, "target 18")]),
-        // Adversarial probe: line 5 is context of the line-3 hunk.
+        // Line 5 is context of the line-3 hunk; the delivered patch is unchanged.
         ("context edit", &[(5, "target 5")]),
+        ("patch changed", &[(18, "target 18")]),
     ];
     for (case, target_edits) in cases {
         let fixture = rebound_merge_fixture(&mut env).await;
@@ -3078,6 +3077,14 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
+        if case == "patch changed" {
+            std::fs::write(fixture.worker.join("delivery.txt"), "changed after approval\n").unwrap();
+            run_git(&["commit", "-am", "cas-e429: change the approved patch"], &fixture.worker);
+            run_git(&["push", "origin", &fixture.branch], &fixture.worker);
+            task = tasks.get(&task.id).unwrap();
+            task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
+            tasks.update(&task).unwrap();
+        }
         let result = fixture.service.factory(Parameters(merge)).await;
         let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
         let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
@@ -3087,9 +3094,9 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
                 .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
         assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
-        if case == "context edit" {
+        if case == "patch changed" {
             assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
-            assert_eq!(handoffs, 2, "{case}: a changed full-context patch gets a fresh review: {text}");
+            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
             assert!(!landed, "{case}: nothing publishes before that review: {text}");
             continue;
         }
@@ -3098,6 +3105,7 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
 
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
+        assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id), "{case}: the carry-forward is audited on the task");
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
             shared(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");

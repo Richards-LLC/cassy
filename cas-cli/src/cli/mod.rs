@@ -720,6 +720,9 @@ pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
 /// Run the CLI with the given arguments.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
     validate_process_startup(&cli)?;
+    if let Some(Commands::Release(ReleaseCommands::Preview(args))) = &cli.command {
+        return release_automation::preview(args, &find_cas_root()?);
+    }
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
     let command_name = get_command_name(&cli.command);

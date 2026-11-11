@@ -6186,6 +6186,109 @@ impl SqlitePromptQueueStore {
     }
 }
 
+impl SqlitePromptQueueStore {
+    fn expire_stale_pending_at(&self, older_than_secs: i64, sweep_at: DateTime<Utc>) -> Result<Vec<QueuedPrompt>> {
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let cutoff = (sweep_at - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
+            // cas-1bc7: every inbox poll runs this sweep. Look for a candidate
+            // without the write lock first, so a sweep with nothing to expire
+            // never queues behind another writer. A row that turns stale after
+            // this read is expired by the next sweep, and is already filtered
+            // out of delivery meanwhile (cas-d047).
+            let any_candidate: bool = conn.query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM prompt_queue
+                      WHERE processed_at IS NULL AND created_at < ?
+                        AND ({OPERATOR_LANE_EXCLUSION} OR ({TRANSCRIPT_MIRROR})))"
+                ),
+                params![cutoff],
+                |row| row.get(0),
+            )?;
+            if !any_candidate && pending_mirror_alert(&conn, sweep_at)?.is_none() {
+                return Ok(Vec::new());
+            }
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let now = sweep_at.to_rfc3339();
+
+            // Re-select under the write lock: a device receipt since the probe
+            // cancels its alarm. The notice and each row's dedupe marker commit
+            // together, so subsequent polls cannot replay this batch.
+            if let Some(alert) = pending_mirror_alert(&tx, sweep_at)? {
+                let ids = alert.ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+                tx.execute(
+                    "INSERT OR IGNORE INTO prompt_queue
+                        (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, kind, dedupe_key)
+                     VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', 'blocker', ?6)",
+                    params![alert.sender,
+                        format!("Messages {ids} to operator have no device receipt after five minutes. These recent asks, blockers or answers to operator input need delivery review; the durable outbox still retries. Review the original messages with message_status.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
+                        now, alert.session, "Recent operator decisions awaiting delivery",
+                        format!("operator-mirror-undelivered:{}", alert.ids[0])],
+                )?;
+                for id in alert.ids {
+                    tx.execute(
+                        "UPDATE prompt_queue SET delivery_stalled_notified_at = ?1 WHERE id = ?2",
+                        params![now, id],
+                    )?;
+                }
+            }
+
+            // Retire aged transcript duplicates without fabricating a device
+            // receipt or altering their durable operator outbox retry. Every
+            // completed transcript copy retires quietly, including copies from
+            // the current supervisor session (cas-31c9).
+            tx.execute(
+                &format!(
+                    "UPDATE prompt_queue
+                     SET processed_at = ?1, highest_stage = 'suppressed',
+                         last_pending_reason = 'superseded_stale',
+                         last_pending_detail = 'expired completed supervisor transcript mirror',
+                         next_attempt_at = NULL
+                     WHERE processed_at IS NULL AND created_at < ?2 AND {TRANSCRIPT_MIRROR}"
+                ),
+                params![now, cutoff],
+            )?;
+            // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
+            // rows, so this roster-independent expiry skips them as the roster
+            // sweep does. The rest are classified the same way: surfaced rows
+            // settle as delivered, unread rows for a real recipient end
+            // recipient_ended_unread, and only unresolved addresses keep
+            // abandoned_unknown_target.
+            let candidates: Vec<QueuedPrompt> = {
+                let mut stmt = tx.prepare_cached(&format!(
+                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
+                     FROM prompt_queue
+                     WHERE processed_at IS NULL AND created_at < ?
+                       AND {OPERATOR_LANE_EXCLUSION}
+                     ORDER BY id ASC"
+                ))?;
+                stmt.query_map(params![cutoff], Self::prompt_from_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let ids: Vec<_> = candidates.iter().map(|row| row.id).collect();
+            let existed_detail = format!(
+                "stale queue item: pending {older_than_secs}s+ and never surfaced to its \
+                 recipient — quarantined instead of delivered (cas-d047)"
+            );
+            let unresolved_detail = format!(
+                "stale queue item: pending {older_than_secs}s+ with no successful handoff — \
+                 quarantined instead of delivered (cas-d047)"
+            );
+            let abandoned =
+                Self::settle_aged_rows_in_tx(&tx, &ids, &now, &existed_detail, &unresolved_detail)?;
+            Self::notify_bulk_abandoned_senders_in_tx(&tx, &abandoned)?;
+            let stale: Vec<QueuedPrompt> = candidates
+                .into_iter()
+                .filter(|row| abandoned.contains(&row.id))
+                .collect();
+
+            tx.commit()?;
+            Ok(stale)
+        })
+    }
+}
+
 impl PromptQueueStore for SqlitePromptQueueStore {
     fn init(&self) -> Result<()> {
         // cas-88d8: concurrent openers race on check-then-ALTER. SQLite
@@ -10248,105 +10351,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
     fn expire_stale_pending(&self, older_than_secs: i64) -> Result<Vec<QueuedPrompt>> {
-        crate::shared_db::with_write_retry(|| {
-            let conn = crate::shared_db::lock_connection(&self.conn)?;
-            let sweep_at = Utc::now();
-            let cutoff = (sweep_at - chrono::Duration::seconds(older_than_secs)).to_rfc3339();
-            // cas-1bc7: every inbox poll runs this sweep. Look for a candidate
-            // without the write lock first, so a sweep with nothing to expire
-            // never queues behind another writer. A row that turns stale after
-            // this read is expired by the next sweep, and is already filtered
-            // out of delivery meanwhile (cas-d047).
-            let any_candidate: bool = conn.query_row(
-                &format!(
-                    "SELECT EXISTS(SELECT 1 FROM prompt_queue
-                      WHERE processed_at IS NULL AND created_at < ?
-                        AND ({OPERATOR_LANE_EXCLUSION} OR ({TRANSCRIPT_MIRROR})))"
-                ),
-                params![cutoff],
-                |row| row.get(0),
-            )?;
-            if !any_candidate && pending_mirror_alert(&conn, sweep_at)?.is_none() {
-                return Ok(Vec::new());
-            }
-            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            let now = sweep_at.to_rfc3339();
-
-            // Re-select under the write lock: a device receipt since the probe
-            // cancels its alarm. The notice and each row's dedupe marker commit
-            // together, so subsequent polls cannot replay this batch.
-            if let Some(alert) = pending_mirror_alert(&tx, sweep_at)? {
-                let ids = alert.ids.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
-                tx.execute(
-                    "INSERT OR IGNORE INTO prompt_queue
-                        (source, target, prompt, created_at, factory_session, summary, priority, origin_kind, kind, dedupe_key)
-                     VALUES ('delivery-watchdog', ?1, ?2, ?3, ?4, ?5, 1, 'daemon', 'blocker', ?6)",
-                    params![alert.sender,
-                        format!("Messages {ids} to operator have no device receipt after five minutes. These recent asks, blockers or answers to operator input need delivery review; the durable outbox still retries. Review the original messages with message_status.\n\n<cas-blocker worker=\"delivery-watchdog\"></cas-blocker>"),
-                        now, alert.session, "Recent operator decisions awaiting delivery",
-                        format!("operator-mirror-undelivered:{}", alert.ids[0])],
-                )?;
-                for id in alert.ids {
-                    tx.execute(
-                        "UPDATE prompt_queue SET delivery_stalled_notified_at = ?1 WHERE id = ?2",
-                        params![now, id],
-                    )?;
-                }
-            }
-
-            // Retire aged transcript duplicates without fabricating a device
-            // receipt or altering their durable operator outbox retry. Every
-            // completed transcript copy retires quietly, including copies from
-            // the current supervisor session (cas-31c9).
-            tx.execute(
-                &format!(
-                    "UPDATE prompt_queue
-                     SET processed_at = ?1, highest_stage = 'suppressed',
-                         last_pending_reason = 'superseded_stale',
-                         last_pending_detail = 'expired completed supervisor transcript mirror',
-                         next_attempt_at = NULL
-                     WHERE processed_at IS NULL AND created_at < ?2 AND {TRANSCRIPT_MIRROR}"
-                ),
-                params![now, cutoff],
-            )?;
-            // cas-f7b0 (contract v2, P3.1/P1.3): the operator lane owns its
-            // rows, so this roster-independent expiry skips them as the roster
-            // sweep does. The rest are classified the same way: surfaced rows
-            // settle as delivered, unread rows for a real recipient end
-            // recipient_ended_unread, and only unresolved addresses keep
-            // abandoned_unknown_target.
-            let candidates: Vec<QueuedPrompt> = {
-                let mut stmt = tx.prepare_cached(&format!(
-                    "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
-                     FROM prompt_queue
-                     WHERE processed_at IS NULL AND created_at < ?
-                       AND {OPERATOR_LANE_EXCLUSION}
-                     ORDER BY id ASC"
-                ))?;
-                stmt.query_map(params![cutoff], Self::prompt_from_row)?
-                    .collect::<std::result::Result<Vec<_>, _>>()?
-            };
-
-            let ids: Vec<_> = candidates.iter().map(|row| row.id).collect();
-            let existed_detail = format!(
-                "stale queue item: pending {older_than_secs}s+ and never surfaced to its \
-                 recipient — quarantined instead of delivered (cas-d047)"
-            );
-            let unresolved_detail = format!(
-                "stale queue item: pending {older_than_secs}s+ with no successful handoff — \
-                 quarantined instead of delivered (cas-d047)"
-            );
-            let abandoned =
-                Self::settle_aged_rows_in_tx(&tx, &ids, &now, &existed_detail, &unresolved_detail)?;
-            Self::notify_bulk_abandoned_senders_in_tx(&tx, &abandoned)?;
-            let stale: Vec<QueuedPrompt> = candidates
-                .into_iter()
-                .filter(|row| abandoned.contains(&row.id))
-                .collect();
-
-            tx.commit()?;
-            Ok(stale)
-        })
+        self.expire_stale_pending_at(older_than_secs, Utc::now())
     }
     fn abandon_ineligible_session_targets(
         &self,
@@ -20755,6 +20760,34 @@ mod tests {
             1,
             "peers must still see the broadcast"
         );
+    }
+
+    #[test]
+    fn selected_operator_without_clients_expires_once_cas_1962() {
+        let (temp, selector) = create_test_store();
+        let id = selector.record_operator_turn(&OperatorTurn {
+            source: "supervisor", target: "operator", prompt: "mirror body",
+            factory_session: Some("factory-a"),
+            metadata: OperatorTurnMetadata {
+                kind: Some("status"),
+                dedupe_key: Some("commander-mirror:factory-a:source:turn"),
+                ..Default::default()
+            },
+        }).unwrap().id();
+        selector.record_selected(id).unwrap();
+        let report = selector.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.delivery_attempts, 0);
+        let after_deadline = report.selected_at.unwrap()
+            + chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1);
+        drop(selector);
+        let recovered = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        recovered.expire_stale_pending_at(PROMPT_QUEUE_STALE_TTL_SECS, after_deadline).unwrap();
+        assert_eq!(recovered.message_delivery_report(id).unwrap().unwrap().stage, DeliveryStage::Abandoned);
+        let sender_notices = || recovered.peek_for_targets(&["supervisor"], Some("factory-a"), 50).unwrap();
+        assert_eq!(sender_notices().len(), 1);
+        recovered.expire_stale_pending_at(PROMPT_QUEUE_STALE_TTL_SECS, after_deadline + chrono::Duration::seconds(60)).unwrap();
+        assert_eq!(sender_notices().len(), 1);
+        assert!(recovered.operator_delivery_event(id).unwrap().is_some());
     }
 
     /// GH #69: a months-old undelivered queue item must be expired with a

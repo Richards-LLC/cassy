@@ -76,6 +76,37 @@ fn test_version() {
 }
 
 #[test]
+fn release_preview_does_not_initialize_tracing_on_success_or_failure() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "base"]);
+    git(&["remote", "add", "origin", "https://github.com/example/preview.git"]);
+    let sha = git(&["rev-parse", "HEAD"]);
+    let store = cas::store::init_cas_dir(root).unwrap();
+    std::fs::write(store.join("config.toml"), "[project]\ncanonical_id='preview-fixture'\n[dev]\ndev_mode=true\n").unwrap();
+    let scope = root.join("scope.json");
+    std::fs::write(&scope, serde_json::to_vec(&serde_json::json!({
+        "project_id":"preview-fixture", "repository":"example/preview", "release_id":"v9.99.0",
+        "reviewed_sha":sha, "final_release_sha":sha, "constituent_epic_ids":[], "included_task_ids":[], "proof_refs":[]
+    })).unwrap()).unwrap();
+    let output = cas_cmd(root).current_dir(root).args(["release", "preview", "--scope"])
+        .arg(&scope).assert().success().get_output().stdout.clone();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap()["members"], 0);
+    assert!(!store.join("traces.db").exists());
+    assert!(!store.join("logs").exists());
+    std::fs::remove_file(&scope).unwrap();
+    cas_cmd(root).current_dir(root).args(["release", "preview", "--scope"]).arg(scope).assert().failure();
+    assert!(!store.join("traces.db").exists());
+    assert!(!store.join("logs").exists());
+}
+
+#[test]
 fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

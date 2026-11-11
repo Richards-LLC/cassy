@@ -91,7 +91,9 @@ Trusted release adapters call `CasCore::close_release_inventory_outcomes` with
 this inventory. Each member closes independently when its approval-bound head
 is an ancestor of `final_release_sha` and its captured generation is unchanged.
 Approval is an approved verification at exactly that head, a recorded review or
-QA receipt naming that task and head, or a Tier 0 delivery. Published-tag shipping
+QA receipt naming that task and head, or a Tier 0 delivery. Recorded repository
+proofs may bind the approved source in `anchor_commits` while their head names
+the later landed merge; this source binding remains valid. Published-tag shipping
 receipts never grant approval. A member without approval remains open as its own
 `REVIEW_MISSING` residual; it does not hold other members.
 

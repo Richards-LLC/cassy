@@ -429,7 +429,6 @@ fn track_on_train(
     } else { preview_scope(root, repo, scope.clone())? };
     preview.allow_cut()?;
     expected.close_preview = Some(preview);
-    expected.release_scope = Some(scope);
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
@@ -439,6 +438,8 @@ fn track_on_train(
         cut.updated_at = chrono::Utc::now();
         tasks.update(&cut).context("could not persist release train cut marker")?;
     }
+    // Review gaps belong to the cut receipt even when reminders are unavailable.
+    save(&path, &expected)?;
     let tracking = (|| -> Result<()> {
         let agents = open_agent_store(root)?.list(None)?;
         let recipient =

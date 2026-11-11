@@ -422,7 +422,7 @@ check 'grep -q "^pr create --base main --head epic/alpha --title Release v9.100.
 check 'grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'auto-merge is enabled'
 check '! grep -q "^pr checks\|^run view" "$FAKE_GH_LOG"' 'cas-61e0: queue admission never waits for a second PR CI proof'
 check 'grep -q "^release track --commit $(git -C "$epic" rev-parse HEAD) --version 9.100.0" "$FAKE_CAS_LOG"' 'cas-61e0: --no-watch automatically arms durable landing and publication reminders'
-check 'grep -q -- "--first-child $epic_first_child$" "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
+check 'grep -q -- "--first-child $epic_first_child --preview " "$FAKE_CAS_LOG"' 'cas-61e0: fresh integration history excludes unrelated main commits from the first-child timer'
 check '! git -C "$tmp/origin.git" show-ref --tags | grep -q v9.100.0' 'nothing is tagged'
 
 # 4. cas-3873: after an ejection repair, rerun the same command even on a

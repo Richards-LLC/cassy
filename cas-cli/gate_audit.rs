@@ -271,16 +271,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
             self.function.flags.insert(s.clone());
             self.function.conditional.insert(s.clone());
         }
-        self.function.policy |= [
-            "REFUSED",
-            "REJECTED",
-            "SAFETY GUARD",
-            "HELD BY A PEER",
-            "supervisor-only",
-            "worker-only",
-        ]
-        .iter()
-        .any(|marker| s.contains(marker));
+
     }
 }
 #[derive(Default)]
@@ -334,6 +325,11 @@ impl Functions<'_> {
             annotation_start -= 1;
         }
         for line in &self.lines[annotation_start..end.min(self.lines.len())] {
+            // gate[] is a machine registry declaration. Human message wording
+            // cannot turn a status update into a policy check.
+            if line.trim_start().strip_prefix("//").map(str::trim_start).is_some_and(|line| line.starts_with("gate[")) {
+                annotations.insert("declared_check".into(), String::new());
+            }
             if let Some((_, declaration)) = line.split_once("gate-audit[")
                 && let Some((key, reason)) = declaration.split_once("]:")
                 && !reason.trim().is_empty()
@@ -359,6 +355,7 @@ impl Functions<'_> {
             ..Default::default()
         };
         f.annotations = self.annotations(start, end);
+        f.policy = f.annotations.contains_key("declared_check");
         let output = &signature.output;
         // The actual type paths, rather than spelling in comments, identify producers.
         struct Types(BTreeSet<String>);
@@ -408,6 +405,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
             ..Default::default()
         };
         f.annotations = self.annotations(item.span().start().line, item.span().end().line);
+        f.policy = f.annotations.contains_key("declared_check");
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }
@@ -431,6 +429,7 @@ impl<'ast> Visit<'ast> for Functions<'_> {
             ..Default::default()
         };
         f.annotations = self.annotations(item.span().start().line, item.span().end().line);
+        f.policy = f.annotations.contains_key("declared_check");
         Body { function: &mut f }.visit_expr(&item.expr);
         self.output.push(f);
     }

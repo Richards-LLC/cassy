@@ -201,14 +201,27 @@ pub(crate) fn observe(root: &Path, session: &str) -> Result<()> {
             let previous = std::fs::read(directory(root, &epic.id)?.join("state.json"))
                 .ok()
                 .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            // cas-9765: run the script the train tip carries. The project
+            // checkout's working tree can trail the train by days; on Nov 10
+            // it predated the script, so every scan failed and a green frozen
+            // train woke nobody and was never auto-cut.
+            let out = directory(root, &epic.id)?;
+            std::fs::create_dir_all(&out)?;
+            let script = out.join("train-ci.py");
+            let source = Command::new("git")
+                .current_dir(&repo)
+                .args(["show", &format!("{head}:scripts/train-ci.py")])
+                .output()?;
+            ensure!(source.status.success(), "train tip {head} has no scripts/train-ci.py");
+            std::fs::write(&script, &source.stdout)?;
             let timeout = Duration::from_secs(90);
             let mut command = Command::new("python3");
             command
-                .arg(repo.join("scripts/train-ci.py"))
+                .arg(&script)
                 .args(["observe", "--repo"])
                 .arg(&repo)
                 .args(["--branch", branch, "--head", &head, "--out"])
-                .arg(directory(root, &epic.id)?)
+                .arg(&out)
                 .current_dir(&repo);
             let output = crate::bounded_process::run_command(
                 &mut command,
@@ -360,6 +373,75 @@ mod tests {
         assert_eq!(wakes().len(), 2, "a repeat, or a green with no red before it, wakes nobody");
         receipt("PASS", "eeee", "14", Some(&next_green));
         assert_eq!(wakes().len(), 2);
+    }
+
+    /// cas-9765, Nov 10: the project checkout sat on a main older than
+    /// scripts/train-ci.py. The train was frozen, a release-repair merged,
+    /// CI went green, and every scan failed on the missing script: no wake.
+    #[test]
+    fn frozen_green_train_wakes_once_when_the_checkout_lacks_the_script() {
+        use cas_types::{Agent, AgentRole, TaskType};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        let git = |args: &[&str]| {
+            let status = Command::new("git").current_dir(repo).args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.test")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.test")
+                .status().unwrap();
+            assert!(status.success(), "git {args:?}");
+        };
+        let write = |path: &str, text: &str| {
+            std::fs::create_dir_all(repo.join(path).parent().unwrap()).unwrap();
+            std::fs::write(repo.join(path), text).unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        write("README.md", "old main\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "old main without the script"]);
+        let lane = "epic/release-train-vnext-cas-train";
+        git(&["switch", "-q", "-c", lane]);
+        // The observer contract: print the receipt and keep it as state.json.
+        write("scripts/train-ci.py", "import argparse, json, pathlib\n\
+p = argparse.ArgumentParser(); p.add_argument('cmd')\n\
+for flag in ('--repo', '--branch', '--head', '--out'): p.add_argument(flag)\n\
+a = p.parse_args()\n\
+state = {'outcome': 'PASS', 'head': a.head, 'run_id': '19', 'run_attempt': 1, 'branch': a.branch,\n\
+         'merge_range': [], 'failures': [], 'last_green': a.head}\n\
+pathlib.Path(a.out, 'state.json').write_text(json.dumps(state))\n\
+print(json.dumps(state))\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "train work"]);
+        git(&["switch", "-q", "-c", "factory/repair"]);
+        write("changelog.d/cas-repair.md", "### Fixed\n\n- **Repair** — fixed.\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "release repair"]);
+        git(&["switch", "-q", lane]);
+
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        let mut owner = Agent::new_with_role("sup".into(), "sup".into(), AgentRole::Supervisor);
+        owner.factory_session = Some("session".into());
+        crate::store::open_agent_store(&root).unwrap().register(&owner).unwrap();
+        let mut epic = cas_types::Task::new("cas-train".into(), "Release train".into());
+        epic.task_type = TaskType::Epic;
+        epic.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into());
+        epic.branch = Some(lane.into());
+        epic.epic_verification_owner = Some(owner.id.clone());
+        crate::store::open_task_store(&root).unwrap().create(&epic).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, "cas-train", "sup", Some("cut")).unwrap();
+        // The verifier auto-merges the release repair into the frozen train,
+        // and the operator's checkout goes back to its old main.
+        git(&["merge", "-q", "--no-ff", "-m", "auto-merge release repair", "factory/repair"]);
+        git(&["switch", "-q", "main"]);
+        assert!(!repo.join("scripts/train-ci.py").exists());
+
+        let wakes = || crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap()
+            .into_iter().filter(|row| row.prompt.contains("release_cut_ready")).count();
+        observe(&root, "session").unwrap();
+        assert_eq!(wakes(), 1, "the green frozen tip wakes its supervisor");
+        observe(&root, "session").unwrap();
+        assert_eq!(wakes(), 1, "once per tip");
     }
 
     #[test]

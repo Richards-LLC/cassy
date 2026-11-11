@@ -2079,6 +2079,8 @@ pub(crate) fn local_knowledge_counts(cas_root: &Path) -> Option<KnowledgeCounts>
 /// no network call and created no vector storage. Failures are reported and
 /// swallowed — knowledge distribution is an enhancement, and it must never
 /// take down a sync that already moved entries and tasks.
+// gate-audit[input]: Non-factory knowledge distribution warning/status, not a refusal of factory work.
+// gate-audit[emit_output]: selector Prints optional knowledge-sync progress; no factory admission changes.
 fn sync_project_knowledge_with_output(
     cli: &Cli,
     cas_root: &Path,
@@ -6779,6 +6781,7 @@ fn evaluate_purge_hard_guards(
 
 // gate[G-145 purge]: Majority-foreign task preservation
 // gate-audit[allow_majority_foreign]: bypass G-145 CLI purge tags the accepted majority-foreign deletion decision.
+// gate-audit[accepted_by]: execute_purge_foreign_with_output
 fn evaluate_purge_hard_guards_with_options(
     delete_set: &PurgeDeleteSet,
     total_tasks: usize,
@@ -7797,6 +7800,7 @@ Re-run 'cas cloud pull' first, or pass --force to purge anyway (destructive).",
 /// the safety refusals before deleting anything. A refusal is returned as
 /// `false`, so callers cannot accidentally continue to `cas cloud sync` after
 /// a failed or unsafe preview.
+// gate-audit[apply]: selector Chooses dry-run versus performing the requested repair; execute_purge_foreign_with_output still enforces G-144/G-145.
 pub(crate) fn doctor_purge_foreign(
     cli: &Cli,
     cas_root: &Path,

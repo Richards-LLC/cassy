@@ -94,7 +94,7 @@ fn every_registered_refusal_site_emits_its_code() {
         (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok("accepted")"#, false),
         (r#"Err(tag("G-01", "REFUSED"))"#, r#"Ok(override_tag("G-01", "accepted"))"#, true),
     ] {
-        let source = format!("// gate-audit[supervisor_override]: bypass G-01 Accepts an otherwise refused request.\nfn probe(supervisor_override: bool) {{ if !supervisor_override {{ {refusal} }} else {{ {accepted} }} }}");
+        let source = format!("fn unrelated() {{ override_tag(\"G-01\", \"accepted\"); }}\n// gate-audit[supervisor_override]: bypass G-01 Accepts an otherwise refused request.\nfn probe(supervisor_override: bool) {{ if !supervisor_override {{ {refusal} }} else {{ {accepted} }} }}");
         std::fs::write(source_dir.join("probe.rs"), source).unwrap();
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{:?}", result.gaps);
@@ -193,6 +193,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     task.external_ref = Some("https://example.test/proof".into());
     tasks.add(&task).unwrap();
     let service = crate::mcp::tools::service::CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+    let work = service.tool_work.clone();
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {
         service.serve(server_io).await.unwrap().waiting().await.unwrap();
@@ -213,6 +214,9 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let response = client.call_tool(request).await.unwrap();
     assert_ne!(response.is_error, Some(true), "{response:?}");
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
+    // COMMITTED can precede the final router result. Await the production
+    // handler-drain signal, including its observer, rather than polling facts.
+    work.wait_idle().await;
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
         Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
     client.cancel().await.unwrap();
@@ -225,6 +229,26 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert!(facts::hook_denial(&output).is_some_and(|reason| codes_in(reason).contains(&"H-01")));
     assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
         Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+
+    // Drive an allowed stored publication override through the real outer
+    // hook path; no Violet operation executes in this fixture.
+    let mut epic = Task::new("cas-publication".into(), "Publication fixture".into());
+    epic.task_type = cas_types::TaskType::Epic;
+    epic.pending_verification = true;
+    epic.notes = format!("[{}] DECISION: PUBLICATION OVERRIDE: fixture approval", Utc::now().format("%Y-%m-%d %H:%M"));
+    tasks.add(&epic).unwrap();
+    let input = serde_json::json!({"session_id":"gate-fixture", "cwd":dir.path(), "tool_name":"violet_post",
+        "tool_input":{"kind":"file", "deliverable":true, "epic_id":epic.id}}).to_string();
+    let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input.clone()), false).unwrap();
+    assert!(facts::hook_denial(&output).is_none());
+    assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }));
+    epic.notes.clear();
+    tasks.update(&epic).unwrap();
+    let output = crate::cli::hook::process_hook_input("PreToolUse", Ok(input), false).unwrap();
+    assert!(facts::hook_denial(&output).is_some());
+    assert_eq!(facts::summarize(&store, before).unwrap().get("H-07"),
+        Some(&facts::Counts { refused: 1, overridden: 1, false_positive: 0 }));
 
     // The shared observer distinguishes a tagged accepted override from a
     // successful read quoting the same code.

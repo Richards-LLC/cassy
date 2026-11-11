@@ -48,6 +48,7 @@ struct Function {
     site: String,
     name: String,
     calls: BTreeSet<String>,
+    methods: BTreeSet<String>,
     refused: BTreeSet<String>,
     overridden: BTreeSet<String>,
     flags: BTreeSet<String>,
@@ -148,6 +149,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_expr_call(self, expr);
     }
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
+        self.function.methods.insert(expr.method.to_string());
         // A method spelling alone is not a resolved free-function call:
         // `.get()`/`.find()` must not import unrelated gate handlers.
         if matches!(expr.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
@@ -435,6 +437,23 @@ fn files(directory: &Path, output: &mut Vec<PathBuf>) {
     }
 }
 
+// Named forwarding contracts resolve through actual AST calls, including
+// methods. They never borrow a tag from an unrelated producer with the same
+// code. Code propagation itself stays conservative about method resolution.
+fn reaches(functions: &[Function], producer: &Function, target: &str) -> bool {
+    let mut pending = producer.calls.union(&producer.methods).cloned().collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if name == target { return true; }
+        if seen.insert(name.clone()) {
+            for function in functions.iter().filter(|f| f.name == name) {
+                pending.extend(function.calls.union(&function.methods).cloned());
+            }
+        }
+    }
+    false
+}
+
 /// Scan declarations, AST control-flow candidates, result types and script flags.
 /// Registry tuples are (code, stage, title, source), from the same build scan.
 pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit {
@@ -670,10 +689,19 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                         {
                             audit.gaps.push(format!("{} {flag}: bypass {code} needs declaration, refusal and override tags",f.site));
                         }
+                        let forwarded = f.annotations.get("accepted_by").is_some_and(|names| {
+                            names.split(',').any(|name| functions.iter().any(|producer| {
+                                producer.name == name.trim() && producer.overridden.contains(code)
+                                    && reaches(&functions, producer, &f.name)
+                            }))
+                        });
+                        if !f.overridden.contains(code) && !forwarded {
+                            audit.gaps.push(format!("{} {flag}: bypass {code} lacks a local tag or a named accepting caller", f.site));
+                        }
                     }
                     (
                         "bypass acceptor",
-                        format!("{reason}; common result observer"),
+                        format!("{reason}; accepting caller: {}; common result observer", f.annotations.get("accepted_by").map(String::as_str).unwrap_or("local tags")),
                     )
                 } else {
                     ("excluded selector", reason.clone())
@@ -715,7 +743,6 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
     for (entry, observer) in [("call_tool", "observe_tool_result"), ("process_hook_input", "observe_hook_output")] {
         if functions.iter().any(|f| f.producer.is_some())
             && !functions.iter().any(|f| f.name == entry && f.calls.contains(observer))
-            && registry.len() > 1
         {
             audit.gaps.push(format!("{entry}: result boundary does not invoke {observer}"));
         }

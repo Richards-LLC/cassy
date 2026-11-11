@@ -1146,6 +1146,7 @@ impl Drop for ScratchRootGuard {
 
 // gate[G-146 probe]: Active-parent probe isolation
 // gate-audit[allow_active_cas_root]: bypass G-146 The probe setup producer records an accepted active-parent override.
+// gate-audit[accepted_by]: run_probe_comm_with_parent
 fn guard_active_parent_root(
     run_root: &Path,
     parent_cas_root: Option<&Path>,

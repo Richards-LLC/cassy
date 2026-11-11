@@ -87,6 +87,7 @@ const CI_VALIDATED_POLICY_NOTICE: &str =
 /// Decide admission from bounded evidence; never poll for pending CI.
 // gate[G-108 merge-admission]: Lane CI admission (code CI required, CI red, CI pending, override)
 // gate-audit[override_requested]: bypass G-108 Producer tags only accepted red/unvalidated CI waivers; pending/unpushed sources remain refused.
+// gate-audit[accepted_by]: worktree_merge_attempt
 fn admit_branch_ci(
     state: &BranchCiState,
     override_requested: bool,
@@ -2750,6 +2751,7 @@ fn epic_lane_bypassed_by_trunk_target(
 // gate[G-140 merge-admission]: Explicit authorization for trunk fallback
 // gate-audit[allow_trunk]: bypass G-140 Explicitly permits the otherwise-refused trunk fallback.
 // gate-audit[epic_lane_bypassed_by_trunk_target]: selector Detects a trunk-pinned child; permission remains controlled by allow_trunk.
+// gate-audit[accepted_by]: worktree_merge_attempt
 fn resolve_system_b_merge_target(
     task_store: &dyn cas_store::TaskStore,
     agent_store: &dyn cas_store::AgentStore,

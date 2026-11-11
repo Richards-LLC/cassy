@@ -1275,6 +1275,8 @@ impl CasCore {
     ///   that commit;
     /// - code already on trunk is never sent for review.
     // gate[G-64 close-after-merge]: Independent QA required at close (passed or waived QA at landed tip)
+    // gate-audit[supervisor_waiver]: bypass G-64 Explicit supervisor waiver of otherwise-required independent QA; close records only QaCloseGate::Waived. accepted_by=close_task_with_dispositions_inner
+    // gate-audit[accepted_by]: close_task_with_dispositions_inner
     pub(crate) fn independent_qa_close_gate(
         &self,
         task: &Task,

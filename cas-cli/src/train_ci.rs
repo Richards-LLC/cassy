@@ -20,6 +20,7 @@ pub(crate) fn directory(root: &Path, train: &str) -> Result<PathBuf> {
 // gate[G-114 train-merge]: Train suite red hold
 // gate-audit[supervisor_override]: bypass G-114 Train-merge producer tags only a newly accepted red-run token; replaying the same token adds no fact.
 // gate-audit[prior_override]: selector Replays the identical stored CI exception; only a newly accepted token emits G-114.
+// gate-audit[accepted_by]: train_merge
 pub(crate) fn guard(
     core: &crate::mcp::CasCore,
     train: &str,

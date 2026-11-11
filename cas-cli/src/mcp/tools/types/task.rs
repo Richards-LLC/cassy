@@ -100,6 +100,7 @@ pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
 // gate[G-129 create]: Task risk declaration required
 // gate-audit[supervisor_override]: bypass G-129 Create/proposal producer tags accepted missing-risk declarations.
 // gate-audit[is_supervisor]: input Authenticated role used for the G-129 waiver; accepted creation response carries the tag.
+// gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_proposal_create_with_delivery_mode
 pub fn validate_task_risk_declaration(
     task_type: TaskType,
     risk: Option<&str>,

@@ -408,6 +408,7 @@ impl WorktreeManager {
     ///
     /// # Returns
     /// The merge commit hash if successful, or None if merge was skipped
+    // gate-audit[cleanup]: selector Chooses post-merge worktree removal; dirty preservation is separately enforced.
     pub fn merge_and_cleanup(
         &self,
         worktree: &mut Worktree,
@@ -452,6 +453,7 @@ impl WorktreeManager {
     }
 
     // gate-audit[force]: bypass G-138 Caller-visible operation supplies the explicit successful dirty-source waiver tag.
+    // gate-audit[accepted_by]: worktree_merge_attempt
     pub(crate) fn merge_preserving_worktree_at_with_publication(
         &self,
         worktree: &mut Worktree,
@@ -688,6 +690,7 @@ impl WorktreeManager {
 
     /// Abandon a worktree without merging
     // gate-audit[force]: bypass G-138 Caller-visible operation tags a successful dirty removal; shared helper owns its refusal code.
+    // gate-audit[accepted_by]: worktree_cleanup,worktree_cleanup_target
     pub fn abandon(&self, worktree: &mut Worktree, force: bool) -> WorktreeResult<()> {
         // Check for uncommitted changes (cas-006c: same named-path
         // classification as merge_and_cleanup). will_remove=true always —

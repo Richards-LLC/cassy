@@ -728,6 +728,7 @@ struct ImportedServer {
 
 #[cfg(feature = "mcp-proxy")]
 // gate-audit[force]: selector Confirms overwriting MCP configuration; tool authorization remains enforced.
+// gate-audit[dry_run]: selector Chooses configuration preview versus import; no factory work is admitted by this flag.
 fn execute_import(
     from: Option<&str>,
     dry_run: bool,

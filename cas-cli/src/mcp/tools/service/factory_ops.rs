@@ -4589,6 +4589,7 @@ impl CasService {
     /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
     /// from this process's environment, so the Commander hub's operator
     /// facade runs the same body (cas-9b08).
+    // gate-audit[held]: selector Chooses hold versus release operation; both enforce the same supervisor authority.
     pub(crate) async fn factory_set_worker_hold_in(
         &self,
         ctx: &crate::ops::fleet::FleetContext,
@@ -10445,6 +10446,7 @@ pub(crate) enum SyncGate {
 /// worker or an in-flight rebase: a second rebase on top of an in-flight
 /// resolution destroys progress, and no automated recovery is safe.
 // gate-audit[force]: bypass G-137 Pure consent classification; successful sync producer tags only actual dirty/mid-task waivers.
+// gate-audit[accepted_by]: factory_sync_all_workers
 pub(crate) fn sync_gate_for_worker(
     worker_name: &str,
     dirty_files: usize,
@@ -10494,6 +10496,7 @@ pub(crate) fn sync_gate_for_worker(
 /// call that caused this bug.
 // gate[G-149 sync]: Worker branch-affinity preservation
 // gate-audit[explicitly_targeted]: bypass G-149 Successful sync producer tags only an otherwise-refused target mismatch.
+// gate-audit[accepted_by]: factory_sync_all_workers
 pub(crate) fn sync_affinity_gate(
     worker_name: &str,
     task_label: Option<&str>,

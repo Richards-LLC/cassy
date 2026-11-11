@@ -1063,6 +1063,7 @@ pub(crate) fn awaits_release_verdict(root: &Path, task: &Task) -> bool {
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
 // gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
+// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
 fn covering_receipt(
     root: &Path,
     task: &Task,

@@ -343,6 +343,7 @@ impl WorktreeManager {
     /// the operator — callers must no longer silently treat dirty trees as
     /// "removed and forgotten".
     // gate-audit[force]: bypass G-138 Caller-visible cleanup tags accepted dirty removals.
+    // gate-audit[accepted_by]: execute_cleanup
     pub fn cleanup_workers(&mut self, force: bool) -> WorktreeResult<CleanupReport> {
         let mut report = CleanupReport::default();
 
@@ -413,6 +414,7 @@ impl WorktreeManager {
 
     /// Remove a single worker's worktree
     // gate-audit[force]: bypass G-138 Caller-visible cleanup tags accepted dirty removals.
+    // gate-audit[accepted_by]: execute_cleanup
     pub fn remove_worker(&mut self, worker_name: &str, force: bool) -> WorktreeResult<()> {
         if let Some(mut worktree) = self.workers.remove(worker_name) {
             let repo_root = self.worker_repo_root(worker_name);

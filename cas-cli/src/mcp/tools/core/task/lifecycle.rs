@@ -710,6 +710,7 @@ mod reused_factory_branch_tests {
 // gate[G-130 create]: User-facing task demo statement required
 // gate-audit[supervisor_override]: bypass G-130 The create/proposal producer tags an accepted missing-demo waiver.
 // gate-audit[is_supervisor]: input Authenticated role; supervisor waiver is tagged G-130 by the accepting create producer.
+// gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_proposal_create_with_delivery_mode
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
     labels: &[String],

@@ -16,6 +16,7 @@ fn update_result(task: &Task, message: String) -> CallToolResult {
 
 // Branch-only retargeting preserves a declared repository, but legacy
 // targetless tasks default to the project exactly as public creation does.
+// gate-audit[input]: Validates the requested branch target exists and matches the repository input contract.
 fn branch_update_work_target(
     cas_root: &std::path::Path,
     existing: Option<&cas_types::WorkTarget>,
@@ -115,6 +116,7 @@ fn assignee_batch_abort(fields: &[&str], rejection: impl std::fmt::Display) -> S
     )
 }
 
+// gate-audit[input]: Validates origin project identity and registration, not an otherwise valid factory request.
 fn verify_origin_project_registered(
     cas_root: &std::path::Path,
     origin_project: &str,

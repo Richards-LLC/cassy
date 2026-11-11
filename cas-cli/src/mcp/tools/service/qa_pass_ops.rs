@@ -59,6 +59,7 @@ impl CasService {
         let note = format!("[{}] {label} {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
+        let mut author_override_accepted = !receipt.author_overrides.is_empty();
         for task_id in receipt.task_heads.keys() {
             let note = match receipt.author_overrides.get(task_id) {
                 Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
@@ -73,7 +74,10 @@ impl CasService {
                                 receipt.task_heads.get(task_id)?).ok().flatten()
                         });
                     match waiver {
-                        Some(pass) => format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head),
+                        Some(pass) => {
+                            author_override_accepted = true;
+                            format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head)
+                        },
                         None => note.clone(),
                     }
                 },
@@ -86,7 +90,7 @@ impl CasService {
         let response = format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
             receipt.ledger_artifact_id, receipt.ledger_path);
-        Ok(Self::success(if receipt.author_overrides.is_empty() { response } else {
+        Ok(Self::success(if !author_override_accepted { response } else {
             crate::gates::override_tag("G-116", response)
         }))
     }

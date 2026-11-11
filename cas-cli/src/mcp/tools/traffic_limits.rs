@@ -163,6 +163,7 @@ pub(crate) fn spill_message_to_artifact(
 // gate[G-131 note]: Appended task note body limit
 // gate-audit[supervisor_override]: bypass G-131 Pure validation helper; note producer tags accepted oversized notes.
 // gate-audit[registered_supervisor]: input Authenticated role, not a caller-provided admission flag.
+// gate-audit[accepted_by]: cas_task_notes
 pub(crate) fn validate_note_body(
     note_type: &str,
     body: &str,

@@ -5554,6 +5554,7 @@ impl CasCore {
     }
 
     // gate[G-26 park]: Gate task close needs a recorded DECISION note
+    // gate-audit[forward]: G-26 Typed validation error; close_task_with_dispositions_inner emits its code.
     fn validate_gate_decision_close(
         &self,
         task: &cas_types::Task,
@@ -5577,6 +5578,7 @@ impl CasCore {
     }
 
     // gate[G-24 park]: Non-integration close authority and receipt fields (evidence_only, negative_result)
+    // gate-audit[forward]: G-24 Typed non-integration receipt validation; close producer tags the refusal.
     fn validate_nonintegration_close(
         &self,
         task_id: &str,
@@ -5664,6 +5666,7 @@ impl CasCore {
     }
 
     // gate[G-27 park]: External verification receipt rejected
+    // gate-audit[forward]: G-27 External proof validation; close producer tags the refusal.
     fn validate_external_verification_close(
         &self,
         task: &cas_types::Task,
@@ -7143,6 +7146,7 @@ impl CasCore {
 
     /// Reject an explicit old or target-side receipt before QA or merge-state
     /// gates can use it to measure a different head from the current delivery.
+    // gate-audit[forward]: G-58 Commit receipt identity validation; close producer tags the refusal.
     fn stale_fresh_park_receipt_refusal(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -7750,13 +7754,14 @@ impl CasCore {
         result
     }
 
-    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-67,G-68,G-71,G-74,G-76,G-77,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-76,G-77,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
     // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
     // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
     // gate-audit[evidence_only]: selector Chooses a separately authorized, measured non-integration terminal disposition.
     // gate-audit[negative_result]: selector Chooses a separately authorized, measured negative result; no code delivery is approved.
     // gate-audit[validate_supervisor_override]: selector Validation of authority; only explicit accepted_override_codes at actual waived checks count.
+    // gate-audit[shipped_timeout_waiver]: selector Replays a previously issued exact-dispatch approval; lookup does not mint an override.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -9711,6 +9716,7 @@ impl CasCore {
                     return Ok(Self::tool_error(crate::gates::tag("G-64", refusal)));
                 }
                 super::qa_dispatch::QaCloseGate::Waived(note) => {
+                    accepted_override_codes.push("G-64");
                     close_notes.record(&mut task, &note);
                 }
             }
@@ -12909,6 +12915,7 @@ impl CasCore {
     /// 4. Everything failed → `AssigneeUnregistered` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
     // gate-audit[bypass_requested]: bypass G-68 Pure verification classification; final close producer tags the actual accepted waiver.
+    // gate-audit[accepted_by]: close_task_with_dispositions_inner
     pub(crate) fn compute_verification_skip_reason(
         &self,
         task: &cas_types::Task,
@@ -17110,6 +17117,7 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
 
 // gate[G-55 park]: Delivery merged into its target before close (factory-branch merge state)
 // gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn run_factory_branch_merge_gate_for_delivery(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -25211,6 +25219,7 @@ fn parked_anchor_delivery_ref(
 /// task's declared repository. Local branches and cached origin refs cannot
 /// authorize a retired-worker close or a reopened QA request.
 /// Callers must establish live registered supervisor authority first.
+// gate-audit[forward]: G-41 Receipt validation for declared pre-close context; run_declared_pre_close_hook returns the coded refusal.
 pub(crate) fn validate_pushed_task_receipt(
     task: &Task,
     context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -25274,6 +25283,7 @@ pub(crate) fn validate_pushed_task_receipt(
 
 // gate-audit[forward]: G-41 Pure diagnostic for the declared pre-close hook; does not accept a waiver.
 // gate-audit[supervisor_override]: selector Alters recovery guidance only; no authorization decision.
+// gate-audit[reachable_from_worktree]: selector Renders measured reachability in a refusal, never grants a bypass.
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,

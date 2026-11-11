@@ -123,6 +123,7 @@ impl CasCore {
     /// Refuse a known competing owner before local task or staffing writes.
     /// Missing advisory infrastructure is visible, and never grants Slack authority.
     // gate-audit[override_reason]: bypass G-133 Live supervisor accepts an actual peer-owned source claim.
+    // gate-audit[accepted_by]: cas_task_create_with_delivery_mode,cas_task_update_with_delivery_mode
     pub(crate) async fn task_source_admission(
         &self,
         source: Option<&str>,

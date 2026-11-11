@@ -848,6 +848,56 @@ async fn release_verdict_names_every_delivery_and_is_not_qa_evidence_cas_ce5e() 
     assert!(close.contains("no `qa-bundle:` note"), "{close}");
 }
 
+/// GH #1657: the published build descends from historical epic targets.
+#[tokio::test]
+async fn release_receipt_at_published_sha_cas_bc58() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut fx = fixture(&mut env);
+    let root = fx.repo.join(".cas");
+    let tasks = open_task_store(&root).unwrap();
+    git(&fx.repo, &["commit", "--allow-empty", "-qm", "release preparation"]);
+    let prep = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let mut heads = std::collections::BTreeMap::new();
+    for (id, target) in [("cas-bq01", "epic/first"), ("cas-bq02", "epic/second")] {
+        git(&fx.repo, &["branch", target, &prep]);
+        let mut task = tasks.get(id).unwrap();
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: "project:test".into(), target_branch: target.into(),
+        });
+        heads.insert(id.to_string(), task.deliverables.factory_branch_anchor.clone().unwrap());
+        tasks.update(&task).unwrap();
+    }
+    git(&fx.repo, &["commit", "--allow-empty", "-qm", "published release"]);
+    fx.staging = git(&fx.repo, &["rev-parse", "HEAD"]);
+    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
+    let fx = fx.with_declared_coverage();
+    assert_ne!(prep, fx.staging);
+
+    // Ordinary QA still requires the walked SHA on each configured target.
+    let error = fx.supervisor.verification(Parameters(fx.request())).await.unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap().is_empty());
+
+    let mut request = fx.request();
+    request.verification_type = Some("release".into());
+    request.staging_sha = Some(git(&fx.repo, &["rev-parse", &format!("{}^", heads["cas-bq01"])]));
+    let error = fx.supervisor.verification(Parameters(request)).await.unwrap_err();
+    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    assert!(cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap().is_empty());
+
+    let mut request = fx.request();
+    request.verification_type = Some("release".into());
+    fx.supervisor.verification(Parameters(request)).await.unwrap();
+    let receipts = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].schema_version, cas_store::RELEASE_VERDICT_SCHEMA);
+    assert_eq!(receipts[0].staging_sha, fx.staging);
+    assert_eq!(receipts[0].task_heads, heads);
+    for target in ["epic/first", "epic/second"] {
+        assert_eq!(git(&fx.repo, &["rev-parse", target]), prep);
+    }
+}
+
 /// cas-f497: either receipt may land first. A verdict that a QA gate holds is
 /// reported, and the later QA receipt finishes the close with no close call.
 /// `verification_type=task` is the documented default.

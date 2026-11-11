@@ -1491,6 +1491,20 @@ mod tests {
         // A new completed turn remains one new wake.
         wake.natural_key = "fresh-wake".into();
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
+        let mut untyped = wake.clone();
+        untyped.natural_key = "untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut untyped.payload { *notice_kind = None; }
+        crate::quality_ledger::emit_checked(dir.path(), &untyped).unwrap();
+        let original_id = cas_store::quality_events_between(dir.path(), None, None).unwrap().last().unwrap().id.clone();
+        let mut legacy_detail = untyped.clone();
+        legacy_detail.natural_key = "turn_detail|untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, supersedes, .. } = &mut legacy_detail.payload {
+            *notice_kind = Some("102644".into());
+            *supersedes = Some(original_id);
+        }
+        crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
         events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
         let report = aggregate("v4.16.0".into(), true, None, None, &events);
         let json = serde_json::to_value(report).unwrap();
@@ -1498,7 +1512,8 @@ mod tests {
         assert_eq!(json["reviews"][0]["cycle_id"], "dc-delivery");
         assert_eq!(json["reviews"][0]["rounds"][2]["provenance"], "supervisor_direct");
         assert_eq!(json["turns_by_notice_kind"]["ci_completed"]["no_op_wakes"], 2);
-        assert_eq!(json["turns"]["wakes"], 2);
+        assert_eq!(json["turns"]["wakes"], 3);
+        assert_eq!(json["turns_by_notice_kind"]["unknown"]["wakes"], 1);
         assert!(json["turns_by_notice_kind"].get("102644").is_none());
     }
 

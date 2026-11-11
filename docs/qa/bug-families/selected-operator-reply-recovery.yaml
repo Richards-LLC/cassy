@@ -1,0 +1,4 @@
+title: A lost operator reply selection retries durably after reconnect or expires once with a sender notice
+tasks: [cas-1962]
+invariants: [HUB-J5-SELECTED-REPLY-RECOVERY]
+journeys: [HUB-J5, FACTORY-SUPERVISE]

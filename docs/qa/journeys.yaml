@@ -1357,6 +1357,9 @@ invariants:
     statement: Imported release reviews resolve committed artifact metadata and verified bytes on the consuming machine while preserving owner project, revocation, receipt hash and size bindings.
     check: Run imported_release_review_resolves_verified_peer_ledger_cas_52c1 through ReleaseClose.prepare with a producer path absent on the consumer; require imported receipt and task state retention, cold metadata hydration, and holds for foreign owner, altered remote or local bytes, local or remote revocation, unavailable Cloud and receipt mismatch.
     bug: {task: cas-52c1}
+  HUB-J5-SELECTED-REPLY-RECOVERY:
+    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; reconnect can deliver it, while an unreceived zero-attempt selection expires after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
+    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race and WebSocket delivery.
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1905,6 +1908,7 @@ journeys:
   - HUB-J5-SECRET-SHAPES
   - HUB-J5-CLAUDE-QUEUED-ANSWER
   - HUB-J5-RECONNECT-ANSWER
+  - HUB-J5-SELECTED-REPLY-RECOVERY
   - HUB-J5-UNREAD-SUCCESSION
   - HUB-J5-DIALOG-HOLD
   - HUB-J5-SENDER-TURN-GATE

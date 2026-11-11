@@ -20877,7 +20877,11 @@ mod tests {
                     assert_eq!(report.retry.next_attempt_at, Some(retry_at));
                     assert_eq!(report.selected_at, selected);
                     assert_eq!(report.retry.delivery_attempts, 0);
-                    assert!(first_attempt_at_of(&recovered, id).is_none());
+                    let first_attempt: Option<String> = recovered.conn.lock().unwrap().query_row(
+                        "SELECT first_attempt_at FROM prompt_queue WHERE id = ?",
+                        params![id], |row| row.get(0),
+                    ).unwrap();
+                    assert!(first_attempt.is_none());
                 }
                 if state == "reconnected" {
                     let rows = recovered.peek_operator_replies_at("factory-a", 10, retry_at).unwrap();

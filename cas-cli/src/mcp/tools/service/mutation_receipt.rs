@@ -19,6 +19,8 @@ pub(crate) struct Receipt {
     /// answer can only ever describe the mutation the caller asked for.
     pub terminal: OnceLock<std::time::Instant>,
     pub outcome: OnceLock<String>,
+    /// Each failed park gate's bounded remedy, used if this close answers late.
+    pub park_refusal_summary: OnceLock<String>,
     /// cas-3937 review: the outcome of the work after a merge's commit (its
     /// task close), for the note recorded once that work finishes.
     pub followup: std::sync::Mutex<Option<String>>,
@@ -36,6 +38,7 @@ impl Receipt {
             commit: OnceLock::new(),
             terminal: OnceLock::new(),
             outcome: OnceLock::new(),
+            park_refusal_summary: OnceLock::new(),
             followup: std::sync::Mutex::new(None),
             phases: std::sync::Mutex::new(Vec::new()),
         })

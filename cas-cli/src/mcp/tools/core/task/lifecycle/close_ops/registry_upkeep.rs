@@ -291,7 +291,7 @@ pub(super) fn finish(
         let text = gate_text::upkeep_message(
             &task.id,
             input_path,
-            finding.title,
+            &format!("{} ({})", finding.title, finding.gate),
             &finding.detail,
             &token,
             warnings,

@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub(crate) const SOURCE: &str = "supervisor-auto-clear";
+const BELOW_THRESHOLD_SOURCE: &str = "supervisor-auto-clear:latest-call-below-threshold";
 const ROLE: &str = "supervisor";
 /// A turn read back from an old transcript is history, not a wake.
 const FRESH_MINUTES: i64 = 30;
@@ -74,6 +75,8 @@ pub(crate) struct TurnEnd<'a> {
     pub harness_session: &'a str,
     pub transcript: &'a Path,
     pub at: DateTime<Utc>,
+    /// Ledger total across the wake's calls, used only to explain a skip.
+    pub wake_input_tokens: Option<u64>,
     /// A newer turn had already started when the scan stopped reading.
     pub mid_turn: bool,
 }
@@ -406,10 +409,26 @@ pub(crate) fn on_turn_end(root: &Path, queue: &dyn PromptQueueStore, turn: &Turn
             let budget = usage.model_context_window.filter(|window| *window > 0)
                 .map(|window| (window.saturating_mul(80) / 100).min(cap)).unwrap_or(cap);
             let trigger_tokens = usage.input_tokens;
-            if trigger_tokens < budget { return Ok(Step::Nothing); }
-            if Utc::now() - turn.at > Duration::minutes(FRESH_MINUTES)
-                || crate::factory_context_reset::context_reset_command(turn.cli).is_none()
-            {
+            if Utc::now() - turn.at > Duration::minutes(FRESH_MINUTES) {
+                return Ok(Step::Nothing);
+            }
+            if trigger_tokens < budget {
+                if let Some(wake_tokens) = turn.wake_input_tokens.filter(|total| *total > cap) {
+                    let notice = format!(
+                        "{}\nAutomatic context clear skipped. The latest call used {} input tokens, below the {} threshold. The wake ledger totals {} across calls.",
+                        crate::supervisor_message_wakes::QUIET,
+                        tokens(trigger_tokens), tokens(budget), tokens(wake_tokens),
+                    );
+                    queue.enqueue_idempotent(
+                        BELOW_THRESHOLD_SOURCE, &turn.agent.name, &notice, Some(turn.factory_session),
+                        Some("Automatic context clear skipped"), Some(NotificationPriority::Normal),
+                        &format!("{BELOW_THRESHOLD_SOURCE}:{}:{}:{}", turn.agent.id, turn.harness_session, turn.at.timestamp_micros()),
+                        Some(&QueueOrigin::Daemon),
+                    )?;
+                }
+                return Ok(Step::Nothing);
+            }
+            if crate::factory_context_reset::context_reset_command(turn.cli).is_none() {
                 return Ok(Step::Nothing);
             }
             State {

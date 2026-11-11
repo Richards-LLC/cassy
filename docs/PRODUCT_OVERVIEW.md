@@ -241,7 +241,9 @@ queueing, so lifting the hold releases no stale READY backlog.
 
 Pre-merge reviews launched by the MCP daemon start the existing task verifier
 automatically, carrying the candidate, criteria, receipts and supervisor review
-notes. Approval continues merge admission and leaves a quiet receipt; rejection,
+notes. The merge returns its held dispatch after claiming one verifier; account
+probes, prompt preparation and startup notices continue in the background.
+Approval continues merge admission and leaves a quiet receipt; rejection,
 questions and failed or expired reviews wake the owner with findings. A single
 delivery that conflicts before candidate review reports CONTENT CONFLICT with
 the paths and reopens the task to its assigned worker, invalidating the old proof

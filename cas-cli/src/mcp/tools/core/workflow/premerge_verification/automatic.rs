@@ -179,27 +179,27 @@ pub(super) fn launch(
         .join(format!("attempt-{:032x}", rand::random::<u128>()));
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let output = directory.join("verdict.json");
-    let (mut command, notice) = command(&core.cas_root, &output)?;
-    command.current_dir(&proof.worktree_root);
-    launch_command(core, task, dispatch, command, output, notice)
+    let root = core.cas_root.clone();
+    let worktree = proof.worktree_root.clone();
+    launch_with_preparation(core, task, dispatch, output, move |output| {
+        let (mut command, notice) = command(&root, output)?;
+        command.current_dir(worktree);
+        Ok((command, notice))
+    })
 }
 
-fn launch_command(
+fn launch_with_preparation(
     core: &CasCore,
     task: &Task,
     dispatch: &VerificationDispatch,
-    mut command: Command,
     output: PathBuf,
-    notice: Option<String>,
+    prepare: impl FnOnce(&Path) -> Result<(Command, Option<String>), String> + Send + 'static,
 ) -> Result<Option<std::thread::JoinHandle<()>>, String> {
     let live = cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
         .map_err(|e| e.to_string())?;
     if live.state != cas_types::VerificationDispatchState::Pending {
         return Ok(None);
     }
-    let body = prompt(core, task, &live)?;
-    let input = output.with_file_name("prompt.txt");
-    std::fs::write(&input, body).map_err(|e| e.to_string())?;
     let mut child = cas_types::Agent::new_sub_agent(
         format!("task-verifier-{:032x}", rand::random::<u128>()),
         "task-verifier".into(),
@@ -231,8 +231,23 @@ fn launch_command(
     )
     .map_err(|e| e.to_string())?;
     let worker = core.clone();
+    let task = task.clone();
     let handle = std::thread::Builder::new().name(format!("verifier-{}", task.id)).spawn(move || {
-        let result = review(&worker, &live, &child.id, &mut command, &input, &output);
+        // Account/login probes, review context and notices may block. The
+        // exact dispatch is already claimed, so the merge can return its hold
+        // while startup continues; retries cannot launch another verifier.
+        let result = (|| {
+            let body = prompt(&worker, &task, &live)?;
+            let input = output.with_file_name("prompt.txt");
+            std::fs::write(&input, body).map_err(|e| e.to_string())?;
+            let (mut command, notice) = prepare(&output)?;
+            if let Some(notice) = notice
+                && let Err(error) = attention(&worker, &live, &notice)
+            {
+                tracing::warn!(dispatch_id = %live.id, %error, "Verifier startup notice failed");
+            }
+            review(&worker, &live, &child.id, &mut command, &input, &output)
+        })();
         // The existing daemon expiry sweep owns timeout escalation and its
         // durable dedupe key; do not emit a second timeout wake here.
         if let Err(error) = result && chrono::Utc::now() < live.deadline_at && !resolved(&worker, &live) {
@@ -262,11 +277,6 @@ fn launch_command(
             let _ = agents.graceful_shutdown(&child.id);
         }
     }).map_err(|e| e.to_string())?;
-    if let Some(notice) = notice
-        && let Err(error) = attention(core, dispatch, &notice)
-    {
-        tracing::warn!(dispatch_id = %dispatch.id, %error, "Verifier launched; follow-up notice failed");
-    }
     Ok(Some(handle))
 }
 
@@ -476,6 +486,68 @@ mod tests {
     }
 
     #[test]
+    fn slow_dispatch_preparation_returns_claim_before_provider_ready_cas_2efe() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let owner = cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        let task = Task::new("cas-2efe".into(), "Slow verifier preparation".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root, &task.id, &owner.id, &owner.id,
+            &cas_types::VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10), false,
+        ).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let caller = core.clone();
+        let review_task = task.clone();
+        let review_dispatch = dispatch.clone();
+        // Gate the external provider preparation, not the verifier/store logic.
+        let request = std::thread::spawn(move || {
+            let result = launch_with_preparation(
+                &caller, &review_task, &review_dispatch,
+                caller.cas_root.join("verdict.json"), move |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Err("injected provider startup failure".into())
+                },
+            );
+            returned_tx.send(result).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let returned = returned_rx.recv_timeout(Duration::from_secs(5));
+        let live = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        let duplicate = if returned.is_ok() {
+            Some(launch_with_preparation(
+                &core, &task, &dispatch, root.join("duplicate.json"),
+                |_| panic!("a claimed dispatch must not probe another provider"),
+            ).unwrap())
+        } else { None };
+        release_tx.send(()).unwrap();
+        request.join().unwrap();
+        let handle = returned.expect("merge must return while provider preparation is gated")
+            .unwrap().unwrap();
+        assert_eq!(live.id, dispatch.id);
+        assert_eq!(live.state, cas_types::VerificationDispatchState::Claimed);
+        assert!(owns(&root, &live));
+        assert!(duplicate.unwrap().is_none());
+        handle.join().unwrap();
+        let recovered = cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap();
+        assert_eq!(recovered.state, cas_types::VerificationDispatchState::Pending);
+        assert!(!owns(&root, &recovered));
+    }
+
+    #[test]
     fn cas_ce3e_launched_verifier_survives_attention_failure() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = tempfile::tempdir().unwrap();
@@ -505,9 +577,9 @@ mod tests {
         // claim, notice and child cleanup still run against the actual store.
         let mut command = Command::new("sh");
         command.args(["-c", "exit 1"]);
-        let result = launch_command(
-            &core, &task, &dispatch, command, directory.join("verdict.json"),
-            Some("fallback".into()),
+        let result = launch_with_preparation(
+            &core, &task, &dispatch, directory.join("verdict.json"),
+            move |_| Ok((command, Some("fallback".into()))),
         );
         let handle = result.expect("a notice failure must not report a failed launch")
             .expect("the verifier was launched");

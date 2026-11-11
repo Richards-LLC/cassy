@@ -24,7 +24,7 @@
 #
 # Landing on main is the release: the merge queue's run builds the archives
 # (release-prebuild.yml) and release.yml publishes them. Nothing here tags,
-# builds Rust or publishes. The local train and gate scripts are not called.
+# publishes. Cut preview reuses an exact Linux prebuild, or builds one candidate.
 #
 # The draft: write the Slack draft before running, at the path printed by
 # --next-version, or anywhere with --notes <file>; `{{VERSION}}` in it becomes
@@ -434,6 +434,47 @@ publish_branch() {
     git push --quiet "$remote" "HEAD:refs/heads/$branch"
 }
 
+# Evaluate with the release commit's code before any push, enqueue or freeze.
+# Do not wait for a queue prebuild that this cut has not admitted yet.
+preview_cut() {
+    local sha task candidate lookup run_id build_start build_seconds=0
+    sha="$(git rev-parse HEAD)"
+    task="$(jq -r '.train_id // empty' <<<"$context")"
+    if [[ -z "$task" ]]; then
+        task="$(jq -r '.included_task_ids[0] // empty' "$release_input_report")"
+    fi
+    [[ -n "$task" ]] || die "cut preview needs a train or an included task ID for its candidate; nothing pushed"
+    local candidate_dir
+    candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
+    mkdir -p "$candidate_dir"
+    lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
+        "$script_dir/find-release-prebuild.sh" "$sha")"
+    if grep -qx 'found=true' <<<"$lookup"; then
+        run_id="$(sed -n 's/^run-id=//p' <<<"$lookup")"
+        "$gh_bin" run download "$run_id" --name cas-x86_64-unknown-linux-gnu --dir "$candidate_dir"
+        tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
+        candidate="$candidate_dir/cas"
+    else
+        build_start=$SECONDS
+        "$cas_bin" qa candidate build --task "$task" --rev "$sha" >&2 \
+            || die "cut candidate build failed; no retry, nothing pushed"
+        build_seconds=$((SECONDS - build_start))
+        candidate="$("$cas_bin" qa candidate path --task "$task")"
+    fi
+    local train_args=()
+    "$train_tracking" && train_args=(--train "$task")
+    "$candidate" release preview --commit "$sha" --version "$version" \
+        --inputs "$release_input_report" "${train_args[@]}" >"$candidate_dir/preview.raw.json"
+    release_close_preview="$candidate_dir/preview.json"
+    jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
+        "$candidate_dir/preview.raw.json" >"$release_close_preview"
+    jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
+        "$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
+    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' "$release_close_preview")"
+    jq -e '.members == 0 or .would_close > 0' "$release_close_preview" >/dev/null \
+        || die "release cut refused: zero would-close; inspect $release_close_preview; nothing pushed or enqueued"
+}
+
 # Advisory once per invocation, including dry-run and version preview. Never
 # include this probe in prepare/rebump loops or fail a release on provider drift.
 python3 "$script_dir/github_queue_health.py" --worktree "$repo_root" --gh "$gh_bin" \
@@ -486,6 +527,7 @@ if "$dry_run"; then
     say "dry run: v$version committed locally on $branch; nothing pushed"
     exit 0
 fi
+preview_cut
 # Best-effort measured history; an older installed CLI cannot block a cut.
 for estimate_stage in train_tip_suite merge_queue release_publish; do
     "$cas_bin" ledger estimate pipeline "$estimate_stage" --preview >&2 \
@@ -497,7 +539,7 @@ done
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
     if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
-        --inputs "$release_input_report" --first-child "$first_child" 2>&1)"; then
+        --inputs "$release_input_report" --first-child "$first_child" --preview "$release_close_preview" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi

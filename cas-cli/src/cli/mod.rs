@@ -475,6 +475,8 @@ pub enum ReleaseCommands {
     Track(release_automation::TrackArgs),
     /// Resolve shipped deliveries and portable proof references at an exact SHA
     Inventory(release_automation::InventoryArgs),
+    /// Preview per-member close decisions without changing the release store
+    Preview(release_automation::PreviewArgs),
     /// Reconcile a published release once, from the host's publication read
     Published(release_adapters::PublishedArgs),
     /// Reconcile a merged staging-to-main promotion PR once
@@ -1040,6 +1042,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Preview(args)) => release_automation::preview(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Published(args)) => release_adapters::published(args, cas_root),
         Commands::Release(ReleaseCommands::Promoted(args)) => release_adapters::promoted(args, require_cas_root(cas_root)?),

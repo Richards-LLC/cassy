@@ -250,7 +250,9 @@ pub(super) fn tag_scope(
             scope.release_id,
             scope.final_release_sha
         );
-        return Ok(scope.clone());
+        let mut published = scope.clone();
+        published.release_tag = Some(tag.to_string());
+        return Ok(published);
     }
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
     let repository = match context {

@@ -26,6 +26,109 @@ pub struct InventoryArgs {
     scope: PathBuf,
 }
 
+#[derive(Debug, Args)]
+pub struct PreviewArgs {
+    /// Replay an exact portable scope, including a historical published release
+    #[arg(long, conflicts_with_all = ["commit", "version", "inputs", "train"])]
+    scope: Option<PathBuf>,
+    #[arg(long, required_unless_present = "scope")]
+    commit: Option<String>,
+    #[arg(long, required_unless_present = "scope")]
+    version: Option<String>,
+    #[arg(long)]
+    inputs: Option<PathBuf>,
+    #[arg(long)]
+    train: Option<String>,
+}
+
+/// No store, receipt, ledger-cache or notification writes.
+pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
+    let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
+    let scope = if let Some(path) = &args.scope {
+        serde_json::from_slice(&fs::read(path)?)?
+    } else {
+        cut_scope(root, &repo, args.commit.as_deref().context("commit required")?,
+            args.version.as_deref().context("version required")?, args.train.as_deref(), args.inputs.as_deref())?
+    };
+    let preview = preview_scope(root, &repo, scope)?;
+    println!("{}", serde_json::to_string(&preview)?);
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct ReleasePreview {
+    scope: ReleaseScope,
+    members: usize,
+    would_close: usize,
+    would_hold: usize,
+    already_closed: usize,
+    not_eligible: usize,
+    by_reason: BTreeMap<String, usize>,
+    review_missing: Vec<String>,
+    members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    #[serde(default)]
+    candidate_build_seconds: u64,
+}
+
+impl ReleasePreview {
+    fn from_members(scope: ReleaseScope, members_by_id: BTreeMap<String,
+        crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>) -> Self {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
+            would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
+            review_missing: vec![], members_by_id, candidate_build_seconds: 0 };
+        for (id, outcome) in &value.members_by_id {
+            let reason = match outcome {
+                CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
+                CassyMergeClose::AlreadyClosed => { value.already_closed += 1; "ALREADY_CLOSED" }
+                CassyMergeClose::NotEligible => { value.not_eligible += 1; "NOT_ELIGIBLE" }
+                CassyMergeClose::Held(reason) => {
+                    value.would_hold += 1;
+                    let code = reason.split(':').next().unwrap_or(reason).trim();
+                    if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
+                    code
+                }
+            };
+            *value.by_reason.entry(reason.to_string()).or_default() += 1;
+        }
+        value
+    }
+
+    fn allow_cut(&self) -> Result<()> {
+        ensure!(self.members == 0 || self.would_close > 0,
+            "release cut refused: {} members, zero would-close; inspect by_reason and review_missing in the preview", self.members);
+        Ok(())
+    }
+}
+
+fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<ReleasePreview> {
+    let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &scope).map_err(anyhow::Error::msg)?;
+    let members = crate::release_reconcile::preview_release(root, repo, &inventory).map_err(anyhow::Error::msg)?;
+    Ok(ReleasePreview::from_members(scope, members))
+}
+
+fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Option<&str>, inputs: Option<&Path>) -> Result<ReleaseScope> {
+    ensure!(version_ok(version), "expected version x.y.z");
+    ensure!(commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()), "release commit must be a full SHA");
+    let mut scope = super::release_adapters::tag_scope(root, repo, None, train.unwrap_or(""), &format!("v{version}"), commit)?;
+    scope.release_tag = None;
+    scope.constituent_epic_ids = train.map(|id| vec![id.to_string()]).unwrap_or_default();
+    if let Some(path) = inputs {
+        let audit = read_cut_inputs(path, repo, commit)?;
+        scope.included_task_ids = audit.included_task_ids;
+        scope.no_code_members = audit.no_code_members;
+    }
+    Ok(scope)
+}
+
+fn read_cut_inputs(path: &Path, repo: &Path, commit: &str) -> Result<ReleaseInputs> {
+    let audit: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
+    ensure!(!audit.checked_sha.is_empty(), "release input audit has no checked_sha");
+    ensure!(audit.checked_sha == commit || git(repo, &["rev-parse", &format!("{commit}^1")]).ok().as_deref() == Some(audit.checked_sha.as_str()),
+        "release input audit is stale; rerun release.sh");
+    Ok(audit)
+}
+
 /// The CLI and trusted release adapters share the same read-only resolver.
 pub fn inventory(args: &InventoryArgs, root: &Path) -> Result<()> {
     let scope: ReleaseScope = serde_json::from_slice(&fs::read(&args.scope)?)?;
@@ -47,6 +150,9 @@ pub struct TrackArgs {
     /// Audited constituent refs, deferrals and included delivery IDs
     #[arg(long)]
     inputs: Option<PathBuf>,
+    /// Candidate-binary preview at this exact release commit
+    #[arg(long)]
+    preview: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
 pub struct InstalledArgs {
@@ -93,6 +199,8 @@ pub(super) struct ReleaseContext {
     pub(super) release_scope: Option<ReleaseScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     release_inventory: Option<ReleaseInventory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    close_preview: Option<ReleasePreview>,
 }
 
 fn version_ok(version: &str) -> bool {
@@ -202,6 +310,7 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         release_inputs: None,
         release_scope: None,
         release_inventory: None,
+        close_preview: None,
     })
 }
 
@@ -267,12 +376,7 @@ fn track_on_train(
         );
     }
     if let Some(path) = &args.inputs {
-        let audit: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
-        let checked = audit.checked_sha.as_str();
-        ensure!(!checked.is_empty(), "release input audit has no checked_sha");
-        ensure!(checked == args.commit || git(repo, &["rev-parse", &format!("{}^1", args.commit)])
-            .ok().as_deref() == Some(checked), "release input audit is stale; rerun release.sh");
-        expected.release_inputs = Some(audit);
+        expected.release_inputs = Some(read_cut_inputs(path, repo, &args.commit)?);
     }
     let previous_commit = expected.release_commit.replace(args.commit.clone());
     if expected.first_child_commit.is_none() {
@@ -314,6 +418,18 @@ fn track_on_train(
             }
         }
     }
+    let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
+    let preview = if let Some(path) = &args.preview {
+        let value: ReleasePreview = serde_json::from_slice(&fs::read(path)?)?;
+        ensure!(serde_json::to_value(&value.scope)? == serde_json::to_value(&scope)?, "cut preview scope differs from release inputs");
+        // Counts and residuals are derived from the candidate's member decisions.
+        let mut rebuilt = ReleasePreview::from_members(scope.clone(), value.members_by_id);
+        rebuilt.candidate_build_seconds = value.candidate_build_seconds;
+        rebuilt
+    } else { preview_scope(root, repo, scope.clone())? };
+    preview.allow_cut()?;
+    expected.close_preview = Some(preview);
+    expected.release_scope = Some(scope);
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
@@ -814,12 +930,14 @@ pub(super) mod tests {
             first_child: sha.clone(),
             version: "9.99.2".into(),
             inputs: None,
+            preview: None,
         };
         (temp, root, train, owner, args)
     }
 
     #[test]
     fn release_inventory_contract_roundtrip() {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let (temp, _, train, _, args) = fixture();
         let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
         let scope = serde_json::json!({
@@ -829,7 +947,23 @@ pub(super) mod tests {
             "constituent_epic_ids": [], "included_task_ids": [], "no_code_members": {}, "proof_refs": []
         });
         value["release_scope"] = scope.clone();
+        let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
+            ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
+            ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
+            ("cas-0003".into(), CassyMergeClose::NotEligible),
+        ]));
+        assert!(preview.allow_cut().is_err());
+        preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
+        preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
+        assert!(preview.allow_cut().is_ok());
+        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
+        assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
+        value["close_preview"] = serde_json::to_value(preview).unwrap();
         let restored: ReleaseContext = serde_json::from_value(value).unwrap();
+        let receipt = temp.path().join("cut.json");
+        save(&receipt, &restored).unwrap();
+        let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+        assert_eq!(restored.close_preview.as_ref().unwrap().review_missing, ["cas-0001"]);
         assert_eq!(serde_json::to_value(restored).unwrap()["release_scope"], scope);
     }
 

@@ -522,8 +522,8 @@ hotfix_fallback() {
     write_valid_draft "$tmp/hotfix-$mode.md"
     FAKE_CONTEXT_MODE="$mode" FAKE_TRACK_EXIT="${2:-0}" FAKE_GH_STATE="$tmp/state-$mode" \
         run "$fixture" --hotfix --base main --no-watch --notes "$tmp/hotfix-$mode.md" >"$tmp/hotfix-$mode.log" 2>&1 || status=$?
-    [[ "$status" == 0 && "$(git -C "$tmp/origin.git" rev-parse "refs/heads/release/v9.99.1-$mode" 2>/dev/null)" == "$(git -C "$fixture" rev-parse HEAD)" ]] || { cat "$tmp/hotfix-$mode.log"; return 1; }
-    grep -qi 'tracking.*skipped\|tracking.*continu' "$tmp/hotfix-$mode.log" &&
+    [[ "$status" != 0 ]] &&
+        ! git -C "$tmp/origin.git" show-ref --verify --quiet "refs/heads/release/v9.99.1-$mode" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
 train_receipt_cut() {
@@ -567,8 +567,8 @@ PY
 }
 check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
 unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
-check 'hotfix_fallback no_train' 'cas-61e0: no open train cannot gate a hotfix cut to --base main'
-check 'hotfix_fallback different_branch' 'cas-61e0: a different train lane cannot gate the explicit hotfix branch'
+check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included task cannot build a cut candidate'
+check 'hotfix_fallback different_branch' 'an unrelated train cannot provide candidate identity for a standalone hotfix'
 freeze_failure_stops_publication() {
     local fixture="$tmp/cut-failure" status=0
     clone_epic "$fixture" epic/cut-failure cut-failure

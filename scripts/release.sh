@@ -475,6 +475,13 @@ preview_cut() {
     jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
         "$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
     say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' "$release_close_preview")"
+    local unreviewed
+    unreviewed="$(jq -r --slurpfile inputs "$release_input_report" '
+        ($inputs[0].included_task_ids // []) as $included |
+        [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
+    ' "$release_close_preview")"
+    [[ -z "$unreviewed" ]] \
+        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release task_ids=<release-member-ids> staging_sha=<reviewed-sha> ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md and $release_close_preview; nothing pushed or enqueued"
     jq -e '.members == 0 or .would_close > 0' "$release_close_preview" >/dev/null \
         || die "release cut refused: zero would-close; inspect $release_close_preview; nothing pushed or enqueued"
 }

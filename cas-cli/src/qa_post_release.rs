@@ -334,9 +334,16 @@ mod tests {
         let mut retired = tasks.get("cas-live").unwrap();
         retired.id = "cas-retired".into();
         tasks.add(&retired).unwrap();
+        // cas-d31ab: two members share one hold kind, alongside review holds.
+        for id in ["cas-held-a", "cas-held-b"] {
+            let mut held = retired.clone();
+            held.id = id.into();
+            held.status = cas_types::TaskStatus::Blocked;
+            tasks.add(&held).unwrap();
+        }
         crate::store::open_agent_store(&cas).unwrap().unregister(&worker.id).unwrap();
         let ledger = project.join("LEDGER.md");
-        fs::write(&ledger, crate::qa_ledger::scaffold(&tasks.get("cas-live").unwrap(), &[], "rev") + "\ncas-live PASS\ncas-retired PASS\n").unwrap();
+        fs::write(&ledger, crate::qa_ledger::scaffold(&tasks.get("cas-live").unwrap(), &[], "rev") + "\ncas-live PASS\ncas-retired PASS\ncas-held-a PASS\ncas-held-b PASS\n").unwrap();
         let store = cas_store::SqliteArtifactStore::open(&cas).unwrap();
         let context = crate::artifacts::PublishContext {
             store: &store,
@@ -349,7 +356,7 @@ mod tests {
         let service = crate::mcp::CasService::new(core, None);
         let request = |kind: &str| serde_json::from_value(serde_json::json!({
             "action": "batch_receipt", "verification_type": kind,
-            "task_ids": ["cas-live", "cas-retired"], "staging_sha": target_tip,
+            "task_ids": ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"], "staging_sha": target_tip,
             "ledger_artifact_id": artifact, "ledger_path": ledger, "ledger_author": "external-qa",
         })).unwrap();
         let text = |response: rmcp::model::CallToolResult| response.content.iter()
@@ -360,25 +367,42 @@ mod tests {
             .list_pending(&unrelated.id).unwrap().into_iter().filter(|row| {
                 serde_json::from_str::<serde_json::Value>(&row.payload).unwrap()["kind"] == "batch_close_hold"
             }).collect::<Vec<_>>();
-        assert_eq!(pending_holds().len(), 2, "{qa}");
+        assert_eq!(pending_holds().len(), 1, "{qa}");
         let prompts = crate::store::open_prompt_queue_store(&cas).unwrap().peek_all(100).unwrap();
         let holds: Vec<_> = prompts.iter().filter(|row| row.summary.as_deref() == Some("batch_close_hold")).collect();
-        assert_eq!(holds.len(), 2);
+        assert_eq!(holds.len(), 1);
         assert!(holds.iter().all(|row| crate::supervisor_notices::is_action_envelope(&row.prompt)));
         let receipt = cas_store::list_qa_batch_receipts(&cas, "batch-offer-fixture").unwrap().remove(0);
-        for id in ["cas-live", "cas-retired"] {
+        let payload: serde_json::Value = serde_json::from_str(&pending_holds()[0].payload).unwrap();
+        let context = &payload["context"];
+        assert_eq!(context["receipt_id"], receipt.id);
+        assert_eq!(context["closed_count"], 0);
+        let groups = context["held_by_kind"].as_object().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups["RELEASE_MEMBER_HELD"].as_array().unwrap().len(), 2);
+        let mut member_ids = std::collections::BTreeSet::new();
+        for member in groups.values().flat_map(|group| group.as_array().unwrap()) {
+            let id = member["task_id"].as_str().unwrap();
+            member_ids.insert(id.to_string());
+            // Complete caller payloads are data, independent of notice prose.
+            assert_eq!(member["next_action"], format!(
+                "task action=close id={id} commit_receipt={} reason=\"<gate proof>\"", receipt.task_heads[id]));
+            assert!(!member["reason"].as_str().unwrap().is_empty());
+        }
+        assert_eq!(member_ids, ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"].map(String::from).into());
+        for id in ["cas-live", "cas-retired", "cas-held-a", "cas-held-b"] {
             let task = tasks.get(id).unwrap();
-            assert_eq!(task.status, cas_types::TaskStatus::AwaitingMerge);
+            assert_eq!(task.status, if id.starts_with("cas-held-") { cas_types::TaskStatus::Blocked } else { cas_types::TaskStatus::AwaitingMerge });
             assert_eq!(task.notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
             assert!(pending_holds().iter().any(|row| row.payload.contains(id)));
         }
         // A continuation replay retries ordinary gates without duplicating its notice or outcome.
         service.inner.close_release_covered_deliveries(&receipt).await;
-        assert_eq!(pending_holds().len(), 2);
+        assert_eq!(pending_holds().len(), 1);
         for id in ["cas-live", "cas-retired"] {
             assert_eq!(tasks.get(id).unwrap().notes.matches(&format!("BATCH_CLOSE_OUTCOME {}:", receipt.id)).count(), 1);
         }
-        // Re-recording the same QA payload creates audit evidence, not another action for the same gate.
+        // A new receipt gets one grouped notice; replay of that receipt stays quiet.
         let qa = text(service.verification(rmcp::handler::server::wrapper::Parameters(request("task"))).await.unwrap());
         assert_eq!(pending_holds().len(), 2);
         // cas-809a: an epic takes no receipt of its own, so its status names the child receipts covering it.
@@ -412,8 +436,14 @@ mod tests {
             assert_eq!(tasks.get(id).unwrap().status, cas_types::TaskStatus::Closed, "{reviewed}");
         }
         let verdict = cas_store::release_verdicts_for_task(&cas, "batch-offer-fixture", "cas-live").unwrap().remove(0);
+        let notices = pending_holds();
+        assert_eq!(notices.len(), 3);
+        let payload: serde_json::Value = notices.iter().map(|row| serde_json::from_str::<serde_json::Value>(&row.payload).unwrap())
+            .find(|payload| payload["context"]["receipt_id"] == verdict.id).unwrap();
+        assert_eq!(payload["context"]["closed_count"], 2);
+        assert_eq!(payload["context"]["held_by_kind"]["RELEASE_MEMBER_HELD"].as_array().unwrap().len(), 2);
         service.inner.close_release_covered_deliveries(&verdict).await;
-        assert_eq!(pending_holds().len(), 2);
+        assert_eq!(pending_holds().len(), 3);
         assert_eq!(offer_batch_receipts(&cas).unwrap(), 0, "closed delivery has no further QA offer");
 
     }

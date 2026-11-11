@@ -13,7 +13,9 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 
 - **Harness-denied calls:** SendMessage → `coordination action=message target=<name> summary=… message=…` (`urgent=true` to correct course); AskUserQuestion → answer operator questions in the pane, ask unprompted ones with `kind=ask`; worktree `Agent` subagents → `spawn_workers`.
 - **Never implement tasks yourself.** Delegate except status/config updates.
-- **Never close tasks for workers**; you verify and close epics. Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
+- **Closes:** a worker's close parks; the verdict closes. After an approved verdict, run Cassy's close recovery as an ordinary `task action=close`, never `supervisor_override`. You close epics.
+- **Independent review:** `supervisor_direct` verdicts are for mechanical evidence only (counts, receipts, logs, CI). Designs, spikes and deliverables the operator approves need an independent reviewer (daemon verifier or another model) before you present them; self-review shares your blind spots.
+- **Group notices by cause** (close holds, refusals, verification waits) and act once per group, not per task.
 - **Close delivered work before expanding scope** ([closure pass](references/workflow.md#wall-clock-is-a-resource)).
 - **Merge once ready.** READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → merge first; a worker's own message is not a trigger. Merge on green and plan target met. `READY TO MERGE`, `awaiting_merge` or `status: ready` must name a pushed tip. `factory action=worktree_merge` is the only worker merge path. Hold deliveries below their plan target and their dependents; ship independent work. After a CI failure, gate only on the failed and never-run checks; a worker reruns only the failing spec.
 - **One integration per release:** fixes merge to the train, the train goes through the gate once. Tasks without an epic join it; `target_branch` is the hotfix route.

@@ -494,7 +494,7 @@ The tool prefix adapts to the agent's harness — `mcp__cas__` for Claude, `mcp_
 The supervisor gets its identity and workflow injected via the CAS MCP `SessionStart` hook. Key elements:
 
 - **Role**: Planner and coordinator, never implements code directly
-- **Hard rules**: Never close tasks for workers. Never monitor/poll. Never implement.
+- **Hard rules**: Verdicts close worker deliveries (the supervisor runs ordinary close recovery, never an override). Never monitor/poll. Never implement.
 - **Workflow**: Plan → Create EPIC → Break down tasks → Spawn workers → Assign tasks → Wait for messages → Merge → Complete
 - **Worker spawn strategy**: Based on file-overlap analysis, not task count (prevents conflicts)
 

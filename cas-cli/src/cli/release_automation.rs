@@ -882,6 +882,16 @@ pub(super) mod tests {
         })).unwrap()).unwrap();
         args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
+        // A local publication is not portable proof until Cloud commits it.
+        assert_eq!(artifact.status, "local");
+        assert!(artifact.cloud_artifact_id.is_none());
+        assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
+            .starts_with("RELEASE_NO_CODE_PROOF_BINDING"));
+        assert!(!receipt_path(&root, &args.version).unwrap().exists());
+        assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
+            &tasks.get(&train.id).unwrap()));
+        artifacts.mark_uploaded(&artifact.id, "cloud-report").unwrap();
+        artifacts.mark_committed(&artifact.id, None).unwrap();
         let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
         let mut size = proof.clone(); size.size_bytes += 1;
         let mut reviewed = proof.clone(); reviewed.reviewed_sha = "0".repeat(40);

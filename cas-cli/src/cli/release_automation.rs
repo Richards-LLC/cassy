@@ -1388,6 +1388,7 @@ pub(super) mod tests {
         train.epic_verification_owner = None;
         open_task_store(&root).unwrap().update(&train).unwrap();
         let publication = root.join("failed-publication.json");
+        let before = open_task_store(&root).unwrap().get(&train.id).unwrap();
         fs::write(&publication, r#"{"tag_name":"v0.1.0","draft":false,"published_at":"2026-11-05T23:00:00Z"}"#).unwrap();
         let cli = super::super::Cli::try_parse_from([
             "cas", "release", "installed", "--receipt", publication.to_str().unwrap(),
@@ -1403,7 +1404,7 @@ pub(super) mod tests {
             .get_by_transition_key(&format!("supervisor-notice:release_post_publish_failed:{}:0.1.0:{}", train.id, owner.id)).unwrap();
         assert!(notices.is_some());
         // There is deliberately no published tag or Git transport for reconciliation.
-        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().updated_at, train.updated_at);
+        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().updated_at, before.updated_at);
     }
 
     #[test]

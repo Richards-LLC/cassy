@@ -383,6 +383,38 @@ esac
         self.assertEqual(calls.read_text().splitlines(),
                          ["qa journeys --check", "qa impact " + self.base + " --json"])
 
+    def test_legacy_registry_uses_explicit_policy_without_a_store(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> .git/validator-calls
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') exit 1 ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/signup.ts", "modified owned surface\n")
+        self.commit()
+        calls = self.repo / ".git" / "validator-calls"
+        explicit = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
+        self.assertNotIn("config get qa.registry.enforce", calls.read_text().splitlines())
+        self.assertIn("qa impact " + base + " --json", calls.read_text().splitlines())
+
+        # A missing header still needs config, and a failed lookup fails closed.
+        calls.unlink()
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.commit()
+        fallback = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(fallback.returncode, 1, fallback.stdout + fallback.stderr)
+        self.assertIn("config get qa.registry.enforce", calls.read_text().splitlines())
+        self.assertNotIn("qa impact " + base + " --json", calls.read_text().splitlines())
+
     def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
         validator = self.repo / ".git" / "legacy-cas"
         validator.write_text('''#!/usr/bin/env bash

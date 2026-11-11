@@ -70,6 +70,43 @@ fn operation_key(project_id: &str, release_id: &str, final_release_sha: &str) ->
     }
 }
 
+/// Counts describe persisted member outcomes, independently of whether the
+/// release operation itself completed. Residuals may also name parent tasks.
+#[derive(Debug, Default, Serialize)]
+struct ReleaseCloseoutCounts {
+    closed: usize,
+    already_closed: usize,
+    held: usize,
+    not_eligible: usize,
+    residual: usize,
+    complete: bool,
+}
+
+impl From<&ReleaseReconcileReceipt> for ReleaseCloseoutCounts {
+    fn from(receipt: &ReleaseReconcileReceipt) -> Self {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let mut counts = Self {
+            residual: receipt.residuals.len(), complete: receipt.complete, ..Self::default()
+        };
+        for outcome in receipt.members.values() {
+            match outcome {
+                CassyMergeClose::Closed { .. } => counts.closed += 1,
+                CassyMergeClose::AlreadyClosed => counts.already_closed += 1,
+                CassyMergeClose::Held(_) => counts.held += 1,
+                CassyMergeClose::NotEligible => counts.not_eligible += 1,
+            }
+        }
+        counts
+    }
+}
+
+impl std::fmt::Display for ReleaseCloseoutCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} member(s) closed by this operation, {} already closed, {} held, {} not eligible; {} residual(s); complete={}",
+            self.closed, self.already_closed, self.held, self.not_eligible, self.residual, self.complete)
+    }
+}
+
 // ---- One operation per release identity. ----
 
 /// Run one trigger. The first trigger for a release identity reconciles once;
@@ -96,12 +133,11 @@ pub(crate) fn reconcile_once(
     };
     send_notice(root, scope, &receipt)?;
     Ok(format!(
-        "{} at {}: {} ({} member(s), {} residual(s))",
+        "{} at {}: {}; {}",
         scope.release_id,
         scope.final_release_sha,
-        if reused { "operation already completed" } else { "reconciled" },
-        receipt.members.len(),
-        receipt.residuals.len(),
+        if reused { "closeout reused" } else { "closeout recorded" },
+        ReleaseCloseoutCounts::from(&receipt),
     ))
 }
 
@@ -109,12 +145,12 @@ pub(crate) fn reconcile_once(
 /// parents with owner and next action, inventory exceptions and unfinished
 /// GitHub issues.
 fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileReceipt) -> Result<()> {
+    let counts = ReleaseCloseoutCounts::from(receipt);
     let mut detail = format!(
-        "{} closeout at {}: {} member(s) reconciled, {} residual(s).",
+        "{} closeout at {}: {}.",
         scope.release_id,
         scope.final_release_sha,
-        receipt.members.len(),
-        receipt.residuals.len()
+        counts,
     );
     for r in &receipt.residuals {
         detail.push_str(&format!("\n- {}: {}; owner {}; next: {}", r.task_id, r.gate, r.owner, r.next_action));
@@ -156,7 +192,7 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
         "release_closeout",
         &detail,
         &format!("supervisor-notice:release_closeout:{}", intent.key),
-        None,
+        Some(serde_json::json!({"closeout_counts": counts})),
     )?;
     Ok(())
 }

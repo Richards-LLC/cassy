@@ -672,3 +672,7 @@ pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
             }))
     }).unwrap_or(false)
 }
+
+#[cfg(test)]
+#[path = "release_close_tests.rs"]
+mod tests;

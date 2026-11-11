@@ -143,12 +143,23 @@ async fn every_anchor_writer_mints_or_appends_its_delivery_cycle_cas_50b2() {
     let first = (1, vec![a.clone(), b.clone()], true);
     assert_eq!(cycles(&cas_dir, &id), [first.clone(), (2, vec![c.clone()], false)]);
 
-    // Transfer adoption is not a new cycle: it appends the adopted tip.
+    // Conflict rework retires the parked anchor inside the cycle; a transfer
+    // that adopts the reworked branch appends its tip to that same cycle.
+    git(repo, &["push", "-q", "origin", "factory/test-agent"]);
+    let parked = close().await;
+    let mut rework = tasks.get(&id).unwrap();
+    assert_eq!(rework.status, TaskStatus::AwaitingMerge, "{parked}");
+    rework.status = TaskStatus::InProgress;
+    tasks.update(&rework).unwrap();
+    assert_eq!(tasks.get(&id).unwrap().deliverables.factory_branch_anchor, None);
     let d = commit(repo, &id, "d.txt");
     git(repo, &["push", "-q", "origin", "factory/test-agent"]);
-    service.task(task_request(serde_json::json!({
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let adopted = supervisor.task(task_request(serde_json::json!({
         "action": "transfer", "id": id, "to_agent": "new-worker", "adopt_branch": true,
-    }))).await.unwrap();
+        "supervisor_override": true, "reason": "Hand the reworked branch over",
+    }))).await;
+    assert!(adopted.is_ok(), "{adopted:?}");
     assert_eq!(tasks.get(&id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(d.as_str()));
     assert_eq!(cycles(&cas_dir, &id), [first.clone(), (2, vec![c.clone(), d.clone()], false)]);
 

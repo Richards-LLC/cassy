@@ -628,6 +628,8 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                     "forwarded candidate",
                     "delegates acceptance; no local conditional bypass".into(),
                 )
+            } else if !candidate(flag) && !f.policy && f.refused.is_empty() {
+                ("excluded execution selector", "Boolean control has no policy refusal or registered gate in this function or statically resolved callees".into())
             } else {
                 audit.gaps.push(format!(
                     "{} {} unclassified bypass candidate {flag}",

@@ -2481,22 +2481,39 @@ mod tests {
             retired_local: HashMap::new(), budget: None,
         };
         tokio::task::spawn_blocking(move || {
-            // A reset changes the harness registration, but preserves the
-            // canonical worker/task owner (GH #1563, cas-9aa1).
-            for (holder_session, reader_name, reader_task, retired, same_owner) in [
-                (Some("session-a"), "reader-worker", "cas-reader", false, false),
-                (Some("session-b"), "reader-worker", "cas-reader", false, false),
-                (None, "reader-worker", "cas-reader", false, false),
-                (Some("session-a"), "holder-worker", "cas-other-task", false, false),
-                (Some("session-a"), "reader-worker", "cas-real-task", false, false),
-                (Some("session-a"), "holder-worker", "cas-real-task", false, true),
-                (Some("session-b"), "holder-worker", "cas-real-task", false, true),
-                (Some("session-a"), "holder-worker", "cas-real-task", true, true),
+            // GH #1803: queued successors retain worker identity across task
+            // rollover; retired/landed claims are not concurrent peer edits.
+            use crate::types::TaskStatus::{AwaitingMerge, Cancelled, Closed, InProgress};
+            for (holder_session, reader_name, reader_task, retired, task_status, landed, expected) in [
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(InProgress), false, None),
+                (Some("session-b"), "reader-worker", "cas-reader", false, None, false, None),
+                (None, "reader-worker", "cas-reader", false, None, false, None),
+                (Some("session-a"), "holder-worker", "cas-other-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "reader-worker", "cas-real-task", false, None, false, None),
+                (Some("session-a"), "holder-worker", "cas-real-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-b"), "holder-worker", "cas-real-task", false, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "holder-worker", "cas-real-task", true, None, false, Some(FileLease::Mine)),
+                (Some("session-a"), "reader-worker", "cas-reader", true, Some(InProgress), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(Closed), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(Cancelled), false, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(AwaitingMerge), true, Some(FileLease::Unchecked)),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(AwaitingMerge), false, None),
+                (Some("session-a"), "reader-worker", "cas-reader", false, Some(InProgress), true, None),
             ] {
                 let same_session = holder_session == Some("session-a");
                 let dir = tempfile::tempdir().unwrap();
                 let root = crate::store::init_cas_dir(dir.path()).unwrap();
                 let agents = crate::store::open_agent_store(&root).unwrap();
+                if let Some(status) = task_status {
+                    let mut task = crate::types::Task::new("cas-real-task".into(), "Fixture".into());
+                    task.status = status;
+                    task.assignee = Some("holder-worker".into());
+                    task.branch = Some("factory/holder-worker-cas-real-task".into());
+                    if landed {
+                        task.deliverables.green_merge_commit = Some("a".repeat(40));
+                    }
+                    crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+                }
                 for (id, name, session) in [("reader", reader_name, Some("session-a")), ("holder", "holder-worker", holder_session)] {
                     let Some(session) = session else { continue };
                     let mut agent = crate::types::Agent::new(id.into(), name.into());
@@ -2511,9 +2528,9 @@ mod tests {
                     resumed_claims.retired_local = retired_local_agents(&root);
                 }
                 let answer = claim_with(&resumed_claims, &root, "reader", reader_name, reader_task, path);
-                if same_owner {
-                    assert_eq!(answer, FileLease::Mine,
-                        "reset/re-take must not report self collision: {holder_session:?}, retired={retired}");
+                if let Some(expected) = expected {
+                    assert_eq!(answer, expected,
+                        "session={holder_session:?}, retired={retired}, status={task_status:?}, landed={landed}");
                     assert!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().is_empty());
                     continue;
                 }
@@ -2526,13 +2543,10 @@ mod tests {
                 // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");
                 assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session:?}: {note}");
-                if holder_session.is_none() {
-                    assert!(note.contains("on other-host"), "{note}");
+                if task_status.is_some() {
+                    assert!(note.contains("factory/holder-worker-cas-real-task"), "{note}");
                 }
-                // pin: the advisory must distinguish local coordination from a different supervisor.
-                assert_eq!(note.contains("another worker in your session (holder-worker, task cas-real-task)"), same_session, "{note}");
-                assert_eq!(note.contains("other session's supervisor"), !same_session, "{note}");
-                assert!(note.contains("target=supervisor") && !note.contains("cas-8dbe"), "{note}");
+                assert_eq!(matches!(holder, crate::cloud::file_leases::FileHolder::SameSession(_)), same_session);
             }
         }).await.unwrap();
     }

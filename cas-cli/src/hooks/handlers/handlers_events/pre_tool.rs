@@ -2844,6 +2844,7 @@ fn git_subcommand_index(git_words: &[String]) -> Option<usize> {
 struct WorkerPathWord {
     literal: Option<bool>,
     quoted: bool,
+    raw_syntax_word: bool,
 }
 
 /// Only constants and whole, previously bound variables are known here. Never
@@ -2908,14 +2909,19 @@ fn collect_git_write_targets(
         previous_end = *end;
         if let ShellToken::Word(value) = token {
             let quoted = raw.starts_with('"') && raw.ends_with('"');
+            // Syntax-check allowances use the raw spelling, never cooked
+            // words that can hide quoting, escaping or shell expansion.
+            let raw_syntax_word = raw == value.as_str() && !raw.is_empty()
+                && raw.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte));
             path_words.entry(value.clone()).and_modify(|prior| {
                 if prior.literal != Some(*literal) { prior.literal = None; }
                 prior.quoted &= quoted;
-            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted });
+                prior.raw_syntax_word &= raw_syntax_word;
+            }).or_insert(WorkerPathWord { literal: Some(*literal), quoted, raw_syntax_word });
         }
     }
     let path_word = |word: &str| path_words.get(word).copied()
-        .unwrap_or(WorkerPathWord { literal: None, quoted: false });
+        .unwrap_or(WorkerPathWord { literal: None, quoted: false, raw_syntax_word: false });
     let allow_variables = lexed.unresolved_at.is_none() && !lexed.tokens.iter().enumerate().any(|(index, token)| match token {
         ShellToken::Operator('(' | ')' | '|') => true,
         ShellToken::Operator('&') => lexed.tokens.get(index.wrapping_sub(1)) != Some(&ShellToken::Operator('&'))
@@ -2998,18 +3004,21 @@ fn collect_git_write_targets(
                     && !script.starts_with(['-', '+'])
                     && path_word(script).literal == Some(true)
             };
-            // Syntax checks whitelist only noexec flags followed by literal
-            // scripts. Redirect operands are not scripts: <file +n -c payload
-            // can execute payload after disabling noexec.
+            // Syntax checks require exact raw noexec flags followed by raw
+            // script paths matching [A-Za-z0-9._/][A-Za-z0-9._/-]*. Redirects
+            // and expansions can supply +n/-c and execute a payload.
             let syntax_check = command_index == 0
                 && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
                 && shell_statement_arguments(command).iter().any(|statement| {
                     if statement != &words { return false; }
                     let flags = statement[1..].iter()
-                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec"))
+                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec")
+                            && path_word(flag).raw_syntax_word)
                         .count();
                     flags > 0 && statement.len() > flags + 1
-                        && statement[flags + 1..].iter().all(literal_script)
+                        && statement[flags + 1..].iter().all(|script| {
+                            literal_script(script) && path_word(script).raw_syntax_word
+                        })
                 });
             if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
                 && (args.first().is_some_and(literal_script) || syntax_check)

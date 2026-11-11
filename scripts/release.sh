@@ -40,7 +40,14 @@ set -Eeuo pipefail
 # argument errors and failures propagated from child commands.
 gate_exit() {
     local status="$1"; shift
-    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
 }
 trap 'gate_exit "$?" "[C-34]"' EXIT
 

@@ -2243,7 +2243,9 @@ file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
 to `overrides.log` and to typed per-code gate facts through
 `cas gates record-override C-07 H-38 --reason <reason>`. The hook refuses
-the skip if the fact cannot be recorded.
+the skip if the fact cannot be recorded. Release and pre-push refusal reporters
+also call `cas gates record-refusal --message <coded-message>` on a best-effort
+basis, preserving the original refusal exit status if the binary/store is unavailable.
 
 Close measures a delivery's recorded `parked_branch` (local, then origin)
 before deriving branches from its current assignee. Its recorded `work_target`

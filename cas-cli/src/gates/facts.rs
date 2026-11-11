@@ -198,6 +198,21 @@ fn result_text(result: &std::result::Result<rmcp::model::CallToolResult, rmcp::E
     }
 }
 
+/// One observation at the shared result boundary of direct, retry and queued
+/// worktree merges. Successful answers and uncoded infrastructure errors are
+/// not gate refusals.
+pub fn observe_merge_result(
+    cas_root: &Path,
+    task_id: Option<&str>,
+    result: &std::result::Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+) {
+    if let Some((_, text)) = result_text(result)
+        && !codes_in(&text).is_empty()
+    {
+        observe_refusal(cas_root, task_id, &text);
+    }
+}
+
 /// Record the gate facts of one task tool answer: every refusal that emits a
 /// code; every refused `start` or `close` (uncoded when it emits none); and a
 /// successful supervisor override. Park handoffs are not refusals.

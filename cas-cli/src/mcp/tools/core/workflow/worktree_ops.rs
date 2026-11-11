@@ -132,22 +132,6 @@ fn admit_branch_ci(
     Ok(false)
 }
 
-/// The worktree-merge boundary owns CI refusals: factory calls do not pass
-/// through the task-tool observer.
-fn admit_branch_ci_recorded(
-    cas_root: &Path,
-    task_id: Option<&str>,
-    state: &BranchCiState,
-    override_requested: bool,
-    reason: Option<&str>,
-) -> Result<bool, String> {
-    let result = admit_branch_ci(state, override_requested, reason);
-    if let Err(message) = &result {
-        crate::gates::facts::observe_refusal(cas_root, task_id, message);
-    }
-    result
-}
-
 fn record_ci_override(cas_root: &Path, task_id: &str, reason: &str) -> anyhow::Result<()> {
     let store = crate::store::open_event_store(cas_root)?;
     crate::gates::facts::record_override_codes(
@@ -158,8 +142,10 @@ fn record_ci_override(cas_root: &Path, task_id: &str, reason: &str) -> anyhow::R
 #[cfg(test)]
 pub(crate) fn exercise_ci_gate_facts(cas_root: &Path) {
     let red = BranchCiState::Red { sha: "fixture".to_string(), url: None };
-    assert!(admit_branch_ci_recorded(cas_root, Some("cas-ci"), &red, false, None).is_err());
-    assert_eq!(admit_branch_ci_recorded(cas_root, Some("cas-ci"), &red, true, Some("reviewed")), Ok(true));
+    let refusal = admit_branch_ci(&red, false, None).unwrap_err();
+    let result = Err(CasCore::error(ErrorCode::INVALID_PARAMS, refusal));
+    crate::gates::facts::observe_merge_result(cas_root, Some("cas-ci"), &result);
+    assert_eq!(admit_branch_ci(&red, true, Some("reviewed")), Ok(true));
     record_ci_override(cas_root, "cas-ci", "reviewed").unwrap();
 }
 
@@ -4453,6 +4439,26 @@ impl CasCore {
         expected_delivery: Option<&crate::factory_ci_retry::Retry>,
         train_queue: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        let result = crate::async_runtime::heap_future(|| self.worktree_merge_result(
+            id, force, task_id, allow_trunk, cleanup, supervisor_override, reason,
+            expected_delivery, train_queue,
+        )).await;
+        crate::gates::facts::observe_merge_result(&self.cas_root, task_id, &result);
+        result
+    }
+
+    async fn worktree_merge_result(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+        train_queue: Option<&str>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
@@ -5462,7 +5468,7 @@ impl CasCore {
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
         // integration gate (cas-6f48) is retired with the rolling sweep.
-        let admission = admit_branch_ci_recorded(&cas_root, task_id, &branch_ci_state, supervisor_override, reason);
+        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason);
         let ci_override = match admission {
             Ok(accepted) => accepted,
             Err(message) => {

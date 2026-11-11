@@ -20,6 +20,17 @@ pub enum GatesCommands {
     /// Record an explicit override at a script boundary
     #[command(hide = true)]
     RecordOverride(OverrideArgs),
+    /// Record a coded refusal emitted by a script
+    #[command(hide = true)]
+    RecordRefusal(RefusalArgs),
+}
+
+#[derive(Args)]
+pub struct RefusalArgs {
+    #[arg(long)]
+    pub message: String,
+    #[arg(long)]
+    pub task: Option<String>,
 }
 
 #[derive(Args)]
@@ -66,6 +77,11 @@ pub fn execute(cmd: &GatesCommands, cli: &Cli, cas_root: Option<&Path>) -> anyho
             let root = cas_root.context("no Cassy store here; run `cas init`")?;
             let store = crate::store::open_event_store(root)?;
             facts::record_override_codes(store.as_ref(), &args.codes, args.task.as_deref(), &args.reason)
+        }
+        GatesCommands::RecordRefusal(args) => {
+            let root = cas_root.context("no Cassy store here; run `cas init`")?;
+            let store = crate::store::open_event_store(root)?;
+            facts::record_refusal(store.as_ref(), args.task.as_deref(), &args.message).map(|_| ())
         }
     }
 }

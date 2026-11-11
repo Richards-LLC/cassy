@@ -9,4 +9,6 @@
 
 - **Count script and merge decisions** — Script failures emit their registered
   codes; merge CI refusals and accepted overrides, including pre-push fast-row
-  skips, record typed per-code facts.
+  skips, record typed per-code facts. Merge results are observed once, including
+  early refusals; release and pre-push reporters also attempt to record refusals
+  without changing their exit status.

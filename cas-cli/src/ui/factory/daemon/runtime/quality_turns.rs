@@ -133,6 +133,7 @@ fn unqueued_wake(prompt: &str, origin: Option<&str>, agent: &Agent) -> WakeChann
 /// IDs inside a Teams envelope or a pointer select only authenticated queue
 /// facts addressed to this recipient. Sender prose never grants provenance.
 fn wake(
+    root: &Path,
     prompt: &str,
     origin: Option<&str>,
     agent: &Agent,
@@ -183,6 +184,15 @@ fn wake(
     // merge_ready:[supervisor,task,head]); only the category is a notice kind.
     let notice = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string)
         .or_else(|| if row.origin == Some(QueueOrigin::Daemon) {
+        // Older lifecycle prompts only retain the durable notification id.
+        // Recover its type only for this exact authenticated recipient.
+        use cas_store::SupervisorQueueStore;
+        if let Some(id) = row.source.strip_prefix("lifecycle-wake:").and_then(|id| id.parse::<i64>().ok())
+            && let Ok(store) = cas_store::SqliteSupervisorQueueStore::open(root)
+            && let Ok(Some(event)) = store.get(id)
+            && event.supervisor_id == agent.id {
+            return Some(event.event_type);
+        }
         match row.source.as_str() {
             "worker-check" => Some("worker_check".into()),
             "task-assignment" => Some("task_assignment".into()),
@@ -389,6 +399,7 @@ impl Pending {
 
     fn attribute(
         &mut self,
+        root: &Path,
         prompt: &str,
         origin: Option<&str>,
         agent: &Agent,
@@ -399,7 +410,7 @@ impl Pending {
         if self.wake.is_some() || launch_context(prompt) {
             return;
         }
-        let (channel, may_answer, notice_kind) = wake(prompt, origin, agent, session, queue, agents);
+        let (channel, may_answer, notice_kind) = wake(root, prompt, origin, agent, session, queue, agents);
         self.wake = Some(channel);
         self.notice_kind = notice_kind;
         self.may_answer = may_answer;
@@ -551,7 +562,7 @@ impl Cursor {
                     // Claude stamps harness-generated input, e.g. a
                     // background-task notification, with its origin kind.
                     let origin = value.pointer("/origin/kind").and_then(Value::as_str);
-                    turn.attribute(&prompt, origin, agent, session, queue, agents);
+                    turn.attribute(root, &prompt, origin, agent, session, queue, agents);
                 }
             } else if kind == "assistant" {
                 if let Some(turn) = &mut self.pending {
@@ -645,7 +656,7 @@ impl Cursor {
         {
             match entry {
                 "message" if payload["role"] == "user" && turn.wake.is_none() => {
-                    turn.attribute(&text(&payload["content"]), None, agent, session, queue, agents);
+                    turn.attribute(root, &text(&payload["content"]), None, agent, session, queue, agents);
                 }
                 "message"
                     if payload["role"] == "assistant" && payload["phase"] == "final_answer" =>
@@ -730,6 +741,7 @@ impl Cursor {
         match kind {
             "user_message_chunk" if turn.wake.is_none() => {
                 turn.attribute(
+                    root,
                     update["content"]["text"].as_str().unwrap_or(""),
                     None,
                     agent,

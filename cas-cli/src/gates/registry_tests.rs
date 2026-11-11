@@ -121,7 +121,9 @@ fn every_registered_refusal_site_emits_its_code() {
 /// the refused code; a refusal with no code is counted as uncoded.
 #[tokio::test]
 async fn refusals_overrides_and_false_positives_are_counted_per_code() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     let dir = tempfile::tempdir().unwrap();
+    env.set("CAS_ROOT", dir.path());
     let store = SqliteEventStore::open(dir.path()).unwrap();
     store.init().unwrap();
     let before = Utc::now() - chrono::Duration::seconds(1);
@@ -137,6 +139,33 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let counts = facts::summarize(&store, before).unwrap();
     assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
     assert_eq!(counts[UNCODED].refused, 1);
+
+    // Exercise the real MCP transport/router with a non-task tool, so a
+    // per-task observer cannot make the boundary test pass.
+    use rmcp::ServiceExt;
+    let core = crate::mcp::CasCore::with_daemon(dir.path().to_path_buf(), None, None);
+    let service = crate::mcp::tools::service::CasService::new(core, #[cfg(feature = "mcp-proxy")] None);
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let server = tokio::spawn(async move {
+        service.serve(server_io).await.unwrap().waiting().await.unwrap();
+    });
+    let client = ().serve(client_io).await.unwrap();
+    let request = serde_json::from_value(serde_json::json!({
+        "name":"verification", "arguments":{"action":"batch_receipt"},
+    })).unwrap();
+    let response = client.call_tool(request).await;
+    assert!(response.is_err());
+    assert!(codes_in(&format!("{response:?}")).contains(&"G-116"));
+    client.cancel().await.unwrap();
+    server.await.unwrap();
+    assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),
+        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
+
+    // Invalid native input returns H-01 before the inner handle_hook route.
+    let output = crate::cli::hook::process_hook_input("PreToolUse", Ok("{".into()), true).unwrap();
+    assert!(facts::hook_denial(&output).is_some_and(|reason| codes_in(reason).contains(&"H-01")));
+    assert_eq!(facts::summarize(&store, before).unwrap().get("H-01"),
+        Some(&facts::Counts { refused: 1, overridden: 0, false_positive: 0 }));
 
     // G-92 returns before CI admission: exercise the public merge API.
     let operator = dir.path().join("operator");

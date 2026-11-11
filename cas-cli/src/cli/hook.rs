@@ -183,26 +183,36 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
     let mut input_json = String::new();
     io::stdin().read_to_string(&mut input_json)?;
 
-    // Parse the hook input
-    let mut input: HookInput = serde_json::from_str(&input_json)
-        .map_err(|e| anyhow::anyhow!("Failed to parse hook input: {e}"))?;
-
-    // Harness-side population: snapshot CAS_AGENT_ROLE into the HookInput so
-    // downstream handlers read the role explicitly from the request rather
-    // than re-reading process-global env at call time. Makes the contract
-    // robust against inline hook dispatch from long-lived MCP processes
-    // where other tools mutate env concurrently.
-    if input.agent_role.is_none() {
-        input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
-    }
-
-    // Handle the hook event
-    let output = handle_hook(event, input)?;
+    let output = process_hook_input(event, Ok(input_json), false)?;
 
     // Output JSON to stdout
     println!("{}", serde_json::to_string(&output)?);
 
     Ok(())
+}
+
+/// Shared entry enclosing native fast validation and ordinary hook handlers.
+/// Native failures become a fail-closed H-01 output before leaving this entry.
+pub(crate) fn process_hook_input(
+    event: &str,
+    input: Result<String, io::Error>,
+    native: bool,
+) -> anyhow::Result<crate::hooks::HookOutput> {
+    let output = if native {
+        input.map_err(anyhow::Error::from)
+            .and_then(|text| native_pre_tool::process_native_input(&text))
+            .unwrap_or_else(|_| crate::hooks::HookOutput::with_pre_tool_permission(
+                "deny", &crate::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive."),
+            ))
+    } else {
+        let mut input: HookInput = serde_json::from_str(&input?)
+            .map_err(|error| anyhow::anyhow!("Failed to parse hook input: {error}"))?;
+        if input.agent_role.is_none() {
+            input.agent_role = std::env::var("CAS_AGENT_ROLE").ok();
+        }
+        handle_hook(event, input)?
+    };
+    Ok(output)
 }
 
 /// Initialize logging for hook execution

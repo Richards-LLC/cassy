@@ -85,7 +85,7 @@ const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
 /// Decide admission from bounded evidence; never poll for pending CI.
-// gate[G-108 merge-admission]: Lane CI admission (code CI required, CI red, CI pending, override)
+// gate[G-108 merge-admission as-of]: Lane CI admission (code CI required, CI red, CI pending, override)
 // gate-audit[override_requested]: bypass G-108 Producer tags only accepted red/unvalidated CI waivers; pending/unpushed sources remain refused.
 // gate-audit[accepted_by]: worktree_merge_attempt
 fn admit_branch_ci(
@@ -95,7 +95,7 @@ fn admit_branch_ci(
 ) -> Result<bool, String> {
     // Missing remote commits are not absent checks or a transport outage.
     // No override can turn an unpublished source into a CI-reviewed delivery.
-    // gate[G-107 merge-admission]: Push first (missing remote commit)
+    // gate[G-107 merge-admission integrity]: Push first (missing remote commit)
     if let BranchCiState::MissingCommit { sha, reason } = state {
         return Err(crate::gates::tag("G-107", format!(
             "PUSH FIRST: refusing worktree_merge for {sha}: {reason}. Push this commit first, confirm the origin repository and access, then retry after CI finishes. Missing-commit CI cannot be overridden. No merge was attempted."
@@ -2748,7 +2748,7 @@ fn epic_lane_bypassed_by_trunk_target(
     (lane != resolved_branch).then(|| lane.to_string())
 }
 
-// gate[G-140 merge-admission]: Explicit authorization for trunk fallback
+// gate[G-140 merge-admission integrity]: Explicit authorization for trunk fallback
 // gate-audit[allow_trunk]: bypass G-140 Explicitly permits the otherwise-refused trunk fallback.
 // gate-audit[epic_lane_bypassed_by_trunk_target]: selector Detects a trunk-pinned child; permission remains controlled by allow_trunk.
 // gate-audit[accepted_by]: worktree_merge_attempt
@@ -3847,7 +3847,7 @@ impl CasCore {
 
     /// Resolve worker ownership synchronously so candidate Task values do not
     /// enlarge the async merge future or its transactional callers' stacks.
-    // gate[G-96 merge-admission]: Parked-delivery binding (ambiguous, incomplete, unresolved, remote)
+    // gate[G-96 merge-admission integrity]: Parked-delivery binding (ambiguous, incomplete, unresolved, remote)
     fn parked_delivery_for_worker(&self, id: &str) -> Result<(Box<cas_types::Task>, String), McpError> {
         let agents = self.open_agent_store()?;
         let token = id.strip_prefix("factory/").unwrap_or(id);
@@ -4338,7 +4338,7 @@ impl CasCore {
         }
     }
 
-    // gate[G-95 merge-admission]: Unanswered peer ask
+    // gate[G-95 merge-admission as-of]: Unanswered peer ask
     pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
         let caller = self.get_agent_id().ok()?;
         let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
@@ -4470,7 +4470,7 @@ impl CasCore {
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
-        // gate[G-92 merge-admission]: Project hold
+        // gate[G-92 merge-admission integrity]: Project hold
         if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
@@ -4505,7 +4505,7 @@ impl CasCore {
         // session's worker branch or task from this session.
         let mut scoped_task =
             task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok()).map(Box::new);
-        // gate[G-93 merge-admission]: Foreign factory-session owner
+        // gate[G-93 merge-admission integrity]: Foreign factory-session owner
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
             |agents, caller, now| {
@@ -4553,7 +4553,7 @@ impl CasCore {
                 .unwrap_or_else(|| system_b_merge_source(id, None).1);
             if branch.starts_with("factory/") {
                 let cwd = cas_root.parent().unwrap_or(&cas_root);
-                // gate[G-94 merge-admission]: Pending or unreviewed QA round on branch
+                // gate[G-94 merge-admission as-of]: Pending or unreviewed QA round on branch
                 if let Some(refusal) =
                     crate::qa_pass::worktree_branch_merge_refusal(&cas_root, cwd, &branch)
                 {
@@ -4805,7 +4805,7 @@ impl CasCore {
         // cas-619f: a user-facing delivery merges only after an independent
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
-        // gate[G-98 merge-admission]: Independent QA required before merge
+        // gate[G-98 merge-admission as-of]: Independent QA required before merge
         if let Some(task_id) = task_id
             && let Some(refusal) = self.independent_qa_merge_refusal(
                 task_id, task_source.as_ref().or(receipt_resume.as_ref()).map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
@@ -4932,7 +4932,7 @@ impl CasCore {
         let target = target.strip_prefix("origin/").unwrap_or(target);
         let integration = Config::configured_epic_base_branch(&cwd)
             .unwrap_or_else(|| manager.git().detect_default_branch());
-        // gate[G-99 merge-admission]: Release train open (trunk merge refused)
+        // gate[G-99 merge-admission integrity]: Release train open (trunk merge refused)
         if matches!(target, "main" | "master" | "trunk")
             || target == integration || target == manager.git().detect_default_branch()
         {
@@ -4970,7 +4970,7 @@ impl CasCore {
         // merge/reachability checks. A cleaned-up source is the sole
         // exception: immutable receipt and target ancestry are authenticated
         // below before source-less reconciliation can proceed.
-        // gate[G-102 merge-admission]: Worktree repository mismatch or worktree not found
+        // gate[G-102 merge-admission integrity]: Worktree repository mismatch or worktree not found
         if source_worktree_live
             && let (Some(task_id), Some(expected)) = (task_id, declared_repo_context.as_ref())
         {
@@ -5029,7 +5029,7 @@ impl CasCore {
         // the branch tip is not the parked task's reviewed SHA. Merge the
         // task's own delivery branch when it holds that SHA, and refuse rather
         // than merge another task's work under this task's name.
-        // gate[G-97 merge-admission]: Parked source drift (source changed, moved, stacked lane)
+        // gate[G-97 merge-admission integrity]: Parked source drift (source changed, moved, stacked lane)
         if transactional_delivery.is_none()
             && let Some(task_id) = task_id
             && let Ok(store) = self.open_task_store()
@@ -5079,7 +5079,7 @@ impl CasCore {
         // ref stands in), and a missing target, an unresolvable source or a
         // diverged origin leave the ordinary merge path to report them.
         let strict = train_queue.is_some();
-        // gate[G-103 train-merge]: Queued train conflict preflight and target diverged
+        // gate[G-103 train-merge integrity]: Queued train conflict preflight and target diverged
         if strict || scoped_task.is_some() {
             let probe = (|| -> Result<Option<(String, Vec<String>)>, McpError> {
                 let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
@@ -5204,7 +5204,7 @@ impl CasCore {
         if transactional_delivery.is_none() {
             let local_merge = scoped_task.as_deref()
                 .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
-            // gate[G-105 merge-admission]: Fresh target containment unverified
+            // gate[G-105 merge-admission integrity]: Fresh target containment unverified
             match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, local_merge) {
                 Containment::Contained { receipt, origin_verified } => {
                     // Preserve the existing behind-local checkout repair, but only
@@ -5283,7 +5283,7 @@ impl CasCore {
                     "TRANSACTIONAL DELIVERY {state}: {detail}\n\nNo merge was attempted. A registered supervisor may recover after correcting the exact cause."
                 ))))
             };
-            // gate[G-106 merge-admission]: Transactional delivery state machine, target CAS and content proof
+            // gate[G-106 merge-admission integrity]: Transactional delivery state machine, target CAS and content proof
             if !matches!(
                 transaction.state,
                 cas_types::WorkerDeliveryState::AwaitingMerge
@@ -5441,7 +5441,7 @@ impl CasCore {
                 let head = crate::fast_lane::resolve(&cwd, ci_source)?;
                 let eligibility = crate::fast_lane::evaluate_delivery(&lane, task, &cwd, &worktree.parent_branch, &head);
                 let note = crate::fast_lane::eligibility_note(&lane, &head, &eligibility);
-                // gate[G-109 merge-admission]: Fast-lane eligibility at merge
+                // gate[G-109 merge-admission integrity]: Fast-lane eligibility at merge
                 let note = if matches!(eligibility, crate::fast_lane::Eligibility::Refused(_)) {
                     crate::gates::tag("G-109", note)
                 } else {
@@ -5694,7 +5694,7 @@ impl CasCore {
             let reconcile = manager
                 .git()
                 .reconcile_target_with_origin(&worktree.parent_branch);
-            // gate[G-110 merge-admission]: Target prepare and target diverged from origin
+            // gate[G-110 merge-admission integrity]: Target prepare and target diverged from origin
             if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
             {
                 return Err(McpError {
@@ -5814,7 +5814,7 @@ impl CasCore {
             // cas-662e: no slug is "not GitHub" only when origin says so. A
             // GitHub origin whose canonical lookup (or the CI walk before it)
             // failed never asked the queue; merging locally hit GH013.
-            // gate[G-111 merge-admission]: Protected default branch requires a PR
+            // gate[G-111 merge-admission integrity]: Protected default branch requires a PR
             if default_target
                 && branch_ci_lookup.repo.is_none()
                 && !matches!(crate::github_repo::origin_slug(&cwd, BRANCH_CI_LOOKUP_TIMEOUT), Ok(None))
@@ -6000,7 +6000,7 @@ impl CasCore {
             // seam is testable: append_stale_checkout_notes is what the
             // operator's receipt is built from.
             append_stale_checkout_notes(&mut reconcile_note, &manager);
-            // gate[G-112 merge-admission]: Publication confirmation (not pushed, push not confirmed)
+            // gate[G-112 merge-admission integrity]: Publication confirmation (not pushed, push not confirmed)
             if let Some((branch, outcome)) = early_target_push.as_ref()
                 && !outcome.is_published()
             {

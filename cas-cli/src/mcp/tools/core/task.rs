@@ -19,7 +19,7 @@ mod update;
 /// emitted by artifact publication or server-attested proposal sync.
 /// Each message ends with the `[G-19]` code token (static text, so the token is
 /// literal rather than appended by `crate::gates::tag`).
-// gate[G-19 park]: Caller note-marker injection rejection
+// gate[G-19 park integrity]: Caller note-marker injection rejection
 pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
     if crate::cloud::syncer::contains_proposal_provenance_marker(text) {
         Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).\n\n[G-19]")

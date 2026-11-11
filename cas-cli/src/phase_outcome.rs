@@ -356,7 +356,7 @@ pub(crate) fn refusal(
 }
 
 /// Fail closed for gate/read errors, including a missing prerequisite record.
-// gate[G-20 park]: Outcome unmet (phase outcome)
+// gate[G-20 park as-of]: Outcome unmet (phase outcome)
 // gate-audit[include_self]: selector Start checks prerequisites; close also checks the current outcome. Neither scope waives a failing selected outcome.
 pub(crate) fn check(
     root: &Path,

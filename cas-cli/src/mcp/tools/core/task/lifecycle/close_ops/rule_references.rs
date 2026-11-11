@@ -156,7 +156,7 @@ fn validate(
 }
 
 impl CasCore {
-    // gate[G-48 park]: Rule references required
+    // gate[G-48 park as-of]: Rule references required
     pub(super) fn check_rule_reference_delivery(
         &self,
         task: &Task,

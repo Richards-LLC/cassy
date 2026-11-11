@@ -1,7 +1,7 @@
 //! Factory check registry (cas-b5cd).
 //!
 //! Every factory check carries one comment declaration at its site:
-//! `gate[<CODE> <stage>]: <title>`, where CODE is a family letter (G close,
+//! `gate[<CODE> <stage> [integrity|as-of]]: <title>`, where CODE is a family letter (G close,
 //! park, merge and release gates; H agent guards; W watchdogs; N notices;
 //! C CI and release checks), a dash and a number. `cas-cli/build.rs` scans
 //! the source for those declarations and generates [`REGISTRY`], so the count
@@ -14,6 +14,8 @@
 
 pub mod facts;
 
+use std::collections::BTreeSet;
+
 #[cfg(test)]
 mod registry_tests;
 
@@ -25,6 +27,36 @@ pub struct GateRow {
     pub title: &'static str,
     /// `path:line` of the declaration, relative to the repository root.
     pub source: &'static str,
+    /// Mandatory at delivery stages; other checks always use current policy.
+    pub approval_policy: Option<ApprovalPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalPolicy {
+    Integrity,
+    AsOf,
+}
+
+/// An immutable, self-contained registry membership version. Unlike a hash,
+/// this can answer historical membership without a second registry store.
+/// PR 2 persists it on the approval fact keyed by cycle id + approved anchor,
+/// and carries it unchanged when that approval carries forward.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct RegistryVersion(BTreeSet<String>);
+
+/// Capture at approval write time, never at dispatch creation or delivery mint.
+pub fn registry_version_in_force() -> RegistryVersion {
+    RegistryVersion(REGISTRY.iter().map(|row| row.code.to_string()).collect())
+}
+
+/// Decide against the supplied approval stamp; this performs no approval lookup.
+/// Missing stamps preserve existing checks, and unknown codes fail closed.
+pub fn check_applies(code: &str, stamp: Option<&RegistryVersion>) -> anyhow::Result<bool> {
+    let row = find(code).ok_or_else(|| anyhow::anyhow!("unregistered gate: {code}"))?;
+    Ok(row.approval_policy != Some(ApprovalPolicy::AsOf)
+        || stamp.is_none_or(|version| version.0.contains(code)))
 }
 
 impl GateRow {

@@ -14,7 +14,7 @@ use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 /// Read-only admission shared by receipt close and release backfill preview.
 /// `Some` retains the task's own ordinary review path; `None` lets the release
 /// verdict authorize it. Neither result bypasses the remaining close gates.
-// gate[G-89 close-after-merge]: Release receipt close admission (CI_OVERRIDE / REQUEST_CHANGES / NOT_PARKED)
+// gate[G-89 close-after-merge integrity]: Release receipt close admission (CI_OVERRIDE / REQUEST_CHANGES / NOT_PARKED)
 pub(crate) fn release_receipt_close_admission(
     root: &std::path::Path,
     task: &Task,
@@ -80,7 +80,7 @@ pub(crate) fn delivery_tip_belongs_to_task(
 /// branch can: only the worker commits to `refs/heads/<branch>`, while a
 /// commit pushed straight to origin by anyone else exists only on the
 /// remote-tracking ref. The tip must be on both.
-// gate[G-91 close-after-merge]: Pushed delivery tip ownership (merge-on-green close)
+// gate[G-91 close-after-merge integrity]: Pushed delivery tip ownership (merge-on-green close)
 pub(crate) fn pushed_delivery_tip(
     repo: &std::path::Path,
     task: &Task,
@@ -666,7 +666,7 @@ impl CasCore {
     /// receipt retries ordinary close too: its existing review gates either
     /// finish the delivery or name the remaining verdict. QA never replaces
     /// release review or a dedicated task review. Returns the report for the receipt's response.
-    // gate[G-90 close-after-merge]: Release-covered close re-runs ordinary gates (Held / TASK_STORE_UNREADABLE)
+    // gate[G-90 close-after-merge integrity]: Release-covered close re-runs ordinary gates (Held / TASK_STORE_UNREADABLE)
     pub(crate) async fn close_release_covered_delivery_outcomes(
         &self, receipt: &cas_store::QaBatchReceipt,
     ) -> std::collections::BTreeMap<String, CassyMergeClose> {

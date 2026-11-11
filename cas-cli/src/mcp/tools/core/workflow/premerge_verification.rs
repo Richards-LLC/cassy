@@ -1051,7 +1051,7 @@ impl CasCore {
 
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
-    // gate[G-104 merge-admission]: Pre-merge verification hold on the candidate
+    // gate[G-104 merge-admission as-of]: Pre-merge verification hold on the candidate
     pub(crate) fn prepare_premerge_verification(
         &self,
         task: &Task,

@@ -147,7 +147,7 @@ fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
 /// Checked at target resolution and again under the delivery-target lock.
 /// Release tracking takes that same lock before persisting the cut marker.
 /// A frozen train (cas-2f4d) admits only repairs of its red.
-// gate[G-100 merge-admission]: Release train cut or frozen (merge refused)
+// gate[G-100 merge-admission integrity]: Release train cut or frozen (merge refused)
 pub(crate) fn check_cut_merge(cas_root: &Path, target: &str, task_id: Option<&str>) -> Result<(), String> {
     let store = crate::store::open_task_store(cas_root).map_err(|error| error.to_string())?;
     for train in store.list(None).map_err(|error| error.to_string())? {

@@ -91,7 +91,7 @@ fn save(path: &Path, queue: &Queue) -> Result<()> {
 /// Checked before preparing a candidate and again under the normal target
 /// lock. The queue creates its reservation under that same lock, so a single
 /// merge already in flight cannot slip between reservation and publication.
-// gate[G-101 merge-admission]: Train merge active reservation
+// gate[G-101 merge-admission integrity]: Train merge active reservation
 pub(crate) fn admit(
     root: &Path,
     repo: &Path,
@@ -137,7 +137,7 @@ fn driver_lock(
 }
 
 impl CasCore {
-    // gate[G-113 train-merge]: Train merge preconditions (supervisor, epic target, queue, entries)
+    // gate[G-113 train-merge integrity]: Train merge preconditions (supervisor, epic target, queue, entries)
     // gate-audit[ci_override]: selector Derived newly accepted G-114 token; final receipt records it.
     // gate-audit[prior_override]: selector Replayed stored decision token; reuse does not mint another override.
     pub(crate) fn train_merge(
@@ -394,7 +394,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 continue;
             }
             let task = tasks.get(&entry.task)?;
-            // gate[G-115 train-merge]: Train entry awaiting dispatch or returned entry skip
+            // gate[G-115 train-merge integrity]: Train entry awaiting dispatch or returned entry skip
             if task.status != TaskStatus::AwaitingMerge
                 || task.deliverables.factory_branch_anchor.as_deref() != Some(&entry.sha)
                 || task.deliverables.parked_branch.as_deref() != Some(&entry.branch)

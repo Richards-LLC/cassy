@@ -210,7 +210,7 @@ pub(crate) fn task_evidence_dir(cas_root: &Path, task: &Task) -> Result<PathBuf,
 
 /// Format preflight before either verification-dispatch path mutates state.
 /// Existing ledgers are checked even for no-code tasks, whose runtime gate skips.
-// gate[G-52 park]: QA ledger rejected and Tier 2 adversarial probe
+// gate[G-52 park as-of]: QA ledger rejected and Tier 2 adversarial probe
 // gate-audit[require_missing]: selector Selects the appropriate preflight phase; missing mandatory ledger remains checked at final park.
 pub(crate) fn ledger_preflight(
     cas_root: &Path,

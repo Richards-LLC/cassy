@@ -6,6 +6,39 @@ use chrono::Utc;
 
 use super::{Family, REGISTRY, UNCODED, facts, tag, override_tag, codes_in};
 
+#[test]
+fn approval_stamp_applies_registry_policy_and_survives_carry_cas_278a() {
+    use super::{ApprovalPolicy, DELIVERY_STAGES, RegistryVersion, check_applies, registry_version_in_force};
+
+    #[derive(Clone)]
+    struct Approval { stamp: RegistryVersion }
+
+    let current = registry_version_in_force();
+    let mut old = current.clone();
+    // The registry itself supplies both the new checks and expected policy;
+    // no handwritten gate list can conceal an unclassified delivery row.
+    for policy in [ApprovalPolicy::AsOf, ApprovalPolicy::Integrity] {
+        assert!(REGISTRY.iter().any(|row| row.approval_policy == Some(policy)));
+    }
+    old.0.retain(|code| super::find(code).unwrap().approval_policy.is_none());
+    let approved = Approval { stamp: old };
+    let carried = approved.clone();
+    let persisted = serde_json::to_string(&approved.stamp).unwrap();
+    let restored: RegistryVersion = serde_json::from_str(&persisted).unwrap();
+    assert_eq!(carried.stamp, restored);
+    assert_eq!(current, registry_version_in_force());
+
+    for row in REGISTRY {
+        assert_eq!(row.approval_policy.is_some(), DELIVERY_STAGES.contains(&row.stage), "{}", row.code);
+        let expected = row.approval_policy != Some(ApprovalPolicy::AsOf)
+            || approved.stamp.0.contains(row.code);
+        assert_eq!(check_applies(row.code, Some(&carried.stamp)).unwrap(), expected, "{}", row.code);
+        assert!(check_applies(row.code, Some(&current)).unwrap());
+        assert!(check_applies(row.code, None).unwrap());
+    }
+    assert!(check_applies("unknown", Some(&carried.stamp)).is_err());
+}
+
 /// The registry is measured from code: every row comes from one declaration,
 /// and every refusing check (gates and guards declared in Rust) emits its
 /// code, so its refusals are recorded under that code and not as uncoded.

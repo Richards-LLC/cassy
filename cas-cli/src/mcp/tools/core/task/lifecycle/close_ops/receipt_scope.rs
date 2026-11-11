@@ -146,7 +146,7 @@ pub(super) fn park_refusals(
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes
     // one cannot be judged yet; running its tests may already cover the module.
-    // gate[G-61 park]: Focused proof: crate test receipts at exact tip and blast-radius scope
+    // gate[G-61 park as-of]: Focused proof: crate test receipts at exact tip and blast-radius scope
     if !untested.is_empty() {
         refusals.push(crate::gates::tag("G-61", format!(
             "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
@@ -205,7 +205,7 @@ fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .current_dir(repo)
         .output();
-    // gate[G-63 park]: Test-shape checker at park (TEST_ASSERTION_PROSE)
+    // gate[G-63 park as-of]: Test-shape checker at park (TEST_ASSERTION_PROSE)
     match output {
         Ok(output) if output.status.success() => None,
         // FIX records are the checker's machine-readable findings. A failed
@@ -265,7 +265,7 @@ fn changelog_refusal(
     let changelog_changed = changed_paths
         .iter()
         .any(|path| if fragments { is_changelog_fragment(path) } else { path == "CHANGELOG.md" });
-    // gate[G-62 park]: CHANGELOG [Unreleased] entry or fragment required
+    // gate[G-62 park as-of]: CHANGELOG [Unreleased] entry or fragment required
     if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges, &task.id) {
         return None;
     }

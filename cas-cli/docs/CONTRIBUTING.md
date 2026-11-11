@@ -41,6 +41,25 @@ ordinary posting policy; Violet owns authoritative checks before allocation,
 including authority changes on other machines. Never retry an uncertain reply
 with a new request ID.
 
+## Approval registry stamps
+
+Delivery-stage registry declarations use `gate[CODE stage integrity]: Title` or
+`gate[CODE stage as-of]: Title`. The generator rejects an absent or unknown
+classification at park, close-after-merge, epic-close, merge-admission and
+train-merge stages. Integrity covers current identity, content, ancestry,
+authority and concurrent publication; review, proof and quality requirements
+use as-of policy. Other stages keep their existing declarations.
+
+`gates::registry_version_in_force()` captures the current sorted code membership
+as a serde `RegistryVersion`. It is a self-contained version, so old approvals
+do not depend on a separate historical registry store. Persist it when recording
+the approval for its `cycle_id` and approved anchor, and carry it unchanged with
+that approval. The approval-by-cycle writer owns persistence and lookup.
+`gates::check_applies(code, stamp)` retains integrity and non-delivery checks,
+filters as-of requirements by stamped membership, retains all checks for a
+missing stamp, and errors on an unregistered code. This API performs no approval
+lookup and adds no approval or delivery-cycle column.
+
 ## Memory update receipts
 
 `memory action=update id=<id> title=<title>` saves the title alone or together

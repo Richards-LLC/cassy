@@ -1144,65 +1144,6 @@ fn handle_pre_tool_use_inner(
         // whenever `config.json` says this IS the factory's tree.
         reap_stranded_native_send_message_copies();
     }
-    let is_supervisor = crate::harness_policy::is_supervisor_from_env();
-
-    // ========================================================================
-    // CODEMAP FRESHNESS GATE: Block supervisor from creating tasks / spawning
-    // workers while CODEMAP.md is significantly out of date.
-    //
-    // Workers use CODEMAP for codebase orientation. Dispatching them against a
-    // stale map wastes tokens and produces drift. The SessionStart warning is
-    // informational; this gate enforces "update before assigning work".
-    //
-    // Only fires for supervisors, only on the two dispatch tools, only when
-    // staleness >= SIGNIFICANT_STALENESS_THRESHOLD. Running `/codemap` bumps
-    // CODEMAP.md's mtime and clears the gate on the next call.
-    // ========================================================================
-    if is_supervisor {
-        let action = input
-            .tool_input
-            .as_ref()
-            .and_then(|ti| ti.get("action").and_then(|v| v.as_str()));
-        let is_gated =
-            is_codemap_gated_tool_call(tool_name, action, crate::harness_policy::own_tool_prefix());
-        if is_gated {
-            let measurement = super::docs_freshness::Measurement::at(Path::new(&input.cwd), cas_root);
-            // gate[H-32 pre-tool]: CODEMAP freshness gate
-            if let Some(
-                crate::hooks::handlers::handlers_events::CodemapStaleness::SignificantlyStale {
-                    total_changes,
-                    ..
-                },
-            ) = super::codemap::evaluate_codemap_at(&measurement).and_then(|evaluation| evaluation.staleness)
-            {
-                let sync = if measurement.reference != "HEAD"
-                    && super::docs_freshness::git(&measurement.root,
-                        &["merge-base", "--is-ancestor", &measurement.reference, "HEAD"]).is_none()
-                {
-                    match crate::worktree::GitOperations::git_remedies([
-                        &["merge", &measurement.reference],
-                        &["rebase", &measurement.reference],
-                    ]) {
-                        Ok([merge, rebase]) => {
-                            format!("Sync this checkout: `{merge}` or `{rebase}`.\n")
-                        }
-                        Err(refusal) => format!("{refusal}\n"),
-                    }
-                } else {
-                    String::new()
-                };
-                return Ok(HookOutput::with_pre_tool_permission(
-                    "deny",
-                    &crate::gates::tag("H-32", format!(
-                        "🗺️  CODEMAP.md is significantly out of date ({total_changes} structural changes).\n\
-                        Measured ref: {} ({}).\n\n\
-                        Workers rely on CODEMAP for codebase orientation — dispatching against a stale map wastes tokens.\n\n\
-                        {sync}Run `/codemap` to refresh, then retry.", measurement.reference, measurement.root.display()
-                    )),
-                ));
-            }
-        }
-    }
 
     // ========================================================================
     // WORKTREE MERGE JAIL: Block all tools except the worktree merge when pending
@@ -11862,23 +11803,6 @@ EOF
     }
 }
 
-/// Whether `tool_name`/`action` is one of the CODEMAP-freshness-gated calls
-/// (task creation, worker spawn) — keyed on the CALLER's own `tool_prefix`
-/// so this recognizes `mcp__cas__task`/`mcp__cs__task`/`cas__task` etc.
-/// correctly for whichever harness is actually running.
-///
-/// EPIC cas-8888 (cas-fd9f): extracted from `handle_pre_tool_use` (was
-/// inline, hardcoded to `mcp__cas__task`/`mcp__cas__coordination` — silently
-/// inert for every non-Claude supervisor, since `tool_name` is whatever the
-/// CALLING process's own harness actually named the tool).
-fn is_codemap_gated_tool_call(tool_name: &str, action: Option<&str>, tool_prefix: &str) -> bool {
-    let task_tool = format!("{tool_prefix}task");
-    let factory_tool = format!("{tool_prefix}factory");
-    (tool_name == task_tool && action == Some("create"))
-        || (tool_name == factory_tool
-            && matches!(action, Some("spawn_workers") | Some("spawn_worker")))
-}
-
 /// Return the single existing Cassy task ID named in a verifier prompt.
 ///
 /// Ambiguous prompts fail closed: authority must bind to one exact task, not
@@ -13629,101 +13553,6 @@ mod worker_commit_guard_tests {
         assert_eq!(
             decision, "deny",
             "non-isolated factory worker on main must be denied (cas-ba04), got: {val}"
-        );
-    }
-
-    // ========================================================================
-    // EPIC cas-8888 (cas-fd9f): harness-aware tool-name matcher guard tests.
-    // ========================================================================
-
-    #[test]
-    fn codemap_gate_recognizes_claude_task_create() {
-        assert!(is_codemap_gated_tool_call(
-            "mcp__cas__task",
-            Some("create"),
-            "mcp__cas__"
-        ));
-    }
-
-    #[test]
-    fn codemap_gate_recognizes_codex_spawn_workers() {
-        assert!(is_codemap_gated_tool_call(
-            "mcp__cs__factory",
-            Some("spawn_workers"),
-            "mcp__cs__"
-        ));
-    }
-
-    /// The load-bearing regression: before cas-fd9f this matcher was
-    /// hardcoded to "mcp__cas__task"/"mcp__cas__coordination" and so NEVER
-    /// fired for a Grok supervisor (whose tool_name is "cas__task" etc.) —
-    /// the CODEMAP freshness gate was silently inert for every non-Claude
-    /// supervisor.
-    #[test]
-    fn codemap_gate_recognizes_grok_task_create_and_spawn_workers() {
-        assert!(is_codemap_gated_tool_call(
-            "cas__task",
-            Some("create"),
-            "cas__"
-        ));
-        assert!(is_codemap_gated_tool_call(
-            "cas__factory",
-            Some("spawn_workers"),
-            "cas__"
-        ));
-    }
-
-    #[test]
-    fn codemap_gate_does_not_match_wrong_prefix_or_action() {
-        // A Grok tool_name must not match under a stale/wrong prefix guess.
-        assert!(!is_codemap_gated_tool_call(
-            "cas__task",
-            Some("create"),
-            "mcp__cas__"
-        ));
-        // Right tool, wrong action.
-        assert!(!is_codemap_gated_tool_call(
-            "cas__task",
-            Some("list"),
-            "cas__"
-        ));
-        // Unrelated tool.
-        assert!(!is_codemap_gated_tool_call("Bash", Some("create"), "cas__"));
-    }
-
-    /// Sanity check that the full `handle_pre_tool_use` entrypoint reaches
-    /// the codemap-gate matcher for a Grok supervisor's `cas__factory`
-    /// call at all (rather than short-circuiting on role/tool checks
-    /// upstream) and, with no CODEMAP.md present to be stale against,
-    /// doesn't false-positive deny. The matcher's actual gate/no-gate logic
-    /// is proven by the dedicated unit tests above — this only guards the
-    /// wiring between `own_tool_prefix()`, the env, and the real handler.
-    #[test]
-    fn grok_supervisor_codemap_gate_wiring_reaches_matcher_without_false_deny() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("supervisor")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_FACTORY_SUPERVISOR_CLI", Some("grok")),
-            ("CAS_FACTORY_WORKER_CLI", None),
-        ]);
-
-        let mut input = crate::hooks::handlers::HookInput::default();
-        input.hook_event_name = "PreToolUse".to_string();
-        input.tool_name = Some("cas__factory".to_string());
-        input.cwd = tmp.path().to_string_lossy().to_string();
-        input.tool_input = Some(serde_json::json!({"action": "spawn_workers"}));
-
-        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-        let val = serde_json::to_value(&out).unwrap();
-        let decision = val
-            .get("hookSpecificOutput")
-            .and_then(|h| h.get("permissionDecision"))
-            .and_then(|v| v.as_str());
-        assert_ne!(
-            decision,
-            Some("deny"),
-            "no CODEMAP.md present → nothing to gate on, must not deny: {val}"
         );
     }
 

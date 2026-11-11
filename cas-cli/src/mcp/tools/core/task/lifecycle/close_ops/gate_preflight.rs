@@ -2,7 +2,10 @@
 //! refusal in one reply. Most close bounces were computable before close, and a
 //! gate that stops at its first failure costs one attempt per failure.
 use super::*;
-use crate::config::{QaMode, RegistryEnforcement, UpkeepStage};
+use crate::config::{QaMode, RegistryEnforcement};
+
+/// Per-task PRODUCT_OVERVIEW fragments that release prep compiles (cas-4b33).
+const OVERVIEW_FRAGMENT_DIR: &str = "docs/product-overview.d";
 
 /// One reply for every refusal of a park attempt. A lone refusal keeps its own
 /// text, which workers and the classifiers that count bounces already read.
@@ -90,7 +93,6 @@ impl CasCore {
             return String::new();
         };
         let qa = config.qa();
-        let upkeep = config.upkeep();
         let parent_epic = self
             .open_task_store()
             .ok()
@@ -148,21 +150,19 @@ impl CasCore {
         }
         let registry_on = qa.registry.enforce != RegistryEnforcement::Off
             || crate::qa_impact::io::git(&repo, &["cat-file", "-e", &format!("HEAD:{}", qa.registry.path)]).is_ok();
-        if registry_on && task.task_type == TaskType::Bug {
-            lines.push(format!(
-                "Bug case: a live journey this fix touches needs a bug family naming {id}, or the refusal's `no case:` decision."
-            ));
-        }
-        let tracked: Vec<&str> = [
-            registry_on.then_some(qa.registry.path.as_str()),
-            (upkeep.codemap() != UpkeepStage::Off).then_some(".claude/CODEMAP.md"),
-            (upkeep.product_overview() != UpkeepStage::Off).then_some("docs/PRODUCT_OVERVIEW.md"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if !tracked.is_empty() {
-            lines.push(format!("Upkeep: keep {} true for changed paths.", tracked.join(", ")));
+        // cas-4b33: shared docs are generated at release prep from per-task
+        // fragments, so a delivery writes only its own fragment files.
+        let overview_fragments = receipt_scope::has_fragment_dir_at(&repo, "HEAD", OVERVIEW_FRAGMENT_DIR);
+        if registry_on || overview_fragments {
+            let mut docs = Vec::new();
+            if registry_on && task.task_type == TaskType::Bug {
+                docs.push(format!("a fix touching a live journey adds `docs/qa/bug-families/<slug>.yaml` naming {id}"));
+            }
+            if overview_fragments {
+                docs.push(format!("product changes go in `{OVERVIEW_FRAGMENT_DIR}/{id}.md`"));
+            }
+            docs.push("never edit .claude/CODEMAP.md or docs/PRODUCT_OVERVIEW.md; release prep regenerates them".into());
+            lines.push(format!("Docs: {}.", docs.join("; ")));
         }
         if !task.proof_targets.is_empty() || task.risk.contains(&TaskRisk::BlastRadius) {
             lines.push(format!(

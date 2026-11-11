@@ -249,6 +249,7 @@ test-ci-tiers:
 	cd .. && python3 scripts/test-review-pr-body.py
 	cd .. && bash scripts/test-hitl-loop-template.sh
 	cd .. && python3 scripts/test-fast-release-rows.py
+	cd .. && python3 scripts/test-doc-fragments.py
 	cd .. && python3 scripts/test-check-call-shapes.py
 	cd .. && python3 scripts/test-live-check-peer-collab.py
 	cd .. && python3 scripts/test-hub-web-gate.py

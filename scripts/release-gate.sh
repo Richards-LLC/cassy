@@ -1781,12 +1781,97 @@ lane_touches() {
     ! git diff --quiet "${fast_base:-HEAD^}" -- "$@"
 }
 
-check_journey_catalog() {
-    if ! lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
-        printf 'journey-catalog: no journey catalog or spec change\n'
+registry_upkeep_needed() {
+    [[ -f docs/qa/journeys.yaml ]] || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    local selection
+    if selection="$(python3 scripts/doc-fragments.py needs-upkeep --base "${fast_base:-HEAD^}")"; then
+        # Only a successful, explicit no can skip the binary validator.
+        [[ "$selection" != no ]]
+    else
         return 0
     fi
-    python3 scripts/journeys-for-diff.py --check
+}
+
+# A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else the latest
+# release installed by scripts/cas-install.sh (SHA-256 checked against the
+# release receipt) into a temporary directory. Lane CI needs no workflow step.
+registry_validator() {
+    local dir
+    local candidate="${CAS_BIN:-}"
+    if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" qa journeys --help >/dev/null 2>&1; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-registry-validator.XXXXXX")" || return 1
+    printf 'journey-catalog: installing the released cas validator into %s\n' "$dir" >&2
+    CAS_INSTALL_DIR="$dir" CAS_WIRE_PATH=0 bash "${CAS_VALIDATOR_INSTALLER:-scripts/cas-install.sh}" >&2 || return 1
+    "$dir/cas" qa journeys --help >/dev/null 2>&1 || return 1
+    printf '%s\n' "$dir/cas"
+}
+
+check_registry_upkeep() {
+    local cas_bin base="${fast_base:-HEAD^}"
+    if ! cas_bin="$(registry_validator)"; then
+        printf 'journey-catalog: FAIL: this diff needs journey registry and ownership validation, but no Cassy validator is available\n'
+        printf 'FIX: put a released cas on PATH or set CAS_BIN, or let scripts/cas-install.sh reach GitHub Releases, then rerun\n'
+        return 1
+    fi
+    "$cas_bin" qa journeys --check || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    if "$cas_bin" qa journeys --help 2>/dev/null | grep -q -- '--base'; then
+        "$cas_bin" qa journeys --check --base "$base"
+        return
+    fi
+    # Legacy impact omits modified-file ownership. Strict policy needs --base;
+    # use the stricter header at base/HEAD, with local config as fallback.
+    local fallback policy revision
+    fallback="$("$cas_bin" config get qa.registry.enforce)" || return 1
+    case "$fallback" in off|observe|enforce|strict) ;; *) return 1 ;; esac
+    for revision in "$base" HEAD; do
+        policy="$(git show "$revision:docs/qa/journeys.yaml" 2>/dev/null | sed -n 's/^enforce:[[:space:]]*//p')"
+        policy="${policy%%#*}"
+        policy="${policy//[[:space:]]/}"
+        policy="${policy//\"/}"
+        policy="${policy//\'/}"
+        if [[ "${policy:-$fallback}" == strict ]]; then
+            printf 'journey-catalog: FAIL: strict registry policy requires a validator with --base support\n'
+            printf 'FIX: set CAS_BIN to a cas supporting qa journeys --check --base, then rerun\n'
+            return 1
+        fi
+    done
+    # Non-strict policy can use the new-file G1/G2 facts from legacy impact.
+    "$cas_bin" qa impact "$base" --json | python3 -c '
+import json, sys
+registry = json.load(sys.stdin)["upkeep"]["registry"]
+for reason in registry["reasons"]:
+    print("UPKEEP registry: " + reason)
+if registry["required"]:
+    print("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused")
+    sys.exit(1)
+'
+}
+
+check_journey_catalog() {
+    local ran=false
+    if lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
+        python3 scripts/journeys-for-diff.py --check || return 1
+        ran=true
+    fi
+    # cas-4b33: journey registry upkeep (formerly a park gate) and the per-task
+    # doc fragments that release prep compiles.
+    if lane_touches docs/qa/journeys.yaml docs/qa/bug-families docs/product-overview.d \
+        docs/PRODUCT_OVERVIEW.md scripts/doc-fragments.py; then
+        python3 scripts/doc-fragments.py check || return 1
+        ran=true
+    fi
+    # Registry validation plus ownership of new user-facing surface files
+    # (formerly the park gate G-49), through Cassy's own validator. Fails closed.
+    if registry_upkeep_needed; then
+        check_registry_upkeep || return 1
+        ran=true
+    fi
+    [[ "$ran" == true ]] || printf 'journey-catalog: no journey catalog, registry, fragment or spec change\n'
 }
 
 check_builtin_skill_limits() {
@@ -2417,7 +2502,7 @@ else
 fi
 gate_row test-env 'process-state test lint (affected crate paths in fast mode) and strict baseline ratchet' check_test_env
 gate_row builtin-doc-hygiene 'shared operator-data policy on builtin sources' check_builtin_doc_hygiene
-gate_row journey-catalog 'python3 scripts/journeys-for-diff.py --check (catalog steps match test.step titles)' \
+gate_row journey-catalog 'journeys-for-diff.py --check (catalog steps); doc-fragments.py check; cas qa journeys --check --base (registry upkeep)' \
     check_journey_catalog
 gate_row builtin-skill-limits 'python3 scripts/check-builtin-skill-limits.py (description, size and line limits)' \
     check_builtin_skill_limits
@@ -2456,7 +2541,7 @@ fast_row_fix() {
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
         builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;
-        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles; check with python3 scripts/journeys-for-diff.py --check' ;;
+        journey-catalog) printf 'make the docs/qa/journeys.md steps match the spec test.step titles (python3 scripts/journeys-for-diff.py --check) fix what python3 scripts/doc-fragments.py check reports, and own new surface files that cas qa journeys --check --base <ref> names' ;;
         builtin-skill-limits) printf 'shorten the skill description, size or line count under the limits the row log prints' ;;
         migration-registry) printf 'declare the migration module and register it in order in cas-cli/src/migration/migrations/mod.rs' ;;
         ci-script-tests-changed) printf 'run the failing script test the row log names directly and fix it' ;;

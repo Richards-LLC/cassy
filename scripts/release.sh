@@ -15,7 +15,8 @@
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
 #      [Unreleased] and the changelog.d fragments to a dated [x.y.z]
-#      section, and names the release-notes draft
+#      section, folds the journey bug-family and product-overview
+#      fragments into their docs (scripts/doc-fragments.py), names the release-notes draft
 #      docs/release-notes/<date>-v<x.y.z>-slack.md, then rebuilds the
 #      embedded Commander bundle with the new version;
 #   4. commits "release: v<x.y.z>", pushes, opens/reuses the train PR,
@@ -58,7 +59,7 @@ shopt -s inherit_errexit
 trap 'printf "error: command failed (exit %s) at line %s: %s\n" "$?" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 usage() {
-    sed -n '3,33p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,34p' "$0" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 Options:
   --hotfix            bump the patch version instead of the minor version
@@ -311,6 +312,21 @@ lint_release_draft() {
         verify-deliveries "$remote/$base" --notes "$draft" --report "$release_input_report" >&2
 }
 
+# cas-4b33: deliveries never edit .claude/CODEMAP.md, so the supervisor
+# regenerates it (/codemap) on the train before the cut. Refuse a map that
+# predates a file added or removed since it was last committed; per-task
+# fragments and release notes do not change the structure.
+require_current_codemap() {
+    local mapped stale
+    git ls-files --error-unmatch .claude/CODEMAP.md >/dev/null 2>&1 || return 0
+    mapped="$(git log -1 --format=%H -- .claude/CODEMAP.md)"
+    stale="$(git diff --no-renames --name-only --diff-filter=AD "$mapped" HEAD -- . \
+        ':(exclude).claude/CODEMAP.md' ':(exclude)changelog.d' ':(exclude)docs/qa/bug-families' \
+        ':(exclude)docs/product-overview.d' ':(exclude)docs/release-notes')"
+    stale="$(printf '%s\n' "$stale" | sed -n '1,5p')"
+    [[ -z "$stale" ]] || die ".claude/CODEMAP.md predates files added or removed since ${mapped:0:12} (${stale//$'\n'/, }); regenerate it with /codemap, commit it on $branch and rerun"
+}
+
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
@@ -345,6 +361,7 @@ prepare() {
         printf '%s\n' "$version"
         return 0
     fi
+    require_current_codemap
     local source
     source="$(draft_source "$version")"
     lint_release_draft "$source"
@@ -357,8 +374,17 @@ prepare() {
         || die "Commander build failed; release was not committed"
     python3 "$script_dir/release_changelog.py" promote CHANGELOG.md "$version" "$(release_date)" "$base_version" \
         || die "CHANGELOG.md promotion failed"
+    # cas-4b33: deliveries add per-task doc fragments; fold them in once here.
+    python3 "$script_dir/doc-fragments.py" compile >&2 \
+        || die "doc fragment compile failed; fix what scripts/doc-fragments.py check reports"
     place_draft "$version" "$source"
     git add -- CHANGELOG.md Cargo.lock "${release_manifests[@]}" hub-web/dist
+    local doc
+    for doc in docs/qa/journeys.yaml docs/qa/bug-families docs/PRODUCT_OVERVIEW.md docs/product-overview.d; do
+        if git ls-files --error-unmatch "$doc" >/dev/null 2>&1; then
+            git add -A -- "$doc"
+        fi
+    done
     # Promotion deleted the changelog.d fragments it folded in (cas-f2be).
     if git ls-files --error-unmatch changelog.d >/dev/null 2>&1; then
         git add -- changelog.d

@@ -447,6 +447,11 @@ preview_cut() {
     local candidate_dir
     candidate_dir="$(git rev-parse --path-format=absolute --git-path "cas/cut-preview/$sha")"
     mkdir -p "$candidate_dir"
+    if [[ -f "$candidate_dir/candidate-path" ]]; then
+        candidate="$(cat "$candidate_dir/candidate-path")"
+        build_seconds="$(cat "$candidate_dir/build-seconds")"
+        [[ -x "$candidate" ]] || die "saved cut candidate is unavailable; no second build for $sha"
+    else
     lookup="$(RELEASE_PREBUILD_WAIT_SECONDS=0 RELEASE_PREBUILD_PLATFORM=linux \
         "$script_dir/find-release-prebuild.sh" "$sha")"
     if grep -qx 'found=true' <<<"$lookup"; then
@@ -455,11 +460,16 @@ preview_cut() {
         tar -xzf "$candidate_dir/cas-x86_64-unknown-linux-gnu.tar.gz" -C "$candidate_dir" cas
         candidate="$candidate_dir/cas"
     else
+        [[ ! -e "$candidate_dir/build-attempted" ]] || die "cut candidate build already attempted for $sha; no retry or second build"
+        : >"$candidate_dir/build-attempted"
         build_start=$SECONDS
         "$cas_bin" qa candidate build --task "$task" --rev "$sha" >&2 \
             || die "cut candidate build failed; no retry, nothing pushed"
         build_seconds=$((SECONDS - build_start))
         candidate="$("$cas_bin" qa candidate path --task "$task")"
+    fi
+    printf '%s\n' "$candidate" >"$candidate_dir/candidate-path"
+    printf '%s\n' "$build_seconds" >"$candidate_dir/build-seconds"
     fi
     release_candidate="$candidate"
     local train_args=()

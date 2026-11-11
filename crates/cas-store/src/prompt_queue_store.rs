@@ -20776,7 +20776,7 @@ mod tests {
         }).unwrap().id();
         selector.record_selected(id).unwrap();
         let report = selector.message_delivery_report(id).unwrap().unwrap();
-        assert_eq!(report.delivery_attempts, 0);
+        assert_eq!(report.retry.delivery_attempts, 0);
         let after_deadline = report.selected_at.unwrap()
             + chrono::Duration::seconds(PROMPT_RETRY_MAX_AGE_SECS + 1);
         drop(selector);

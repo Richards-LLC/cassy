@@ -5613,6 +5613,7 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
         let recorded = format!("factory/departed-worker-{}", task.id);
         git(root, &["branch", "-m", &recorded]);
         let base = git(root, &["rev-parse", "HEAD^"]);
+        let delivery = std::fs::read(root.join("delivery.txt")).unwrap();
         let origin = tempfile::TempDir::new().unwrap();
         git(origin.path(), &["init", "--bare"]);
         git(root, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
@@ -5645,8 +5646,7 @@ async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
         let expected = format!("factory/{}-{}", receiver.name, task.id);
         assert_eq!(git(destination.path(), &["branch", "--show-current"]), expected);
         assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), tip);
-        assert_eq!(std::fs::read(destination.path().join("delivery.txt")).unwrap(),
-            std::fs::read(root.join("delivery.txt")).unwrap());
+        assert_eq!(std::fs::read(destination.path().join("delivery.txt")).unwrap(), delivery);
         assert_eq!(git(root, &["rev-parse", &format!("refs/remotes/origin/{recorded}")]), tip);
         let after = tasks.get(&task.id).unwrap();
         assert_eq!(after.assignee.as_deref(), Some(receiver.name.as_str()));

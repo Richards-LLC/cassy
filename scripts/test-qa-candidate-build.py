@@ -21,16 +21,16 @@ verify_candidate_version = candidate["verify_candidate_version"]
 class CandidateVersionTests(unittest.TestCase):
     def test_real_version_output_matches_revision_and_cargo_version(self):
         revision = "ab49616c7b90bbb39d0d493fa7015d7ac0ded2fa"
-        incident = "cas 4.16.0 (ab49616c 2026-11-11)"
+        incident = "cas 9.99.7 (ab49616c 2026-11-11)"
         for output, declared, requested, valid in [
-            ("cas 4.16.0 (ab49616 2026-11-11)", "4.16.0", revision, True),
-            (incident, "4.16.0", revision, True),
-            (f"cas 4.16.0 ({revision} 2026-11-11)", "4.16.0", revision, True),
-            ("cas 4.16.0 (ab4961 2026-11-11)", "4.16.0", revision, False),
-            (f"cas 4.16.0 ({revision}0 2026-11-11)", "4.16.0", revision + "0", False),
-            (incident, "4.16.1", revision, False),
-            (incident, "4.16.0", "f" + revision[1:], False),
-            ("cas 4.16.0", "4.16.0", revision, False),
+            ("cas 9.99.7 (ab49616 2026-11-11)", "9.99.7", revision, True),
+            (incident, "9.99.7", revision, True),
+            (f"cas 9.99.7 ({revision} 2026-11-11)", "9.99.7", revision, True),
+            ("cas 9.99.7 (ab4961 2026-11-11)", "9.99.7", revision, False),
+            (f"cas 9.99.7 ({revision}0 2026-11-11)", "9.99.7", revision + "0", False),
+            (incident, "9.99.8", revision, False),
+            (incident, "9.99.7", "f" + revision[1:], False),
+            ("cas 9.99.7", "9.99.7", revision, False),
         ]:
             with self.subTest(output=output, declared=declared, requested=requested):
                 if valid:

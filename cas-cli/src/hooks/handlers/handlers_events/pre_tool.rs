@@ -13048,12 +13048,22 @@ mod worker_commit_guard_tests {
         env.set("CAS_CLONE_PATH", &linked_path);
 
         for (command, denied) in [
+            (format!("bash -n {{+n,-c,'cd \"{repo_path}\"; git commit -m probe'}}"), true),
             (format!("bash -n < scripts/release.sh +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
             ("bash -n scripts/release.sh scripts/fast-rows-pre-push.sh".into(), false),
+            ("bash -n ./scripts/release-v1.sh".into(), false),
             ("bash --noexec scripts/release.sh".into(), false),
             ("bash -n --noexec -n scripts/release.sh".into(), false),
             ("sh -n scripts/release.sh".into(), false),
-            ("bash -n 'scripts/release check.sh'".into(), false),
+            ("bash -n 'scripts/release.sh'".into(), true),
+            ("bash -n 'scripts/release check.sh'".into(), true),
+            ("bash -n $VAR".into(), true),
+            ("bash -n scripts/*.sh".into(), true),
+            ("bash -n ~/x".into(), true),
+            ("bash -n scripts/release=check.sh".into(), true),
+            ("bash -n scripts/release\\.sh".into(), true),
+            ("bash '-n' scripts/release.sh".into(), true),
+            ("bash '--noexec' scripts/release.sh".into(), true),
             ("bash -l -n scripts/release.sh".into(), true),
             ("bash -n -- scripts/release.sh".into(), true),
             ("bash --noexec -- scripts/release.sh".into(), true),

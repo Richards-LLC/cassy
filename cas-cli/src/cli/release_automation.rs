@@ -1364,6 +1364,37 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn failed_install_notice_reaches_owner_once_cas_fed1() {
+        use clap::Parser;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, mut train, owner, mut tracking) = fixture();
+        tracking.version = "0.1.0".into();
+        track_on_train(&tracking, &root, temp.path(), &train).unwrap();
+        // The receipt retains ownership after the release train has rolled over.
+        train.status = TaskStatus::Closed;
+        train.epic_verification_owner = None;
+        open_task_store(&root).unwrap().update(&train).unwrap();
+        let publication = root.join("failed-publication.json");
+        fs::write(&publication, r#"{"tag_name":"v0.1.0","draft":false,"published_at":"2026-11-05T23:00:00Z"}"#).unwrap();
+        let cli = super::super::Cli::try_parse_from([
+            "cas", "release", "installed", "--receipt", publication.to_str().unwrap(),
+            "--repo", "example/repo", "--failed-attempts", "3",
+        ]).unwrap();
+        let Some(super::super::Commands::Release(super::super::ReleaseCommands::Installed(args))) = cli.command else { panic!("wrong command"); };
+        for _ in 0..2 { installed(&args, Some(&root)).unwrap(); }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, owner.name);
+        assert!(crate::supervisor_notices::is_action_envelope(&rows[0].prompt));
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+            .get_by_transition_key(&format!("supervisor-notice:release_post_publish_failed:{}:0.1.0:{}", train.id, owner.id)).unwrap();
+        assert!(notices.is_some());
+        // There is deliberately no published tag or Git transport for reconciliation.
+        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().updated_at, train.updated_at);
+    }
+
+    #[test]
     fn release_git_child_has_a_deadline() {
         let temp = tempfile::tempdir().unwrap();
         git(temp.path(), &["init"]).unwrap();

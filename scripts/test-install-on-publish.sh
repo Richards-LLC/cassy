@@ -49,6 +49,10 @@ if [[ "$1 $2" == "release published" ]]; then
 fi
 if [[ "$1 $2" == "release installed" ]]; then
     notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
+    if [[ "${6:-}" == example/repo && "${7:-}" == --failed-attempts ]]; then
+        printf 'failed-notice=%s:%s\n' "$notice_tag" "$8" >>"$FAKE_LOG"
+        exit 0
+    fi
     printf 'notice=%s\n' "$notice_tag" >>"$FAKE_LOG"
     if [[ "${FAKE_NOTICE_HANGS:-}" == "$notice_tag" ]]; then
         exec perl -MPOSIX=setpgid -e '
@@ -172,6 +176,33 @@ assert json.loads((state / "install-on-publish.pending.d/v9.99.2.json").read_tex
 PY_ORDER
     [[ $? == 0 ]] || exit 1
 ) && ok 'a newer install precedes retries and retains the older pending notice' || bad 'a newer install precedes retries and retains the older pending notice'
+
+# An always-failing older notice retires once, including when the legacy
+# receipt keeps rediscovering it. Subsequent ticks must not recreate it.
+(
+    export XDG_STATE_HOME="$tmp/exhausted-state" RELEASE_NOTICE_MAX_ATTEMPTS=3
+    echo 9.99.3 >"$FAKE_INSTALLED"
+    mkdir -p "$XDG_STATE_HOME/cassy"
+    printf '{"tag_name":"v9.99.2","published_at":"2026-11-05T23:00:00Z","draft":false}\n' >"$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+    cp "$XDG_STATE_HOME/cassy/install-on-publish.pending.json" "$tmp/legacy-publication.json"
+    : >"$FAKE_LOG"
+    for tick in 1 2 3 4 5; do
+        # Replay legacy discovery across timer restarts as well as ordinary retries.
+        cp "$tmp/legacy-publication.json" "$XDG_STATE_HOME/cassy/install-on-publish.pending.json"
+        FAKE_LATEST=v9.99.3 FAKE_NOTICE_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+    done
+    python3 - "$FAKE_LOG" "$XDG_STATE_HOME/cassy" <<'PY_EXHAUSTED'
+import json, pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+state = pathlib.Path(sys.argv[2])
+assert lines.count("notice=v9.99.2") == 3, lines
+assert lines.count("failed-notice=v9.99.2:3") == 1, lines
+assert not (state / "install-on-publish.pending.d/v9.99.2.json").exists()
+failed = list((state / "install-on-publish.failed.d").glob("*.json"))
+assert len(failed) == 1, failed
+assert json.loads(failed[0].read_text())["tag_name"] == "v9.99.2"
+PY_EXHAUSTED
+) && ok 'an exhausted older notice stops at the cap with one failure report' || bad 'an exhausted older notice stops at the cap with one failure report'
 
 # A failed older publication stays pending even if its install notice succeeds.
 # A newer install must happen before either publication is reconciled again.

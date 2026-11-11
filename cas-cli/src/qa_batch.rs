@@ -518,7 +518,6 @@ pub(crate) fn shipped_anchor(root: &Path, task: &Task) -> Option<String> {
         commit(&repo, task.deliverables.factory_branch_anchor.as_deref()?)?
     } else {
         if task.status != cas_types::TaskStatus::Blocked
-            || task.deliverables.factory_branch_anchor.is_some()
             || !cas_store::has_qa_batch_deferral(root, &task.id).ok()?
         {
             return None;

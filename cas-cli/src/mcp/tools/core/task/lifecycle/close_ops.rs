@@ -31196,9 +31196,11 @@ esac
         cas_store::record_observed_delivery_merge(&cas_dir, &blocker.id, "factory/idle-heron-4b22",
             "main", &accepted, &receipt, actor).unwrap();
         cas_store::defer_qa_batch_evidence(&cas_dir, &blocker.id, &accepted).unwrap();
-        blocker.deliverables.decline_factory_branch_anchor();
         blocker.status = TaskStatus::Blocked;
         store.add(&blocker).unwrap();
+        assert_eq!(crate::qa_batch::shipped_anchor(&cas_dir, &blocker), Some(accepted.clone()));
+        blocker.deliverables.decline_factory_branch_anchor();
+        store.update(&blocker).unwrap();
         // Merged, closed and reopened for rework: only history names the old tip.
         let mut reopened = worker_task("idle-heron-4b22");
         reopened.id = "cas-4b22-reopened".into();

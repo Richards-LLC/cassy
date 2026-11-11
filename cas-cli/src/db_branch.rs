@@ -804,13 +804,14 @@ pub fn render_record(record: &DbBranchRecord) -> String {
 
 /// Only the supervisor holds the Neon credential. A worker asks for a branch
 /// with a blocker message instead.
+// gate-audit[is_supervisor]: input Derived authenticated role used to enforce H-45; never an optional override.
 pub fn role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::gates::tag("H-45", format!(
             "coordination {action} rejected: only the supervisor provisions or deletes database branches, and connection strings never reach a worker through MCP. Ask for one with `coordination action=message target=supervisor blocker=true summary=\"db branch for <task-id>\" message=\"db branch for <task-id>: <why>\"`; the supervisor's db_branch_create writes {ENV_FILE} into your worktree."
-        ))
+        )))
     }
 }
 

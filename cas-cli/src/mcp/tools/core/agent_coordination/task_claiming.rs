@@ -728,6 +728,8 @@ impl CasCore {
     ///    two-step fallback if `transfer` is unavailable.
     ///
     /// Safety: refuses to reset a `Closed` task (use `reopen` instead).
+    // gate-audit[force]: bypass G-134 Live-worker reset safety refusal; only an actual live-owner reset receives the override tag.
+    // gate-audit[reset_override]: selector Derived acceptance of external supervisor_override; final G-134 tag records the actual waiver.
     pub async fn cas_task_reset(
         &self,
         Parameters(req): Parameters<TaskReleaseRequest>,
@@ -825,6 +827,10 @@ impl CasCore {
         //
         // An orphaned task (no assignee, or assignee with a stale/dead heartbeat)
         // is unaffected — this is the intended dead-session recovery path.
+        // gate[G-134 reset]: Live worker reset safety guard
+        let reset_override = req.force.unwrap_or(false) && task.assignee.as_deref()
+            .and_then(|assignee| super::super::task::resolve_agent_identity(agent_store.as_ref(), assignee))
+            .is_some_and(|agent| (chrono::Utc::now()-agent.last_heartbeat).num_seconds() <= crate::mcp::tools::service::factory_ops::WORKER_STALE_SECS);
         if !req.force.unwrap_or(false) {
             if let Some(ref assignee) = task.assignee {
                 // Resolve either the display name or opaque id. The registry
@@ -836,7 +842,7 @@ impl CasCore {
                     use crate::mcp::tools::service::factory_ops::WORKER_STALE_SECS;
                     let elapsed = (chrono::Utc::now() - agent.last_heartbeat).num_seconds();
                     if elapsed <= WORKER_STALE_SECS {
-                        return Ok(Self::success(format!(
+                        return Ok(Self::success(crate::gates::refusal_tag("G-134", format!(
                             "SAFETY GUARD: task {} is assigned to '{}' whose heartbeat is {}s ago \
                              (threshold: {}s) — the worker appears to be ALIVE and may be actively \
                              working this task. Resetting now would orphan their in-flight work.\n\n\
@@ -852,7 +858,7 @@ impl CasCore {
                             assignee,
                             req.task_id,
                             tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
-                        )));
+                        ))));
                     }
                 }
             }
@@ -924,10 +930,11 @@ impl CasCore {
             ],
         );
 
-        Ok(Self::success(format!(
+        let response = format!(
             "Reset task: {} (was {:?}, assignee cleared, lease released: {})",
             req.task_id, prior_status, lease_released
-        )))
+        );
+        Ok(Self::success(if reset_override { crate::gates::override_tag("G-134",response) } else {response}))
     }
 
     /// List tasks available for claiming
@@ -1040,6 +1047,8 @@ impl CasCore {
     ///
     /// Non-supervisor callers that set `supervisor_override=true` receive an
     /// explicit rejection; the flag is not silently ignored.
+    // gate-audit[supervisor_override_requested]: bypass G-141 Transfer proceeds without the ordinary caller lease/assignee ownership.
+    // gate-audit[adopt_branch]: selector Requests validated branch adoption as part of transfer; ownership and cleanliness remain enforced.
     pub async fn cas_task_transfer(
         &self,
         Parameters(req): Parameters<TaskTransferRequest>,
@@ -1106,6 +1115,7 @@ impl CasCore {
             .or_else(|| task.assignee.clone()).unwrap_or_else(|| "<unassigned>".into());
         // prior_lease_holder is Some(<agent_id>) when we force-released a live lease.
         // Used below for the audit note.
+        // gate[G-141 transfer]: Transfer lease / assignee ownership
         let prior_lease_holder: Option<String> = match &lease {
             Some(l) if l.agent_id == agent_id && l.status == LeaseStatus::Active => {
                 // Caller owns the lease — normal transfer path.
@@ -1137,12 +1147,12 @@ impl CasCore {
                 } else {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-141", format!(
                             "Task {} is owned by {}, not {}. \
                              Supervisors can force-transfer with supervisor_override=true \
                              (bypasses the lease check and logs an audit entry).",
                             req.task_id, holder_display, agent_id
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -1169,11 +1179,11 @@ impl CasCore {
                 if !caller_is_assignee && !supervisor_forced {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-141", format!(
                             "No active lease found for task {} (status: {}). Its assignee, or a \
                              supervisor with supervisor_override=true, can still transfer it.",
                             req.task_id, task.status
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -1353,7 +1363,8 @@ impl CasCore {
         )).unwrap_or_default();
         let adoption_note = format!("{adoption_note}{}", source_admission.notice);
 
-        Ok(Self::success(format!(
+        let forced_transfer = supervisor_override_requested && (prior_lease_holder.is_some() || transferred_without_lease);
+        let response = format!(
             "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
             previous_holder,
@@ -1362,7 +1373,8 @@ impl CasCore {
             req.note.as_deref().unwrap_or("(none)"),
             override_note,
             adoption_note
-        )))
+        );
+        Ok(Self::success(if forced_transfer {crate::gates::override_tag("G-141",response)} else {response}))
     }
 
     /// List tasks claimed by this agent

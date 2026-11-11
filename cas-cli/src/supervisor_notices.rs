@@ -125,6 +125,7 @@ pub(crate) fn enqueue_keyed(
     enqueue_notice(root, recipient, kind, detail, key, None, context)
 }
 
+// gate[N-29 notice]: Supervisor notices with operator fallback and adoption
 fn enqueue_notice(
     root: &Path,
     recipient: &Recipient,

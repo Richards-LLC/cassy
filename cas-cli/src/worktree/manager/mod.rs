@@ -220,6 +220,8 @@ impl WorktreeManager {
     /// the worktree directory (merge_and_cleanup with cleanup=true,
     /// abandon, remove_worker); pass `false` only when the worktree is
     /// merged but preserved (cleanup=false).
+    // gate[G-138 worktree]: Dirty source worktree preservation
+    // gate-audit[will_remove]: selector Selects which dirty-file classes the requested operation affects; force remains the actual G-138 bypass.
     fn reject_or_warn_on_dirty(
         &self,
         git: &GitOperations,
@@ -234,11 +236,11 @@ impl WorktreeManager {
                 message.push_str(", ");
             }
             message.push_str(&dirty.describe_warnings());
-            return Err(WorktreeError::UncommittedChanges(message));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",message)));
         }
 
         if dirty.is_blocked() {
-            return Err(WorktreeError::UncommittedChanges(dirty.describe_blocking()));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",dirty.describe_blocking())));
         }
 
         if !dirty.warnings.is_empty() {
@@ -406,6 +408,7 @@ impl WorktreeManager {
     ///
     /// # Returns
     /// The merge commit hash if successful, or None if merge was skipped
+    // gate-audit[cleanup]: selector Chooses post-merge worktree removal; dirty preservation is separately enforced.
     pub fn merge_and_cleanup(
         &self,
         worktree: &mut Worktree,
@@ -449,6 +452,8 @@ impl WorktreeManager {
         self.merge_preserving_worktree_at_with_publication(worktree, force, will_cleanup, source_sha, None)
     }
 
+    // gate-audit[force]: bypass G-138 Caller-visible operation supplies the explicit successful dirty-source waiver tag.
+    // gate-audit[accepted_by]: worktree_merge_attempt
     pub(crate) fn merge_preserving_worktree_at_with_publication(
         &self,
         worktree: &mut Worktree,
@@ -684,6 +689,8 @@ impl WorktreeManager {
     }
 
     /// Abandon a worktree without merging
+    // gate-audit[force]: bypass G-138 Caller-visible operation tags a successful dirty removal; shared helper owns its refusal code.
+    // gate-audit[accepted_by]: worktree_cleanup,worktree_cleanup_target
     pub fn abandon(&self, worktree: &mut Worktree, force: bool) -> WorktreeResult<()> {
         // Check for uncommitted changes (cas-006c: same named-path
         // classification as merge_and_cleanup). will_remove=true always —

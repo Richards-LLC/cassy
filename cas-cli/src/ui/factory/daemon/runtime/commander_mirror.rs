@@ -1056,6 +1056,7 @@ pub(super) fn scan_supervisor_replies(
                 continue;
             };
             let key = format!("commander-mirror:{}:{}:{}", session, agent.id, turn.key);
+            // gate[N-34 notice]: Commander supervisor-turn mirror
             if let Err(error) = queue.mirror_supervisor_turn(
                 session,
                 &key,

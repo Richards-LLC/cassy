@@ -60,6 +60,7 @@ fn enqueue_worker_attention_relay(
 /// activity), so the stored row is the "already paged" mark (cas-b080).
 ///
 /// [`SUPERVISOR_IDLE_OPERATOR_PAGE_SECS`]: crate::ui::factory::director::SUPERVISOR_IDLE_OPERATOR_PAGE_SECS
+// gate[W-04 watchdog]: Supervisor-idle operator page
 fn page_operator_for_idle_supervisor(
     cas_dir: &std::path::Path,
     next_step: &crate::ui::factory::director::SupervisorActionableState,
@@ -154,6 +155,7 @@ pub(super) fn record_operator_page(
 /// Known cost: a verifier that dies just after an extension is reported up
 /// to about twelve minutes late (the ten-minute extension plus the two-minute
 /// lead), never later than the hour cap.
+// gate[W-38 watchdog]: Verification dispatch deadline extension
 fn extend_progressing_verification_dispatches(
     cas_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
@@ -220,6 +222,7 @@ fn extend_progressing_verification_dispatches(
 /// skipped before the per-sweep cap, so a burst of expiries cannot keep the
 /// same oldest rows in front of newer ones. Returns how many expired
 /// dispatches have a persisted relay after this sweep.
+// gate[W-39 watchdog]: Expired verification dispatch relay (verification_dispatch_expired)
 pub(super) fn escalate_expired_verification_dispatches(
     cas_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
@@ -303,6 +306,7 @@ fn enqueue_worker_attention_relay_for_episode(
         if let Some(episode) = operator_page_episode {
             page_operator_for_idle_supervisor(cas_dir, next_step, *episode);
         }
+        // gate[W-47 watchdog]: Merged-close-blocked relay (merged_close_blocked)
         if next_step.merged_close_blocked_relay_key().is_some() {
             // Each delivery owns one durable notice, even when the mixed queue
             // gains another task or the supervisor/daemon starts a new turn.
@@ -466,6 +470,7 @@ pub(super) fn enqueue_usage_limit_relay(
 /// Surface a terminal harness-side refusal even when its MCP child continues
 /// heartbeating. The evidence is collected from the harness artifact, not
 /// inferred from heartbeat age.
+// gate[N-09 notice]: Worker-unavailable relay helper (test-only callers)
 pub(super) fn enqueue_worker_unavailable_relay(
     cas_dir: &std::path::Path,
     worker: &str,
@@ -1057,6 +1062,7 @@ impl MergeQueueRepair {
                     .map_err(|error| tracing::warn!(task_id = %task.id, %error, "cas-25ce: ejected delivery not returned"))
                     .is_ok()
             }
+            // gate[N-28 notice]: Second merge-queue ejection operator page
             Self::PageOperator { run, head } => {
                 let paged = record_operator_page(
                     cas_dir,
@@ -1224,6 +1230,7 @@ fn enqueue_delivery_pr_merged_wake(
 
 /// Drain the durable lifecycle outbox once (cas-ecff). Runs on the daemon's
 /// store worker (GH #1165).
+// gate[W-37 watchdog]: Lifecycle outbox drain
 fn drain_lifecycle_outbox_once(cas_dir: &std::path::Path) {
     let Ok(sq) = crate::store::open_supervisor_queue_store(cas_dir) else {
         return;
@@ -1374,6 +1381,7 @@ fn persist_ci_watch_results(
 /// Persist the PR identity as soon as it is discovered, then persist the merge
 /// receipt only after the worker wake is durable. A failed prompt write leaves
 /// the merge unrecorded so the next GitHub poll retries the complete handoff.
+// gate[W-45 watchdog]: Delivery PR merged observation and wake
 fn apply_delivery_pr_observation(
     cas_dir: &std::path::Path,
     observation: &super::ci_watch::DeliveryPrObservation,
@@ -1426,6 +1434,7 @@ fn apply_delivery_pr_observation(
 /// remains open, the existing durable supervisor attention lane tells the
 /// supervisor exactly which PR/receipt needs recovery. Its stable key makes
 /// this a single escalation for the merge episode.
+// gate[W-46 watchdog]: Delivery PR merge timeout (delivery_pr_merge_timeout)
 fn relay_delivery_pr_merge_timeouts(cas_dir: &std::path::Path) {
     let Ok(store) = crate::store::open_task_store_cached(cas_dir) else {
         return;
@@ -4491,6 +4500,7 @@ impl FactoryDaemon {
                     ci_watch_task = Some(tokio::task::spawn_blocking(move || {
                         // Consume CI before resuming the queue, so a known red
                         // cannot admit another delivery in this pass.
+                        // gate[W-53 watchdog]: Train CI observe, merge resume and CI merge retry
                         if let Err(error) = crate::train_ci::observe(&watch_cas_dir, &session_name) {
                             tracing::warn!(%error, "train CI scan deferred");
                         }

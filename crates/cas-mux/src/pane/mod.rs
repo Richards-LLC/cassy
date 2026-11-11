@@ -1308,6 +1308,7 @@ impl Pane {
     }
 
     /// Override the harness events path (tests only).
+    // gate-audit[harness_events_path_override]: selector Test-only event input path, not factory work admission.
     pub fn set_harness_events_path_for_test(&self, path: impl Into<PathBuf>) {
         if let Ok(mut guard) = self.harness_events_path_override.lock() {
             *guard = Some(path.into());
@@ -1355,6 +1356,7 @@ impl Pane {
     /// Claude/Codex are deliberately unchanged: their tracked boolean is not a
     /// normal-completion/busy signal.
     /// Quiet PTY output alone never clears — long MCP/tool waits stay active.
+    // gate-audit[harness_events_path_override]: selector Test-only event input path; changes observed telemetry, not policy.
     pub fn refresh_harness_turn_state(&self) {
         if !self.is_turn_in_flight() {
             return;
@@ -1393,6 +1395,7 @@ impl Pane {
         }
     }
 
+    // gate-audit[harness_events_path_override]: selector Test-only event input path; fallback discovers production telemetry.
     fn resolve_harness_events_path(&self) -> Option<PathBuf> {
         if let Ok(guard) = self.harness_events_path_override.lock() {
             if let Some(ref p) = *guard {

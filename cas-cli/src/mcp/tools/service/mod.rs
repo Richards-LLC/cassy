@@ -1244,6 +1244,7 @@ fn coordination_params_not_in(req: &CoordinationRequest, allowed: &[&str]) -> Ve
 impl CasService {
     /// Shared dispatch behind the `coordination` and `factory` tools. Each
     /// tool decides which actions it accepts before calling this.
+    // gate-audit[input]: Validates and dispatches the requested action; factory policy results remain tagged by their handlers.
     async fn coordination_dispatch(
         &self,
         req: CoordinationRequest,

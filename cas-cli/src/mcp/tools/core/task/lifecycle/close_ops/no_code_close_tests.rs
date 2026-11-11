@@ -2999,7 +2999,7 @@ async fn queued_stale_tasks_are_skipped_with_notes_cas_8488() {
 /// GH #1596/#1597: refusing A must leave B editable and preserve its owner
 /// across the supervisor's correction round; a foreign descendant is refused.
 #[tokio::test]
-async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
+async fn refused_close_keeps_correction_tip_and_restart_cas_56f1() {
     for foreign in [false, true] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture(&mut env, "main");
@@ -3014,22 +3014,22 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         agents.update(&agent).unwrap();
         let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
         for (key, value) in [("qa.mode", "batch"), ("qa.evidence_gate", "false"),
-            ("qa.independent_pass", "false"), ("qa.registry.enforce", "enforce")] {
+            ("qa.independent_pass", "false")] {
             config.set(key, value).unwrap();
         }
         config.save(&f.cas_dir()).unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
         let id = "cas-56f1";
-        let mut task = assigned(id, TaskType::Bug, "main");
+        let mut task = assigned(id, TaskType::Task, "main");
         task.status = TaskStatus::Open;
         f.put(&task);
         call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
         let start = f.task(id).deliverables.factory_branch_start.unwrap();
         std::fs::create_dir_all(checkout.join("src")).unwrap();
-        std::fs::create_dir_all(checkout.join("docs/qa/bug-families")).unwrap();
         std::fs::write(checkout.join("src/flow.ts"), "export const flow = true;\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/journeys.yaml"), "version: 1\nupdated: '2026-11-09'\ninvariants:\n  INV: {statement: Arrived, check: Read state}\nbug_families:\n  correction: {title: Flow correction, tasks: [cas-56f1], invariants: [INV], journeys: [FLOW]}\njourneys:\n  - id: FLOW\n    status: live\n    entry: {url: /flow, trigger: Open}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [INV]\n").unwrap();
-        std::fs::write(checkout.join("docs/qa/bug-families/correction.yaml"), "title: Flow correction\ntasks: [cas-56f1]\ninvariants: [INV]\njourneys: [FLOW]\n").unwrap();
+        // Keep the restart/ownership regression on a live park refusal;
+        // registry upkeep now belongs to the lane lint (cas-4b33).
+        std::fs::write(checkout.join("HANDOFF.md"), "fixture checkpoint\n").unwrap();
         git(&checkout, &["add", "."]);
         git(&checkout, &["commit", "-qm", "fix: repair flow"]);
         let a = git(&checkout, &["rev-parse", "HEAD"]);
@@ -3040,13 +3040,14 @@ async fn refused_registry_close_keeps_correction_tip_and_restart_cas_56f1() {
         f.put(&task);
         let close = |tip: &str| serde_json::json!({"action":"close", "id":id, "reason":format!("PASS {tip}")});
         let refused = call(&f.worker, close(&a)).await;
+        assert!(refused.contains("ROOT_HANDOFF_COMMITTED"), "{refused}");
         let after = f.task(id);
         assert_eq!(after.status, TaskStatus::InProgress, "{refused}");
         assert!(after.deliverables.parked_branch.is_none(), "{refused}");
         assert!(!after.pending_verification);
         assert!(cas_store::get_latest_worker_delivery(&f.cas_dir(), id).unwrap().is_none());
-        git(&checkout, &["rm", "docs/qa/bug-families/correction.yaml"]);
-        git(&checkout, &["commit", "-qm", "docs: keep one canonical flow family"]);
+        git(&checkout, &["rm", "HANDOFF.md"]);
+        git(&checkout, &["commit", "-qm", "docs: remove the root checkpoint"]);
         let b = git(&checkout, &["rev-parse", "HEAD"]);
         git(&checkout, &["push", "-q", "origin", LANE]);
         let parked = call(&f.worker, close(&b)).await;

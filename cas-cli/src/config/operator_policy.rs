@@ -897,6 +897,7 @@ fn context_refusal(context: &InvocationContext, subject: &str, remedy: &str) -> 
 /// cas-1b94: shared by the MCP `proxy_add`/`proxy_remove` tools, the `cas mcp`
 /// CLI and the PreToolUse hook, so the three apply one rule.
 #[cfg(feature = "mcp-proxy")]
+// gate-audit[forward]: H-45 Returned by the common MCP role-policy guard; it never accepts a bypass.
 pub fn supervisor_only_mcp_refusal(
     name: &str,
     added: Option<&cmcp_core::config::ServerConfig>,

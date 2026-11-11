@@ -78,13 +78,16 @@ const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/ch
 const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
 const CI_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n";
+    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n[override G-108]\n\n";
 const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n";
+    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n[override G-108]\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
 /// Decide admission from bounded evidence; never poll for pending CI.
+// gate[G-108 merge-admission]: Lane CI admission (code CI required, CI red, CI pending, override)
+// gate-audit[override_requested]: bypass G-108 Producer tags only accepted red/unvalidated CI waivers; pending/unpushed sources remain refused.
+// gate-audit[accepted_by]: worktree_merge_attempt
 fn admit_branch_ci(
     state: &BranchCiState,
     override_requested: bool,
@@ -92,41 +95,41 @@ fn admit_branch_ci(
 ) -> Result<bool, String> {
     // Missing remote commits are not absent checks or a transport outage.
     // No override can turn an unpublished source into a CI-reviewed delivery.
+    // gate[G-107 merge-admission]: Push first (missing remote commit)
     if let BranchCiState::MissingCommit { sha, reason } = state {
-        return Err(format!(
+        return Err(crate::gates::tag("G-107", format!(
             "PUSH FIRST: refusing worktree_merge for {sha}: {reason}. Push this commit first, confirm the origin repository and access, then retry after CI finishes. Missing-commit CI cannot be overridden. No merge was attempted."
-        ));
+        )));
     }
     if override_requested && reason.is_none_or(|reason| reason.trim().is_empty()) {
-        return Err(
-            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason."
-                .to_string(),
-        );
+        return Err(crate::gates::tag("G-108",
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason.",
+        ));
     }
     if let BranchCiState::UnvalidatedCode { sha, reason } = state {
         if !override_requested {
-            return Err(format!(
+            return Err(crate::gates::tag("G-108", format!(
                 "CODE CI REQUIRED: refusing worktree_merge for {sha}: {reason}. Require code CI or a local validation receipt for this code delivery. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted."
-            ));
+            )));
         }
         return Ok(true);
     }
     if let BranchCiState::Red { sha, url } = state {
         if !override_requested {
-            return Err(format!(
+            return Err(crate::gates::tag("G-108", format!(
                 "CI RED: refusing worktree_merge for {sha}. Failing run: {}. A registered supervisor may retry with supervisor_override=true, task_id=<task>, and a non-empty reason. No merge was attempted.",
                 url.as_deref().unwrap_or("unavailable")
-            ));
+            )));
         }
         return Ok(true);
     }
     // cas-6c13: never merge code on pending lane CI. A pending run can still
     // fail (cas-38e7 went red 7 min after a merge on pending); no override.
     if let BranchCiState::CodePending { sha, url, .. } = state {
-        return Err(format!(
+        return Err(crate::gates::tag("G-108", format!(
             "CI PENDING: refusing worktree_merge for {sha}: lane CI is still running ({}). Retry when it finishes; pending CI cannot be overridden. No merge was attempted.",
             url.as_deref().unwrap_or("run URL unavailable")
-        ));
+        )));
     }
     Ok(false)
 }
@@ -2745,6 +2748,10 @@ fn epic_lane_bypassed_by_trunk_target(
     (lane != resolved_branch).then(|| lane.to_string())
 }
 
+// gate[G-140 merge-admission]: Explicit authorization for trunk fallback
+// gate-audit[allow_trunk]: bypass G-140 Explicitly permits the otherwise-refused trunk fallback.
+// gate-audit[epic_lane_bypassed_by_trunk_target]: selector Detects a trunk-pinned child; permission remains controlled by allow_trunk.
+// gate-audit[accepted_by]: worktree_merge_attempt
 fn resolve_system_b_merge_target(
     task_store: &dyn cas_store::TaskStore,
     agent_store: &dyn cas_store::AgentStore,
@@ -2797,7 +2804,7 @@ fn resolve_system_b_merge_target(
                     if !allow_trunk {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
+                            message: Cow::from(crate::gates::tag("G-140",format!(
                                 "task {task_id} belongs to epic {} (delivery lane {lane}) but its \
                                  WorkTarget resolves to trunk {trunk} — refusing to bypass the \
                                  epic lane (would merge to: {trunk}). Re-target the task to the \
@@ -2805,7 +2812,7 @@ fn resolve_system_b_merge_target(
                                  allow_trunk=true only if {trunk} is truly intended.\n\n{}",
                                 epic.id,
                                 merge_target_remediation(assignee)
-                            )),
+                            ))),
                             data: None,
                         });
                     }
@@ -2851,12 +2858,12 @@ fn resolve_system_b_merge_target(
         }
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-140",format!(
                 "task {task_id} has no declared merge target — refusing trunk \
                  fallback (would merge to: {trunk}). Pass allow_trunk=true only if \
                  that exact destination is intended.\n\n{}",
                 merge_target_remediation(assignee)
-            )),
+            ))),
             data: None,
         });
     }
@@ -3005,13 +3012,13 @@ fn resolve_system_b_merge_target(
             .join(", ");
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-140",format!(
                 "assignee {assignee} has epic task(s) whose WorkTarget resolves to trunk \
                  {trunk} instead of the epic lane ({list}) — refusing to bypass the epic \
                  lane (would merge to: {trunk}). Re-target the task to its epic lane, or \
                  pass task_id= with allow_trunk=true only if {trunk} is truly intended.\n\n{}",
                 merge_target_remediation(assignee)
-            )),
+            ))),
             data: None,
         });
     }
@@ -3131,13 +3138,13 @@ fn resolve_system_b_merge_target(
 
     Err(McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: Cow::from(format!(
+        message: Cow::from(crate::gates::tag("G-140",format!(
             "no declared merge target for worktree assignee {assignee}: no task_id or \
              assignee epic binding. The fallback would merge to: {trunk}; allow_trunk \
              was not set, so Cassy is refusing (cas-0b32/cas-b86e). Session focus is not \
              merge authority.\n\n{}",
             merge_target_remediation(assignee)
-        )),
+        ))),
         data: None,
     })
 }
@@ -3512,6 +3519,9 @@ impl CasCore {
     /// - the worktree is dirty (`abandon`'s own gate).
     ///
     /// Only the dirty and unmerged refusals are bypassable with `force`.
+    // gate-audit[force]: bypass G-138 Only an actual successful dirty-worktree removal receives the tag.
+    // gate-audit[dirty_override]: selector Measured G-138 acceptance from force, tagged only after successful cleanup.
+    // gate-audit[dry_run]: selector Chooses preview without cleanup; never permits deletion.
     pub async fn worktree_cleanup(
         &self,
         id: Option<&str>,
@@ -3605,6 +3615,7 @@ impl CasCore {
         };
 
         let mut cleaned = 0;
+        let mut dirty_override = false;
         let mut errors = Vec::new();
 
         for mut wt in orphans {
@@ -3617,7 +3628,10 @@ impl CasCore {
             }
             if wt.path.exists() {
                 if let Ok(manager) = WorktreeManager::new(&cwd, manager_config.clone()) {
+                    let bypassed = force && manager.git().classify_dirty_status(&wt.path)
+                        .is_ok_and(|dirty| dirty.is_blocked() || !dirty.warnings.is_empty());
                     if manager.abandon(&mut wt, force).is_ok() {
+                        dirty_override |= bypassed;
                         wt.mark_abandoned();
                         wt.mark_removed();
                         let _ = worktree_store.update(&wt);
@@ -3636,19 +3650,15 @@ impl CasCore {
             }
         }
 
-        if errors.is_empty() {
-            Ok(Self::success(format!("Cleaned up {cleaned} worktree(s).")))
-        } else {
-            Ok(Self::success(format!(
-                "Cleaned up {} worktree(s), {} error(s): {}",
-                cleaned,
-                errors.len(),
-                errors.join(", ")
-            )))
-        }
+        let response=if errors.is_empty() { format!("Cleaned up {cleaned} worktree(s).") }
+        else {format!("Cleaned up {} worktree(s), {} error(s): {}",cleaned,errors.len(),errors.join(", "))};
+        Ok(Self::success(if dirty_override{crate::gates::override_tag("G-138",response)}else{response}))
     }
 
     /// cas-f102 (GH #140): remove ONE worktree, resolved System A then System B.
+    // gate-audit[force]: bypass G-138,G-139 Dirty and unmerged worktree preservation guards; live-owner guard remains enforced.
+    // gate-audit[dirty_override]: selector Measured G-138 acceptance from force, tagged only after successful cleanup.
+    // gate-audit[dry_run]: selector Chooses preview without cleanup; never permits deletion.
     async fn worktree_cleanup_target(
         &self,
         id: &str,
@@ -3765,14 +3775,15 @@ impl CasCore {
         // the branch with `-D`, so removing this worktree would destroy them.
         let containers = manager.git().branches_containing(&worktree.branch);
         let branch_is_reachable = !containers.is_empty();
+        // gate[G-139 worktree]: Unmerged worktree branch preservation
         if !branch_is_reachable && !force {
-            return Ok(Self::success(format!(
+            return Ok(Self::success(crate::gates::refusal_tag("G-139",format!(
                 "Refused: {} has commits that exist on no other branch, and cleanup deletes the \
                  branch.\n\nMerge it first (`factory action=worktree_merge id={id}`), or pass \
                  force=true to discard the commits.\n\nWorktree: {}",
                 worktree.branch,
                 worktree.path.display()
-            )));
+            ))));
         }
 
         let system = if is_system_b { "System B" } else { "System A" };
@@ -3803,6 +3814,8 @@ impl CasCore {
             )));
         }
 
+        let dirty_override = force && manager.git().classify_dirty_status(&worktree.path)
+            .is_ok_and(|dirty| dirty.is_blocked() || !dirty.warnings.is_empty());
         // Refusal 3 (dirty without force) is `abandon`'s own gate.
         if let Err(error) = manager.abandon(&mut worktree, force) {
             return Ok(Self::success(format!(
@@ -3816,7 +3829,7 @@ impl CasCore {
             let _ = worktree_store.update(&worktree);
         }
 
-        Ok(Self::success(format!(
+        let mut response = format!(
             "Removed {system} worktree.\n\n  path:   {}\n  branch: {} (deleted; was {reachable_via})\n\
              {}",
             worktree.path.display(),
@@ -3826,11 +3839,15 @@ impl CasCore {
             } else {
                 "\nStore row marked abandoned + removed."
             }
-        )))
+        );
+        if dirty_override {response=crate::gates::override_tag("G-138",response);}
+        if force && !branch_is_reachable {response=crate::gates::override_tag("G-139",response);}
+        Ok(Self::success(response))
     }
 
     /// Resolve worker ownership synchronously so candidate Task values do not
     /// enlarge the async merge future or its transactional callers' stacks.
+    // gate[G-96 merge-admission]: Parked-delivery binding (ambiguous, incomplete, unresolved, remote)
     fn parked_delivery_for_worker(&self, id: &str) -> Result<(Box<cas_types::Task>, String), McpError> {
         let agents = self.open_agent_store()?;
         let token = id.strip_prefix("factory/").unwrap_or(id);
@@ -3855,10 +3872,10 @@ impl CasCore {
             ids.sort_unstable();
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-96", format!(
                     "AMBIGUOUS PARKED DELIVERY: worker {worker} has {} parked tasks ({}). Supply task_id=<task> and its recorded delivery branch. No merge was attempted.",
                     parked.len(), if ids.is_empty() { "none".into() } else { ids.join(", ") },
-                )),
+                ))),
                 data: None,
             });
         }
@@ -3868,9 +3885,9 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-96", format!(
                     "PARKED DELIVERY INCOMPLETE: task {} needs its recorded branch and branch_tip. Re-park the delivery or supply task_id explicitly. No merge was attempted.", task.id,
-                )),
+                ))),
                 data: None,
             });
         }
@@ -3910,10 +3927,10 @@ impl CasCore {
         };
         let refuse = |reason: String| McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-96", format!(
                 "DELIVERY BRANCH UNRESOLVED: task {} recorded source {} cannot be validated: {reason}. No merge was attempted. Restore the approved binding or use task action=rebind_branch before retrying.",
                 task.id, start.branch,
-            )),
+            ))),
             data: None,
         };
         if !Self::recorded_task_merge_source(task, &start.branch) {
@@ -3949,10 +3966,10 @@ impl CasCore {
         // it; name the next action instead.
         let not_parked_here = |next: String| McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-96", format!(
                 "DELIVERY NOT PARKED HERE: task {} is {:?} in this store; {next}. No merge was attempted.",
                 task.id, task.status,
-            )),
+            ))),
             data: None,
         };
         if let Some(machine) = peer_machine {
@@ -4097,10 +4114,10 @@ impl CasCore {
         if branches.len() != 1 {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-96", format!(
                     "AMBIGUOUS DELIVERY SOURCE: task {} has {} candidates: {}. Record the intended branch and anchor, then retry. No merge was attempted.",
                     task.id, branches.len(), if branches.is_empty() { "none".into() } else { branches.join(", ") },
-                )),
+                ))),
                 data: None,
             });
         }
@@ -4136,9 +4153,9 @@ impl CasCore {
         }
         let refuse = |detail: String| McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-96", format!(
                 "REMOTE DELIVERY REFUSED: {detail}. No merge was attempted."
-            )),
+            ))),
             data: None,
         };
         if recorded_anchor.len() != 40
@@ -4321,10 +4338,11 @@ impl CasCore {
         }
     }
 
-    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>) -> Option<String> {
+    // gate[G-95 merge-admission]: Unanswered peer ask
+    pub(super) fn peer_ask_merge_refusal(&self, task_id: Option<&str>, pr: Option<u64>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
         let caller = self.get_agent_id().ok()?;
         let agent = self.open_agent_store().ok().and_then(|store| store.get(&caller).ok());
-        crate::peer_ask_gate::merge_refusal(
+        crate::peer_ask_gate::merge_refusal_with_overrides(
             &self.cas_root,
             &caller,
             agent.as_ref().map(|agent| agent.name.as_str()).unwrap_or(caller.as_str()),
@@ -4332,7 +4350,9 @@ impl CasCore {
             &crate::peer_ask_gate::MergeSubject {
                 task_id: task_id.map(str::to_string), pr, any_pr: false,
             },
+            accepted_override_codes,
         )
+        .map(|refusal| crate::gates::tag("G-95", refusal))
     }
 
     /// Merge worktree back to parent
@@ -4406,6 +4426,8 @@ impl CasCore {
         )).await
     }
 
+    // gate-audit[force]: bypass G-138 Consents to dirty source worktree handling; shared-target residue is still refused.
+    // gate-audit[supervisor_override]: bypass G-108 Admits red/unvalidated lane CI with a durable supervisor decision.
     async fn worktree_merge_admitted(
         &self,
         id: &str,
@@ -4418,12 +4440,42 @@ impl CasCore {
         expected_delivery: Option<&crate::factory_ci_retry::Retry>,
         train_queue: Option<&str>,
     ) -> Result<CallToolResult, McpError> {
+        let mut accepted_override_codes = Vec::new();
+        let mut result = crate::async_runtime::heap_future(|| self.worktree_merge_attempt(
+            id, force, task_id, allow_trunk, cleanup, supervisor_override, reason, expected_delivery, train_queue,
+            &mut accepted_override_codes,
+        )).await?;
+        crate::gates::append_override_tags(&mut result, &accepted_override_codes);
+        Ok(result)
+    }
+
+    // gate-audit[force]: bypass G-138 Accepts dirty source handling while preserving shared-target safety.
+    // gate-audit[supervisor_override]: bypass G-108 Accepts a measured red/unvalidated lane CI result with an audited reason.
+    // gate-audit[ci_override]: selector Derived accepted CI decision; external supervisor_override owns G-108.
+    // gate-audit[dirty_override]: selector Derived accepted dirty handling; external force owns G-138.
+    async fn worktree_merge_attempt(
+        &self,
+        id: &str,
+        force: bool,
+        task_id: Option<&str>,
+        allow_trunk: bool,
+        cleanup: Option<bool>,
+        supervisor_override: bool,
+        reason: Option<&str>,
+        expected_delivery: Option<&crate::factory_ci_retry::Retry>,
+        train_queue: Option<&str>,
+        accepted_override_codes: &mut Vec<&'static str>,
+    ) -> Result<CallToolResult, McpError> {
         use crate::config::Config;
         use crate::store::open_worktree_store;
         use crate::worktree::{WorktreeConfig, WorktreeManager};
 
+        // gate[G-92 merge-admission]: Project hold
         if let Some(hold) = cas_store::project_hold::notice(&self.cas_root) {
-            return Err(Self::error(ErrorCode::INVALID_REQUEST, hold));
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                crate::gates::tag("G-92", hold),
+            ));
         }
         if let Some(message) = reason
             .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
@@ -4453,6 +4505,7 @@ impl CasCore {
         // session's worker branch or task from this session.
         let mut scoped_task =
             task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok()).map(Box::new);
+        // gate[G-93 merge-admission]: Foreign factory-session owner
         if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
             &cas_root,
             |agents, caller, now| {
@@ -4467,7 +4520,10 @@ impl CasCore {
         ) {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(owner.refusal(&format!("worktree_merge of {id}"), &caller)),
+                message: Cow::from(crate::gates::tag("G-93", owner.refusal(
+                    &format!("worktree_merge of {id}"),
+                    &caller,
+                ))),
                 data: None,
             });
         }
@@ -4497,12 +4553,13 @@ impl CasCore {
                 .unwrap_or_else(|| system_b_merge_source(id, None).1);
             if branch.starts_with("factory/") {
                 let cwd = cas_root.parent().unwrap_or(&cas_root);
+                // gate[G-94 merge-admission]: Pending or unreviewed QA round on branch
                 if let Some(refusal) =
                     crate::qa_pass::worktree_branch_merge_refusal(&cas_root, cwd, &branch)
                 {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(refusal),
+                        message: Cow::from(crate::gates::tag("G-94", refusal)),
                         data: None,
                     });
                 }
@@ -4534,7 +4591,10 @@ impl CasCore {
             ) {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(owner.refusal(&format!("worktree_merge of {id}"), &caller)),
+                    message: Cow::from(crate::gates::tag("G-93", owner.refusal(
+                        &format!("worktree_merge of {id}"),
+                        &caller,
+                    ))),
                     data: None,
                 });
             }
@@ -4549,7 +4609,7 @@ impl CasCore {
             // peer about this task or its PR holds the merge until answered or
             // visibly overridden.
             let pr = scoped_task.as_deref().and_then(|task| task.deliverables.delivery_pr_number);
-            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr) {
+            if let Some(refusal) = self.peer_ask_merge_refusal(Some(task_id), pr, accepted_override_codes) {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
             }
         }
@@ -4724,13 +4784,13 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-97", format!(
                     "PARKED DELIVERY SOURCE CHANGED: requested branch {} at {} has a different tip. Retry with recorded branch {} at {}. No merge was attempted.",
                     crate::worktree::GitOperations::visible_git_label(requested_branch),
                     crate::worktree::GitOperations::visible_git_label(&requested_tip),
                     crate::worktree::GitOperations::visible_git_label(&source.branch),
                     crate::worktree::GitOperations::visible_git_label(&source.anchor),
-                )),
+                ))),
                 data: None,
             });
         }
@@ -4745,6 +4805,7 @@ impl CasCore {
         // cas-619f: a user-facing delivery merges only after an independent
         // QA round (reviewed by someone other than the implementer) passed
         // or was waived for the exact tip being merged.
+        // gate[G-98 merge-admission]: Independent QA required before merge
         if let Some(task_id) = task_id
             && let Some(refusal) = self.independent_qa_merge_refusal(
                 task_id, task_source.as_ref().or(receipt_resume.as_ref()).map(|source| source.branch.as_str()).unwrap_or(id), &cwd,
@@ -4752,7 +4813,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(refusal),
+                message: Cow::from(crate::gates::tag("G-98", refusal)),
                 data: None,
             });
         }
@@ -4764,7 +4825,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(refusal),
+                message: Cow::from(crate::gates::tag("G-94", refusal)),
                 data: None,
             });
         }
@@ -4800,11 +4861,11 @@ impl CasCore {
                     if !source_worktree_live && remote_source.is_none() && transactional_delivery.is_none() {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
+                            message: Cow::from(crate::gates::tag("G-102", format!(
                                 "Worktree not found: {id} (checked System A worktree store and \
                              the System B path {})",
                                 path.display()
-                            )),
+                            ))),
                             data: None,
                         });
                     }
@@ -4871,6 +4932,7 @@ impl CasCore {
         let target = target.strip_prefix("origin/").unwrap_or(target);
         let integration = Config::configured_epic_base_branch(&cwd)
             .unwrap_or_else(|| manager.git().detect_default_branch());
+        // gate[G-99 merge-admission]: Release train open (trunk merge refused)
         if matches!(target, "main" | "master" | "trunk")
             || target == integration || target == manager.git().detect_default_branch()
         {
@@ -4895,12 +4957,12 @@ impl CasCore {
                 } else {
                     "Merge work into the train. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane; it uses the normal release PR and publication path."
                 };
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-99", format!(
                     "RELEASE TRAIN OPEN: {} ({}) owns {target}; worktree_merge cannot advance \
                      trunk while this train is open, including with allow_trunk=true. \
                      {guidance}",
                     train.id, train.effective_epic_branch().unwrap_or(&train.title),
-                )));
+                ))));
             }
         }
 
@@ -4908,6 +4970,7 @@ impl CasCore {
         // merge/reachability checks. A cleaned-up source is the sole
         // exception: immutable receipt and target ancestry are authenticated
         // below before source-less reconciliation can proceed.
+        // gate[G-102 merge-admission]: Worktree repository mismatch or worktree not found
         if source_worktree_live
             && let (Some(task_id), Some(expected)) = (task_id, declared_repo_context.as_ref())
         {
@@ -4917,12 +4980,12 @@ impl CasCore {
             )
             .map_err(|reason| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-102", format!(
                     "⚠️ WORKTREE REPOSITORY MISMATCH\n\n\
                      Cannot resolve repository identity for {}: {reason}. \
                      Refusing before merge/reachability checks.",
                     worktree.path.display()
-                )),
+                ))),
                 data: None,
             })?;
             crate::mcp::tools::core::task::repo_context::validate_worktree_binding(
@@ -4934,7 +4997,7 @@ impl CasCore {
             )
             .map_err(|message| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message),
+                message: Cow::from(crate::gates::tag("G-102", message)),
                 data: None,
             })?;
         }
@@ -4957,7 +5020,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(refusal),
+                message: Cow::from(crate::gates::tag("G-94", refusal)),
                 data: None,
             });
         }
@@ -4966,6 +5029,7 @@ impl CasCore {
         // the branch tip is not the parked task's reviewed SHA. Merge the
         // task's own delivery branch when it holds that SHA, and refuse rather
         // than merge another task's work under this task's name.
+        // gate[G-97 merge-admission]: Parked source drift (source changed, moved, stacked lane)
         if transactional_delivery.is_none()
             && let Some(task_id) = task_id
             && let Ok(store) = self.open_task_store()
@@ -4979,7 +5043,7 @@ impl CasCore {
                 Err(refusal) => {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(refusal),
+                        message: Cow::from(crate::gates::tag("G-97", refusal)),
                         data: None,
                     });
                 }
@@ -4999,11 +5063,11 @@ impl CasCore {
         if !source_worktree_live && remote_source.is_none() && transactional_delivery.is_none() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-102", format!(
                     "Worktree not found: {id} (checked System A worktree store and \
                      the System B path {})",
                     worktree.path.display()
-                )),
+                ))),
                 data: None,
             });
         }
@@ -5015,6 +5079,7 @@ impl CasCore {
         // ref stands in), and a missing target, an unresolvable source or a
         // diverged origin leave the ordinary merge path to report them.
         let strict = train_queue.is_some();
+        // gate[G-103 train-merge]: Queued train conflict preflight and target diverged
         if strict || scoped_task.is_some() {
             let probe = (|| -> Result<Option<(String, Vec<String>)>, McpError> {
                 let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
@@ -5030,20 +5095,20 @@ impl CasCore {
                     manager.git().resolve_commit(&format!("refs/remotes/origin/{}", worktree.parent_branch))
                 };
                 let Some(local) = manager.git().resolve_commit(&worktree.parent_branch) else {
-                    return if strict { Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target missing")) } else { Ok(None) };
+                    return if strict { Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-103", "merge target missing"))) } else { Ok(None) };
                 };
                 let target_tip = match remote {
                     Some(remote) if manager.git().is_ancestor(&local, &remote) => remote,
                     Some(remote) if !manager.git().is_ancestor(&remote, &local) => {
                         return if strict {
-                            Err(Self::error(ErrorCode::INVALID_PARAMS, "merge target diverged from origin; reconcile before retrying the merge"))
+                            Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-103", "merge target diverged from origin; reconcile before retrying the merge")))
                         } else { Ok(None) };
                     }
                     _ => local,
                 };
                 match manager.git().preflight_merge_conflicts(&target_tip, &worktree.branch) {
                     Ok(paths) => Ok(Some((target_tip, paths))),
-                    Err(error) if strict => Err(Self::error(ErrorCode::INVALID_PARAMS, error.to_string())),
+                    Err(error) if strict => Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-103", error.to_string()))),
                     Err(_) => Ok(None),
                 }
             })()?;
@@ -5055,7 +5120,7 @@ impl CasCore {
                 let mut error = worktree_merge_mcp_error(
                     error, &worktree.branch, &worktree.parent_branch,
                 );
-                error.message = Cow::Owned(format!("{}{recovery}", error.message));
+                error.message = Cow::Owned(crate::gates::tag("G-103", format!("{}{recovery}", error.message)));
                 return Err(error);
             }
         }
@@ -5139,6 +5204,7 @@ impl CasCore {
         if transactional_delivery.is_none() {
             let local_merge = scoped_task.as_deref()
                 .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
+            // gate[G-105 merge-admission]: Fresh target containment unverified
             match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, local_merge) {
                 Containment::Contained { receipt, origin_verified } => {
                     // Preserve the existing behind-local checkout repair, but only
@@ -5154,9 +5220,9 @@ impl CasCore {
                         return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
                     }
                 }
-                Containment::Unverified(message) => return Ok(Self::tool_error(message)),
+                Containment::Unverified(message) => return Ok(Self::tool_error(crate::gates::tag("G-105", message))),
                 Containment::NotContained if deferred_contained_review => {
-                    return Ok(Self::tool_error("The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation."));
+                    return Ok(Self::tool_error(crate::gates::tag("G-105", "The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation.")));
                 }
                 Containment::NotContained => {}
             }
@@ -5177,7 +5243,8 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from("CI RETRY SOURCE MOVED: parked delivery changed after authorization; no merge was attempted."),
+                message: Cow::from(crate::gates::tag("G-97", "CI RETRY SOURCE MOVED: \
+                    parked delivery changed after authorization; no merge was attempted.")),
                 data: None,
             });
         }
@@ -5212,10 +5279,11 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
-                Ok(Self::tool_error(format!(
+                Ok(Self::tool_error(crate::gates::tag("G-106", format!(
                     "TRANSACTIONAL DELIVERY {state}: {detail}\n\nNo merge was attempted. A registered supervisor may recover after correcting the exact cause."
-                )))
+                ))))
             };
+            // gate[G-106 merge-admission]: Transactional delivery state machine, target CAS and content proof
             if !matches!(
                 transaction.state,
                 cas_types::WorkerDeliveryState::AwaitingMerge
@@ -5223,10 +5291,10 @@ impl CasCore {
                     | cas_types::WorkerDeliveryState::Merged
                     | cas_types::WorkerDeliveryState::CloseReady
             ) {
-                return Ok(Self::tool_error(format!(
+                return Ok(Self::tool_error(crate::gates::tag("G-106", format!(
                     "Transactional delivery {} is in state {}; merge/resume is not authorized from this state.",
                     transaction.id, transaction.state
-                )));
+                ))));
             }
             let Some(expected) = declared_repo_context.as_ref() else {
                 return fail(
@@ -5337,13 +5405,13 @@ impl CasCore {
         if !source_worktree_live && remote_source.is_none() && !reconciled_delivery {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-102", format!(
                     "Worktree not found: {id} (checked System A worktree store and \
                      the System B path {}). Transactional delivery cannot continue \
                      without a live source unless the authenticated receipt commit \
                      is already an ancestor of its declared target.",
                     worktree.path.display()
-                )),
+                ))),
                 data: None,
             });
         }
@@ -5373,6 +5441,12 @@ impl CasCore {
                 let head = crate::fast_lane::resolve(&cwd, ci_source)?;
                 let eligibility = crate::fast_lane::evaluate_delivery(&lane, task, &cwd, &worktree.parent_branch, &head);
                 let note = crate::fast_lane::eligibility_note(&lane, &head, &eligibility);
+                // gate[G-109 merge-admission]: Fast-lane eligibility at merge
+                let note = if matches!(eligibility, crate::fast_lane::Eligibility::Refused(_)) {
+                    crate::gates::tag("G-109", note)
+                } else {
+                    note
+                };
                 Some((lane, head, eligibility, note))
             });
         let fast_lane_lookup = fast_lane.as_ref()
@@ -5484,7 +5558,7 @@ impl CasCore {
         let override_authority = if supervisor_override {
             Some(self.resolve_live_supervisor_authority().map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: a live registered supervisor is required ({error:?}).")),
+                message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: a live registered supervisor is required ({error:?})."))),
                 data: None,
             })?)
         } else {
@@ -5496,17 +5570,17 @@ impl CasCore {
                 .expect("CI override has authority");
             let task_id = task_id.ok_or_else(|| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
+                message: Cow::from(crate::gates::tag("G-108",
                     "SUPERVISOR OVERRIDE REJECTED: task_id is required to log the CI decision.",
-                ),
+                )),
                 data: None,
             })?;
             let task_store = self.open_task_store()?;
             task_store.get(task_id).map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-108", format!(
                     "SUPERVISOR OVERRIDE REJECTED: task {task_id} not found: {error}"
-                )),
+                ))),
                 data: None,
             })?;
             let note = ci_override_note(
@@ -5517,7 +5591,7 @@ impl CasCore {
             );
             task_store.append_note(task_id, &note).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}")),
+                message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}"))),
                 data: None,
             })?;
             if matches!(branch_ci_state, BranchCiState::Red { .. }) {
@@ -5530,6 +5604,8 @@ impl CasCore {
         } else {
             CI_ADVISORY_POLICY_NOTICE
         };
+        let dirty_override = force && source_worktree_live && manager.git().classify_dirty_status(&worktree.path)
+            .is_ok_and(|dirty| dirty.is_blocked() || do_cleanup && !dirty.warnings.is_empty());
         let observed_source_tip = transactional_delivery
             .is_none()
             .then(|| remote_source.as_ref()
@@ -5600,13 +5676,12 @@ impl CasCore {
                             "target ref moved after preflight; no merge was attempted",
                         )),
                     );
-                    return Ok(Self::tool_error(
+                    return Ok(Self::tool_error(crate::gates::tag("G-106",
                         "TRANSACTIONAL DELIVERY tip_changed: the target ref moved between \
                          preflight and merge.\n\nNo merge was attempted and no delivery was \
                          recorded. Re-review the worker commit against the new target tip, \
-                         then retry."
-                            .to_string(),
-                    ));
+                         then retry.",
+                    )));
                 }
             }
 
@@ -5619,14 +5694,15 @@ impl CasCore {
             let reconcile = manager
                 .git()
                 .reconcile_target_with_origin(&worktree.parent_branch);
+            // gate[G-110 merge-admission]: Target prepare and target diverged from origin
             if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
             {
                 return Err(McpError {
                     code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!(
+                    message: Cow::from(crate::gates::tag("G-110", format!(
                         "Cannot prepare merge target {} from origin: {reason}. No merge was attempted.",
                         worktree.parent_branch,
-                    )),
+                    ))),
                     data: None,
                 });
             }
@@ -5637,14 +5713,14 @@ impl CasCore {
                 behind,
             } = &reconcile
             {
-                return Ok(Self::tool_error(target_diverged_error(
+                return Ok(Self::tool_error(crate::gates::tag("G-110", target_diverged_error(
                     &ci_prefix,
                     &worktree.parent_branch,
                     local,
                     remote,
                     *ahead,
                     *behind,
-                )));
+                ))));
             }
             reconcile_note = describe_target_reconcile(&worktree.parent_branch, &reconcile);
 
@@ -5666,10 +5742,10 @@ impl CasCore {
             {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(format!(
+                    message: Cow::from(crate::gates::tag("G-97", format!(
                         "PARKED DELIVERY SOURCE MOVED: {} no longer matches parked branch_tip {anchor}. Re-park the pushed, validated source before retrying. No merge was attempted.",
                         worktree.branch,
-                    )),
+                    ))),
                     data: None,
                 });
             }
@@ -5738,15 +5814,16 @@ impl CasCore {
             // cas-662e: no slug is "not GitHub" only when origin says so. A
             // GitHub origin whose canonical lookup (or the CI walk before it)
             // failed never asked the queue; merging locally hit GH013.
+            // gate[G-111 merge-admission]: Protected default branch requires a PR
             if default_target
                 && branch_ci_lookup.repo.is_none()
                 && !matches!(crate::github_repo::origin_slug(&cwd, BRANCH_CI_LOOKUP_TIMEOUT), Ok(None))
             {
                 tracing::warn!(target = %worktree.parent_branch, "GitHub repository unresolved; merge refused before any local merge");
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, format!(
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-111", format!(
                     "{ci_prefix}PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: merge queue state unknown for {} (GitHub repository unresolved); no merge was attempted, retry worktree_merge. Local target and source retained.",
                     worktree.parent_branch,
-                )));
+                ))));
             }
             if default_target
                 && let Some(slug) = branch_ci_lookup.repo.as_deref()
@@ -5765,14 +5842,14 @@ impl CasCore {
                 }
                 let source = parked_source_tip.as_deref().or(observed_source_tip.as_deref())
                     .map(str::to_string).or_else(|| manager.git().resolve_commit(&worktree.branch))
-                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "PR source tip is unresolved"))?;
+                    .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-111", "PR source tip is unresolved")))?;
                 let pr = super::protected_pr::prepare(
                     &cwd, slug, &worktree.branch, &worktree.parent_branch, &source, scoped_task.as_deref(),
                 ).map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
-                    format!("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: {error}. Local target and source retained.")))?;
+                    crate::gates::tag("G-111", format!("PROTECTED_DEFAULT_BRANCH_REQUIRES_PR: {error}. Local target and source retained."))))?;
                 if let Some(pr) = pr {
                     if manager.git().resolve_commit(&worktree.branch).is_some_and(|head| head != source) {
-                        return Err(Self::error(ErrorCode::INVALID_PARAMS, "PR source moved before auto-merge; no auto-merge was enabled"));
+                        return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-111", "PR source moved before auto-merge; no auto-merge was enabled")));
                     }
                     if let Some(approval) = premerge_approval.as_ref() {
                         let current = self.open_task_store()?.get(&approval.candidate.task_id)
@@ -5788,7 +5865,7 @@ impl CasCore {
                             || current.deliverables.work_target != task.deliverables.work_target
                             || current.deliverables.factory_branch_anchor.as_deref().is_some_and(|head| head != source)
                         {
-                            return Err(Self::error(ErrorCode::INVALID_PARAMS, "Delivery changed before PR auto-merge; no auto-merge was enabled"));
+                            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-111", "Delivery changed before PR auto-merge; no auto-merge was enabled")));
                         }
                         let mut next = current.clone();
                         next.status = cas_types::TaskStatus::AwaitingMerge;
@@ -5800,7 +5877,7 @@ impl CasCore {
                         store.update_if_current(&next, &current)
                             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
                     }
-                    super::protected_pr::arm(self, &cwd, &pr, task_id)
+                    super::protected_pr::arm(self, &cwd, &pr, task_id, accepted_override_codes)
                         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
                     return Ok(Self::success(format!(
                         "{ci_prefix}PR queued: {} (source {} at {source}, target {}). Auto-merge enabled for this exact head; no local merge or default-branch push was attempted. Source worktree retained. The merge queue owns landing; Cassy reconciles the task after publication.",
@@ -5923,10 +6000,11 @@ impl CasCore {
             // seam is testable: append_stale_checkout_notes is what the
             // operator's receipt is built from.
             append_stale_checkout_notes(&mut reconcile_note, &manager);
+            // gate[G-112 merge-admission]: Publication confirmation (not pushed, push not confirmed)
             if let Some((branch, outcome)) = early_target_push.as_ref()
                 && !outcome.is_published()
             {
-                return Ok(Self::tool_error(format!("{ci_prefix}{}", describe_target_push_state(branch, outcome))));
+                return Ok(Self::tool_error(crate::gates::tag("G-112", format!("{ci_prefix}{}", describe_target_push_state(branch, outcome)))));
             }
             match merge_result {
                 Ok(commit) => commit,
@@ -5959,15 +6037,14 @@ impl CasCore {
                             )),
                         );
                     }
-                    return Ok(Self::tool_error(
+                    return Ok(Self::tool_error(crate::gates::tag("G-106",
                         "TRANSACTIONAL DELIVERY tip_changed: the target ref moved while the \
                          merge was running.\n\nThe merge was computed in an ephemeral worktree \
                          and discarded rather than published over the concurrent update, so no \
                          delivery was recorded and the target still carries the other writer's \
                          commit. Re-review the worker commit against the new target tip, then \
-                         retry."
-                            .to_string(),
-                    ));
+                         retry.",
+                    )));
                 }
                 Err(error) => {
                     if let (Some((_, transaction)), Some(authority)) =
@@ -6047,9 +6124,9 @@ impl CasCore {
             ) {
                 return Err(McpError {
                     code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(
+                    message: Cow::from(crate::gates::tag("G-106",
                         "Transactional delivery refused to mark merged: exact receipt commit is not an ancestor of the target after Git returned.",
-                    ),
+                    )),
                     data: None,
                 });
             }
@@ -6063,19 +6140,19 @@ impl CasCore {
                 crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Dropped { paths } => {
                     return Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-106", format!(
                             "Transactional delivery refused to mark merged: receipt commit is reachable, but delivery content is absent from path(s): {}.",
                             paths.join(", ")
-                        )),
+                        ))),
                         data: None,
                     });
                 }
                 crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Unknown { reason } => {
                     return Err(McpError {
                         code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!(
+                        message: Cow::from(crate::gates::tag("G-106", format!(
                             "Transactional delivery refused to mark merged: receipt commit is reachable, but delivery content could not be proven: {reason}."
-                        )),
+                        ))),
                         data: None,
                     });
                 }
@@ -6129,7 +6206,7 @@ impl CasCore {
                             },
                         )),
                     );
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(crate::gates::tag("G-106", format!(
                         "TRANSACTIONAL DELIVERY tip_changed: the target ref moved during the \
                          merge, so the resulting merge was not rooted at the reviewed target.\n\n\
                          {}\n\nNo delivery was recorded. Re-review the worker commit against \
@@ -6140,7 +6217,7 @@ impl CasCore {
                             "The merge could NOT be rolled back automatically because the target \
                              moved again. Inspect the target branch before retrying."
                         }
-                    )));
+                    ))));
                 }
             }
             // cas-5ee0 (GH #137): publish the target ref HERE — after every
@@ -6195,14 +6272,14 @@ impl CasCore {
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
             {
                 let push = protected_error.unwrap_or_else(|| describe_target_push_state(&receipt.target_branch, &push_outcome));
-                return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
+                return Ok(Self::tool_error(crate::gates::tag("G-112", format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred."))));
             }
             if let Some(error) = protected_error {
                 let restored = restore_unreviewed_protected_merge(
                     manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(),
                     Some(&target_tip), Some(&receipt.commit_sha), &push_outcome,
                 );
-                return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
+                return Ok(Self::tool_error(crate::gates::tag("G-111", format!("{ci_prefix}{error}\n{restored}"))));
             }
             post_merge_test_delay().await;
             target_push = Some((receipt.target_branch.clone(), push_outcome));
@@ -6385,7 +6462,7 @@ impl CasCore {
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
             {
                 let push = protected_error.unwrap_or_else(|| describe_target_push_state(&push_branch, &push_outcome));
-                return Ok(Self::tool_error(format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred.")));
+                return Ok(Self::tool_error(crate::gates::tag("G-112", format!("{ci_prefix}{push}\n{held}\nSource cleanup was deferred."))));
             }
         }
         if defer_reviewed_cleanup && do_cleanup && source_worktree_live && push_outcome.is_published() {
@@ -6410,7 +6487,7 @@ impl CasCore {
                 manager.git(), &push_branch, unpublished_merge_base.as_deref(),
                 merge_commit.as_deref(), observed_source_tip.as_deref(), &push_outcome,
             );
-            return Ok(Self::tool_error(format!("{ci_prefix}{error}\n{restored}")));
+            return Ok(Self::tool_error(crate::gates::tag("G-111", format!("{ci_prefix}{error}\n{restored}"))));
         }
         if defer_reviewed_cleanup && !push_outcome.is_published() {
             do_cleanup = false;
@@ -6736,6 +6813,9 @@ impl CasCore {
             detail.push('\n');
             detail.push_str(&notice);
         }
+        if ci_override { detail = crate::gates::override_tag("G-108", detail); }
+        if dirty_override { detail = crate::gates::override_tag("G-138", detail); }
+        if trunk_fallback { detail = crate::gates::override_tag("G-140", detail); }
         Ok(Self::success(detail))
     }
 

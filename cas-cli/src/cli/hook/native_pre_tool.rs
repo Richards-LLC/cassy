@@ -13,6 +13,7 @@ pub fn is_native_codex_pre_tool(args: &[String]) -> bool {
         && std::env::var("CAS_HOOK_HARNESS").as_deref() == Ok("codex")
 }
 
+// gate[H-01 pre-tool]: Codex native entry fail-closed
 fn bounded_cargo_validation<F>(budget: Duration, validate: F) -> HookOutput
 where
     F: FnOnce() -> Result<HookOutput, crate::error::MemError> + Send + 'static,
@@ -24,10 +25,10 @@ where
         })
         .is_err()
     {
-        return HookOutput::with_pre_tool_permission("deny", UNAVAILABLE);
+        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE));
     }
     let Ok(Ok(output)) = receiver.recv_timeout(budget) else {
-        return HookOutput::with_pre_tool_permission("deny", UNAVAILABLE);
+        return HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE));
     };
     // A successful callback must carry the rewrite Codex actually applies;
     // an empty/invalid output would otherwise execute the original Cargo.
@@ -41,24 +42,26 @@ where
     {
         output
     } else {
-        HookOutput::with_pre_tool_permission("deny", UNAVAILABLE)
+        HookOutput::with_pre_tool_permission("deny", &crate::gates::tag("H-01", UNAVAILABLE))
     }
 }
 
 pub fn execute_native_pre_tool_use() -> anyhow::Result<()> {
     let mut text = String::new();
-    io::stdin().read_to_string(&mut text)?;
+    let input = io::stdin().read_to_string(&mut text).map(|_| text);
+    let output = super::process_hook_input("PreToolUse", input, true)?;
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+pub(super) fn process_native_input(text: &str) -> anyhow::Result<HookOutput> {
     let mut input: HookInput = match serde_json::from_str(&text) {
         Ok(input) => input,
         Err(_) => {
-            println!(
-                "{}",
-                serde_json::to_string(&HookOutput::with_pre_tool_permission(
-                    "deny",
-                    "CASSY GUARD UNAVAILABLE: invalid hook input; retry after correcting the hook configuration."
-                ))?
-            );
-            return Ok(());
+            return Ok(HookOutput::with_pre_tool_permission(
+                "deny",
+                &crate::gates::tag("H-01", "CASSY GUARD UNAVAILABLE: invalid hook input; retry after correcting the hook configuration.")
+            ));
         }
     };
     if input.agent_role.is_none() {
@@ -72,6 +75,5 @@ pub fn execute_native_pre_tool_use() -> anyhow::Result<()> {
         super::init_hook_logging(false);
         handle_hook("PreToolUse", input)?
     };
-    println!("{}", serde_json::to_string(&output)?);
-    Ok(())
+    Ok(output)
 }

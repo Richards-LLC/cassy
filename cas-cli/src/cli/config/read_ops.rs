@@ -1040,6 +1040,7 @@ pub(crate) fn execute_diff(
     Ok(())
 }
 
+// gate-audit[force]: selector Confirms a requested configuration reset; immutable operator policy still applies.
 pub(crate) fn execute_reset(
     args: &ConfigResetArgs,
     cli: &Cli,

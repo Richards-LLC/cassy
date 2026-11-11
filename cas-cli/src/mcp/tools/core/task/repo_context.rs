@@ -451,6 +451,7 @@ pub(crate) fn resolve_default_branch(repo_root: &Path) -> Result<String, String>
 }
 
 /// Validate and normalize a branch name using Git's own branch grammar.
+// gate-audit[input]: Validates Git reference syntax before any policy decision.
 pub(crate) fn validate_target_branch(repo_root: &Path, branch: &str) -> Result<String, String> {
     let branch = branch.trim();
     if branch.is_empty() {
@@ -463,6 +464,7 @@ pub(crate) fn validate_target_branch(repo_root: &Path, branch: &str) -> Result<S
 
 /// Create the portable durable target. An omitted target remains `None` for
 /// legacy/non-git task stores; an explicitly supplied path always fails closed.
+// gate-audit[input]: Validates repository selector and target syntax before policy admission.
 pub(crate) fn declare_work_target(
     cas_root: &Path,
     target_repo: Option<&str>,

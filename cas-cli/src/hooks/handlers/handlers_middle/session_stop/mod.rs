@@ -90,6 +90,7 @@ pub fn handle_loop_iteration(
         ))
         .unwrap_or_default();
 
+    // gate[N-98 notice]: Loop iteration prompt
     let iteration_msg = format!(
         "🔄 Loop iteration {}{}\n\n{}{}",
         active_loop.iteration,
@@ -126,8 +127,9 @@ pub fn handle_loop_iteration(
     // Block exit (decision=block + reason for Claude) and surface user-visible
     // status via systemMessage. The named constructor enforces the Stop-family
     // schema invariant — hookSpecificOutput is unrepresentable here by type.
+    // gate[H-37 stop]: Loop iteration continue
     Ok(HookOutput::block_stop_with_context(
-        iteration_msg,
+        crate::gates::tag("H-37", iteration_msg),
         format!("Loop iteration {} continuing", active_loop.iteration),
     ))
 }

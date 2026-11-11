@@ -349,6 +349,7 @@ fn green_tip(cas_dir: &Path, epic: &Task, train: &str) -> Option<String> {
 
 /// Send each due "train ready to cut" notice once. `queued` holds branches
 /// whose PR is in the merge queue now; a train in the queue is being cut.
+// gate[W-52 watchdog]: Release-train cut notice
 pub(crate) fn notify_train_cuts(
     cas_dir: &Path,
     queued: &BTreeSet<String>,
@@ -369,7 +370,7 @@ pub(crate) fn notify_train_cuts(
         use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
         let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, !queued.is_empty(), now) {
             Ok(Outcome::Handled) => continue,
-            Ok(Outcome::Declined(reason)) => format!("Auto-cut: {reason}."),
+            Ok(Outcome::Declined(reason)) => crate::gates::tag("G-122", format!("Auto-cut: {reason}.")),
             Err(error) => format!("Auto-cut failed: {error:#}."),
         };
         let merged: Vec<_> = cas_store::observed_delivery_merges_into(cas_dir, &train)?

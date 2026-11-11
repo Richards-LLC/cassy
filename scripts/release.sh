@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-34 release-script]: One-command release cut (scripts/release.sh)
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
 # train branch) once the work is code-done:
@@ -35,6 +36,22 @@
 # 3 no queue admission after the enqueue request; 4 non-release merge conflict.
 
 set -Eeuo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then
+        printf '\n%s\n' "$@" >&2
+        # Reporting is best effort and must preserve the refusal's exit code.
+        local bin="${CAS_BIN:-cas}"
+        if command -v "$bin" >/dev/null 2>&1; then
+            "$bin" gates record-refusal --message "script exit $status $*" >/dev/null 2>&1 || :
+        fi
+    fi
+}
+trap 'gate_exit "$?" "[C-34]"' EXIT
+
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
 # Include commands inside prepare's substitution: Git and gh can fail without

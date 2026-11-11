@@ -10,6 +10,7 @@ pub(crate) mod claude;
 mod claude_md;
 pub(crate) mod codex;
 mod codemap_cmd;
+pub(crate) mod gates_cmd;
 mod history_cmd;
 mod install_on_publish;
 mod artifact_cmd;
@@ -410,6 +411,10 @@ pub enum Commands {
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
 
+    /// Factory check registry: stable codes and per-code refusal facts
+    #[command(subcommand)]
+    Gates(gates_cmd::GatesCommands),
+
     /// Project QA registry and checks
     #[command(subcommand)]
     Qa(qa::QaCommand),
@@ -547,6 +552,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::ClaudeMd(_)
         | Commands::Qa(_)
         | Commands::Codemap(_)
+        | Commands::Gates(_)
         | Commands::History(_)
         | Commands::Index(_)
         | Commands::Artifact(_)
@@ -900,6 +906,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::ClaudeMd(_) => "claude-md".to_string(),
         Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
+        Commands::Gates(_) => "gates".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
         Commands::Artifact(_) => "artifact".to_string(),
@@ -1061,6 +1068,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
         Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
+        Commands::Gates(cmd) => gates_cmd::execute(cmd, cli, cas_root),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Artifact(cmd) => artifact_cmd::execute(cmd, cli, require_cas_root(cas_root)?),

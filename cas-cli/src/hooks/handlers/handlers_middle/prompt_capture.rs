@@ -136,9 +136,11 @@ pub fn handle_user_prompt_submit(
     let is_factory = crate::harness_policy::is_factory_agent(input);
     let is_supervisor = is_factory && crate::harness_policy::is_supervisor(input);
     let mut factory_context = String::new();
+    // gate[N-81 notice]: Supervisor reminder per prompt
     if is_supervisor {
         factory_context.push_str(&build_supervisor_reminder());
     }
+    // gate[N-82 notice]: Inbox turn-start block
     if is_factory {
         if let Some(mail) = super::factory_inbox::surface_factory_inbox(cas_root, input) {
             if !factory_context.is_empty() {
@@ -303,6 +305,7 @@ fn handle_user_prompt_submit_capture(
                     stakeholder: None,
                 };
 
+                // gate[N-89 notice]: Auto-detected preference
                 if rule_store.add(&rule).is_ok() {
                     // Return context to inform the user about the created rule.
                     // EPIC cas-8888 (cas-fd9f): own_tool_prefix() — was

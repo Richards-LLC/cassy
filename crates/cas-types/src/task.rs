@@ -1591,6 +1591,8 @@ impl Task {
 
     /// Effective terminal outcome, including read-side interpretation of
     /// legacy NULL rows. This never mutates or backfills persistence.
+    // gate-audit[evidence_only]: selector Reads already-recorded disposition metadata; cannot authorize or change a close.
+    // gate-audit[negative_result]: selector Reads already-recorded negative-result metadata; cannot authorize or change a close.
     pub fn effective_terminal_outcome(&self) -> Option<TaskTerminalOutcome> {
         self.terminal_outcome.clone().or_else(|| match self.status {
             TaskStatus::Closed if self.deliverables.evidence_only.is_some() => {

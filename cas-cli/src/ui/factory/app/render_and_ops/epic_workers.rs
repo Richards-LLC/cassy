@@ -1494,6 +1494,7 @@ fn refresh_epic_base_from_parent(
 /// Turn a declared-parent refresh failure into a hard spawn refusal. The
 /// branch pair in `error` is intentionally preserved so the operator knows
 /// exactly which histories must be reconciled before another cut.
+// gate-audit[input]: Renders an advisory refusal to refresh an invalid or occupied epic checkout; no bypass accepted.
 fn epic_base_refresh_refusal(error: &str) -> String {
     format!(
         "EPIC BASE REFRESH REFUSED: {error}. Reconcile the named branches before spawning a worker."
@@ -3417,6 +3418,8 @@ impl FactoryApp {
         self.shutdown_worker_inner(name, false, true).await.map(|_| ())
     }
 
+    // gate-audit[force]: selector Chooses SIGKILL instead of SIGTERM; this operation has no active-task refusal to waive. MCP admission owns G-136.
+    // gate-audit[preserve_worktree]: selector Recycle retains the worktree; does not suppress shutdown authorization.
     async fn shutdown_worker_inner(
         &mut self,
         name: &str,
@@ -4214,6 +4217,7 @@ impl FactoryApp {
     /// * `count` - Number of workers to shutdown (0 or None = all)
     /// * `names` - Specific worker names to shutdown (overrides count)
     /// * `force` - Reserved for compatibility; supervisor should pre-check worktree safety
+    // gate-audit[force]: selector Forwards signal strategy (SIGKILL/SIGTERM) to shutdown_worker_inner; no active-work admission is bypassed here.
     pub async fn shutdown_workers(
         &mut self,
         count: Option<usize>,

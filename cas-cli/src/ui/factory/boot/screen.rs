@@ -275,6 +275,7 @@ impl BootScreen {
             spinner_tick: 0,
         })
     }
+    // gate-audit[skip_animation]: selector Controls display animation only; no admission or permission check.
     pub(crate) fn draw_logo(&mut self) -> std::io::Result<u16> {
         let logo_color = themed!(self, WORDMARK);
         let logo_glow = themed!(self, WORDMARK_GLOW);
@@ -544,6 +545,7 @@ impl BootScreen {
         self.stdout.flush()?;
         Ok(())
     }
+    // gate-audit[skip_animation]: selector Controls display animation only; no admission or permission check.
     pub(crate) fn spin_step(&mut self, row: u16, iterations: u64) -> std::io::Result<()> {
         if self.skip_animation {
             return Ok(());
@@ -696,6 +698,7 @@ impl BootScreen {
         self.stdout.flush()?;
         Ok(())
     }
+    // gate-audit[skip_animation]: selector Controls display animation only; no admission or permission check.
     pub(crate) fn show_ready(&mut self, final_row: u16) -> std::io::Result<()> {
         let ready_color = themed!(self, READY);
         let glow_color = themed!(self, LOGO_GLOW);

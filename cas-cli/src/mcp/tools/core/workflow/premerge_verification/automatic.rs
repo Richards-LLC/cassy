@@ -367,6 +367,7 @@ fn review(
     Ok(())
 }
 
+// gate[N-16 notice]: Automatic verifier could not start
 pub(super) fn attention(
     core: &CasCore,
     dispatch: &VerificationDispatch,

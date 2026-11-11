@@ -174,6 +174,7 @@ fn report_close_held(cas_dir: &Path, held: CloseHeld) {
 
 /// Tell the supervisor once per freeze which deliveries it holds and who
 /// lifts it, so a frozen train is never reported as a stall.
+// gate[N-01 notice]: Train-freeze held
 fn report_freeze_held(cas_dir: &Path, held: FreezeHeld) {
     let mut reported = HELD_REPORTED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let reported = reported.get_or_insert_with(HashSet::new);
@@ -237,6 +238,7 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
     let quiet = (now - episode.1).num_seconds();
     let (minutes, start) = (quiet / 60, episode.1.to_rfc3339());
     let waiting = waiting.join("\n");
+    // gate[W-01 watchdog]: Progress watchdog supervisor wake (progress_stalled)
     if quiet >= QUIET_SECS && !episode.2 {
         let detail = format!(
             "Nothing has moved in this factory for {minutes} min with work open: no task change, lane commit, merge or message from any agent here. Heartbeats do not count.\nWaiting:\n{waiting}\nFind who owes the next step and chase it, take it over, or tell the operator. If nothing moves in another {} min, the operator is paged.",
@@ -249,6 +251,7 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
             super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }
         );
     }
+    // gate[W-02 watchdog]: Progress watchdog operator page
     if quiet >= 2 * QUIET_SECS && !episode.3 {
         let message = format!(
             "Nothing has moved in factory session {session} for {minutes} min, though work is open and heartbeats look healthy. Supervisor {supervisor} was woken at {} min and nothing has moved since.\nWaiting:\n{waiting}\nCheck the supervisor's pane, chase the peer, or take the work over.",

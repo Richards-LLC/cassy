@@ -83,6 +83,7 @@ pub(crate) fn pending(root: &Path, task: &Task) -> Result<Option<String>> {
 
 /// Called only from the trusted, merged fast-lane receipt gate. Reuses the
 /// existing Commander operator-turn outbox; no second channel or model hop.
+// gate[N-30 notice]: Fast-lane QA walk ask
 pub(crate) fn ask(
     root: &Path,
     task: &Task,

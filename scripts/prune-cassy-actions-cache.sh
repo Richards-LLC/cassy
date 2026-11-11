@@ -4,6 +4,15 @@
 # job lifecycle is idle. Compiler-process absence alone is not an idle proof.
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[W-65]"' EXIT
+
+
 fail() {
     printf 'error: %s\n' "$1" >&2
     exit 1
@@ -186,6 +195,7 @@ prune_slot() {
     log "slot=$((index + 1)) target=$target_bytes sccache=$sccache_bytes total=$((target_bytes + sccache_bytes)) cap=$slot_budget_bytes"
 }
 
+# gate[W-65 watchdog]: Scheduled Actions cache prune when runners are idle
 prune_all() {
     local mode="$1" index state
     exec 9>>"$cache_root/.cassy-actions-cache-job.lock"

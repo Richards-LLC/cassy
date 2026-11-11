@@ -11,10 +11,11 @@ use crate::qa_pass::PreExistingIssue;
 use cas_types::{Dependency, DependencyType, QaPass, QaVerdict, TaskStatus};
 
 impl CasService {
+    // gate[G-116 release-verdict]: batch_receipt and release verdict validation
     pub(super) async fn verification_batch_receipt(&self, req: VerificationRequest)
         -> Result<CallToolResult, McpError> {
         let reject = |reason: String| Self::error(ErrorCode::INVALID_PARAMS,
-            format!("batch_receipt rejected: {reason}"));
+            crate::gates::tag("G-116", format!("batch_receipt rejected: {reason}")));
         let recorder = self.inner.resolve_live_supervisor_authority()
             .map_err(|_| reject("requires a live registered supervisor".into()))?;
         let config = crate::config::Config::load(&self.inner.cas_root).map_err(|e| reject(e.to_string()))?;
@@ -58,6 +59,7 @@ impl CasService {
         let note = format!("[{}] {label} {}: staging={} ledger={} recorder={} author={} ({})",
             receipt.recorded_at, receipt.id, receipt.staging_sha, receipt.ledger_artifact_id, receipt.recorder_agent_id,
             receipt.ledger_author_id.as_deref().unwrap_or("unrecorded"), receipt.ledger_author_role.as_deref().unwrap_or("unknown"));
+        let mut author_override_accepted = !receipt.author_overrides.is_empty();
         for task_id in receipt.task_heads.keys() {
             let note = match receipt.author_overrides.get(task_id) {
                 Some(words) => format!("{note}. DECISION: author is in this task's lineage; accepted by operator override: {words}"),
@@ -72,7 +74,10 @@ impl CasService {
                                 receipt.task_heads.get(task_id)?).ok().flatten()
                         });
                     match waiver {
-                        Some(pass) => format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head),
+                        Some(pass) => {
+                            author_override_accepted = true;
+                            format!("{note}. DECISION: QA-record author accepted for release closeout by supervisor waiver {} at {}.", pass.id, pass.bound_head)
+                        },
                         None => note.clone(),
                     }
                 },
@@ -82,11 +87,15 @@ impl CasService {
             }
         }
         let closes = self.inner.close_release_covered_deliveries(&receipt).await;
-        Ok(Self::success(format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
+        let response = format!("{label} {} recorded: {} tasks at staging {}. Ledger: {} ({}).{closes}",
             receipt.id, receipt.task_heads.len(), receipt.staging_sha,
-            receipt.ledger_artifact_id, receipt.ledger_path)))
+            receipt.ledger_artifact_id, receipt.ledger_path);
+        Ok(Self::success(if !author_override_accepted { response } else {
+            crate::gates::override_tag("G-116", response)
+        }))
     }
 
+    // gate[G-118 release-verdict]: qa_record verdict validation
     pub(super) async fn verification_qa_record(
         &self,
         req: VerificationRequest,
@@ -99,13 +108,13 @@ impl CasService {
         if let Some(message) =
             crate::mcp::tools::core::task::caller_note_marker_rejection(summary)
         {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {message}")));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {message}"))));
         }
         let ledger_path = required(req.ledger_path.as_deref(), "ledger_path (this round's LEDGER.md)")?;
         if !std::path::Path::new(ledger_path).is_file() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!("qa_record: ledger_path {ledger_path} is not a file; write the ledger first"),
+                crate::gates::tag("G-118", format!("qa_record: ledger_path {ledger_path} is not a file; write the ledger first")),
             ));
         }
         // cas-e371 (GH #1023 finding 1): unrelated pre-existing issues become
@@ -113,17 +122,17 @@ impl CasService {
         // demo statement, or a journey invariant the diff adds or edits, report
         // it without this scope.
         let (mut pre_existing, delivery_issues) = crate::qa_pass::split_qa_issues(req.issues.as_deref())
-            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
+            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {problem}"))))?;
         // cas-2849: a pre-existing issue takes its text from the ledger's
         // "F10 NORMAL: <text>" line when issues gave only its id; one with no
         // text anywhere is refused before anything is recorded.
         let ledger_text = std::fs::read_to_string(ledger_path).unwrap_or_default();
         crate::qa_pass::complete_pre_existing_issues(&mut pre_existing, &ledger_text)
-            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {problem}")))?;
+            .map_err(|problem| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {problem}"))))?;
         if let Some(refusal) =
             crate::qa_pass::rejection_scope_refusal(verdict, pre_existing.len(), delivery_issues)
         {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {refusal}")));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {refusal}"))));
         }
         let (reviewer, reviewer_id) = self.inner.qa_caller_identity()?;
         let cas_root = self.inner.cas_root.clone();
@@ -138,16 +147,16 @@ impl CasService {
         {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!("qa_record rejected: no self-review: {reviewer_id} implemented {task_id}"),
+                crate::gates::tag("G-118", format!("qa_record rejected: no self-review: {reviewer_id} implemented {task_id}")),
             ));
         }
         let claimed = cas_store::claim_qa_pass(&cas_root, task_id, &reviewer, now).map_err(|error| {
-            Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}"))
+            Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {error}")))
         })?;
         // The verdict must be backed by the round's evidence bundle, built
         // against exactly the tip under review (cas-c3b8 contract v1).
         let (citation, bundle) = crate::qa_pass::validate_round_evidence(&cas_root, std::path::Path::new(ledger_path), &claimed, verdict)
-            .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {reason}")))?;
+            .map_err(|reason| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {reason}"))))?;
         if verdict == QaVerdict::Approved {
             let state = self.inner.open_task_store()?.get_execution_state(task_id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
@@ -155,7 +164,7 @@ impl CasService {
                 && let Some(refusal) = crate::mcp::tools::core::task::lifecycle::qa_impact::ledger_refusal(
                     impact, &claimed.bound_head, &ledger_text)
             {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS, refusal));
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", refusal)));
             }
         }
         let pass = cas_store::resolve_qa_pass(
@@ -168,7 +177,7 @@ impl CasService {
             ledger_path,
             now,
         )
-        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_record rejected: {error}")))?;
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-118", format!("qa_record rejected: {error}"))))?;
         crate::qa_pass::sync::record(&cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("QA sync receipt failed: {error}")))?;
         crate::quality_ledger::qa_recorded(&cas_root, &pass, verdict, &ledger_text, &reviewer_id);
@@ -222,7 +231,7 @@ impl CasService {
         if !crate::harness_policy::is_supervisor_from_env() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "qa_request is supervisor-only; a worker's close dispatches QA for a user-facing delivery itself",
+                crate::gates::tag("H-45", "qa_request is supervisor-only; a worker's close dispatches QA for a user-facing delivery itself"),
             ));
         }
         let task_id = required(req.task_id.as_deref(), "task_id (the delivery to review)")?;
@@ -297,6 +306,7 @@ impl CasService {
         )))
     }
 
+    // gate[G-119 release-verdict]: qa_waive authority and head binding
     pub(super) async fn verification_qa_waive(
         &self,
         req: VerificationRequest,
@@ -304,13 +314,13 @@ impl CasService {
         if !crate::harness_policy::is_supervisor_from_env() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                "qa_waive is supervisor-only; a reviewer records a verdict with qa_record",
+                crate::gates::tag("G-119", "qa_waive is supervisor-only; a reviewer records a verdict with qa_record"),
             ));
         }
         let task_id = required(req.task_id.as_deref(), "task_id")?;
         let reason = required(req.summary.as_deref(), "summary (the waiver reason)")?;
         if let Some(message) = crate::mcp::tools::core::task::caller_note_marker_rejection(reason) {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {message}")));
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", format!("qa_waive rejected: {message}"))));
         }
         let supervisor = self.inner.get_agent_id()?;
         let task = self
@@ -352,14 +362,14 @@ impl CasService {
             .unwrap_or_else(|| "main".to_string());
         let chosen = if let Some(requested) = req.head_sha.as_deref() {
             let pushed = pushed_tip.ok_or_else(|| {
-                Self::error(ErrorCode::INVALID_PARAMS, format!(
+                Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", format!(
                     "qa_waive: cannot validate head_sha: {branch} has no readable pushed tip on origin; push the delivery branch and retry"
-                ))
+                )))
             })?;
             if requested.trim() != pushed {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    format!("qa_waive: head_sha must equal {branch}'s pushed tip {pushed}"),
+                    crate::gates::tag("G-119", format!("qa_waive: head_sha must equal {branch}'s pushed tip {pushed}")),
                 ));
             }
             Some(crate::qa_pass::WaiverHead {
@@ -375,13 +385,13 @@ impl CasService {
         let Some(chosen) = chosen else {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!(
+                crate::gates::tag("G-119", format!(
                     "qa_waive: {task_id} has no delivered commit on record to bind a waiver to: it never \
                      parked, no QA round was opened, and no merge commit is recorded. For a pushed \
                      delivery, pass head_sha=<full pushed branch SHA>. If it was merged \
                      before close, close it with supervisor_override=true, a reason and \
                      commit_receipt=<merged sha>; the QA gate records the waiver against that commit."
-                ),
+                )),
             ));
         };
         let (pass, retired) = self.inner.waive_qa_round(
@@ -392,7 +402,7 @@ impl CasService {
             &chosen.head,
             reason,
         )
-        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", format!("qa_waive rejected: {error}"))))?;
         // What the receipt adds: why a newer tip was chosen, or that the
         // branch has moved past the waived tip so the merge will still refuse.
         let short = |sha: &str| sha[..sha.len().min(8)].to_string();
@@ -428,11 +438,11 @@ impl CasService {
                 format!("qa_waive recorded pass {} but the decision note failed: {error}", pass.id),
             ));
         }
-        Ok(Self::success(format!(
+        Ok(Self::success(crate::gates::override_tag("G-94", format!(
             "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.{retired}",
             pass.head8(),
             pass.id
-        )))
+        ))))
     }
 
     /// cas-5c38: a no-code task has no tip to bind a waiver to, and the QA
@@ -451,7 +461,7 @@ impl CasService {
             true,
             chrono::Utc::now(),
         )
-        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
+        .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, crate::gates::tag("G-119", format!("qa_waive rejected: {error}"))))?;
         crate::qa_pass::sync::record(&self.inner.cas_root, task_id)
             .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
         let closed = withdrawn

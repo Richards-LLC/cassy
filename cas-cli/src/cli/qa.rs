@@ -540,9 +540,11 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     println!("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused");
                 }
             }
+            // gate[G-49 lane-lint]: Registry upkeep (journey registry and unowned user-facing files)
             anyhow::ensure!(
                 report.problems.is_empty() && !upkeep.as_ref().is_some_and(|u| u.refuses()),
-                "fix the registry problems, then rerun: cas qa journeys --check"
+                "{}",
+                crate::gates::tag("G-49", "fix the registry problems, then rerun: cas qa journeys --check")
             );
             Ok(())
         }

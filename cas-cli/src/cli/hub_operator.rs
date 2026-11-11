@@ -151,6 +151,7 @@ fn parse_scopes(hub_id: &str, raw: &[String]) -> Result<Vec<CommandScope>> {
         .collect()
 }
 
+// gate-audit[force]: selector Selects explicit operator-state replacement; authorization checks still run.
 pub(super) fn execute(args: &HubOperatorArgs, cli: &Cli) -> Result<()> {
     let paths = HubRuntimePaths::default_for_user()?;
     let store = PrincipalStore::new(paths.root());

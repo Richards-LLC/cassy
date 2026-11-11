@@ -10,6 +10,8 @@ use registry_upkeep::{Finding, delivery_snapshot, finish, read, tracked, warning
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
+// gate-audit[override_reason]: bypass G-51 Permits measured report-quality findings with a live supervisor reason.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 pub(super) fn at_park(
     notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,

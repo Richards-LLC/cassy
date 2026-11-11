@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-32 release-script]: Install on publish (systemd timer or LaunchAgent)
 # Install each published CAS release on this host, with no agent hop (cas-f95b).
 #
 #   scripts/install-on-publish.sh --install     # install the user timer (once per host)
@@ -29,6 +30,16 @@
 # RELEASE_INSTALL_HOST (host label in the notes; default hostname -s),
 # RELEASE_NOTICE_TIMEOUT_SECONDS (notice deadline; default 45).
 set -euo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+gate_checks=("[C-32]")
+trap 'gate_exit "$?" "${gate_checks[@]}"' EXIT
+
 
 repo="${CAS_RELEASE_REPO:-Richards-LLC/cassy}"
 cas_bin="${CAS_BIN:-cas}"
@@ -293,6 +304,7 @@ retry_pending() {
     done
 }
 
+# gate[W-64 watchdog]: Install-on-publish timer check
 run_once() {
     local tag latest current started last_version last_at publication
     publication="$("$gh_bin" api "repos/$repo/releases/latest" 2>/dev/null)" || {
@@ -350,11 +362,12 @@ case "${1:---once}" in
     --install) install_units ;;
     --uninstall) uninstall_units ;;
     --once)
+        gate_checks+=("[W-64]")
         mkdir -p "$state_dir"
         if [[ "$platform" == Darwin ]]; then
             # shlock atomically claims a PID lock and recovers a dead owner's lock.
             shlock -p "$$" -f "$state_dir/install-on-publish.lock" || { log "another install check is running"; exit 0; }
-            trap 'rm -f "$state_dir/install-on-publish.lock"' EXIT
+            trap 'gate_exit "$?" "${gate_checks[@]}"; rm -f "$state_dir/install-on-publish.lock"' EXIT
             trap 'exit 130' INT
             trap 'exit 143' TERM
         else

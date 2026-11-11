@@ -17,6 +17,10 @@ pub(crate) fn directory(root: &Path, train: &str) -> Result<PathBuf> {
 
 /// A known red holds an existing queue even while its repair's tip is pending.
 /// An override belongs to one observed red run, never to a future failure.
+// gate[G-114 train-merge]: Train suite red hold
+// gate-audit[supervisor_override]: bypass G-114 Train-merge producer tags only a newly accepted red-run token; replaying the same token adds no fact.
+// gate-audit[prior_override]: selector Replays the identical stored CI exception; only a newly accepted token emits G-114.
+// gate-audit[accepted_by]: train_merge
 pub(crate) fn guard(
     core: &crate::mcp::CasCore,
     train: &str,
@@ -27,12 +31,12 @@ pub(crate) fn guard(
 ) -> Result<Option<String>> {
     ensure!(
         supervisor_override || reason.is_none(),
-        "train_merge reason requires supervisor_override=true"
+        crate::gates::tag("G-114", "train_merge reason requires supervisor_override=true")
     );
     if supervisor_override {
         ensure!(
             reason.is_some_and(|reason| !reason.trim().is_empty()),
-            "train suite override requires a nonempty reason"
+            crate::gates::tag("G-114", "train suite override requires a nonempty reason")
         );
     }
     let path = directory(&core.cas_root, train)?.join("state.json");
@@ -44,7 +48,7 @@ pub(crate) fn guard(
     let state: Value = serde_json::from_slice(&bytes)?;
     ensure!(
         state["branch"].as_str() == Some(branch),
-        "train suite receipt belongs to another branch; refresh CI"
+        crate::gates::tag("G-114", "train suite receipt belongs to another branch; refresh CI")
     );
     if state["red_since"].as_str().is_none() {
         return Ok(None);
@@ -53,20 +57,20 @@ pub(crate) fn guard(
         "{}:{}:{}",
         state["run_id"]
             .as_str()
-            .context("red receipt has no run id")?,
+            .context(crate::gates::tag("G-114", "red receipt has no run id"))?,
         state["run_attempt"]
             .as_u64()
-            .context("red receipt has no run attempt")?,
+            .context(crate::gates::tag("G-114", "red receipt has no run attempt"))?,
         state["red_head"]
             .as_str()
-            .context("red receipt has no tested head")?
+            .context(crate::gates::tag("G-114", "red receipt has no tested head"))?
     );
     if prior_override == Some(&token) {
         return Ok(Some(token));
     }
     if supervisor_override {
         let actor = core.resolve_live_supervisor_authority().map_err(|_| {
-            anyhow::anyhow!("train suite override requires a live registered supervisor")
+            anyhow::anyhow!(crate::gates::tag("G-114", "train suite override requires a live registered supervisor"))
         })?;
         let reason = reason.unwrap().trim().replace(['\n', '\r'], " ");
         core.open_task_store()
@@ -80,13 +84,13 @@ pub(crate) fn guard(
             )?;
         return Ok(Some(token));
     }
-    anyhow::bail!(
+    anyhow::bail!(crate::gates::tag("G-114", format!(
         "TRAIN SUITE RED: {branch} is held at tested merge {} (run {}). Failing tests: {}. Complete log: {}. Repair until green, or use supervisor_override=true with a visible reason.",
         state["red_head"].as_str().unwrap_or("unknown"),
         state["run_id"].as_str().unwrap_or("unknown"),
         state["failures"],
         state["complete_log"].as_str().unwrap_or("see CI artifact")
-    )
+    )))
 }
 
 /// A green full set at a new tip after a red (or with no earlier verdict) is

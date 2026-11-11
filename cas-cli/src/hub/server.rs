@@ -4513,6 +4513,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     }
 }
 
+// gate-audit[force]: selector Chooses the HubAdmin takeover operation with its own required scope; does not bypass authentication or that scope.
 async fn acquire_lease<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path(session): Path<String>,

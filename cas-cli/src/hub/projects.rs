@@ -168,6 +168,7 @@ fn project_entry(main: &Path, last_touched_at: DateTime<Utc>) -> ProjectEntry {
     }
 }
 
+// gate-audit[skip_disposable]: selector Filters disposable projects from a read-only listing; no admission decision.
 fn projects_from_rows(
     rows: Vec<KnownRepo>,
     sessions: &[HubSession],

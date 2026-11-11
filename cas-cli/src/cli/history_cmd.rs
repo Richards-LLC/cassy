@@ -725,6 +725,7 @@ fn execute_docs(args: &DocsArgs, cas_root: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+// gate-audit[force]: selector Reprocesses cached GitHub history; no factory permission or delivery check is waived.
 fn execute_backfill(args: &BackfillArgs, cas_root: &Path) -> anyhow::Result<()> {
     let repo_root = history::repo_root_for(cas_root)?;
 

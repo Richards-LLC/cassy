@@ -306,10 +306,11 @@ impl ReviewedDelivery {
             }
             git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)
         };
-        (!contained).then(|| format!(
+        // gate[G-65 close-after-merge]: Exact approved SHA must land (verified delivery)
+        (!contained).then(|| crate::gates::tag("G-65", format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,
-        ))
+        )))
     }
 }
 

@@ -1,0 +1,5 @@
+## Core Concepts
+
+- **Gate registry** - factory checks have stable codes across gate, guard, watchdog, notice and CI families. `cas gates list` measures the live registry from source declarations. MCP tool, hook and release/pre-push refusals carry their `[CODE]`; `cas gates report --since <tag>` counts recorded refusals, overrides and false-positive declarations per code. Uncoded refusals remain countable. Workflow C checks are counted and coded; their per-code facts follow separately.
+
+- **Measured policy exceptions** - accepting producers carry explicit override tags through successful MCP, hook or CLI results. One observer per request boundary counts each code once; reads quoting codes and approval-receipt replays add no override. The completeness test generates an AST audit of emission sites, bypass classifications and recording boundaries; builds generate only the declaration registry. Personal-memory data quality, non-factory device controls and execution confirmations are reasoned exclusions.

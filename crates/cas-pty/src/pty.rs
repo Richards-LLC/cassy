@@ -3083,6 +3083,7 @@ impl Pty {
     ///
     /// Falls back to `child.kill()` (SIGKILL on the direct child) when no PID
     /// is available (non-unix builds, already-reaped process, etc.).
+    // gate-audit[force]: selector Selects termination signal strength for an already-authorized process tree; it does not bypass process ownership.
     pub async fn kill_tree(&mut self, force: bool) {
         #[cfg(unix)]
         {

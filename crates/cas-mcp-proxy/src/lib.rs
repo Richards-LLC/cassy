@@ -383,10 +383,11 @@ impl ExternalToolAllowlistPolicy {
 impl ProxyPolicy for ExternalToolAllowlistPolicy {
     fn decide(&self, request: &ProxyPolicyRequest<'_>) -> ProxyPolicyDecision {
         if !self.allows_role(request.caller.role, request.server, request.tool) {
+            // gate[H-43 mcp]: MCP proxy supervisor-only routes and env
             if route_set_matches(&self.supervisor_routes, request.server, request.tool) {
                 return ProxyPolicyDecision::Deny {
                     reason: format!(
-                        "external tool \"{}.{}\" is allowlisted for supervisors only; a {} cannot call it",
+                        "external tool \"{}.{}\" is allowlisted for supervisors only; a {} cannot call it\n\n[H-43]",
                         public_upstream_id(request.server),
                         public_tool_id(request.tool),
                         request.caller.role
@@ -3141,7 +3142,7 @@ mod tests {
                 decide(role, "neon", "run_sql"),
                 ProxyPolicyDecision::Deny {
                     reason: format!(
-                        "external tool \"neon.run_sql\" is allowlisted for supervisors only; a {role} cannot call it"
+                        "external tool \"neon.run_sql\" is allowlisted for supervisors only; a {role} cannot call it\n\n[H-43]"
                     ),
                 }
             );

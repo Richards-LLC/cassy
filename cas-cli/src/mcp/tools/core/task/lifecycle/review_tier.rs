@@ -30,6 +30,7 @@ pub(crate) struct TierDecision {
 
 impl TierDecision {
     /// One note per delivered tip, so a retried close does not repeat it.
+    // gate[N-19 notice]: VERIFICATION TIER task note
     pub(crate) fn note(&self) -> String {
         let (number, review) = match self.tier {
             VerificationTier::Mechanical => (0, "no independent verifier; CI and mechanical gates only"),

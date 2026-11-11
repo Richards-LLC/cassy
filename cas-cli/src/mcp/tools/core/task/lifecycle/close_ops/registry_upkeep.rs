@@ -160,6 +160,8 @@ fn decision_reason<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
+// gate-audit[override_reason]: bypass G-51 Authorizes a report-quality finding waiver; final close retains its successful notice.
+// gate-audit[decision_reason]: bypass G-51 Accepts the same measured report finding under a delivery/finding-bound operator decision note.
 pub(super) fn finish(
     notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
@@ -196,6 +198,7 @@ pub(super) fn finish(
             crate::mcp::tools::core::guidance::caller_prefix(),
         );
         if let Some(reason) = override_reason.filter(|reason| !reason.trim().is_empty()) {
+            notices.push(crate::gates::override_tag("G-51", ""));
             notes.record(
                 task,
                 &format!(
@@ -218,6 +221,7 @@ pub(super) fn finish(
                 task,
                 &format!("UPKEEP ESCAPE {}: {token} {reason}", finding.gate),
             );
+            notices.push(crate::gates::override_tag("G-51", ""));
         } else {
             refusals.push(text);
         }

@@ -170,6 +170,7 @@ pub(crate) fn intervention(
 
 /// Every successful task close. An override is an intervention, and a close whose
 /// last merge row is a refusal or an ejection landed some way other than the tools.
+// gate-audit[supervisor_override]: selector Records telemetry about a close already accepted by its policy boundary.
 pub(crate) fn task_closed(
     cas_root: &Path,
     task_id: &str,

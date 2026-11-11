@@ -45,6 +45,7 @@ pub(crate) struct ViktorWatchRecorder {
 /// a pending watch silently retries forever. The queue receipt is keyed by the
 /// exact durable watch set, so another daemon restart cannot spam a supervisor
 /// while a newly-recorded run still produces a fresh alert.
+// gate[N-60 notice]: Viktor upstream absent (daemon queue)
 pub(crate) async fn alert_unpollable_watches(
     cas_root: &Path,
     proxy: &cmcp_core::ProxyEngine,

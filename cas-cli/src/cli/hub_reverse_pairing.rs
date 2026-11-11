@@ -346,6 +346,7 @@ fn authorize_with_relay_with_config(
     )
 }
 
+// gate-audit[skip_hub_readiness]: selector Disposable test/pairing setup skips the readiness probe; authentication and scopes still apply.
 fn authorize_with_relay_with_config_and_probe<F>(
     args: &HubAuthorizeArgs,
     cli: &Cli,
@@ -740,6 +741,7 @@ fn is_loopback_origin(origin: &str) -> bool {
     }
 }
 
+// gate-audit[override_scopes]: selector Reduces requested device scopes; scope escalation is always rejected. Non-factory device API.
 fn granted_scopes(
     requested: &[Scope],
     override_scopes: Option<&BTreeSet<Scope>>,

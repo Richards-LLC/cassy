@@ -146,12 +146,13 @@ pub(super) fn park_refusals(
     let untested = untested_changed_crates(proof_repo, changed_paths, &tested);
     // The module check below reads these receipts, so a crate that still owes
     // one cannot be judged yet; running its tests may already cover the module.
+    // gate[G-61 park]: Focused proof: crate test receipts at exact tip and blast-radius scope
     if !untested.is_empty() {
-        refusals.push(format!(
+        refusals.push(crate::gates::tag("G-61", format!(
             "⚠️ FOCUSED PROOF REQUIRED (cas-eac2): task {id} changes Rust in crates that have no passing worker test receipt at {short}: {crates}. Lane CI no longer runs broad Rust tests for factory pushes, so the targeted fallback is yours.\n\nNext: At {short}, run a capped targeted test for the changed behaviour in each crate (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`, or `--test <harness>`), then retry `{caller}task action=close id={id}`. A receipt from another crate does not count.",
             id = task.id,
             crates = untested.join(", "),
-        ));
+        )));
         return refusals;
     }
     // cas-d6eb: a blast-radius module neither declared nor covered by a
@@ -171,12 +172,12 @@ pub(super) fn park_refusals(
             widened.push(module.clone());
         }
     }
-    refusals.push(format!(
+    refusals.push(crate::gates::tag("G-61", format!(
         "⚠️ PROOF SCOPE INCOMPLETE (cas-d6eb): task {id} declares risk=blast-radius, and its delivery at {short} reaches source modules that neither its proof_targets nor a passing worker test receipt at that commit covers: {modules}. Parking locks the proof scope, so fix it now: run a capped targeted test in each module's crate at {short} (`cargo nextest run -p <crate> --lib -E 'test(<name>)'`), or widen the declaration with `{caller}task action=update id={id} proof_targets=\"{targets}\"`. Then retry `{caller}task action=close id={id}`.",
         id = task.id,
         modules = uncovered.join(", "),
         targets = widened.join(","),
-    ));
+    )));
     refusals
 }
 
@@ -194,9 +195,9 @@ fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types
         super::freshest_target_ref(repo, target)
     };
     let Some(target_commit) = super::resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}")) else {
-        return Some(format!(
+        return Some(crate::gates::tag("G-63", format!(
             "TEST_ASSERTION_TARGET_UNRESOLVED: cannot resolve target `{target}` (selected `{target_ref}`). Fetch the integration target, then retry park."
-        ));
+        )));
     };
     let output = std::process::Command::new("python3")
         .arg(&guard)
@@ -204,20 +205,21 @@ fn message_assertion_refusal(repo: &Path, target: &str, delivery_mode: cas_types
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .current_dir(repo)
         .output();
+    // gate[G-63 park]: Test-shape checker at park (TEST_ASSERTION_PROSE)
     match output {
         Ok(output) if output.status.success() => None,
         // FIX records are the checker's machine-readable findings. A failed
         // invocation without a finding is unavailable proof, not a prose pin.
         Ok(output) if output.status.code() == Some(1)
-            && String::from_utf8_lossy(&output.stdout).lines().any(|line| line.starts_with("FIX: ")) => Some(format!(
+            && String::from_utf8_lossy(&output.stdout).lines().any(|line| line.starts_with("FIX: ")) => Some(crate::gates::tag("G-63", format!(
             "TEST_ASSERTION_PROSE: tests must assert behavior, error codes or rule IDs rather than human messages.\n{}{}",
             String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
-        )),
-        Ok(output) => Some(format!(
+        ))),
+        Ok(output) => Some(crate::gates::tag("G-63", format!(
             "TEST_ASSERTION_PROSE_UNAVAILABLE: test-shape checker exited {} without completing the check.\n{}{}",
             output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr),
-        )),
-        Err(error) => Some(format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}")),
+        ))),
+        Err(error) => Some(crate::gates::tag("G-63", format!("TEST_ASSERTION_PROSE_UNAVAILABLE: {error}"))),
     }
 }
 
@@ -263,6 +265,7 @@ fn changelog_refusal(
     let changelog_changed = changed_paths
         .iter()
         .any(|path| if fragments { is_changelog_fragment(path) } else { path == "CHANGELOG.md" });
+    // gate[G-62 park]: CHANGELOG [Unreleased] entry or fragment required
     if changelog_changed && has_titled_unreleased_delta(repo, head, target, delivery_ranges, &task.id) {
         return None;
     }
@@ -278,10 +281,10 @@ fn changelog_refusal(
     let inspected_ranges = delivery_ranges
         .map(|ranges| format!("{ranges:?}"))
         .unwrap_or_else(|| format!("first-parent history relative to {target}"));
-    Some(format!(
+    Some(crate::gates::tag("G-62", format!(
         "⚠️ CHANGELOG [Unreleased] REQUIRED (cas-a945): task {} changes shipped product or developer source but has no new or extended titled entry under `CHANGELOG.md`'s `## [Unreleased]` section. Inspected commit {head}; target {target}; delivery ranges {inspected_ranges}.\n\nNext: {entry} Then retry `{caller}task action=close id={}`. For test-only, docs-only or internal QA work, record `{caller}task action=notes id={} note_type=decision notes=\"no changelog: <reason>\"` with a specific reason.",
         task.id, task.id, task.id,
-    ))
+    )))
 }
 
 /// cas-f2be: per-delivery changelog fragments. GitHub's mergeability check
@@ -300,8 +303,13 @@ fn is_changelog_fragment(path: &str) -> bool {
 /// Whether `commit` tracks a `changelog.d/` directory, which switches the
 /// changelog gate from `CHANGELOG.md` edits to fragment files.
 pub(super) fn has_changelog_fragments_at(repo: &Path, commit: &str) -> bool {
+    has_fragment_dir_at(repo, commit, CHANGELOG_FRAGMENT_DIR)
+}
+
+/// Whether `dir` holds any tracked file at `commit`.
+pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool {
     std::process::Command::new("git")
-        .args(["ls-tree", "--name-only", commit, "--", &format!("{CHANGELOG_FRAGMENT_DIR}/")])
+        .args(["ls-tree", "--name-only", commit, "--", &format!("{dir}/")])
         .current_dir(repo)
         .output()
         .ok()

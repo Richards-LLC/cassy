@@ -1442,6 +1442,7 @@ pub fn expired_verification_dispatches(
 /// supplies positively dead process snapshots; status/PID/fingerprint are
 /// compared again under the write lock so a revived owner is never displaced.
 /// Missing registry rows require matching machine/session retirement evidence.
+// gate[W-40 watchdog]: Orphaned verification dispatch adoption
 pub fn adopt_orphaned_verification_dispatches(
     cas_dir: &Path,
     supervisor_id: &str,
@@ -2196,6 +2197,7 @@ pub fn correct_parked_delivery_execution_note(
     )
 }
 
+// gate-audit[allow_merged_delivery]: selector Selects the distinct authorized merged-delivery correction transaction; record ownership/CAS checks remain enforced.
 fn correct_parked_delivery_proof_scope_inner(
     cas_dir: &Path,
     corrected_task: &Task,

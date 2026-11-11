@@ -117,7 +117,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/doc-fragments.py" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -326,6 +326,31 @@ dry_release_rebuilds_commander() {
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/web-release
 }
 check 'dry_release_rebuilds_commander' 'cas-56bbc: dry release commits Commander dist identical to a fresh post-bump build'
+
+# cas-4b33: shared docs are generated at the cut. A stale CODEMAP stops prep;
+# once regenerated, the release commit carries the compiled overview fragment.
+docs_generated_at_the_cut() {
+    local fixture="$tmp/docs-cut" before status=0
+    clone_epic "$fixture" epic/docs-cut docs-cut
+    mkdir -p "$fixture/.claude" "$fixture/docs/product-overview.d"
+    printf '# Map\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" add .claude && git -C "$fixture" commit --quiet -m 'map'
+    printf '# Overview\n\n## Pitch\n\nBase pitch.\n' >"$fixture/docs/PRODUCT_OVERVIEW.md"
+    printf '## Pitch\n\nFragment pitch line.\n' >"$fixture/docs/product-overview.d/cas-0006.md"
+    git -C "$fixture" add docs && git -C "$fixture" commit --quiet -m 'overview and fragment'
+    write_valid_draft "$tmp/docs-cut-draft.md"
+    before="$(git -C "$fixture" rev-parse HEAD)"
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >"$tmp/docs-cut.log" 2>&1 || status=$?
+    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
+        grep -q 'CODEMAP.md predates' "$tmp/docs-cut.log" || return 1
+    printf '# Map\n\n- docs/ - overview\n' >"$fixture/.claude/CODEMAP.md"
+    git -C "$fixture" commit --quiet -am 'regenerate map'
+    run "$fixture" --hotfix --dry-run --notes "$tmp/docs-cut-draft.md" >>"$tmp/docs-cut.log" 2>&1 || return 1
+    git -C "$fixture" show HEAD:docs/PRODUCT_OVERVIEW.md | grep -q 'Fragment pitch line.' &&
+        ! git -C "$fixture" cat-file -e HEAD:docs/product-overview.d/cas-0006.md 2>/dev/null &&
+        [[ -z "$(git -C "$fixture" status --porcelain)" ]]
+}
+check 'docs_generated_at_the_cut || { cat "$tmp/docs-cut.log"; false; }' 'cas-4b33: stale CODEMAP stops prep; the release commit carries compiled doc fragments'
 
 commander_build_failure_stops_release() {
     local fixture="$tmp/web-failure" before status=0

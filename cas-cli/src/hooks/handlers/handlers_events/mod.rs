@@ -23,15 +23,14 @@ pub(crate) use attribution::{
 };
 #[cfg(test)]
 pub use codemap::check_codemap_freshness;
-pub use codemap::{
-    CodemapStaleness, codemap_stop_reminder,
-    detect_codemap_structural_changes,
-};
+pub use codemap::detect_codemap_structural_changes;
 pub use message_display::handle_message_display;
 pub use notifications::{handle_notification, handle_permission_request, handle_pre_compact};
 pub use pre_tool::handle_pre_tool_use;
 pub(crate) use pre_tool::worker_cargo_request;
 /// `cas violet post|thread` applies the same deliverable gate as a `violet_post` tool call.
+pub(crate) use publication_gate::denial_with_overrides as violet_publication_check;
+#[cfg(test)]
 pub(crate) use publication_gate::denial as violet_publication_denial;
 pub(crate) use publication_gate::release_notes_post as violet_release_notes_post;
 pub(crate) use publication_gate::post_release_post_denial as violet_post_release_denial;

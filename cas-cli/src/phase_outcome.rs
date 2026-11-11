@@ -356,6 +356,8 @@ pub(crate) fn refusal(
 }
 
 /// Fail closed for gate/read errors, including a missing prerequisite record.
+// gate[G-20 park]: Outcome unmet (phase outcome)
+// gate-audit[include_self]: selector Start checks prerequisites; close also checks the current outcome. Neither scope waives a failing selected outcome.
 pub(crate) fn check(
     root: &Path,
     store: &dyn cas_store::TaskStore,
@@ -364,8 +366,8 @@ pub(crate) fn check(
 ) -> std::result::Result<(), String> {
     match refusal(root, store, id, include_self) {
         Ok(None) => Ok(()),
-        Ok(Some(message)) => Err(message),
-        Err(error) => Err(format!("OUTCOME CHECK FAILED for {id}: {error:#}")),
+        Ok(Some(message)) => Err(crate::gates::tag("G-20", message)),
+        Err(error) => Err(crate::gates::tag("G-20", format!("OUTCOME CHECK FAILED for {id}: {error:#}"))),
     }
 }
 

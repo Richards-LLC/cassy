@@ -148,7 +148,7 @@ async fn resume(
     if serde_json::to_value(scope).map_err(|e| e.to_string())?
         != serde_json::to_value(&inventory.scope).map_err(|e| e.to_string())?
     {
-        return Err("RELEASE_SCOPE_MISMATCH".into());
+        return Err(crate::gates::tag("G-128", "RELEASE_SCOPE_MISMATCH"));
     }
     let key = ReleaseOperationKey {
         project_id: scope.project_id.clone(),
@@ -199,7 +199,7 @@ async fn resume(
         serde_json::to_value(scope).map_err(|e| e.to_string())
     };
     if immutable(&receipt.scope)? != immutable(scope)? {
-        return Err("RELEASE_IDENTITY_CHANGED".into());
+        return Err(crate::gates::tag("G-128", "RELEASE_IDENTITY_CHANGED"));
     }
     if !receipt.triggers.contains(&trigger) {
         receipt.triggers.push(trigger);
@@ -374,6 +374,7 @@ fn outcome_fingerprint(receipt: &ReleaseReconcileReceipt) -> Result<String> {
 
 /// Every trusted publish/promotion/recovery adapter uses this operation. The
 /// trigger identifies the event, while #2's validator owns proof authority.
+// gate[G-128 release]: Release reconciler closes shipped work keyed on the release SHA
 pub(crate) async fn reconcile_release(
     root: &Path,
     scope: &ReleaseScope,
@@ -382,12 +383,12 @@ pub(crate) async fn reconcile_release(
 ) -> Result<ReleaseReconcileReceipt> {
     match &trigger {
         ReconcileTrigger::Publish { tag } if scope.release_tag.as_ref() != Some(tag) => {
-            return Err("RELEASE_TRIGGER_TAG_MISMATCH".into());
+            return Err(crate::gates::tag("G-128", "RELEASE_TRIGGER_TAG_MISMATCH"));
         }
         ReconcileTrigger::Promotion { pr, merge_sha }
             if scope.promotion_pr != Some(*pr) || merge_sha != &scope.final_release_sha =>
         {
-            return Err("RELEASE_TRIGGER_PROMOTION_MISMATCH".into());
+            return Err(crate::gates::tag("G-128", "RELEASE_TRIGGER_PROMOTION_MISMATCH"));
         }
         _ => {}
     }
@@ -604,7 +605,7 @@ impl ReleaseEffects for CoreEffects<'_> {
                 return Ok(());
             }
             if !visiting.insert(id.into()) {
-                return Err("RELEASE_PARENT_CYCLE".into());
+                return Err(crate::gates::tag("G-128", "RELEASE_PARENT_CYCLE"));
             }
             for child in store.get_subtasks(id).map_err(|e| e.to_string())? {
                 if child.task_type == TaskType::Epic {

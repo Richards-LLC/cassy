@@ -14,21 +14,22 @@ use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 /// Read-only admission shared by receipt close and release backfill preview.
 /// `Some` retains the task's own ordinary review path; `None` lets the release
 /// verdict authorize it. Neither result bypasses the remaining close gates.
+// gate[G-89 close-after-merge]: Release receipt close admission (CI_OVERRIDE / REQUEST_CHANGES / NOT_PARKED)
 pub(crate) fn release_receipt_close_admission(
     root: &std::path::Path,
     task: &Task,
     repo: &std::path::Path,
 ) -> Result<Option<String>, String> {
     if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
-        return Err("CI_OVERRIDE: merged under a CI override; it needs its own close".into());
+        return Err(crate::gates::tag("G-89", "CI_OVERRIDE: merged under a CI override; it needs its own close"));
     }
     if task.deliverables.factory_branch_anchor.is_none()
         && !task.deliverables.historical_factory_branch_anchors.is_empty()
     {
-        return Err("REQUEST_CHANGES: request_changes moved the task out of its park; close the retired delivery with task close commit_receipt=<merged sha>".into());
+        return Err(crate::gates::tag("G-89", "REQUEST_CHANGES: request_changes moved the task out of its park; close the retired delivery with task close commit_receipt=<merged sha>"));
     }
     if task.status != TaskStatus::AwaitingMerge && task.deliverables.green_merge_commit.is_none() {
-        return Err("NOT_PARKED: not parked; it needs its own close".into());
+        return Err(crate::gates::tag("G-89", "NOT_PARKED: not parked; it needs its own close"));
     }
     Ok(super::review_tier::own_review(root, task, repo))
 }
@@ -79,6 +80,7 @@ pub(crate) fn delivery_tip_belongs_to_task(
 /// branch can: only the worker commits to `refs/heads/<branch>`, while a
 /// commit pushed straight to origin by anyone else exists only on the
 /// remote-tracking ref. The tip must be on both.
+// gate[G-91 close-after-merge]: Pushed delivery tip ownership (merge-on-green close)
 pub(crate) fn pushed_delivery_tip(
     repo: &std::path::Path,
     task: &Task,
@@ -86,28 +88,28 @@ pub(crate) fn pushed_delivery_tip(
     tip: &str,
 ) -> Result<(), String> {
     if task.task_type == TaskType::Epic {
-        return Err("an epic closes through epic verification".to_string());
+        return Err(crate::gates::tag("G-91", "an epic closes through epic verification"));
     }
     let Some(worker) = task.assignee.as_deref() else {
-        return Err("the task has no assignee".to_string());
+        return Err(crate::gates::tag("G-91", "the task has no assignee"));
     };
     let branch = branch.strip_prefix("origin/").unwrap_or(branch);
     if !crate::mcp::tools::core::workflow::task_delivery_branch_matches(
         branch, worker, &task.id,
     ) {
-        return Err(format!("{branch} is not {worker}'s delivery branch for {}", task.id));
+        return Err(crate::gates::tag("G-91", format!("{branch} is not {worker}'s delivery branch for {}", task.id)));
     }
     let Some(pushed) = super::close_ops::resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}")) else {
-        return Err(format!("cached origin/{branch} does not resolve; live publication is unknown"));
+        return Err(crate::gates::tag("G-91", format!("cached origin/{branch} does not resolve; live publication is unknown")));
     };
     if pushed != tip && !super::close_ops::git_commit_is_ancestor(repo, tip, &pushed) {
-        return Err(format!("{tip} is absent from cached origin/{branch}; live publication is unknown"));
+        return Err(crate::gates::tag("G-91", format!("{tip} is absent from cached origin/{branch}; live publication is unknown")));
     }
     let local = super::close_ops::resolve_branch_sha(repo, &format!("refs/heads/{branch}"));
     if !local.is_some_and(|local| local == tip || super::close_ops::git_commit_is_ancestor(repo, tip, &local)) {
-        return Err(format!(
+        return Err(crate::gates::tag("G-91", format!(
             "{tip} is on cached origin/{branch} but not on {worker}'s local {branch}; this does not establish the worker's own delivery"
-        ));
+        )));
     }
     Ok(())
 }
@@ -664,6 +666,7 @@ impl CasCore {
     /// receipt retries ordinary close too: its existing review gates either
     /// finish the delivery or name the remaining verdict. QA never replaces
     /// release review or a dedicated task review. Returns the report for the receipt's response.
+    // gate[G-90 close-after-merge]: Release-covered close re-runs ordinary gates (Held / TASK_STORE_UNREADABLE)
     pub(crate) async fn close_release_covered_delivery_outcomes(
         &self, receipt: &cas_store::QaBatchReceipt,
     ) -> std::collections::BTreeMap<String, CassyMergeClose> {
@@ -674,7 +677,7 @@ impl CasCore {
         let mut outcomes = std::collections::BTreeMap::new();
         let Ok(store) = self.open_task_store() else {
             return receipt.task_heads.keys().map(|id| (id.clone(), CassyMergeClose::Held(
-                "TASK_STORE_UNREADABLE: the task store is unreadable; retry task close.".into(),
+                crate::gates::tag("G-90", "TASK_STORE_UNREADABLE: the task store is unreadable; retry task close."),
             ))).collect();
         };
         for task_id in receipt.task_heads.keys() {
@@ -714,7 +717,7 @@ impl CasCore {
                 if let Err(error) = notice {
                     reason.push_str(&format!("; supervisor notice not queued: {error}"));
                 }
-                outcomes.insert(task_id.clone(), CassyMergeClose::Held(reason));
+                outcomes.insert(task_id.clone(), CassyMergeClose::Held(crate::gates::tag("G-90", reason)));
             };
             let task = match store.get(task_id) {
                 Ok(task) => task,
@@ -802,12 +805,12 @@ impl CasCore {
                     outcomes.insert(task_id.clone(), CassyMergeClose::AlreadyClosed);
                 }
                 CassyMergeClose::Held(text) => hold(&text),
-                CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&format!(
+                CassyMergeClose::NotEligible if task.deliverables.factory_branch_anchor.is_none() => hold(&crate::gates::tag("G-89", format!(
                     "this receipt covers its merged delivery, but request_changes moved the task out of its park; close it with task close commit_receipt={}",
                     receipt.staging_sha
-                )),
+                ))),
                 CassyMergeClose::NotEligible => {
-                    hold("not parked, or merged under a CI override; it needs its own close")
+                    hold(&crate::gates::tag("G-89", "not parked, or merged under a CI override; it needs its own close"))
                 }
             }
         }

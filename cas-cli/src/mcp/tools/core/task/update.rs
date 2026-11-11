@@ -16,6 +16,7 @@ fn update_result(task: &Task, message: String) -> CallToolResult {
 
 // Branch-only retargeting preserves a declared repository, but legacy
 // targetless tasks default to the project exactly as public creation does.
+// gate-audit[input]: Validates the requested branch target exists and matches the repository input contract.
 fn branch_update_work_target(
     cas_root: &std::path::Path,
     existing: Option<&cas_types::WorkTarget>,
@@ -115,6 +116,7 @@ fn assignee_batch_abort(fields: &[&str], rejection: impl std::fmt::Display) -> S
     )
 }
 
+// gate-audit[input]: Validates origin project identity and registration, not an otherwise valid factory request.
 fn verify_origin_project_registered(
     cas_root: &std::path::Path,
     origin_project: &str,
@@ -580,6 +582,7 @@ impl CasCore {
     /// Shared pre-persistence assignment policy for create and update. Keep
     /// identity normalization and freshness together so dispatch cannot accept
     /// an assignment that the supervisor's update path would refuse.
+    // gate-audit[supervisor_override]: bypass G-132 Reasoned supervisor stale-assignment waiver.
     pub(crate) fn validate_task_assignee(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -650,6 +653,7 @@ impl CasCore {
                 {
                     warnings.push(note);
                 } else {
+                    // gate[G-132 assign]: Stale worker assignment blocked
                     let mut assignment_override_applied = false;
                     if factory_config.block_stale_assignment
                         && behind_count >= factory_config.stale_threshold_commits
@@ -722,6 +726,7 @@ impl CasCore {
                                 visible_branch,
                                 reason,
                             ));
+                            warnings.push(crate::gates::override_tag("G-132", ""));
                             assignment_override_applied = true;
                         } else {
                             let [rebase] = crate::worktree::GitOperations::git_remedies([
@@ -731,10 +736,10 @@ impl CasCore {
                                 crate::worktree::GitOperations::visible_git_label(&branch);
                             let worker_name =
                                 crate::worktree::GitOperations::visible_git_label(worker_name);
-                            return Err(format!(
+                            return Err(crate::gates::tag("G-132", format!(
                                 "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
                                 factory_config.stale_threshold_commits,
-                            ));
+                            )));
                         }
                     }
                     if !assignment_override_applied {
@@ -779,6 +784,10 @@ impl CasCore {
         .await
     }
 
+    // gate-audit[supervisor_override]: bypass G-07,G-132,G-133 Split assignment, stale assignment and peer-source ownership waivers are explicitly tagged.
+    // gate-audit[proof_scope_fix]: bypass G-151 Authorized frozen-binding correction invalidates old proof; mandatory per-crate proof still runs.
+    // gate-audit[binding_override]: selector Derived authorized frozen-binding waiver recorded as G-151 on success.
+    // gate-audit[override_grant]: selector Newly issued source-claim approval carried through final G-133 response.
     pub(crate) async fn cas_task_update_with_delivery_mode(
         &self,
         req: TaskUpdateRequest,
@@ -812,6 +821,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        let binding_override = proof_scope_fix && task.status == TaskStatus::AwaitingMerge
+            && (target_repo.is_some() || target_branch.is_some() || req.epic.is_some());
         // Check before any ordinary fields or side effects: a rejected batch
         // must not change a peer's child. Only this authenticated assignment
         // path can mint the one-start, worker-bound takeover receipt.
@@ -1490,7 +1501,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message.to_string()),
+                message: Cow::from(crate::gates::tag("G-86", message.to_string())),
                 data: None,
             });
         }
@@ -1667,7 +1678,7 @@ impl CasCore {
             if caller.role == cas_types::AgentRole::Worker {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                    crate::gates::tag("H-45", "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it."),
                 ));
             }
         }
@@ -2170,7 +2181,7 @@ impl CasCore {
             }
             if new_status == TaskStatus::Closed && task.status != TaskStatus::Closed {
                 if let Err(message) = crate::qa_batch::ensure_deferred_close(&self.cas_root, &task, None, None) {
-                    return Ok(Self::tool_error(message));
+                    return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
                 }
                 let parent_epic = task_store.get_parent_epic(&task.id).map_err(|error| {
                     Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to resolve effective task target: {error}"))
@@ -2206,9 +2217,9 @@ impl CasCore {
                         )
                         .map_err(|message| McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
+                            message: Cow::from(crate::gates::tag("G-41", format!(
                                 "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
-                            )),
+                            ))),
                             data: None,
                         })?,
                     );
@@ -2218,7 +2229,7 @@ impl CasCore {
                     &task,
                     close_repo_context.as_ref(),
                 ) {
-                    return Ok(Self::tool_error(message.to_string()));
+                    return Ok(Self::tool_error(crate::gates::tag("G-86", message.to_string())));
                 }
             }
             if new_status != task.status {
@@ -2887,6 +2898,8 @@ impl CasCore {
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
+        if split_takeover.is_some() { response = crate::gates::override_tag("G-07", response); }
+        if binding_override {response=crate::gates::override_tag("G-151",response);}
 
         Ok(update_result(&task, response))
     }
@@ -2907,6 +2920,7 @@ pub(crate) fn known_epics(task_store: &dyn cas_store::TaskStore) -> Vec<Task> {
 /// already parked for merge: its branch, anchor and proof were measured
 /// against the current target. Refuse, naming the explicit correction, as the
 /// `update epic=` guard does.
+// gate[G-151 update]: Frozen parked-delivery target binding
 pub(crate) fn refuse_retarget_of_parked_delivery(
     task: &Task,
     epic_id: &str,
@@ -2923,13 +2937,13 @@ pub(crate) fn refuse_retarget_of_parked_delivery(
         .unwrap_or_else(|| "no work target".to_string());
     Err(McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: Cow::from(format!(
+        message: Cow::from(crate::gates::tag("G-151",format!(
             "RE-PARENT REFUSED: task {id} is parked for merge against {current}, and moving it under epic {epic_id} would retarget it to {repo} @ {branch}. A parked delivery is not retargeted implicitly. To move the delivery, a registered supervisor runs `{prefix}task action=update id={id} proof_scope_fix=true target_repo={repo} target_branch={branch} reason=\"<why>\"`, then repeats the re-parent.",
             id = task.id,
             repo = target.repo_selector,
             branch = target.target_branch,
             prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
-        )),
+        ))),
         data: None,
     })
 }

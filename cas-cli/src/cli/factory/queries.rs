@@ -847,6 +847,7 @@ pub(super) fn execute_message(
             task_id: None,
         })?;
         let queue = crate::store::open_prompt_queue_store(&cas_root)?;
+        // gate[N-32 notice]: CLI factory message to the operator
         queue.record_operator_turn(&cas_store::OperatorTurn {
             source: from,
             target: "operator",
@@ -936,6 +937,7 @@ pub(super) fn execute_message(
     Ok(())
 }
 
+// gate-audit[cas_root_override]: selector Chooses the explicitly addressed Cassy store; never overrides message authority.
 fn message_root_for_session(
     session: &SessionInfo,
     project_dir: Option<&std::path::Path>,

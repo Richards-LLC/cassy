@@ -616,14 +616,15 @@ pub(crate) fn admit_daemon_build(cas_root: &Path) -> std::result::Result<File, S
         std::fs::create_dir_all(&slots)?;
         let admission = lock_file(&slots.join("admission.lock"))?;
         admission.lock_exclusive()?;
-        let violations =
-            crate::factory_build_guard::inspect(cas_root, &config, 1).violations();
+        let snapshot = crate::factory_build_guard::inspect(cas_root, &config, 1);
+        let violations = snapshot.violations();
         if !violations.is_empty() {
             return Ok(Err(violations.join("; ")));
         }
         for index in 0..config.max_concurrent_builders {
             let slot = lock_file(&slots.join(format!("slot-{index}.lock")))?;
             if slot.try_lock_exclusive().is_ok() {
+                report_disabled_admission(cas_root, &snapshot);
                 return Ok(Ok(slot));
             }
         }
@@ -633,6 +634,15 @@ pub(crate) fn admit_daemon_build(cas_root: &Path) -> std::result::Result<File, S
         )))
     };
     admit().unwrap_or_else(|error| Err(format!("{error:#}")))
+}
+
+// gate-audit[forward]: A completed admission can suppress the soft capacity policy through the operator env setting; hard slots have already been acquired.
+fn report_disabled_admission(root: &Path, snapshot: &crate::factory_build_guard::BuildGuardSnapshot) {
+    if snapshot.disabled {
+        let tag = crate::gates::override_tag("G-135", "Build admission accepted with CAS_FACTORY_BUILD_GUARD=off");
+        crate::gates::facts::observe_cli_output(root, &tag);
+        eprintln!("{tag}");
+    }
 }
 
 fn available_slot_count(root: &Path, cap: usize) -> Result<usize> {
@@ -2119,6 +2129,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
             return Err(error);
         }
     };
+    report_disabled_admission(&cas_root, &snapshot);
     if let Err(error) = crate::factory_capacity_wait::admitted(&cas_root, &repo) {
         tracing::warn!(%error, "capacity wait clear failed; continuing admitted build");
     }

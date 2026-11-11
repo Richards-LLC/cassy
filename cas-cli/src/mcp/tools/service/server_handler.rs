@@ -238,10 +238,15 @@ impl ServerHandler for CasService {
             let service = self.clone();
             let handler = tracing::Instrument::instrument(
                 async move {
+                    let arguments = request.arguments.clone();
                     let tcc = rmcp::handler::server::tool::ToolCallContext::new(
                         &service, request, context,
                     );
-                    service.tool_router.call(tcc).await
+                    let result = service.tool_router.call(tcc).await;
+                    crate::gates::facts::observe_tool_result(
+                        &service.inner.cas_root, arguments.as_ref(), &result,
+                    );
+                    result
                 },
                 tracing::Span::current(),
             );

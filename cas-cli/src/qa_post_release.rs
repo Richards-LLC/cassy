@@ -792,7 +792,15 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
     })
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
-pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+// gate[G-120 epic-close]: Post-release watch before epic close or release notes
+#[cfg(test)]
+pub(crate) fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
+    gate_with_overrides(cas_root, epic, release_notes, &mut Vec::new())
+}
+
+// gate-audit[recent_override]: bypass G-120 A recent operator note authorizes release publication/close despite an incomplete watch.
+// gate-audit[release_notes]: selector Selects publication vs epic-close diagnostic; both evaluate the same watch.
+pub fn gate_with_overrides(cas_root: &Path, epic: &Task, release_notes: bool, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();
     let waiting = fs::read(
@@ -830,7 +838,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
     }
     if let Some(reason) = recent_override(&epic.notes, now) {
         if let Ok(store) = crate::store::open_task_store(cas_root) {
-            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { return None; }
+            if store.append_note(&epic.id,&format!("[{}] DECISION: post-release gate overridden for {} by recorded operator reason: {reason}",now.format("%Y-%m-%d %H:%M"),if release_notes {"release notes"} else {"epic close"})).is_ok() { accepted_override_codes.push("G-120"); return None; }
         }
     }
     let state = if verdict == Verdict::Pending {
@@ -844,7 +852,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         .and_then(|receipt| watch_first_line(&receipt.watch_first))
         .map(|line| format!(" {line}."))
         .unwrap_or_default();
-    Some(format!(
+    Some(crate::gates::tag("G-120", format!(
         "{}: epic {} check {progress}. Run `cas qa post-release start --epic {} --sha <release-sha>` and wait for clean, or record an operator decision note `{OVERRIDE_MARKER} <operator's words>` (valid 6 hours).{watch}",
         if release_notes {
             format!("RELEASE NOTES BLOCKED (post_release_{state})")
@@ -853,7 +861,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         },
         epic.id,
         epic.id
-    ))
+    )))
 }
 fn run_summary(run: &Run) -> String {
     if let Some(error) = &run.error {

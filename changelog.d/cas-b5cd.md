@@ -1,0 +1,20 @@
+### Added — Factory
+
+- **Every factory check has a stable code** — Was: refusals were free-text
+  headings with no way to count them per check. Now: each gate, guard,
+  watchdog, notice and CI check declares a code at its source, `cas gates list`
+  prints the registry measured from code, refusals end with their `[CODE]`, and
+  `cas gates report --since <tag>` counts refusals, overrides and
+  `cas gates false-positive` declarations per code.
+
+- **Count script and merge decisions** — Script failures emit their registered
+  codes; merge CI refusals and accepted overrides, including pre-push fast-row
+  skips, record typed per-code facts. One MCP router boundary observes every
+  tool's coded refusal or tagged accepted override; one outer hook entry covers
+  ordinary and native fast paths. Release/pre-push reporters retain refusal exits.
+
+- **Measure actual policy exceptions** — Successful accepting producers emit
+  explicit override tags, including stored operator approvals; quoted codes and
+  read-only approval replay add no facts. A test-only AST inventory generates
+  refusal/override sites, candidate exclusions and recording boundaries, and
+  rejects unclassified or uncovered factory-policy candidates.

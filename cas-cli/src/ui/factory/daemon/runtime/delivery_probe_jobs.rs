@@ -161,6 +161,7 @@ pub(crate) fn read_normal_probe(
         live,
     }
 }
+// gate[W-28 watchdog]: Worker delivery stalled after bounded retry (worker_delivery_stalled)
 pub(crate) fn write_normal_flag(
     cas_dir: &std::path::Path,
     session: &str,

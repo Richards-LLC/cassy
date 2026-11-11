@@ -157,6 +157,24 @@ fn is_regenerated_output(path: &str) -> bool {
         )
 }
 
+/// cas-0208: generated output a delivery's own patch-id leaves out. A target
+/// move regenerates these, so they never mean the reviewed change moved.
+const OWN_PATCH_EXCLUDED: &[&str] = &[
+    "hub-web/dist",
+    ".claude/CODEMAP.md",
+    "cas-cli/src/builtins/reference-history.json",
+    "cas-cli/src/builtins/codex/agents/task-verifier.toml",
+    ".codex/agents/task-verifier.toml",
+];
+
+/// cas-0208: patch-id of the delivery's own change (`source` over its merge
+/// base with `target`), whitespace-exact with three lines of context and
+/// without generated output. Unchanged target edits elsewhere, even beside a
+/// delivered hunk, leave it equal; any edit to the delivered change does not.
+fn own_patch_id(repo: &Path, source: &str, target: &str) -> Option<String> {
+    crate::qa_pass::change_patch_id_excluding(repo, source, target, OWN_PATCH_EXCLUDED)
+}
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     if args.first() == Some(&"merge-tree") {
         // Candidate preparation precedes the manager's merge preflight.
@@ -313,7 +331,9 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
 fn fail(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        crate::gates::tag("G-104",
+            format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        ),
     )
 }
 
@@ -772,9 +792,9 @@ impl Approval {
                 verdict.id == self.verdict_id && verdict.status == VerificationStatus::Approved
             })
         {
-            return Err("the exact candidate approval is no longer current".into());
+            return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
-        self.candidate.validate(root, task)
+        self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
     /// Reconciled delivery can close on its original mapping after other
@@ -918,6 +938,7 @@ impl CasCore {
         Ok(())
     }
 
+    // gate[N-15 notice]: Candidate verification handoff or automatic verifier launch
     pub(crate) fn emit_premerge_review_handoff(
         &self,
         task: &Task,
@@ -1030,6 +1051,7 @@ impl CasCore {
 
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
+    // gate[G-104 merge-admission]: Pre-merge verification hold on the candidate
     pub(crate) fn prepare_premerge_verification(
         &self,
         task: &Task,
@@ -1217,6 +1239,7 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        // gate[N-12 notice]: Premerge candidate verification dispatch
         let dispatch = cas_store::create_verification_dispatch_bound(
             &self.cas_root,
             &task.id,
@@ -1240,11 +1263,13 @@ impl CasCore {
         )))
     }
 
-    /// cas-d4b7: the target moved under an approved candidate, so the reviewed
-    /// tree no longer recomputes. When the source tip, plan context and the
-    /// patch the merge adds to the new target are all unchanged, the approval
-    /// is rebound to the new candidate with a receipt and no verifier runs.
-    /// Any mismatch returns None and the caller dispatches a fresh review.
+    /// cas-d4b7, cas-0208: the target moved under an approved candidate, so
+    /// the reviewed tree no longer recomputes ("target changed reviewed
+    /// delivery files" in `tree_on`). When the plan context and the delivery's
+    /// own patch-id are unchanged and the new candidate merges cleanly, the
+    /// approval is rebound to the new candidate with a receipt and no verifier
+    /// runs. A conflict or any change to the delivered patch returns None and
+    /// the caller dispatches a fresh review.
     #[allow(clippy::too_many_arguments)]
     fn rebind_unchanged_patch(
         &self,
@@ -1271,13 +1296,13 @@ impl CasCore {
             || prior.repository != repository
             || prior.source_branch != source
             || prior.target_branch != target
-            || task.deliverables.factory_branch_anchor.as_deref() != Some(prior.source_sha.as_str())
-            || git(repo, &["rev-parse", source]).ok().as_deref() != Some(prior.source_sha.as_str())
+            || git(repo, &["rev-parse", source]).ok().as_deref()
+                != task.deliverables.factory_branch_anchor.as_deref()
             || review_target(repo, target).ok().as_deref() == Some(prior.target_sha.as_str())
         {
             return Ok(None);
         }
-        let Ok(approved) = delivered_patch_id(repo, &prior.target_sha, &prior.tree) else {
+        let Some(approved) = own_patch_id(repo, &prior.source_sha, &prior.target_sha) else {
             return Ok(None);
         };
         // The fresh-review path enforces this gate; a rebind may not skip it.
@@ -1301,18 +1326,17 @@ impl CasCore {
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
         }
-        let Ok(current) = delivered_patch_id(repo, &candidate.target_sha, &candidate.tree) else {
-            return Ok(None);
-        };
-        if current != approved {
+        if own_patch_id(repo, &candidate.source_sha, &candidate.target_sha).as_deref()
+            != Some(approved.as_str())
+        {
             return Ok(None);
         }
-        let matched = format!("full-context patch-id {current}");
         let receipt = format!(
-            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} unchanged, target {} -> {}, delivered {matched} identical.",
+            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} -> {}, target {} -> {}, clean merge, delivery's own patch-id {approved} (generated output excluded) identical.",
             verdict.id,
             dispatch.id,
             candidate.proof.head_commit,
+            prior.source_sha,
             candidate.source_sha,
             prior.target_sha,
             candidate.target_sha,

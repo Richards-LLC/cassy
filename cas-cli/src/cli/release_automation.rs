@@ -123,9 +123,9 @@ fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Optio
 
 fn read_cut_inputs(path: &Path, repo: &Path, commit: &str) -> Result<ReleaseInputs> {
     let audit: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
-    ensure!(!audit.checked_sha.is_empty(), "release input audit has no checked_sha");
+    ensure!(!audit.checked_sha.is_empty(), crate::gates::tag("G-121", "release input audit has no checked_sha"));
     ensure!(audit.checked_sha == commit || git(repo, &["rev-parse", &format!("{commit}^1")]).ok().as_deref() == Some(audit.checked_sha.as_str()),
-        "release input audit is stale; rerun release.sh");
+        crate::gates::tag("G-121", "release input audit is stale; rerun release.sh"));
     Ok(audit)
 }
 
@@ -340,6 +340,7 @@ pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
     let (repo, train) = open_train(root)?;
     track_on_train(args, root, &repo, &train)
 }
+// gate[G-121 release-verdict]: Release track checks (train branch, full SHA, train tip, version owner, input audit)
 fn track_on_train(
     args: &TrackArgs,
     root: &Path,
@@ -352,15 +353,15 @@ fn track_on_train(
     let _target_lock = crate::worktree::target_lock::lock_delivery_target(root, &canonical_repo, &expected.branch)?;
     ensure!(
         git(&repo, &["branch", "--show-current"])? == expected.branch,
-        "release must be cut on the train branch"
+        crate::gates::tag("G-121", "release must be cut on the train branch")
     );
     ensure!(
         args.commit.len() == 40 && args.commit.bytes().all(|c| c.is_ascii_hexdigit()),
-        "release commit must be a full SHA"
+        crate::gates::tag("G-121", "release commit must be a full SHA")
     );
     ensure!(
         git(&repo, &["rev-parse", "HEAD"])? == args.commit,
-        "release commit must equal the train tip"
+        crate::gates::tag("G-121", "release commit must equal the train tip")
     );
     let path = receipt_path(root, &args.version)?;
     fs::create_dir_all(path.parent().unwrap())?;
@@ -375,7 +376,7 @@ fn track_on_train(
         expected = serde_json::from_slice(&fs::read(&path)?)?;
         ensure!(
             expected.train_id == train.id,
-            "version already belongs to another train"
+            crate::gates::tag("G-121", "version already belongs to another train")
         );
     }
     if let Some(path) = &args.inputs {
@@ -385,7 +386,7 @@ fn track_on_train(
     if expected.first_child_commit.is_none() {
         ensure!(
             args.first_child.len() == 40 && args.first_child.bytes().all(|b| b.is_ascii_hexdigit()),
-            "first child must be a full SHA"
+            crate::gates::tag("G-121", "first child must be a full SHA")
         );
         git(
             &repo,
@@ -1114,9 +1115,9 @@ pub(super) mod tests {
         let mut undeclared = scope.clone();
         undeclared.no_code_members.insert("cas-undeclared".into(), vec![proof.clone()]);
         let extra = crate::qa_batch::resolve_release_inventory(&root, repo, &undeclared).unwrap();
-        assert_eq!(crate::release_reconcile::reconcile_release(
+        assert!(crate::release_reconcile::reconcile_release(
             &root, &undeclared, &extra, crate::release_reconcile::ReconcileTrigger::Backfill,
-        ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
+        ).await.unwrap_err().starts_with("RELEASE_IDENTITY_CHANGED"));
         // Release close now requires an approval bound to the report's own
         // anchor, independently of the release-wide reviewed commit.
         cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {

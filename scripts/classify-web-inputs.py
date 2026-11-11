@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-40 ci]: Web-input classifier (selects Commander web and journeys checks)
 """Print whether a diff touches the Commander web check's inputs (true/false).
 
 The Commander step (typecheck, unit tests, build, visual QA, dist drift and the
@@ -97,4 +98,9 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv))
+    try:
+        sys.exit(main(sys.argv))
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-40]", file=sys.stderr)
+        raise

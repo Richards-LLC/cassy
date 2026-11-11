@@ -102,6 +102,7 @@ impl Pane {
     }
 
     #[allow(clippy::type_complexity)]
+    // gate-audit[force_all]: selector Requests a complete terminal screen snapshot instead of a delta; no policy decision.
     pub fn get_incremental_update(
         &mut self,
     ) -> Result<Option<(Vec<RowData>, Option<CursorPosition>, u64)>> {

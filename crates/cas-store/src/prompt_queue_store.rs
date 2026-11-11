@@ -7150,6 +7150,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         origin: Option<&QueueOrigin>,
     ) -> Result<EnqueueIdempotentResult> {
         require_operator_session(target, factory_session)?;
+        // gate[N-33 notice]: Operator delivery outbox routing
         if target.trim().eq_ignore_ascii_case("operator") {
             return self
                 .record_operator_turn(&OperatorTurn {

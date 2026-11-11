@@ -101,11 +101,9 @@ fn main() -> ExitCode {
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
         return match cli::execute_native_pre_tool_use() {
             Ok(()) => ExitCode::SUCCESS,
-            Err(_) => {
-                let output = cas::hooks::HookOutput::with_pre_tool_permission("deny", "CASSY GUARD UNAVAILABLE: hook processing failed; retry when the host is responsive.");
-                println!("{}", serde_json::to_string(&output).unwrap());
-                ExitCode::SUCCESS
-            }
+            // Read/validation failures are converted to the observed H-01
+            // denial by the shared hook entry; only output serialization can fail here.
+            Err(_) => ExitCode::FAILURE
         };
     }
 
@@ -200,6 +198,10 @@ fn main() -> ExitCode {
             ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = startup.and_then(|()| cli::run(cli));
+    if let Err(error) = &outcome
+        && !cas::gates::codes_in(&format!("{error:#}")).is_empty()
+        && let Ok(root) = store::find_cas_root()
+    { cas::gates::facts::observe_refusal(&root, None, &format!("{error:#}")); }
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
     // The shared SQLite pool owns every close; checkpoint and close its idle

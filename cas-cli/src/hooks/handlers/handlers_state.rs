@@ -436,6 +436,7 @@ impl ExitBlockers {
     }
 
     /// Format a message describing the blockers
+    // gate[N-97 notice]: Exit blockers notice
     pub fn format_message(&self) -> String {
         let mut lines = vec!["⚠️ Cannot exit - you have remaining work:".to_string()];
 
@@ -724,6 +725,7 @@ pub fn handle_verifier_spawn_cleanup(
 /// A verifier spawn claims only the named task's durable dispatch. It never
 /// clears `pending_verification`; only a legitimate verdict may resolve that
 /// exact task transition.
+// gate[N-102 notice]: Verifier binding failures
 pub fn handle_subagent_start(
     input: &HookInput,
     cas_root: Option<&Path>,

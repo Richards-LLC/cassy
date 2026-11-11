@@ -104,12 +104,25 @@ fn summary(body: &str) -> String {
 
 /// The refusal for merging `subject` while `supervisor_agent_id` waits on a
 /// peer. An overridden ask lets the merge through and tells the operator.
+#[cfg(test)]
 pub(crate) fn merge_refusal(
     cas_root: &Path,
     supervisor_agent_id: &str,
     supervisor_name: &str,
     operator_session: Option<&str>,
     subject: &MergeSubject,
+) -> Option<String> {
+    merge_refusal_with_overrides(cas_root, supervisor_agent_id, supervisor_name, operator_session, subject, &mut Vec::new())
+}
+
+// gate-audit[override_reason]: bypass G-95 An operator note authorizes merging despite an unresolved ask.
+pub(crate) fn merge_refusal_with_overrides(
+    cas_root: &Path,
+    supervisor_agent_id: &str,
+    supervisor_name: &str,
+    operator_session: Option<&str>,
+    subject: &MergeSubject,
+    accepted_override_codes: &mut Vec<&'static str>,
 ) -> Option<String> {
     if subject.task_id.is_none() && subject.pr.is_none() && !subject.any_pr {
         return None;
@@ -118,6 +131,7 @@ pub(crate) fn merge_refusal(
     for ask in asks.iter().filter(|ask| names_subject(&ask.body, subject)) {
         if let Some((task_id, reason)) = override_reason(cas_root, ask) {
             announce_override(cas_root, supervisor_name, operator_session, ask, &task_id, &reason);
+            accepted_override_codes.push("G-95");
             continue;
         }
         let note_task = task_for_override(cas_root, ask, subject);
@@ -142,6 +156,7 @@ pub(crate) fn merge_refusal(
 /// A supervisor's raw `gh pr merge`: every merge in `command` resolves to
 /// its PR the way the QA merge guard does; an unresolvable merge is held by
 /// every open ask.
+#[cfg(test)]
 pub(crate) fn github_merge_refusal(
     cas_root: &Path,
     cwd: &Path,
@@ -149,6 +164,18 @@ pub(crate) fn github_merge_refusal(
     supervisor_agent_id: &str,
     supervisor_name: &str,
     operator_session: Option<&str>,
+) -> Option<String> {
+    github_merge_refusal_with_overrides(cas_root, cwd, command, supervisor_agent_id, supervisor_name, operator_session, &mut Vec::new())
+}
+
+pub(crate) fn github_merge_refusal_with_overrides(
+    cas_root: &Path,
+    cwd: &Path,
+    command: &str,
+    supervisor_agent_id: &str,
+    supervisor_name: &str,
+    operator_session: Option<&str>,
+    accepted_override_codes: &mut Vec<&'static str>,
 ) -> Option<String> {
     let merges = crate::qa_pass::github_gate::github_merges_in(command);
     if merges.is_empty()
@@ -163,7 +190,10 @@ pub(crate) fn github_merge_refusal(
                 Ok(pr) => MergeSubject { task_id: None, pr: Some(pr), any_pr: false },
                 Err(_) => MergeSubject { task_id: None, pr: None, any_pr: true },
             };
-            merge_refusal(cas_root, supervisor_agent_id, supervisor_name, operator_session, &subject)
+            let mut accepted = Vec::new();
+            let refusal = merge_refusal_with_overrides(cas_root, supervisor_agent_id, supervisor_name, operator_session, &subject, &mut accepted);
+            if !accepted.is_empty() { accepted_override_codes.push("H-26"); }
+            refusal
         })
 }
 

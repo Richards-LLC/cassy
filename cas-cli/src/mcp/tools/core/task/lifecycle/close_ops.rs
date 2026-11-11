@@ -7490,6 +7490,7 @@ impl CasCore {
     /// authorize a later cycle. This guard must not advance, repair, or fail a
     /// transaction; those transitions belong to the delivery path.
     // gate[G-86 close-after-merge]: Direct update status=closed guards (delivery state, merge predicate)
+    // gate-audit[forward]: G-86 Typed direct-close guard; task-update callers emit the refusal code.
     pub(crate) fn guard_direct_update_close_delivery_state(
         &self,
         task: &Task,

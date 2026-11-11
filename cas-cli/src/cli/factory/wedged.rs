@@ -2563,6 +2563,7 @@ pub(crate) enum KillVerdict {
 // gate[G-143 kill]: Worker PID fingerprint safety
 // gate-audit[force]: bypass G-143 CLI producer tags accepted PID-fingerprint overrides.
 // gate-audit[accepted_by]: execute_kill
+// gate-audit[forward]: G-143 Pure PID-fingerprint verdict; execute_kill emits the refusal code.
 fn kill_verdict(pid: u32, expected_starttime: Option<u64>, force: bool) -> KillVerdict {
     if !crate::mcp::daemon::pid_alive(pid) {
         return KillVerdict::AlreadyDead;

@@ -6782,6 +6782,7 @@ fn evaluate_purge_hard_guards(
 // gate[G-145 purge]: Majority-foreign task preservation
 // gate-audit[allow_majority_foreign]: bypass G-145 CLI purge tags the accepted majority-foreign deletion decision.
 // gate-audit[accepted_by]: execute_purge_foreign_with_output
+// gate-audit[forward]: G-145 Pure purge-policy classification; execute_purge_foreign_with_output emits the refusal code.
 fn evaluate_purge_hard_guards_with_options(
     delete_set: &PurgeDeleteSet,
     total_tasks: usize,

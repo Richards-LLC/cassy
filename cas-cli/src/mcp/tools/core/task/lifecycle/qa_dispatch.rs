@@ -1277,6 +1277,7 @@ impl CasCore {
     // gate[G-64 close-after-merge]: Independent QA required at close (passed or waived QA at landed tip)
     // gate-audit[supervisor_waiver]: bypass G-64 Explicit supervisor waiver of otherwise-required independent QA; close records only QaCloseGate::Waived. accepted_by=close_task_with_dispositions_inner
     // gate-audit[accepted_by]: close_task_with_dispositions_inner
+    // gate-audit[forward]: G-64 Typed QA verdict; close_task_with_dispositions_inner emits refused or accepted-waiver tags.
     pub(crate) fn independent_qa_close_gate(
         &self,
         task: &Task,

@@ -1206,6 +1206,7 @@ pub(crate) fn debt_refusal(task: &str) -> String {
 /// Final transition guard, independent of QA mode, classification, merge
 /// outcome and whether the earlier optional evidence gate was reached.
 // gate[G-83 close-after-merge]: Deferred batch QA debt (waiting for batch receipt)
+// gate-audit[forward]: G-83 Deferred-evidence verdict; final close emits its code.
 pub(crate) fn ensure_deferred_close(
     root: &Path,
     task: &Task,

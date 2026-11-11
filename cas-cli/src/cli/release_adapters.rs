@@ -70,6 +70,43 @@ fn operation_key(project_id: &str, release_id: &str, final_release_sha: &str) ->
     }
 }
 
+/// Counts describe persisted member outcomes, independently of whether the
+/// release operation itself completed. Residuals may also name parent tasks.
+#[derive(Debug, Default, Serialize)]
+struct ReleaseCloseoutCounts {
+    closed: usize,
+    already_closed: usize,
+    held: usize,
+    not_eligible: usize,
+    residual: usize,
+    complete: bool,
+}
+
+impl From<&ReleaseReconcileReceipt> for ReleaseCloseoutCounts {
+    fn from(receipt: &ReleaseReconcileReceipt) -> Self {
+        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+        let mut counts = Self {
+            residual: receipt.residuals.len(), complete: receipt.complete, ..Self::default()
+        };
+        for outcome in receipt.members.values() {
+            match outcome {
+                CassyMergeClose::Closed { .. } => counts.closed += 1,
+                CassyMergeClose::AlreadyClosed => counts.already_closed += 1,
+                CassyMergeClose::Held(_) => counts.held += 1,
+                CassyMergeClose::NotEligible => counts.not_eligible += 1,
+            }
+        }
+        counts
+    }
+}
+
+impl std::fmt::Display for ReleaseCloseoutCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} member(s) closed by this operation, {} already closed, {} held, {} not eligible; {} residual(s); complete={}",
+            self.closed, self.already_closed, self.held, self.not_eligible, self.residual, self.complete)
+    }
+}
+
 // ---- One operation per release identity. ----
 
 /// Run one trigger. The first trigger for a release identity reconciles once;
@@ -96,12 +133,11 @@ pub(crate) fn reconcile_once(
     };
     send_notice(root, scope, &receipt)?;
     Ok(format!(
-        "{} at {}: {} ({} member(s), {} residual(s))",
+        "{} at {}: {}; {}",
         scope.release_id,
         scope.final_release_sha,
-        if reused { "operation already completed" } else { "reconciled" },
-        receipt.members.len(),
-        receipt.residuals.len(),
+        if reused { "closeout reused" } else { "closeout recorded" },
+        ReleaseCloseoutCounts::from(&receipt),
     ))
 }
 
@@ -109,12 +145,12 @@ pub(crate) fn reconcile_once(
 /// parents with owner and next action, inventory exceptions and unfinished
 /// GitHub issues.
 fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileReceipt) -> Result<()> {
+    let counts = ReleaseCloseoutCounts::from(receipt);
     let mut detail = format!(
-        "{} closeout at {}: {} member(s) reconciled, {} residual(s).",
+        "{} closeout at {}: {}.",
         scope.release_id,
         scope.final_release_sha,
-        receipt.members.len(),
-        receipt.residuals.len()
+        counts,
     );
     for r in &receipt.residuals {
         detail.push_str(&format!("\n- {}: {}; owner {}; next: {}", r.task_id, r.gate, r.owner, r.next_action));
@@ -156,7 +192,7 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
         "release_closeout",
         &detail,
         &format!("supervisor-notice:release_closeout:{}", intent.key),
-        None,
+        Some(serde_json::json!({"closeout_counts": counts})),
     )?;
     Ok(())
 }
@@ -742,8 +778,50 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|row| row.target == owner.name
             && crate::supervisor_notices::is_action_envelope(&row.prompt)
-            && row.prompt.contains("cas-0002")
-            && row.prompt.contains("record the batch QA receipt")));
+            && row.prompt.contains("cas-0002")));
+
+        // Replay the captured all-held incident and a mixed operation through
+        // the real notice outbox. Counters are protocol data, not prose pins.
+        let all_held = (0..58).map(|i| (format!("cas-{i:04x}"), CassyMergeClose::Held("QA_MISSING".into())))
+            .collect::<BTreeMap<_, _>>();
+        let mixed = BTreeMap::from([
+            ("cas-a001".into(), CassyMergeClose::Closed { notice: String::new() }),
+            ("cas-a002".into(), CassyMergeClose::AlreadyClosed),
+            ("cas-a003".into(), CassyMergeClose::Held("QA_MISSING".into())),
+            ("cas-a004".into(), CassyMergeClose::NotEligible),
+        ]);
+        for (release, members, residuals, expected) in [
+            ("all-held", all_held, 46, serde_json::json!({
+                "closed": 0, "already_closed": 0, "held": 58, "not_eligible": 0,
+                "residual": 46, "complete": false,
+            })),
+            ("mixed", mixed, 2, serde_json::json!({
+                "closed": 1, "already_closed": 1, "held": 1, "not_eligible": 1,
+                "residual": 2, "complete": false,
+            })),
+            ("complete", BTreeMap::new(), 0, serde_json::json!({
+                "closed": 0, "already_closed": 0, "held": 0, "not_eligible": 0,
+                "residual": 0, "complete": true,
+            })),
+        ] {
+            let scope = scope(release);
+            let mut receipt = reconciler.receipt(
+                operation_key(&scope.project_id, release, &sha), &scope, ReconcileTrigger::Installed,
+            );
+            receipt.members = members;
+            receipt.residuals = (0..residuals).map(|i| ReleaseResidual {
+                task_id: format!("cas-{i:04x}"), gate: "QA_MISSING".into(),
+                owner: owner.id.clone(), next_action: "record proof".into(),
+            }).collect();
+            receipt.complete = expected["complete"].as_bool().unwrap();
+            for _ in 0..2 { send_notice(&root, &scope, &receipt).unwrap(); }
+            let key = format!("supervisor-notice:release_closeout:{}", receipt.notice_intent.unwrap().key);
+            let row = crate::store::open_supervisor_queue_store(&root).unwrap()
+                .get_by_transition_key(&key).unwrap().unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&row.payload).unwrap();
+            assert_eq!(payload["context"]["closeout_counts"], expected);
+        }
+        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 5);
     }
 
     /// The review ledger scaffold publishes both blocks for its scope, and #2's

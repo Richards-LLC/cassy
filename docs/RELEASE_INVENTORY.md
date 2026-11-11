@@ -206,7 +206,11 @@ close intents retain their holds.
 The operation persists `notice_intent {key, recipient, fingerprint}` and sends
 no notice. The publication/promotion adapter alone enqueues that intent using
 its stable key and bound recipient. Retry and supervisor turnover reuse the
-same intent rather than double-send. A completed lookup is the adapter's no-op
+same intent rather than double-send. The notice context stores
+`closeout_counts` with `closed`, `already_closed`, `held`, `not_eligible`,
+`residual` and `complete`, derived from the persisted receipt. The headline and
+CLI summary use those outcome counts; an attempted or held member is never
+reported as a successful close. A completed lookup is the adapter's no-op
 check; partial operations remain resumable.
 
 An independently authored, published release review may additionally carry

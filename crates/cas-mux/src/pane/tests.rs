@@ -80,10 +80,18 @@ mod cases {
                 .expect("feed line");
         }
 
-        assert!(pane.scroll(-5).is_ok());
+        let live: Vec<_> = (0..pane.rows()).map(|row| pane.dump_row(row).unwrap()).collect();
+        pane.scroll(-5).unwrap();
+        let offset = pane.scroll_offset();
+        assert!(offset > 0);
+        assert_ne!(pane.dump_row(0).unwrap(), live[0]);
+        assert_eq!((0..pane.rows()).map(|row| pane.dump_live_row(row).unwrap()).collect::<Vec<_>>(), live);
+        assert_eq!(pane.scroll_offset(), offset);
         assert!(pane.scroll(3).is_ok());
         assert!(pane.scroll_to_top().is_ok());
         assert!(pane.scroll_to_bottom().is_ok());
+        pane.feed(b"\x1b[?1049hAlternate screen").unwrap();
+        assert_eq!(pane.dump_live_row(0).unwrap(), pane.dump_row(0).unwrap());
     }
 
     #[test]

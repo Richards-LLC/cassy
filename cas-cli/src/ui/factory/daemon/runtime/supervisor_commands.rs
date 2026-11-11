@@ -160,7 +160,7 @@ impl FactoryDaemon {
 }
 
 fn screen(pane: &cas_mux::Pane) -> String {
-    (0..pane.rows()).filter_map(|row| pane.dump_row(row).ok()).collect::<Vec<_>>().join("\n")
+    (0..pane.rows()).filter_map(|row| pane.dump_live_row(row).ok()).collect::<Vec<_>>().join("\n")
 }
 
 /// A startup grace or a quiet PTY is insufficient: require a known empty native

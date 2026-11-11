@@ -1176,11 +1176,17 @@ mod tests {
         task.deliverables.delivery_pr_merged_at = Some(Utc::now());
         task.pending_worktree_merge = true;
         task_store.add(&task).unwrap();
-        // cas-50b2: a delivery parked before cycles existed gets exactly one
-        // open cycle when the store opens.
-        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        // cas-50b2: creating an anchored task mints its open cycle. A delivery
+        // parked before cycles existed gets the same one cycle at store open.
         let cycles = || crate::delivery_cycles(root.path(), &task.id).unwrap();
         let shape = || cycles().into_iter().map(|c| (c.cycle, c.anchors, c.ended)).collect::<Vec<_>>();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
+        let forget_cycles = |id: &str| {
+            Connection::open(root.path().join("cas.db")).unwrap()
+                .execute("DELETE FROM delivery_cycles WHERE task_id = ?1", [id]).unwrap();
+        };
+        forget_cycles(&task.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
         assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
 
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
@@ -1303,10 +1309,9 @@ mod tests {
         assert_eq!(retained.updated_at, parked_at);
         assert_eq!(retained.deliverables.factory_branch_anchor,
             corrective.deliverables.factory_branch_anchor);
-        // The re-park mints cycle 2 and freezes its attribution window; the
-        // same commit parked in cycle 2 gets a receipt id distinct from cycle 1's.
+        // The re-park mints cycle 2; the same commit parked in cycle 2 gets a
+        // receipt id distinct from cycle 1's.
         assert_eq!(shape(), [(1, vec!["a".repeat(40)], true), (2, vec!["c".repeat(40)], false)]);
-        assert_eq!(cycles()[1].attribution_not_before, Some(retained.created_at));
         assert_eq!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 1).id, receipt.id);
         assert_ne!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 2).id, receipt.id);
         // Opposite ordering: when park commits first, request_changes wins.
@@ -1315,20 +1320,26 @@ mod tests {
         ).unwrap();
         let current = task_store.get(&task.id).unwrap();
         assert_eq!(current.status, TaskStatus::Open);
-        // A synced anchor from another machine mints the same deterministic
-        // cycle there and here: the cycle number travels with the row.
-        let peer = Task::new("cas-synced".into(), "peer delivery".into());
+        // A synced create and a synced update from another machine number the
+        // cycle from the replicated counter, so both machines get the same id;
+        // a backfill honours that counter too.
+        let mut peer = Task::new("cas-synced".into(), "peer delivery".into());
+        peer.deliverables.delivery_cycle = 3;
+        peer.deliverables.mint_or_append(&"e".repeat(40));
         task_store.add(&peer).unwrap();
+        let peer_shape = || crate::delivery_cycles(root.path(), &peer.id).unwrap()
+            .into_iter().map(|c| (c.cycle_id, c.cycle, c.anchors)).collect::<Vec<_>>();
+        let peer_id = crate::delivery_cycle_id("", &peer.id, 3);
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40)])]);
         let current = task_store.get(&peer.id).unwrap();
         let mut synced = current.clone();
-        synced.deliverables.delivery_cycle = 3;
-        synced.deliverables.mint_or_append(&"e".repeat(40));
+        synced.deliverables.mint_or_append(&"f".repeat(40));
         synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
         task_store.update_from_sync(&synced, &current).unwrap().unwrap();
-        let synced_cycles = crate::delivery_cycles(root.path(), &peer.id).unwrap();
-        assert_eq!(synced_cycles.len(), 1);
-        assert_eq!((synced_cycles[0].cycle, synced_cycles[0].anchors.clone()), (3, vec!["e".repeat(40)]));
-        assert_eq!(synced_cycles[0].cycle_id, crate::delivery_cycle_id("", &peer.id, 3));
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40), "f".repeat(40)])]);
+        forget_cycles(&peer.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(peer_shape(), [(peer_id, 3, vec!["f".repeat(40)])]);
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

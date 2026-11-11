@@ -149,8 +149,6 @@ async fn every_anchor_writer_mints_or_appends_its_delivery_cycle_cas_50b2() {
     let parked = close().await;
     let mut rework = tasks.get(&id).unwrap();
     assert_eq!(rework.status, TaskStatus::AwaitingMerge, "{parked}");
-    let not_before = || cas_store::delivery_cycles(&cas_dir, &id).unwrap()[1].attribution_not_before;
-    let frozen = not_before().expect("the first park freezes the attribution window");
     rework.status = TaskStatus::InProgress;
     tasks.update(&rework).unwrap();
     assert_eq!(tasks.get(&id).unwrap().deliverables.factory_branch_anchor, None);
@@ -164,7 +162,6 @@ async fn every_anchor_writer_mints_or_appends_its_delivery_cycle_cas_50b2() {
     assert!(adopted.is_ok(), "{adopted:?}");
     assert_eq!(tasks.get(&id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(d.as_str()));
     assert_eq!(cycles(&cas_dir, &id), [first.clone(), (2, vec![c.clone(), d.clone()], false)]);
-    assert_eq!(not_before(), Some(frozen), "a transfer does not move the frozen window");
 
     // Reopen ends the cycle too; the next anchor write mints cycle 3.
     let mut closed = tasks.get(&id).unwrap();

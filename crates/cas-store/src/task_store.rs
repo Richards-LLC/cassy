@@ -447,36 +447,12 @@ impl SqliteTaskStore {
                 return Err(StoreError::TaskNotFound(task.id.clone()));
             }
             // cas-50b2: every anchor write, local or synced, mints or appends
-            // its delivery cycle in this transaction. A local park freezes the
-            // cycle's attribution window at the first AwaitingMerge transition.
-            if !task.is_terminal()
-                && let Some(anchor) = persisted_deliverables.factory_branch_anchor.as_deref()
-                && !anchor.trim().is_empty()
-            {
-                let project = task.origin_project.as_deref()
-                    .or(prior.as_ref().and_then(|(_, _, project)| project.as_deref()))
-                    .or(self.origin_project.as_deref())
-                    .unwrap_or_default();
-                let sources = serde_json::to_string(&persisted_deliverables.authorized_merge_sources)?;
-                let cycle_id = crate::delivery_cycle::mint_or_append_with_conn(
-                    &tx,
-                    &crate::delivery_cycle::AnchorWrite {
-                        project,
-                        task_id: &task.id,
-                        anchor,
-                        counter: persisted_deliverables.delivery_cycle,
-                        start_base: persisted_deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
-                        authorized_merge_sources: &sources,
-                        replicated: from_sync,
-                    },
-                    now,
-                )?;
-                if !from_sync && prev_status.is_some() && task.status == TaskStatus::AwaitingMerge {
-                    crate::delivery_cycle::freeze_attribution_not_before_with_conn(
-                        &tx, &task.id, &cycle_id, task.created_at,
-                    )?;
-                }
-            }
+            // its delivery cycle in this transaction.
+            let project = task.origin_project.as_deref()
+                .or(prior.as_ref().and_then(|(_, _, project)| project.as_deref()))
+                .or(self.origin_project.as_deref())
+                .unwrap_or_default();
+            Self::mint_cycle_with_conn(&tx, task, &persisted_deliverables, project, from_sync, now)?;
 
             // Emit status change events only when status actually changed
             // (prev_status is Some only when old status differs from new)
@@ -925,6 +901,36 @@ impl SqliteTaskStore {
         })
     }
 
+    /// cas-50b2: mint or append the cycle of a non-terminal task's anchor.
+    fn mint_cycle_with_conn(
+        conn: &Connection,
+        task: &Task,
+        deliverables: &TaskDeliverables,
+        project: &str,
+        replicated: bool,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        let Some(anchor) = deliverables.factory_branch_anchor.as_deref().filter(|tip| !tip.trim().is_empty()) else {
+            return Ok(());
+        };
+        if task.is_terminal() {
+            return Ok(());
+        }
+        crate::delivery_cycle::mint_or_append_with_conn(
+            conn,
+            &crate::delivery_cycle::AnchorWrite {
+                project,
+                task_id: &task.id,
+                anchor,
+                counter: deliverables.delivery_cycle,
+                start_base: deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
+                replicated,
+            },
+            now,
+        )?;
+        Ok(())
+    }
+
     fn add_with_conn(conn: &Connection, task: &Task, event_session_id: Option<&str>) -> Result<()> {
         let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, None);
         conn.execute(
@@ -969,6 +975,11 @@ impl SqliteTaskStore {
                 Self::proof_targets_to_string(&task.proof_targets),
                 task.door.map(|door| door.to_string()),
             ],
+        )?;
+        // cas-50b2: a create that carries an anchor (local or a synced
+        // insert) mints its cycle, numbered by the row's replicated counter.
+        Self::mint_cycle_with_conn(
+            conn, task, &task.deliverables, task.origin_project.as_deref().unwrap_or_default(), false, task.created_at,
         )?;
 
         // Record event for sidecar activity feed
@@ -1164,7 +1175,10 @@ impl TaskStore for SqliteTaskStore {
         let task = self.task_with_default_origin(task);
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
-            Self::add_with_conn(&conn, &task, None)
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            Self::add_with_conn(&tx, &task, None)?;
+            tx.commit()?;
+            Ok(())
         })
     }
 

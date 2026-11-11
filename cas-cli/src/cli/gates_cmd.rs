@@ -157,8 +157,9 @@ fn report(cas_root: &Path, since: &str, json: bool) -> anyhow::Result<()> {
 
 fn false_positive(cas_root: &Path, args: &FalsePositiveArgs) -> anyhow::Result<()> {
     let role = std::env::var("CAS_AGENT_ROLE").unwrap_or_default();
+    // gate[G-153 record]: Gate false-positive declaration authority
     if role.eq_ignore_ascii_case("worker") {
-        bail!("only a supervisor or the operator declares a gate false positive; ask the supervisor");
+        bail!(crate::gates::tag("G-153", "only a supervisor or the operator declares a gate false positive; ask the supervisor"));
     }
     if args.reason.trim().is_empty() {
         bail!("--reason must say why the refusal was wrong");

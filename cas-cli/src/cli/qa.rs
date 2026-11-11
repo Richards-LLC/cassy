@@ -741,14 +741,28 @@ fn candidate(args: &CandidateArgs, cli: &Cli, cas_root: Option<&Path>) -> Result
         "a worker never builds a candidate in its own process; request it with \
          `factory action=candidate_request task_id={task} revision=<sha>`"
     );
-    let script = project.join("scripts/qa-candidate-build.py");
+    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
+    // The builder imports sibling helpers whose own source-relative reads
+    // must also come from --rev. Keep the caller's checkout untouched.
+    let source = tempfile::Builder::new().prefix("cas-candidate-builder-").tempdir()?;
+    let mut archive = Command::new("git")
+        .arg("-C").arg(&project)
+        .args(["archive", "--format=tar", &revision])
+        .stdout(Stdio::piped())
+        .spawn().context("read candidate builder revision")?;
+    let mut stream = archive.stdout.take().context("candidate source stream unavailable")?;
+    let unpacked = tar::Archive::new(&mut stream).unpack(source.path());
+    // Consume trailing archive padding before waiting, including on unpack failure.
+    let drained = std::io::copy(&mut stream, &mut std::io::sink());
+    let status = archive.wait().context("wait for candidate source archive")?;
+    ensure!(status.success(), "candidate source archive exited {status}");
+    unpacked.context("unpack candidate builder revision")?;
+    drained.context("read candidate source archive")?;
+    let script = source.path().join("scripts/qa-candidate-build.py");
     ensure!(
         script.is_file(),
-        "QA candidate builder missing: scripts/qa-candidate-build.py\n\
-         Use an up-to-date Cassy source checkout, then rerun:\n\
-           cas qa candidate build --task {task} \\\n    --rev {revision}"
+        "QA candidate builder missing at {revision}: scripts/qa-candidate-build.py"
     );
-    let _one_build_per_machine = crate::factory_candidate_queue::hold_machine_build_lock()?;
     let status = Command::new("python3")
         .arg(script)
         .arg("--repo")

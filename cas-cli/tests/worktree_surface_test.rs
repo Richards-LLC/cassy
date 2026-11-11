@@ -1085,10 +1085,7 @@ async fn cross_repo_merge_mutates_only_declared_repo(implicit: bool) {
     // Keep the new managed-merge fixture's transport entirely local while
     // retaining a GitHub origin for its CI identity.
     let remote = TempDir::new().unwrap();
-    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
-    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
-        "git@github.com:org/work-b.git"], &repo_b.root);
-    run_git(&["push", "origin", "main"], &repo_b.root);
+    ci_check_run::local_ssh_origin(&repo_b.root, remote.path(), &["main"]);
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init repo A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init repo B CAS");
     disable_system_a(&cas_root_a);
@@ -1358,10 +1355,7 @@ async fn task_bound_merge_uses_persisted_binding_for_duplicate_live_clones() {
         );
     }
     let remote = TempDir::new().unwrap();
-    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo_b.root);
-    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
-        "git@github.com:org/shared-work.git"], &repo_b.root);
-    run_git(&["push", "origin", "main"], &repo_b.root);
+    ci_check_run::local_ssh_origin(&repo_b.root, remote.path(), &["main"]);
     let cas_root_a = init_cas_dir(&repo_a.root, &mut env).expect("init clone A CAS");
     let cas_root_b = init_cas_dir(&repo_b.root, &mut env).expect("init clone B CAS");
     disable_system_a(&cas_root_a);
@@ -5222,10 +5216,7 @@ async fn standalone_non_trunk_work_target_does_not_require_allow_trunk_cas_84df(
     disable_system_a(&cas_root);
     run_git(&["branch", "staging"], &repo.root);
     let remote = TempDir::new().unwrap();
-    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
-    run_git(&["config", &format!("url.{}.insteadOf", remote.path().display()),
-        "git@github.com:org/staging-target.git"], &repo.root);
-    run_git(&["push", "origin", "main", "staging"], &repo.root);
+    ci_check_run::local_ssh_origin(&repo.root, remote.path(), &["main", "staging"]);
 
     let task_store = open_task_store(&cas_root).expect("open_task_store");
     let mut standalone_task = Task::new(

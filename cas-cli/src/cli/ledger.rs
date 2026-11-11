@@ -1511,7 +1511,7 @@ mod tests {
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
         events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
-        let report = aggregate("v4.16.0".into(), true, None, None, &events);
+        let report = aggregate("v9.99.0".into(), true, None, None, &events);
         let json = serde_json::to_value(report).unwrap();
         assert_eq!(json["reviews"][0]["rounds"].as_array().map(Vec::len), Some(3));
         assert_eq!(json["reviews"][0]["cycle_id"], "dc-delivery");

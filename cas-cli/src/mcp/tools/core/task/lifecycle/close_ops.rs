@@ -9236,10 +9236,14 @@ impl CasCore {
                         }
                         fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(message)),
                         fast_lane_gate::ReceiptGate::Failed(message) => {
-                            let recovery = self.return_merged_delivery_for_source_fix(
-                                &task, &evidence_repo, &resolved_parent_branch, &message,
-                            );
-                            gate_refusals.push(format!("{message}{recovery}"));
+                            // A failed receipt/revert requires a new source delivery;
+                            // ordinary post-merge upkeep remains supervisor-owned.
+                            let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
+                            let recovery = super::merge_close::return_merged_delivery_for_source_fix(
+                                &self.cas_root, &actor, &task, &evidence_repo,
+                                &resolved_parent_branch, &message,
+                            ).unwrap_or_else(|error| format!("Cassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id));
+                            gate_refusals.push(format!("{message}\n\n{recovery}"));
                             return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                         }
                     }

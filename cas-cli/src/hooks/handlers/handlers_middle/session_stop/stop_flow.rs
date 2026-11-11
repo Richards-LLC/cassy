@@ -750,12 +750,6 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
         }
     }
 
-    // Best-effort codemap reminder
-    let codemap_reminder = crate::hooks::handlers::handlers_events::codemap_stop_reminder(cas_root);
-    if let Some(ref reminder) = codemap_reminder {
-        eprintln!("cas: {reminder}");
-    }
-
     // cas-5c0a (B3): Emit final git-state event for factory workers so the
     // supervisor can see branch/HEAD/pushed-ref/PR without manual forensics.
     // Fires on the normal-stop path (i.e. not on blocked loop-iteration returns).
@@ -786,7 +780,6 @@ pub fn handle_stop(input: &HookInput, cas_root: Option<&Path>) -> Result<HookOut
     // Stop hooks don't support hookSpecificOutput.additionalContext in Claude
     // Code's schema — route via systemMessage instead.
     let notices = [
-        codemap_reminder,
         supervisor_turn_ends_without_wake_source(cas_root, input),
         supervisor_turn_leaves_messaged_workers_uncovered(cas_root, input),
     ]

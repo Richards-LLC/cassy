@@ -2,7 +2,6 @@ use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
-mod docs_upkeep;
 mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
@@ -9150,7 +9149,6 @@ impl CasCore {
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, qa_receipt,
             );
-            let mut upkeep_refusals = Vec::new();
             let rule_head = super::qa_evidence_gate::delivered_head(
                 &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
             );
@@ -9159,22 +9157,9 @@ impl CasCore {
             ) {
                 gate_refusals.push(message);
             }
-            match registry_upkeep::at_park(
-                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
-                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
-            ) {
-                Ok(notices) => registry_upkeep_notices = notices,
-                Err(message) => upkeep_refusals.push(message),
-            }
-            match docs_upkeep::at_park(
-                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
-                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
-            ) {
-                Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => upkeep_refusals.push(message),
-            }
+            // cas-4b33: journey registry upkeep (G-49) runs as the lane lint
+            // and CODEMAP/PRODUCT_OVERVIEW are regenerated at release prep, so
+            // park no longer re-judges shared docs (G-50 removed).
             // cas-5d07: a report reaches the operator only as the report the
             // skill describes; not deferred by the fast lane.
             match report_quality::at_park(
@@ -9184,24 +9169,6 @@ impl CasCore {
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
                 Err(message) => gate_refusals.push(message),
-            }
-            if fast_lane_stage.on_lane() {
-                upkeep_refusals = fast_lane_gate::defer_upkeep(
-                    &mut close_notes, &mut task, &fast_lane_stage, upkeep_refusals,
-                    &mut registry_upkeep_notices,
-                );
-            }
-            // Returning a merged delivery changes the task, so it happens once,
-            // for all of its upkeep findings, and ends this attempt.
-            if !upkeep_refusals.is_empty() {
-                let message = upkeep_refusals.join("\n\n");
-                let recovery = self.return_merged_delivery_for_source_fix(
-                    &task, &evidence_repo, &resolved_parent_branch, &message,
-                );
-                gate_refusals.push(format!("{message}{recovery}"));
-                if !recovery.is_empty() {
-                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
-                }
             }
             let qa_base = qa_window.and_then(|window| {
                 let head = super::qa_evidence_gate::delivered_head(

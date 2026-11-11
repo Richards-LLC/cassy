@@ -120,6 +120,7 @@ pub(crate) mod worker_task_queue;
 pub mod qa_pass;
 pub mod qa_registry;
 pub mod qa_impact;
+pub mod qa_upkeep;
 pub mod qa_seed;
 pub mod qa_post_release;
 pub mod rapid_response;

@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -31,6 +32,21 @@ def _pinned_linter():
 LINTER = _pinned_linter()
 if LINTER:
     os.environ["MARKDOWNLINT_CLI2"] = LINTER
+# The journey-catalog row's registry upkeep needs a Cassy validator; keep the
+# fixture rows hermetic (cas-4b33): no CAS_BIN and an installer that fails.
+os.environ.pop("CAS_BIN", None)
+os.environ["CAS_VALIDATOR_INSTALLER"] = "/nonexistent/cas-install.sh"
+REGISTRY = """version: 1
+updated: '2026-11-11'
+surfaces: ['hub-web/src/**']
+journeys:
+  - id: J1
+    status: live
+    seeded: true
+    entry: {url: /signup, trigger: Open}
+    owners: ['hub-web/src/signup.ts']
+    traffic: {share_pct: null, basis: fixture}
+"""
 
 
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
@@ -96,7 +112,7 @@ class FastRows(unittest.TestCase):
                        "journeys-for-diff.py", "check-builtin-skill-limits.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
                        "mcp-call-surface.json", "fast-rows-pre-push.sh", "release-train-announce.py",
-                       "release-diary-thread.py"):
+                       "release-diary-thread.py", "doc-fragments.py"):
             self.write("scripts/" + helper, (ROOT / "scripts" / helper).read_text())
         for source_dir in ("scripts/fixtures/communication-slos", "crates/cas-store/src/communication_slo"):
             for source in (ROOT / source_dir).glob("*.sql"):
@@ -107,6 +123,8 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.write("hub-web/src/signup.ts", "signup\n")
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
@@ -288,6 +306,8 @@ class FastRows(unittest.TestCase):
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",
              JOURNEY_CATALOG.replace("Tap the row —", "Tap the renamed row —")),
+            # cas-4b33: registry upkeep moved from park to this lane lint.
+            ("journey-catalog", "docs/qa/bug-families/ghost.yaml", "title: Ghost case\njourneys: [MISSING]\n"),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/violet/SKILL.md",
              VIOLET_SKILL + "x" * 80 + "\n" + "Padding line.\n" * 1200),
             ("builtin-skill-limits", "cas-cli/src/builtins/skills/example/SKILL.md",
@@ -313,6 +333,93 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("FAIL " + row, result.stdout)
 
+
+    def test_registry_upkeep_fails_closed_without_a_validator_cas_4b33(self):
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    def test_selector_failure_invokes_registry_validator_cas_4b33(self):
+        tools = self.repo / ".git" / "tools"
+        tools.mkdir()
+        selector = tools / "python3"
+        selector.write_text(f'''#!/bin/sh
+if [ "$1" = scripts/doc-fragments.py ] && [ "$2" = needs-upkeep ]; then
+    echo 'ModuleNotFoundError: No module named yaml' >&2
+    echo no
+    exit 1
+fi
+exec {shlex.quote(sys.executable)} -S "$@"
+''')
+        selector.chmod(0o755)
+        validator = tools / "cas"
+        validator.write_text('''#!/bin/sh
+case "$*" in
+    'qa journeys --help') [ "${LEGACY_VALIDATOR:-0}" = 1 ] || echo --base ;;
+    'qa journeys --check'*) echo "$*" >> .git/validator-calls ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*)
+        echo "$*" >> .git/validator-calls
+        echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("hub-web/src/signup.ts", "updated owned surface\n")
+        self.commit()
+        result = self.fast_from(self.base, CAS_BIN=str(validator),
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.repo / ".git" / "validator-calls"
+        self.assertTrue(calls.exists(), result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa journeys --check --base " + self.base])
+        calls.unlink()
+        legacy = self.fast_from(self.base, CAS_BIN=str(validator), LEGACY_VALIDATOR="1",
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(legacy.returncode, 0, legacy.stdout + legacy.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa impact " + self.base + " --json"])
+
+    def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/usr/bin/env bash
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: strict\n")
+        self.write("hub-web/src/email.ts", "pre-existing unowned surface\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/email.ts", "modified unowned surface\n")
+        # The stricter base policy must survive a delivery's downgrade.
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        result = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    @unittest.skipUnless(shutil.which("cas"), "needs a released cas to provision")
+    def test_self_provisioned_validator_catches_an_unowned_surface_cas_4b33(self):
+        installer = self.repo / ".git" / "fake-install.sh"
+        installer.write_text('#!/usr/bin/env bash\ninstall -m 755 "$REAL_CAS" "$CAS_INSTALL_DIR/cas"\n')
+        env = {"CAS_VALIDATOR_INSTALLER": str(installer), "REAL_CAS": shutil.which("cas")}
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        unowned = self.fast_from(self.base, **env)
+        self.assertEqual(unowned.returncode, 1, unowned.stdout + unowned.stderr)
+        self.assertIn("FAIL journey-catalog", unowned.stdout)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "ignore: ['hub-web/src/email.ts']\n")
+        self.commit()
+        owned = self.fast_from(self.base, **env)
+        self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"

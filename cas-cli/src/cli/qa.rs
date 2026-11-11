@@ -153,6 +153,8 @@ struct CheckReport<'a> {
     #[serde(flatten)]
     validation: &'a crate::qa_registry::ValidationReport,
     debt_summary: DebtSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upkeep: Option<&'a crate::qa_upkeep::DiffUpkeep>,
 }
 
 #[derive(Subcommand)]
@@ -189,6 +191,10 @@ pub enum QaCommand {
         /// Check schema, references and globs without executing specs
         #[arg(long)]
         check: bool,
+        /// With --check: also refuse registry problems and unowned new
+        /// surface files that the diff from this ref to HEAD introduced
+        #[arg(long, requires = "check")]
+        base: Option<String>,
         /// Bootstrap from tracked routes and project context
         #[arg(long)]
         seed: bool,
@@ -295,6 +301,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
         },
         QaCommand::Journeys {
             check: _,
+            base,
             seed,
             merge,
             status,
@@ -426,6 +433,11 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                 }
                 return Ok(());
             }
+            // cas-4b33: the lane lint's diff-scoped upkeep (formerly park G-49).
+            let upkeep = base
+                .as_deref()
+                .map(|base| crate::qa_upkeep::for_diff(&project_root, &qa, base, "HEAD"))
+                .transpose()?;
             let registry_path = qa.registry.path;
             let report = crate::qa_registry::check(&project_root, Path::new(&registry_path))?;
             let debt_summary = DebtSummary::record(
@@ -440,6 +452,7 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     serde_json::to_string_pretty(&CheckReport {
                         validation: &report,
                         debt_summary,
+                        upkeep: upkeep.as_ref(),
                     })?
                 );
             } else {
@@ -516,8 +529,19 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
                     }
                 }
             }
+            if let Some(upkeep) = upkeep.as_ref().filter(|_| !cli.json) {
+                for warning in &upkeep.warnings {
+                    println!("{warning}");
+                }
+                for finding in &upkeep.findings {
+                    println!("UPKEEP {} {}:\n{}", finding.gate, finding.title, finding.detail);
+                }
+                if upkeep.refuses() {
+                    println!("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused");
+                }
+            }
             anyhow::ensure!(
-                report.problems.is_empty(),
+                report.problems.is_empty() && !upkeep.as_ref().is_some_and(|u| u.refuses()),
                 "fix the registry problems, then rerun: cas qa journeys --check"
             );
             Ok(())

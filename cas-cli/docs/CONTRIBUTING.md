@@ -622,12 +622,10 @@ inherited CAS_ROOT that does not belong to its declared project; canonical and
 worktree aliases of that project's store remain valid. For an isolated QA rig,
 initialize its own project and clear inherited CAS_ROOT before starting it.
 
-After a published merge, an enforced registry or documentation upkeep gate
-returns the parked task Open to its assignee through the same `request_changes`
-core. Cassy retains the gate text in task notes, sends one corrective notice,
-and retires the old automatic-close intent. The worker can start, commit the
-source repair and re-deliver with a fresh anchor. Verification and QA waits
-keep their existing dispatch ownership.
+Task park no longer runs journey registry or documentation upkeep gates
+(cas-4b33): deliveries add per-task fragments, the `journey-catalog` fast row
+lints them, and release prep compiles them; see
+[documentation upkeep](../../docs/qa/docs-upkeep.md).
 
 A supervisor message to a blocked worker records ownership of that wait when
 sent with `kind=answer`, `in_reply_to` the worker's blocker message, or as a

@@ -300,8 +300,13 @@ fn is_changelog_fragment(path: &str) -> bool {
 /// Whether `commit` tracks a `changelog.d/` directory, which switches the
 /// changelog gate from `CHANGELOG.md` edits to fragment files.
 pub(super) fn has_changelog_fragments_at(repo: &Path, commit: &str) -> bool {
+    has_fragment_dir_at(repo, commit, CHANGELOG_FRAGMENT_DIR)
+}
+
+/// Whether `dir` holds any tracked file at `commit`.
+pub(super) fn has_fragment_dir_at(repo: &Path, commit: &str, dir: &str) -> bool {
     std::process::Command::new("git")
-        .args(["ls-tree", "--name-only", commit, "--", &format!("{CHANGELOG_FRAGMENT_DIR}/")])
+        .args(["ls-tree", "--name-only", commit, "--", &format!("{dir}/")])
         .current_dir(repo)
         .output()
         .ok()

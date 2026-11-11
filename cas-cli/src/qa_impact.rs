@@ -113,8 +113,6 @@ pub struct Unowned {
 
 #[derive(Debug, Default, Serialize)]
 pub struct Upkeep {
-    pub codemap: UpkeepItem,
-    pub product_overview: UpkeepItem,
     pub registry: UpkeepItem,
 }
 

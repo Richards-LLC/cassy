@@ -778,6 +778,9 @@ async fn batch_qa_receipt_closes_listed_deliveries_cas_d697() {
             cas_store::QualityPayload::CheckRun { check_id, .. } if check_id == "qa_batch")),
         "{ledger:?}"
     );
+    let interventions = cas_store::quality_events_between(&fx.repo.join(".cas"), None, None).unwrap();
+    assert_eq!(interventions.iter().filter(|event| matches!(event.payload,
+        cas_store::QualityPayload::Intervention { intervention: cas_store::InterventionKind::ManualReceipt, .. })).count(), 1);
     let receipt = cas_store::list_qa_batch_receipts(&fx.repo.join(".cas"), "batch-project").unwrap();
     assert_eq!(
         (receipt[0].ledger_author_id.as_deref(), receipt[0].ledger_author_role.as_deref()),

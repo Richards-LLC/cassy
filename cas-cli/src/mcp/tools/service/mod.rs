@@ -436,7 +436,8 @@ impl CasService {
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
                 "close" => {
-                    let manual = this.inner.resolve_live_supervisor_authority().ok();
+                    let manual = if req.supervisor_override.unwrap_or(false) { None }
+                        else { this.inner.resolve_live_supervisor_authority().ok() };
                     let was_closed = this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
                         .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
                     let result = this.task_close(req).await;

@@ -3718,40 +3718,19 @@ async fn test_close_auto_unblocks_blocked_dependents() {
         .await
         .expect("verification add should succeed");
 
-    let close = service
-        .cas_task_close(Parameters(TaskCloseRequest {
-            no_delivery: None,
-            stranded_branch_override: None,
-            id: blocker_id,
-            reason: Some("done".to_string()),
-            supervisor_override: None,
-            search_manifest: None,
-            commit_receipt: None,
-        }))
-        .await
-        .expect("task close should succeed");
-    let close_text = extract_text(close);
-    assert!(
-        close_text.contains("Auto-unblocked"),
-        "Close output should mention auto-unblocked tasks: {close_text}"
-    );
-
-    let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
-            read: cas::mcp::tools::TaskReadOptions {
-                full: true,
-                ..Default::default()
-            },
-            id: blocked_id,
-            with_deps: false,
-        }))
-        .await
-        .expect("task_show should succeed");
-    let text = extract_text(show);
-    assert!(
-        text.contains("Status: Open"),
-        "Blocked dependent should auto-transition to Open: {text}"
-    );
+    let unified = CasService::new(service.clone(), None);
+    let request = || Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+        "action": "close", "id": blocker_id, "reason": "done"
+    })).unwrap());
+    unified.task(request()).await.expect("task close should succeed");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    assert_eq!(tasks.get(&blocked_id).unwrap().status, cas::types::TaskStatus::Open);
+    let manual_closes = || cas_store::quality_events_for_task(&cas_dir, &blocker_id).unwrap().into_iter()
+        .filter(|e| matches!(e.payload, cas_store::QualityPayload::Intervention {
+            intervention: cas_store::InterventionKind::ManualClose, .. })).count();
+    assert_eq!(manual_closes(), 1);
+    let _ = unified.task(request()).await;
+    assert_eq!(manual_closes(), 1, "a closed-task retry performs no additional manual close");
 }
 
 async fn create_task_titled(service: &CasCore, title: &str) -> String {

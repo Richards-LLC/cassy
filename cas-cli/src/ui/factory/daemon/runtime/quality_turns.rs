@@ -999,8 +999,11 @@ impl Scanner {
 /// Explicit historical replay uses the same readers, never auto-clear or a new
 /// observer. Only retained transcripts and authenticated queue rows can enrich a wake.
 pub(crate) fn backfill_quality_turns(root: &Path, since: DateTime<Utc>) -> anyhow::Result<usize> {
+    let actors: BTreeSet<_> = cas_store::quality_events_between(root, Some(since), None)?.into_iter()
+        .filter(|e| matches!(e.payload, QualityPayload::Turn { notice_kind: None, .. }))
+        .filter_map(|e| e.actor).collect();
     let agents = crate::store::open_agent_store(root)?.list(None)?;
-    let agents: Vec<_> = agents.into_iter().filter(|agent| agent.last_heartbeat >= since).collect();
+    let agents: Vec<_> = agents.into_iter().filter(|agent| actors.contains(&agent.id)).collect();
     let queue = crate::store::open_prompt_queue_store(root)?;
     let sessions: BTreeSet<_> = agents.iter().filter_map(|a| a.factory_session.clone()).collect();
     let mut inserted = 0;

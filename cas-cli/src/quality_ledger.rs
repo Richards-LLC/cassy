@@ -237,8 +237,12 @@ fn attested_interventions(root: &Path, notes: &str, since: DateTime<Utc>) -> any
         let rows: Vec<AttestedIntervention> = serde_json::from_str(json)?;
         for row in rows.into_iter().filter(|row| row.occurred_at >= since) {
             anyhow::ensure!(!row.source.trim().is_empty() && !row.key.trim().is_empty(), "attestation needs a source and key");
-            let mut event = NewQualityEvent::new(format!("attested|{}|{}", row.intervention.as_str(), row.key),
+            let key = if row.intervention == InterventionKind::ManualReceipt {
+                format!("manual_receipt|{}", row.key)
+            } else { format!("attested|{}|{}", row.intervention.as_str(), row.key) };
+            let mut event = NewQualityEvent::new(key,
                 QualityPayload::Intervention { intervention: row.intervention, minutes: None });
+            event.title = Some(row.key.replace('-', " "));
             event.occurred_at = row.occurred_at;
             event.actor = Some(row.actor);
             event.task_id = row.task_id;

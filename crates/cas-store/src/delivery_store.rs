@@ -1355,6 +1355,14 @@ mod tests {
         forget_cycles(&legacy.id);
         SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
         assert_eq!(open_cycle(), expected, "backfill");
+        legacy = task_store.get(&legacy.id).unwrap();
+        legacy.status = TaskStatus::Closed;
+        task_store.update(&legacy).unwrap();
+        forget_cycles(&legacy.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert!(crate::delivery_cycles(root.path(), &legacy.id).unwrap().is_empty());
+        crate::backfill_delivery_cycles(root.path(), "").unwrap();
+        assert_eq!(open_cycle(), expected, "explicit terminal delivery history recovery");
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

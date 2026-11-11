@@ -614,6 +614,7 @@ struct DeliveryReviews {
 #[derive(Debug, Serialize)]
 struct InterventionRow {
     kind: &'static str,
+    title: Option<String>,
     at: DateTime<Utc>,
     actor: Option<String>,
     source: Option<String>,
@@ -951,7 +952,7 @@ fn aggregate(
                 }
             }
             QualityPayload::Intervention { intervention, .. } => {
-                report.intervention_rows.push(InterventionRow { kind: intervention.as_str(), at: event.occurred_at,
+                report.intervention_rows.push(InterventionRow { kind: intervention.as_str(), title: event.title.clone(), at: event.occurred_at,
                     actor: event.actor.clone(), source: event.local_note.clone() });
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
@@ -1201,7 +1202,7 @@ fn render(report: &LedgerReport) -> String {
     }
 
     for row in report.intervention_rows.iter().filter(|r| r.source.as_deref().is_some_and(|s| s.starts_with("supervisor-attested:"))) {
-        let _ = writeln!(out, "  {} {}: {}", when(row.at), row.kind, row.source.as_deref().unwrap_or_default());
+        let _ = writeln!(out, "  {} {} {}: {}", when(row.at), row.kind, row.title.as_deref().unwrap_or_default(), row.source.as_deref().unwrap_or_default());
     }
 
     let minutes = |minutes: &f64| duration(Some(*minutes));
@@ -1499,8 +1500,8 @@ mod tests {
         // The release train carries three recorded deliveries in one main merge.
         for (task, rev, source) in [("cas-feature", "v1.1.0~2", "v1.1.0~2^2"),
             ("cas-config", "v1.1.0~1", "v1.1.0~1"), ("cas-lint", "v1.1.0", "v1.1.0")] {
-            let merge = git(dir.path(), &["rev-parse", rev]).unwrap();
-            let anchor = git(dir.path(), &["rev-parse", source]).unwrap();
+            let merge = git(dir.path(), &["rev-parse", &format!("{rev}^{{commit}}")]).unwrap();
+            let anchor = git(dir.path(), &["rev-parse", &format!("{source}^{{commit}}")]).unwrap();
             cas_store::record_observed_delivery_merge(&root, task, "factory/worker", "epic/train", &anchor, &merge, "supervisor").unwrap();
         }
         git_in(dir.path(), &["branch", "train"]);

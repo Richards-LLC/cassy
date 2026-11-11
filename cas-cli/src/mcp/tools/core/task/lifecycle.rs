@@ -2955,9 +2955,9 @@ impl CasCore {
                         crate::factory_isolation::branch_at(worker_checkout)
                             .unwrap_or_else(|| "(detached HEAD)".into()),
                     );
-                    // Reassignment may replace a boundary only after all old
-                    // tips are proven inherited. Inspect immediately before the
-                    // successful start write, through the shared rebind audit.
+                    // Reassignment preserves prior deliveries. A queued,
+                    // untouched successor can also adopt its fresh target;
+                    // inspect before the guarded start write and shared audit.
                     let reassigned = task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
                             start.assignee != worker.name && start.branch != worker_branch
                         })
@@ -3603,7 +3603,9 @@ impl CasCore {
             task.deliverables.factory_branch_start = Some(start);
         }
         let automatic_rebind = reassigned_branch.and_then(|(checkout, worker, branch)| {
-            super::rebind::reassigned_branch_start(&checkout, &task, &worker, &branch)
+            super::rebind::reassigned_branch_start(
+                &self.cas_root, &checkout, &task, &worker, &branch, queued_start,
+            )
         });
         if let Some((start, _)) = automatic_rebind.as_ref() {
             task.deliverables.factory_branch_start = Some(start.clone());
@@ -4649,8 +4651,9 @@ mod related_recall_response_tests {
 
     /// cas-1896: one integration per release. A standalone task joins the
     /// open release train cut from the integration branch (main, or the
-    /// configured staging), the next task joins the same train, a landed
-    /// train closes and the next opens, and an explicit target is a hotfix.
+    /// configured staging). A landed train stays available for release
+    /// reconciliation while new work joins its successor. An explicit target
+    /// is a hotfix.
     #[tokio::test]
     async fn standalone_create_joins_the_release_train_on_main_or_staging_cas_1896() {
         use std::process::Command;
@@ -4728,12 +4731,15 @@ mod related_recall_response_tests {
             child.status = TaskStatus::Closed;
             store.update(&child).unwrap();
         }
-        let next = create("Fix three").await;
-        assert!(next.contains(&format!("{} landed on `main`", train.id)), "{next}");
-        assert_eq!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
-        let open: Vec<_> = trains("main").into_iter().filter(|t| !t.is_terminal()).collect();
+        create("Fix three").await;
+        let landed_train = store.get(&train.id).unwrap();
+        assert_eq!(landed_train.status, train.status);
+        assert_eq!(landed_train.closed_at, train.closed_at);
+        let open: Vec<_> = trains("main")
+            .into_iter()
+            .filter(|t| t.id != train.id && !t.is_terminal())
+            .collect();
         assert_eq!(open.len(), 1, "next train opens");
-        assert_ne!(open[0].id, train.id);
         assert_eq!(
             task("Fix three").deliverables.work_target.unwrap().target_branch,
             open[0].branch.clone().unwrap()

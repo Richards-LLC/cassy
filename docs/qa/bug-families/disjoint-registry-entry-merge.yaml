@@ -1,0 +1,4 @@
+title: Parallel registry entries survive candidate and landing merges while competing edits still conflict and separate shared doc entries require no coordination
+tasks: [cas-7867]
+invariants: []
+journeys: [FACTORY-MERGE, FACTORY-SUPERVISE]

@@ -163,7 +163,7 @@ pub const GENERATED_MERGE_ATTRIBUTE: &str = "merge=cas-generated";
 pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-artifacts.sh";
 /// cas-7aa5: the `.gitattributes` value for CHANGELOG.md's [Unreleased] union driver.
 pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
-/// Registry driver: independent bug families merge; competing edits conflict.
+/// Registry driver: independent entries merge; competing edits conflict.
 pub const JOURNEYS_MERGE_ATTRIBUTE: &str = "merge=cas-journeys";
 /// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
 /// `merge-tree`) runs the same driver whatever the checkout carries.
@@ -1457,6 +1457,28 @@ impl GitOperations {
         notes.push(note);
     }
 
+    /// Run the real merge's regeneration step in an isolated checkout before
+    /// sealing a review candidate. A stale or uncommitted result cannot be reviewed.
+    pub(crate) fn regenerated_candidate_tree(
+        &self,
+        merged_head: &str,
+        pre_merge_head: &str,
+    ) -> Result<String> {
+        let worktree = self.add_temp_worktree(merged_head)?;
+        let operations = Self::new(worktree.path().to_path_buf());
+        operations.regenerate_generated_artifacts(worktree.path(), pre_merge_head);
+        let failures = operations.take_stale_checkout_notes();
+        if !failures.is_empty() {
+            return Err(GitError::CommandFailed(failures.join("\n")));
+        }
+        if operations.has_uncommitted_changes(worktree.path())? {
+            return Err(GitError::CommandFailed(
+                "candidate regeneration left uncommitted output".into(),
+            ));
+        }
+        operations.ref_sha("HEAD^{tree}")
+    }
+
     /// Paths a merge of `source` into `target` would actually touch
     /// (cas-4702 / GH #73).
     ///
@@ -2027,6 +2049,7 @@ impl GitOperations {
 
     /// Checkout a branch in the main repo
     pub fn checkout(&self, branch: &str) -> Result<()> {
+        self.clear_clean_codemap_skip_worktree(&self.repo_root)?;
         let output = Command::new("git")
             .args(["checkout", branch])
             .current_dir(&self.repo_root)

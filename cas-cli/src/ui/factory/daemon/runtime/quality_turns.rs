@@ -118,6 +118,7 @@ fn unqueued_wake(prompt: &str, origin: Option<&str>, agent: &Agent) -> WakeChann
     if prompt.starts_with(cas_pty::WORKER_STARTUP_BRIEF_PREFIX)
         || prompt.starts_with(cas_pty::CODEX_WORKER_STARTUP_PREFIX)
         || prompt.contains(super::queue_and_events::DELIVERY_WATCHDOG_NUDGE)
+        || prompt.contains(super::queue_and_events::LEGACY_DELIVERY_WATCHDOG_NUDGE)
     {
         return WakeChannel::Daemon;
     }

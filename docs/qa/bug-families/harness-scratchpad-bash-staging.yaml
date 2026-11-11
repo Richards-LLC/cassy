@@ -1,0 +1,4 @@
+title: Bash can create its session scratchpad and stage notes while other sessions and bare temporary paths stay refused
+tasks: [cas-738c]
+invariants: []
+journeys: []

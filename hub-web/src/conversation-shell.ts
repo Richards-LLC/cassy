@@ -348,8 +348,7 @@ export function contextSheetWhere(model: Pick<ConversationShellModel, "projectDi
  */
 function contextRailMarkup(selected: boolean, projectExplorerHref: string | null = null): string {
   const sections = selected
-    ? '<section class="context-section" data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h2 id="context-waiting-heading">Waiting on you</h2><ul class="context-list context-waiting"></ul></section>'
-      + `<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2>${projectExplorerHref ? projectExplorerLinkMarkup(projectExplorerHref) : ""}<p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>`
+    ? `<section class="context-section" data-section="progress" aria-labelledby="context-progress-heading" hidden><h2 id="context-progress-heading">Tasks &amp; progress</h2><section data-section="waiting" aria-labelledby="context-waiting-heading" hidden><h3 id="context-waiting-heading">Waiting on you</h3><ul class="context-list context-waiting"></ul></section>${projectExplorerHref ? projectExplorerLinkMarkup(projectExplorerHref) : ""}<p class="status-stale" role="status" hidden></p><div id="conversation-status-slot"></div></section>`
       + '<section class="context-section" data-section="attachments" aria-labelledby="context-attachments-heading" hidden><h2 id="context-attachments-heading">Attachments</h2><ul class="context-list context-attachments"></ul></section>'
       + '<section class="context-section" data-section="attention" hidden><div id="conversation-attention-slot"></div></section>'
     : "";

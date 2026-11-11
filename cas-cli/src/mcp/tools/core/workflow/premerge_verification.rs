@@ -188,6 +188,26 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Build the tree the merge will ship, including repository-owned regeneration.
+fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
+    let merged = git(repo, &["merge-tree", "--write-tree", target, source])?;
+    let tree = merged.lines().next().ok_or("merge candidate tree missing")?;
+    if git(
+        repo,
+        &["ls-tree", "--name-only", tree, "--", crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT],
+    )?.is_empty() {
+        return Ok(tree.to_string());
+    }
+    let merged_head = git(
+        repo,
+        &["commit-tree", tree, "-p", target, "-p", source,
+          "-m", "Prepare generated artifacts for merge candidate"],
+    )?;
+    crate::worktree::GitOperations::new(repo.to_path_buf())
+        .regenerated_candidate_tree(&merged_head, target)
+        .map_err(|error| error.to_string())
+}
+
 /// cas-d4b7: whitespace-exact, full-context (three-line) patch-id of the
 /// change `tree` adds to `target`. Patch-ids ignore hunk headers, so a
 /// zero-context id would hide a target edit beside a delivered hunk (`if ok`
@@ -429,7 +449,7 @@ fn portable_plan_digest(root: &Path, task: &Task) -> Result<String, String> {
 
 fn context_digest(root: &Path, task: &Task) -> Result<String, String> {
     let mut hash = Sha256::new();
-    hash.update(b"cas-premerge-candidate-v1\0");
+    hash.update(b"cas-premerge-candidate-v2-regenerated\0");
     hash_plan_context(root, task, &mut hash)?;
     let config = crate::config::Config::load(root).map_err(|error| error.to_string())?;
     hash.update(format!(
@@ -541,11 +561,10 @@ impl Candidate {
         // move that recomputes the exact reviewed tree, such as a ref fast-
         // forward or a queue merge of commits the source already carries,
         // changes no reviewed content, whatever the path overlap says.
-        let merged = git(
-            &self.repository,
-            &["merge-tree", "--write-tree", target, &self.source_sha],
-        )?;
-        let tree = merged.lines().next().ok_or("merge tree missing")?.to_string();
+        if target == self.target_sha {
+            return Ok(self.tree.clone());
+        }
+        let tree = regenerated_merge_tree(&self.repository, target, &self.source_sha)?;
         if tree == self.tree {
             return Ok(self.tree.clone());
         }
@@ -652,12 +671,16 @@ impl Candidate {
 
     fn verify_landing(&self, landed: &str) -> Result<(), String> {
         let expected = self.tree_on(&self.landing_base(landed)?)?;
-        let landed = self.delivery_landing(landed)?;
-        if git(
+        // Check the final bundle after regeneration, not the stale dist in
+        // the merge commit below it. History/projection outputs retain their
+        // existing regeneration exemption.
+        let changed = git(
             &self.repository,
-            &["rev-parse", &format!("{landed}^{{tree}}")],
-        )? != expected
-        {
+            &["diff", "--name-only", "--no-renames", &expected, landed],
+        )?;
+        if changed.lines().any(|path| {
+            !is_regenerated_output(path) || path.starts_with("hub-web/dist/")
+        }) {
             return Err(
                 "landed tree differs from the recomputed approved delivery; publication refused"
                     .into(),
@@ -1430,16 +1453,7 @@ impl CasCore {
                 manifest.display(), dispatch.id,
             )));
         }
-        let merged = git(
-            repo,
-            &["merge-tree", "--write-tree", &target_sha, &source_sha],
-        )
-        .map_err(fail)?;
-        let tree = merged
-            .lines()
-            .next()
-            .ok_or_else(|| fail("merge candidate tree missing"))?
-            .to_string();
+        let tree = regenerated_merge_tree(repo, &target_sha, &source_sha).map_err(fail)?;
         let candidate_sha = git(
             repo,
             &[
@@ -1915,6 +1929,67 @@ mod tests {
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
     }
+    #[test]
+    fn candidate_regenerates_dist_like_worktree_merge_cas_e4b9() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        commit_file(repo, ".gitignore", ".cas/\n", "state");
+        commit_file(repo, ".gitattributes", "hub-web/dist/** merge=cas-generated\n", "attributes");
+        commit_file(repo, "hub-web/src/a", "a0\n", "source a");
+        commit_file(repo, "hub-web/src/b", "b0\n", "source b");
+        commit_file(repo, "hub-web/dist/app.js", "a0\nb0\n", "bundle");
+        commit_file(repo, crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT,
+            "#!/usr/bin/env bash\nset -euo pipefail\n\
+             git diff --quiet \"$1\" \"$2\" -- hub-web/src && exit 0\n\
+             cat hub-web/src/a hub-web/src/b > hub-web/dist/app.js\n\
+             if [ -n \"$(git status --porcelain -- hub-web/dist)\" ]; then\n\
+               git add hub-web/dist\n\
+               git commit -q -m 'build(hub-web): regenerate dist from merged sources'\n\
+             fi\n", "generator");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        commit_file(repo, "hub-web/src/b", "b1\n", "delivery source");
+        commit_file(repo, "hub-web/dist/app.js", "a0\nb1\n", "delivery bundle");
+        run(repo, &["checkout", "-q", "main"]);
+        commit_file(repo, "hub-web/src/a", "a1\n", "target source");
+        let target = commit_file(repo, "hub-web/dist/app.js", "a1\nb0\n", "target bundle");
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let task = Task::new("cas-e4b9-fixture".into(), "Review".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let candidate = core.build_verification_candidate(
+            &task, repo, "factory/w", "main", "fixture".into(), None,
+        ).unwrap();
+        let reviewed = run(repo, &["show", &format!("{}:hub-web/dist/app.js", candidate.proof.head_commit)]);
+        assert_eq!(reviewed, "a1\nb1", "review must execute the bundle built from both merged inputs");
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+        assert_eq!(run(repo, &["status", "--porcelain"]), "");
+        assert_eq!(candidate.tree_on(&target).unwrap(), candidate.tree);
+        let moved = commit_file(repo, "README.md", "unrelated\n", "target moved again");
+        candidate.tree_on(&moved).unwrap();
+        let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let landed = operations.merge_branch("main", "factory/w", true).unwrap().unwrap();
+        assert_eq!(run(repo, &["show", &format!("{landed}:hub-web/dist/app.js")]), reviewed);
+        assert_eq!(candidate.verify_landing(&landed), Ok(()));
+        // Rebuild the same original target to compare the complete tree, too.
+        run(repo, &["checkout", "-q", "-b", "original-target", &target]);
+        let exact = operations.merge_branch("original-target", "factory/w", true).unwrap().unwrap();
+        assert_eq!(run(repo, &["rev-parse", &format!("{exact}^{{tree}}")]), candidate.tree);
+        let corrupted = commit_file(repo, "hub-web/dist/app.js", "stale\n", "incorrect regeneration");
+        assert!(candidate.verify_landing(&corrupted).is_err());
+        // A broken generator cannot publish a stale review checkout.
+        run(repo, &["checkout", "-q", "factory/w"]);
+        commit_file(repo, crate::worktree::git::REGENERATE_ARTIFACTS_SCRIPT,
+            "#!/usr/bin/env bash\nexit 3\n", "broken generator");
+        assert!(core.build_verification_candidate(
+            &task, repo, "factory/w", "original-target", "failure".into(), None,
+        ).is_err());
+    }
+
     /// cas-ded57: replay parallel top-of-map insertions through factory's manager,
     /// including its merge-tree preflight, before the real merge installs a driver.
     #[test]
@@ -1936,15 +2011,24 @@ mod tests {
         let path = "docs/qa/journeys.yaml";
         std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
         commit_file(repo, ".gitattributes", "docs/qa/journeys.yaml merge=cas-journeys\n", "attributes");
-        let base = "version: 1\nupdated: '2026-11-07'\nenforce: enforce\nbug_families:\n  existing:\n    tasks: [cas-base]\njourneys: []\n";
+        let base = concat!(
+            "version: 1\nupdated: '2026-11-07'\nenforce: enforce\n",
+            "bug_families:\n  existing:\n    title: Existing case\n    tasks: [cas-base]\n",
+            "invariants:\n  BASE:\n    statement: Existing invariant\n    check: Read it back\n",
+            "journeys:\n- id: BASE\n  status: dark\n  status_reason: Fixture\n",
+        );
         commit_file(repo, path, base, "registry");
         let target = manager.create_epic_branch("Journey Merge").unwrap();
         manager.git().checkout(&target).unwrap();
         // Every worker forks the same tip, before either has landed.
         let mut lanes = Vec::new();
+        let add_entries = |key: &str| base
+            .replace("bug_families:\n", &format!("bug_families:\n  {key}:\n    title: Case {key}\n    tasks: [cas-{key}]\n    invariants: [{key}]\n    journeys: [{key}]\n"))
+            .replace("invariants:\n  BASE:", &format!("invariants:\n  {key}:\n    statement: Invariant {key}\n    check: Read it back\n  BASE:"))
+            .replace("journeys:\n- id: BASE", &format!("journeys:\n- id: {key}\n  status: dark\n  status_reason: Fixture\n  invariants: [{key}]\n- id: BASE"));
         for (name, date, body) in [
-            ("one", "2026-11-08", base.replace("bug_families:\n", "bug_families:\n  one:\n    tasks: [cas-one]\n")),
-            ("two", "2026-11-09", base.replace("bug_families:\n", "bug_families:\n  two:\n    tasks: [cas-two]\n")),
+            ("one", "2026-11-08", add_entries("one")),
+            ("two", "2026-11-09", add_entries("two")),
             ("same-a", "2026-11-08", base.replace("cas-base", "cas-a").replace("enforce: enforce", "enforce: warn")),
             ("same-b", "2026-11-09", base.replace("cas-base", "cas-b")),
             ("policy", "2026-11-09", base.replace("enforce: enforce", "enforce: off")),
@@ -1954,8 +2038,9 @@ mod tests {
             lanes.push(lane);
         }
         // A non-queued delivery builds its candidate before manager preflight.
-        git(repo, &["merge-tree", "--write-tree", &lanes[0].branch, &lanes[1].branch])
-            .expect("candidate preparation installs the registry driver too");
+        let preview = |left: &str, right: &str| git(repo, &["merge-tree", "--write-tree", left, right])
+            .expect("disjoint registry entries merge during candidate preparation");
+        assert_eq!(preview(&lanes[0].branch, &lanes[1].branch), preview(&lanes[1].branch, &lanes[0].branch));
         for lane in &mut lanes[..2] {
             // Independently prove manager preflight reinstalls the driver,
             // rather than inheriting the candidate preparation's config.
@@ -1969,6 +2054,12 @@ mod tests {
         for key in ["one", "two", "existing"] {
             assert!(registry.bug_families.contains_key(key));
         }
+        for key in ["one", "two", "BASE"] {
+            assert!(registry.invariants.contains_key(key));
+            assert!(registry.journeys.iter().any(|journey| journey.id == key));
+        }
+        let report = crate::qa_registry::check(repo, &repo.join(path)).unwrap();
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
         manager.merge_and_cleanup(&mut lanes[2], false, false).unwrap();
         let before = manager.git().ref_sha(&target).unwrap();
         for lane in &mut lanes[3..] {

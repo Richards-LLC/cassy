@@ -43,6 +43,7 @@ pub(crate) mod qa_rapid_response;
 mod provider_default;
 pub(crate) mod release_report;
 mod release_precheck;
+pub(crate) mod release_adapters;
 mod release_automation;
 pub mod deliverable;
 mod sweep;
@@ -90,7 +91,6 @@ mod update;
 pub mod update_transaction;
 pub(crate) mod viktor;
 mod violet_cmd;
-#[cfg(feature = "mcp-proxy")]
 pub(crate) use violet_cmd::hub as violet_hub;
 pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
 
@@ -473,6 +473,12 @@ pub enum ReleaseCommands {
     Context(release_automation::ContextArgs),
     /// Arm durable release landing and publication reminders
     Track(release_automation::TrackArgs),
+    /// Resolve shipped deliveries and portable proof references at an exact SHA
+    Inventory(release_automation::InventoryArgs),
+    /// Reconcile a published release once, from the host's publication read
+    Published(release_adapters::PublishedArgs),
+    /// Reconcile a merged staging-to-main promotion PR once
+    Promoted(release_adapters::PromotedArgs),
     /// Notify the owning supervisor after a published release is installed
     Installed(release_automation::InstalledArgs),
     /// Backfill shipped release trains from their published tags
@@ -1033,7 +1039,10 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Update(args) => update::execute(args, cli, cas_root),
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Published(args)) => release_adapters::published(args, cas_root),
+        Commands::Release(ReleaseCommands::Promoted(args)) => release_adapters::promoted(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Installed(args)) => release_automation::installed(args, cas_root),
         Commands::Release(ReleaseCommands::Backfill(args)) => release_automation::backfill(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Precheck(args)) => release_precheck::execute(args, cli),

@@ -118,6 +118,7 @@ pub(super) fn record_operator_page(
         options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
+        task_id: None,
     }) {
         Ok(payload) => payload,
         Err(error) => {
@@ -4626,15 +4627,17 @@ impl FactoryDaemon {
                                     violet_error_reported = true;
                                 }
                                 if let Some(presence) = presence
-                                    && !sweeps.is_empty()
                                     && self.binding_intake.sweep.is_none()
                                 {
                                     let violet = std::sync::Arc::clone(violet);
                                     let cas_dir = self.app.cas_dir().to_path_buf();
                                     self.binding_intake.sweep = Some(tokio::spawn(async move {
+                                        let registration = presence.agent_id.clone();
                                         if violet.sweep(sweeps, presence).await? > 0 {
                                             super::delivery::wake_daemon_after_enqueue(&cas_dir);
                                         }
+                                        tokio::task::spawn_blocking(move || violet.reconcile_reactions(&registration))
+                                            .await.map_err(|error| format!("source status pass did not finish: {error}"))?;
                                         Ok(())
                                     }));
                                 }

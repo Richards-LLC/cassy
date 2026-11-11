@@ -1,0 +1,4 @@
+title: Typed executable-command redirect assertions pass while equivalent human error narratives remain refused
+tasks: [cas-8edf]
+invariants: [FACTORY-MACHINE-COMMAND-SHAPE]
+journeys: [FACTORY-CLOSE]

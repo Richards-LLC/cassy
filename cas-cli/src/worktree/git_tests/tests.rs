@@ -403,6 +403,7 @@ fn test_mark_config_skip_worktree() {
     // Create .claude directory with tracked files
     std::fs::create_dir_all(repo_path.join(".claude/rules")).unwrap();
     std::fs::write(repo_path.join(".claude/rules/test.md"), "test rule").unwrap();
+    std::fs::write(repo_path.join(".claude/CODEMAP.md"), "tracked navigation").unwrap();
     std::fs::write(repo_path.join("CLAUDE.md"), "# Claude").unwrap();
 
     Command::new("git")
@@ -423,6 +424,10 @@ fn test_mark_config_skip_worktree() {
 
     // Mark skip-worktree
     git.mark_config_skip_worktree(&worktree_path).unwrap();
+    let flags = Command::new("git")
+        .args(["ls-files", "-v", ".claude/CODEMAP.md"])
+        .current_dir(&worktree_path).output().unwrap();
+    assert_eq!(flags.stdout, b"H .claude/CODEMAP.md\n");
 
     // Modify a tracked file in the worktree
     std::fs::write(
@@ -453,6 +458,49 @@ fn test_mark_config_skip_worktree_no_files() {
     // No .claude files tracked - should succeed silently
     let result = git.mark_config_skip_worktree(&repo_path);
     assert!(result.is_ok());
+}
+
+/// GH #1784: identical bytes with stale stat metadata and a legacy S bit
+/// must not strand queued branches or an ordinary fast-forward. Real edits
+/// must still refuse, with their bytes and index intact.
+#[test]
+fn clean_codemap_metadata_allows_updates_but_preserves_edits_cas_e0d8() {
+    for checkout in [false, true] {
+        for dirty in [false, true] {
+            let (_temp, repo) = create_test_repo();
+            let git = GitOperations::new(repo.clone());
+            let run = |args: &[&str]| {
+                let output = Command::new("git").args(args).current_dir(&repo).output().unwrap();
+                assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+                output.stdout
+            };
+            std::fs::create_dir(repo.join(".claude")).unwrap();
+            let path = repo.join(".claude/CODEMAP.md");
+            std::fs::write(&path, b"before\n").unwrap();
+            run(&["add", ".claude/CODEMAP.md"]);
+            run(&["commit", "-qm", "navigation base"]);
+            run(&["checkout", "-qb", "incoming"]);
+            std::fs::write(&path, b"after\n").unwrap();
+            run(&["commit", "-qam", "navigation update"]);
+            run(&["checkout", "-q", "master"]);
+            run(&["update-index", "--skip-worktree", ".claude/CODEMAP.md"]);
+            let local = if dirty { b"unsaved\n".as_slice() } else { b"before\n".as_slice() };
+            std::fs::write(&path, local).unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_unix_time(1_000_000_000, 0)).unwrap();
+            assert!(run(&["status", "--porcelain"]).is_empty());
+            let succeeded = if checkout {
+                // The queued task start uses this seam without reprovisioning.
+                git.checkout("incoming").is_ok()
+            } else {
+                git.mark_config_skip_worktree(&repo).unwrap();
+                Command::new("git").args(["merge", "--ff-only", "incoming"])
+                    .current_dir(&repo).output().unwrap().status.success()
+            };
+            assert_eq!(succeeded, !dirty, "checkout={checkout}, dirty={dirty}");
+            assert_eq!(std::fs::read(&path).unwrap(), if dirty { local } else { b"after\n" });
+            assert_eq!(run(&["show", ":.claude/CODEMAP.md"]), if dirty { b"before\n".as_slice() } else { b"after\n".as_slice() });
+        }
+    }
 }
 
 #[test]

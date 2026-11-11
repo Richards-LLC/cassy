@@ -18,6 +18,7 @@ fn main() {
     generate_commander_chunks();
     generate_archive_fixture_sources();
     generate_init_design_captures();
+    println!("cargo:rerun-if-changed=gate_audit.rs");
     generate_gate_registry();
     println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
     println!("cargo:rerun-if-changed=../hub-web/dist/app.js");

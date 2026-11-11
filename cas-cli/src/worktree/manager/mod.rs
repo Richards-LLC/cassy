@@ -220,6 +220,7 @@ impl WorktreeManager {
     /// the worktree directory (merge_and_cleanup with cleanup=true,
     /// abandon, remove_worker); pass `false` only when the worktree is
     /// merged but preserved (cleanup=false).
+    // gate[G-138 worktree]: Dirty source worktree preservation
     fn reject_or_warn_on_dirty(
         &self,
         git: &GitOperations,
@@ -234,11 +235,11 @@ impl WorktreeManager {
                 message.push_str(", ");
             }
             message.push_str(&dirty.describe_warnings());
-            return Err(WorktreeError::UncommittedChanges(message));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",message)));
         }
 
         if dirty.is_blocked() {
-            return Err(WorktreeError::UncommittedChanges(dirty.describe_blocking()));
+            return Err(WorktreeError::UncommittedChanges(crate::gates::tag("G-138",dirty.describe_blocking())));
         }
 
         if !dirty.warnings.is_empty() {

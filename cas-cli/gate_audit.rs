@@ -41,6 +41,7 @@ fn candidate(name: &str) -> bool {
     matches!(name, "supervisor_override" | "force" | "override_requested" | "allow_trunk"
         | "stranded_branch_override" | "confirm_warning" | "proof_scope_fix" | "adopt_branch"
         | "no_delivery" | "negative_result" | "evidence_only")
+        || name.starts_with("supervisor_override_") || name.starts_with("force_")
         || name.contains("bypass") || name.starts_with("skip_") || name.starts_with("allow_")
         || name.starts_with("CAS_SKIP_")
 }
@@ -65,9 +66,9 @@ impl<'ast> Visit<'ast> for Body<'_> {
             if let Some(segment) = path.path.segments.last() {
                 let name = segment.ident.to_string();
                 self.function.calls.insert(name.clone());
-                if matches!(name.as_str(), "tag"|"override_tag") {
+                if matches!(name.as_str(), "tag"|"refusal_tag"|"override_tag") {
                     if let Some(code) = expr.args.first().and_then(literal) {
-                        if name == "tag" { self.function.refused.insert(code); }
+                        if name != "override_tag" { self.function.refused.insert(code); }
                         else { self.function.overridden.insert(code); }
                     }
                 }
@@ -101,13 +102,23 @@ impl<'ast> Visit<'ast> for Body<'_> {
     }
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         fn tokens(body:&mut Body<'_>, stream:proc_macro2::TokenStream, guard:bool){
-            for token in stream { match token {
-                proc_macro2::TokenTree::Group(group)=>tokens(body,group.stream(),guard),
-                proc_macro2::TokenTree::Literal(literal)=>if let Ok(lit)=syn::parse_str::<syn::LitStr>(&literal.to_string()){body.visit_lit_str(&lit);},
-                proc_macro2::TokenTree::Ident(ident) if guard && candidate(&ident.to_string())=>{body.function.flags.insert(ident.to_string());body.function.conditional.insert(ident.to_string());},
+            let tokens:Vec<_>=stream.into_iter().collect();
+            for (index,token) in tokens.iter().enumerate() { match token {
+                proc_macro2::TokenTree::Group(group)=>tokens_in_group(body,group.stream(),guard),
+                proc_macro2::TokenTree::Literal(literal)=>if let Ok(lit)=syn::parse2::<syn::LitStr>(proc_macro2::TokenStream::from(proc_macro2::TokenTree::Literal(literal.clone()))){body.visit_lit_str(&lit);},
+                proc_macro2::TokenTree::Ident(ident)=>{
+                    let name=ident.to_string();
+                    if guard && candidate(&name){body.function.flags.insert(name.clone());body.function.conditional.insert(name.clone());}
+                    if matches!(name.as_str(),"tag"|"refusal_tag"|"override_tag")
+                        && let Some(proc_macro2::TokenTree::Group(args))=tokens.get(index+1)
+                        && let Some(proc_macro2::TokenTree::Literal(lit))=args.stream().into_iter().next()
+                        && let Ok(code)=syn::parse_str::<syn::LitStr>(&lit.to_string())
+                    {if name=="override_tag"{body.function.overridden.insert(code.value());}else{body.function.refused.insert(code.value());}}
+                },
                 _=>{}
             }}
         }
+        fn tokens_in_group(body:&mut Body<'_>,stream:proc_macro2::TokenStream,guard:bool){tokens(body,stream,guard)}
         tokens(self,mac.tokens.clone(),mac.path.is_ident("ensure"));
     }
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
@@ -214,6 +225,9 @@ pub fn scan(root:&Path, registry:&[(String,String,String,String)])->Audit{
         for code in f.refused.union(&f.overridden){if !registered.contains(code){audit.gaps.push(format!("{} uses unregistered code {code}",f.site));}}
         if let Some(boundary)=f.producer{audit.rows.push([format!("result producer {}",f.name),f.site.clone(),f.refused.iter().cloned().collect::<Vec<_>>().join(", "),"via common observer".into(),"explicit tags only".into(),boundary.into()]);}
         if f.name.contains("false_positive"){audit.rows.push([format!("false-positive path {}",f.name),f.site.clone(),"runtime registered code".into(),"—".into(),"—".into(),"facts::record_false_positive; rejects unregistered codes".into()]);}
+        if f.policy && f.refused.is_empty() {
+            audit.rows.push([format!("policy refusal candidate {}",f.name),f.site.clone(),"—".into(),"—".into(),"—".into(),f.annotations.get("input").or_else(||f.annotations.get("forward")).cloned().unwrap_or_else(||"UNCLASSIFIED".into())]);
+        }
         if f.policy && f.refused.is_empty() && !f.annotations.contains_key("input") && !f.annotations.contains_key("forward") {
             audit.gaps.push(format!("{} {} has an unclassified policy refusal",f.site,f.name));
         }
@@ -221,9 +235,17 @@ pub fn scan(root:&Path, registry:&[(String,String,String,String)])->Audit{
             let reason=f.annotations.get(flag).or_else(||f.annotations.get("selector")).or_else(||f.annotations.get("input"));
             let conditional=f.conditional.contains(flag);
             let covered=!f.overridden.is_empty() || f.refused.iter().any(|c|all_overridden.contains(c));
-            let (kind,boundary)=if let Some(reason)=reason {("excluded selector",reason.clone())}
+            let (kind,boundary)=if let Some(reason)=reason {
+                if let Some(codes)=reason.strip_prefix("bypass ").and_then(|r|r.split_whitespace().next()) {
+                    for code in codes.split(',') {
+                        if !registered.contains(code) || !all_refused.contains(code) || !all_overridden.contains(code) {
+                            audit.gaps.push(format!("{} {flag}: bypass {code} needs declaration, refusal and override tags",f.site));
+                        }
+                    }
+                    ("bypass acceptor",format!("{reason}; common result observer"))
+                } else {("excluded selector",reason.clone())}
+            }
                 else if !conditional {("forwarded candidate", "delegates acceptance; no local conditional bypass".into())}
-                else if covered {("bypass acceptor", "common MCP observer; CLI/script paths identify their own fact sink".into())}
                 else {audit.gaps.push(format!("{} {} unclassified bypass candidate {flag}",f.site,f.name));("UNCLASSIFIED","missing local classification / override tag".into())};
             audit.rows.push([format!("{kind}: {flag} ({})",f.name),f.site.clone(),f.overridden.union(&f.refused).cloned().collect::<Vec<_>>().join(", "),if f.refused.is_empty(){"—"}else{"yes"}.into(),if covered{"yes"}else{"—"}.into(),boundary]);
         }

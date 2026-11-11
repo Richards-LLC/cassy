@@ -100,6 +100,13 @@ pub fn codes_in(text: &str) -> Vec<&'static str> {
     tagged_codes(text, "")
 }
 
+/// Preserve legacy non-error advisory responses while identifying a policy refusal.
+pub fn refusal_tag(code: &'static str, message: impl Into<String>) -> String {
+    format!("{}\n\n[refusal {code}]", tag(code, message))
+}
+
+pub fn refusal_codes_in(text: &str) -> Vec<&'static str> { tagged_codes(text, "refusal ") }
+
 pub fn override_codes_in(text: &str) -> Vec<&'static str> {
     tagged_codes(text, "override ")
 }

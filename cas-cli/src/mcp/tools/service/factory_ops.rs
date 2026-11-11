@@ -2997,17 +2997,19 @@ impl CasService {
         }
         if let Some(check) = peer_check {
             if let Some((task_id, hold)) = check.task {
+                // gate[G-142 spawn]: Peer task claim blocks duplicate spawn
                 if !force_peer_claim {
                     return Err(Self::error(
                         ErrorCode::INVALID_REQUEST,
-                        format!(
+                        crate::gates::tag("G-142", format!(
                             "⛔ HELD BY A PEER — task {task_id} is claimed by {} (a session of this repository on another machine or clone) until {}. A worker spawned for it would duplicate their work, so nothing was queued. Ask them first: {prefix}coordination action=message target={} summary=\"{task_id}\" message=\"Are you still on {task_id}?\". To spawn anyway: {prefix}factory action=spawn_workers task_id={task_id} force=true",
                             hold.describe(),
                             hold.until(),
                             hold.name(),
-                        ),
+                        )),
                     ));
                 }
+                peer_notice = crate::gates::override_tag("G-142", peer_notice);
                 peer_notice.push_str(&format!(
                     "\n⚠️  PEER CLAIM OVERRIDE — {} claims {task_id} until {}; spawned anyway (force=true). The worker's start will be refused unless it is forced too. Tell them: {prefix}coordination action=message target={} summary=\"took over {task_id}\" message=\"...\"",
                     hold.describe(),
@@ -3163,13 +3165,17 @@ impl CasService {
                 if let Some(receipt) = routed { return Ok(Self::success(receipt)) }
             }
         }
+        // gate[G-135 spawn]: Local builder capacity admission
         if !build_guard.violations().is_empty() && !force_build_guard {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
-                build_guard.refusal_message(),
+                crate::gates::tag("G-135", build_guard.refusal_message()),
             ));
         }
-        let build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        let mut build_guard_notice = build_guard.receipt_notice(force_build_guard);
+        if force_build_guard && !build_guard.violations().is_empty() {
+            build_guard_notice = crate::gates::override_tag("G-135", build_guard_notice);
+        }
         let throttle_notice =
             crate::factory_build_guard::throttle_notice(&factory_config, slots, &build_guard);
         // Resolve a concrete WorkerSpec per queued worker. Batch-level fields
@@ -3965,17 +3971,18 @@ impl CasService {
             .iter()
             .filter(|snapshot| snapshot.requires_force())
             .collect();
+        // gate[G-136 shutdown]: Active worker work must be preserved before forced shutdown
         if !force && !unsafe_snapshots.is_empty() {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!(
+                crate::gates::tag("G-136", format!(
                     "shutdown_workers refused: selected worker state requires force=true. Nothing was queued.\n{}",
                     unsafe_snapshots
                         .iter()
                         .map(|snapshot| format!("- {}\n  {}", snapshot.render(), snapshot.remedy()))
                         .collect::<Vec<_>>()
                         .join("\n")
-                ),
+                )),
             ));
         }
 
@@ -4204,7 +4211,7 @@ impl CasService {
                 .join("\n")
         );
 
-        Ok(Self::success(msg))
+        Ok(Self::success(if force && !unsafe_snapshots.is_empty() {crate::gates::override_tag("G-136", msg)} else {msg}))
     }
 
     /// Recycle one idle worker without losing its isolated checkout. The
@@ -7344,6 +7351,7 @@ impl CasService {
             let in_progress = binding
                 .filter(|b| b.blocks_rebase)
                 .map(|b| b.label.as_str());
+            // gate[G-137 sync]: Stale-worker dirty or in-progress worktree sync guard
             if let SyncGate::Refuse(reason) = sync_gate_for_worker(
                 &worker.name,
                 dirty_files,
@@ -7351,12 +7359,17 @@ impl CasService {
                 in_progress,
                 force,
             ) {
-                skipped.push(reason);
+                skipped.push(crate::gates::refusal_tag("G-137",reason));
                 continue;
             }
 
             match sync_worker_clone(&path, &sync_ref) {
-                Ok(details) => synced.push(format!("{} ({})", worker.name, details)),
+                Ok(details) => {
+                    let row=format!("{} ({})", worker.name, details);
+                    synced.push(if force && (dirty_files > 0 || in_progress.is_some()) {
+                        crate::gates::override_tag("G-137",row)
+                    } else {row});
+                },
                 Err(failure) => {
                     // A stranded stash or an unfinished rebase is invisible to
                     // the worker whose directory it is — push it to them and to

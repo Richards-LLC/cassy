@@ -2746,6 +2746,7 @@ fn epic_lane_bypassed_by_trunk_target(
     (lane != resolved_branch).then(|| lane.to_string())
 }
 
+// gate[G-140 merge-admission]: Explicit authorization for trunk fallback
 fn resolve_system_b_merge_target(
     task_store: &dyn cas_store::TaskStore,
     agent_store: &dyn cas_store::AgentStore,
@@ -2798,7 +2799,7 @@ fn resolve_system_b_merge_target(
                     if !allow_trunk {
                         return Err(McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
+                            message: Cow::from(crate::gates::tag("G-140",format!(
                                 "task {task_id} belongs to epic {} (delivery lane {lane}) but its \
                                  WorkTarget resolves to trunk {trunk} — refusing to bypass the \
                                  epic lane (would merge to: {trunk}). Re-target the task to the \
@@ -2806,7 +2807,7 @@ fn resolve_system_b_merge_target(
                                  allow_trunk=true only if {trunk} is truly intended.\n\n{}",
                                 epic.id,
                                 merge_target_remediation(assignee)
-                            )),
+                            ))),
                             data: None,
                         });
                     }
@@ -2852,12 +2853,12 @@ fn resolve_system_b_merge_target(
         }
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-140",format!(
                 "task {task_id} has no declared merge target — refusing trunk \
                  fallback (would merge to: {trunk}). Pass allow_trunk=true only if \
                  that exact destination is intended.\n\n{}",
                 merge_target_remediation(assignee)
-            )),
+            ))),
             data: None,
         });
     }
@@ -3006,13 +3007,13 @@ fn resolve_system_b_merge_target(
             .join(", ");
         return Err(McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!(
+            message: Cow::from(crate::gates::tag("G-140",format!(
                 "assignee {assignee} has epic task(s) whose WorkTarget resolves to trunk \
                  {trunk} instead of the epic lane ({list}) — refusing to bypass the epic \
                  lane (would merge to: {trunk}). Re-target the task to its epic lane, or \
                  pass task_id= with allow_trunk=true only if {trunk} is truly intended.\n\n{}",
                 merge_target_remediation(assignee)
-            )),
+            ))),
             data: None,
         });
     }
@@ -3132,13 +3133,13 @@ fn resolve_system_b_merge_target(
 
     Err(McpError {
         code: ErrorCode::INVALID_PARAMS,
-        message: Cow::from(format!(
+        message: Cow::from(crate::gates::tag("G-140",format!(
             "no declared merge target for worktree assignee {assignee}: no task_id or \
              assignee epic binding. The fallback would merge to: {trunk}; allow_trunk \
              was not set, so Cassy is refusing (cas-0b32/cas-b86e). Session focus is not \
              merge authority.\n\n{}",
             merge_target_remediation(assignee)
-        )),
+        ))),
         data: None,
     })
 }
@@ -3606,6 +3607,7 @@ impl CasCore {
         };
 
         let mut cleaned = 0;
+        let mut dirty_override = false;
         let mut errors = Vec::new();
 
         for mut wt in orphans {
@@ -3618,7 +3620,10 @@ impl CasCore {
             }
             if wt.path.exists() {
                 if let Ok(manager) = WorktreeManager::new(&cwd, manager_config.clone()) {
+                    let bypassed = force && manager.git().classify_dirty_status(&wt.path)
+                        .is_ok_and(|dirty| dirty.is_blocked() || !dirty.warnings.is_empty());
                     if manager.abandon(&mut wt, force).is_ok() {
+                        dirty_override |= bypassed;
                         wt.mark_abandoned();
                         wt.mark_removed();
                         let _ = worktree_store.update(&wt);
@@ -3637,16 +3642,9 @@ impl CasCore {
             }
         }
 
-        if errors.is_empty() {
-            Ok(Self::success(format!("Cleaned up {cleaned} worktree(s).")))
-        } else {
-            Ok(Self::success(format!(
-                "Cleaned up {} worktree(s), {} error(s): {}",
-                cleaned,
-                errors.len(),
-                errors.join(", ")
-            )))
-        }
+        let response=if errors.is_empty() { format!("Cleaned up {cleaned} worktree(s).") }
+        else {format!("Cleaned up {} worktree(s), {} error(s): {}",cleaned,errors.len(),errors.join(", "))};
+        Ok(Self::success(if dirty_override{crate::gates::override_tag("G-138",response)}else{response}))
     }
 
     /// cas-f102 (GH #140): remove ONE worktree, resolved System A then System B.
@@ -3766,14 +3764,15 @@ impl CasCore {
         // the branch with `-D`, so removing this worktree would destroy them.
         let containers = manager.git().branches_containing(&worktree.branch);
         let branch_is_reachable = !containers.is_empty();
+        // gate[G-139 worktree]: Unmerged worktree branch preservation
         if !branch_is_reachable && !force {
-            return Ok(Self::success(format!(
+            return Ok(Self::success(crate::gates::refusal_tag("G-139",format!(
                 "Refused: {} has commits that exist on no other branch, and cleanup deletes the \
                  branch.\n\nMerge it first (`factory action=worktree_merge id={id}`), or pass \
                  force=true to discard the commits.\n\nWorktree: {}",
                 worktree.branch,
                 worktree.path.display()
-            )));
+            ))));
         }
 
         let system = if is_system_b { "System B" } else { "System A" };
@@ -3804,6 +3803,8 @@ impl CasCore {
             )));
         }
 
+        let dirty_override = force && manager.git().classify_dirty_status(&worktree.path)
+            .is_ok_and(|dirty| dirty.is_blocked() || !dirty.warnings.is_empty());
         // Refusal 3 (dirty without force) is `abandon`'s own gate.
         if let Err(error) = manager.abandon(&mut worktree, force) {
             return Ok(Self::success(format!(
@@ -3817,7 +3818,7 @@ impl CasCore {
             let _ = worktree_store.update(&worktree);
         }
 
-        Ok(Self::success(format!(
+        let mut response = format!(
             "Removed {system} worktree.\n\n  path:   {}\n  branch: {} (deleted; was {reachable_via})\n\
              {}",
             worktree.path.display(),
@@ -3827,7 +3828,10 @@ impl CasCore {
             } else {
                 "\nStore row marked abandoned + removed."
             }
-        )))
+        );
+        if dirty_override {response=crate::gates::override_tag("G-138",response);}
+        if force && !branch_is_reachable {response=crate::gates::override_tag("G-139",response);}
+        Ok(Self::success(response))
     }
 
     /// Resolve worker ownership synchronously so candidate Task values do not
@@ -5560,6 +5564,8 @@ impl CasCore {
         } else {
             CI_ADVISORY_POLICY_NOTICE
         };
+        let dirty_override = force && source_worktree_live && manager.git().classify_dirty_status(&worktree.path)
+            .is_ok_and(|dirty| dirty.is_blocked() || do_cleanup && !dirty.warnings.is_empty());
         let observed_source_tip = transactional_delivery
             .is_none()
             .then(|| remote_source.as_ref()
@@ -6768,6 +6774,8 @@ impl CasCore {
             detail.push_str(&notice);
         }
         if ci_override { detail = crate::gates::override_tag("G-108", detail); }
+        if dirty_override { detail = crate::gates::override_tag("G-138", detail); }
+        if trunk_fallback { detail = crate::gates::override_tag("G-140", detail); }
         Ok(Self::success(detail))
     }
 

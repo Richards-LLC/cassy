@@ -431,11 +431,11 @@ impl CasService {
                 format!("qa_waive recorded pass {} but the decision note failed: {error}", pass.id),
             ));
         }
-        Ok(Self::success(format!(
+        Ok(Self::success(crate::gates::override_tag("G-94", format!(
             "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.{retired}",
             pass.head8(),
             pass.id
-        )))
+        ))))
     }
 
     /// cas-5c38: a no-code task has no tip to bind a waiver to, and the QA

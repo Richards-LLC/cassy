@@ -8014,6 +8014,9 @@ impl CasCore {
             return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
         }
 
+        if supervisor_override && is_supervisor_from_env() && req.reason.as_deref().is_some_and(|reason|
+            tmpfs_receipt_path_in_close_reason(reason, close_reason_artifacts_root(&self.cas_root).as_deref()).is_some())
+        { accepted_override_codes.push("G-33"); }
         // gate[G-33 park]: Tmpfs proof receipt rejected
         if !(supervisor_override && is_supervisor_from_env())
             && let Some(reason) = req.reason.as_deref()
@@ -8765,6 +8768,7 @@ impl CasCore {
                             )))));
                         }
                     };
+                    accepted_override_codes.push("G-125");
                     let caller = match self.resolve_live_supervisor_authority() {
                         Ok(caller) => caller,
                         Err(error) => {
@@ -9014,7 +9018,6 @@ impl CasCore {
         // (GH #744). An anchor that cannot be resolved refuses the close.
         if shipped_timeout_waiver.is_some() { accepted_override_codes.push("G-35"); }
         if deferred_epic_override_note.is_some() { accepted_override_codes.push("G-125"); }
-        if epic_override_note_pending { accepted_override_codes.push("G-125"); }
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
@@ -12700,6 +12703,7 @@ impl CasCore {
             receipt = gate_text::upkeep_receipt(&self.cas_root,
                 configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
         }
+        if epic_override_note_pending { accepted_override_codes.push("G-125"); }
         for code in accepted_override_codes.into_iter()
             .chain(crate::gates::override_codes_in(&registry_upkeep_notices.join("\n")))
         {

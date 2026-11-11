@@ -189,7 +189,7 @@ pub fn observe_tool_result(
     let value = |name: &str| arguments.and_then(|args| args.get(name));
     let task_id = value("task_id").and_then(|id| id.as_str())
         .or_else(|| value("id").and_then(|id| id.as_str()).filter(|id| id.starts_with("cas-")));
-    if refused && !codes_in(&text).is_empty() {
+    if (refused || !super::refusal_codes_in(&text).is_empty()) && !codes_in(&text).is_empty() {
         observe_refusal(cas_root, task_id, &text);
     } else if !refused {
         let codes = super::override_codes_in(&text);

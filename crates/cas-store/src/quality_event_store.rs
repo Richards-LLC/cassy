@@ -862,6 +862,33 @@ mod tests {
     }
 
     #[test]
+    fn review_and_notice_evidence_survive_local_and_cloud_roundtrip() {
+        let root = tempfile::tempdir().unwrap();
+        for (key, payload, field, expected) in [
+            ("review", serde_json::json!({"kind":"check_run", "check_id":"task_verifier",
+                "stage":"verifier", "outcome":"fail", "review": {"verification_id":"ver-1",
+                "cycle_id":"dc-one", "provenance":"independent"}}), "review",
+                serde_json::json!({"verification_id":"ver-1", "cycle_id":"dc-one", "provenance":"independent"})),
+            ("wake", serde_json::json!({"kind":"turn", "woken_by":"daemon", "notice_kind":"ci_completed",
+                "actions":[], "no_op":true, "input_tokens":null, "output_tokens":null, "minutes":null}),
+                "notice_kind", serde_json::json!("ci_completed")),
+        ] {
+            let mut event = NewQualityEvent::new(key, serde_json::from_value(payload).unwrap());
+            event.local_note = Some("private evidence".into());
+            assert!(record_quality_event(root.path(), &event).unwrap());
+            let mut wire = quality_events_after(root.path(), 0, 20).unwrap().pop().unwrap().to_wire();
+            let json = serde_json::to_value(&wire).unwrap();
+            assert_eq!(json["payload"][field], expected);
+            assert!(json.get("local_note").is_none());
+            let peer = tempfile::tempdir().unwrap();
+            wire.project_id = Some("peer-project".into());
+            import_quality_events(peer.path(), &[wire], "local-project").unwrap();
+            let imported = quality_events_after(peer.path(), 0, 20).unwrap();
+            assert_eq!(serde_json::to_value(&imported[0].payload).unwrap()[field], expected);
+        }
+    }
+
+    #[test]
     fn estimates_roundtrip_with_retained_ledger_history() {
         let dir = tempfile::tempdir().unwrap();
         record_quality_event(dir.path(), &intervention("existing")).unwrap();

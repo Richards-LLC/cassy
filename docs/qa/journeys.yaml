@@ -551,6 +551,10 @@ bug_families:
     tasks: [cas-0d5e]
     journeys: [HUB-J17, HUB-J25, HUB-J26]
     invariants: [HUB-WORKER-TIMELINE-HEADER]
+  approved-epic-integration-parent:
+    title: An active integration parks with its exact supervisor-approved merge parent and pushed-tip proof while other side history stays subject to attribution
+    tasks: [cas-8a0f]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
   late-close-park-refusals:
     title: A late close reports every failed park gate and links to the complete refusal
     tasks: [cas-5c77]

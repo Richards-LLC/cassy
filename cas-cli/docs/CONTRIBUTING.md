@@ -4331,6 +4331,13 @@ passes explicit SHA grants to storage. QA/verifier findings and queue-ejection
 details remain review text: quoting a valid or malformed marker grants nothing
 and cannot prevent the delivery from returning to its worker.
 
+For a task that is still InProgress, a live registered supervisor can use
+`task action=request_changes` with `merge_source=<full commit SHA>` to record
+the same grant before the first park. This preserves the task's status, assignee,
+branch anchor and proof. The grant applies to that exact merge parent in the
+task's declared work target. Close checks every other side parent and measures
+the approved merge's delivered diff against the ordinary pushed-tip proof gates.
+
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current
 registration is live in this factory, independent of the implementer, and has

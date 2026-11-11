@@ -13362,21 +13362,6 @@ impl CasCore {
                 format!("Task not found: {error}"),
             )
         })?;
-        if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
-                    task.id, task.status
-                ),
-            ));
-        }
-        let supervisor_id = self.get_agent_id().map_err(|error| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("task request_changes requires registered supervisor identity: {error}"),
-            )
-        })?;
         // Only this supervisor request is a command. QA/verifier findings and
         // queue-ejection detail reach the store as inert review text.
         let source_commits = req.reason.split_whitespace()
@@ -13390,6 +13375,67 @@ impl CasCore {
                 }
                 Ok(source.to_ascii_lowercase())
             }).collect::<Result<Vec<_>, _>>()?;
+
+        let authorize_active = task.status == TaskStatus::InProgress && !source_commits.is_empty();
+        if !authorize_active && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
+                    task.id, task.status
+                ),
+            ));
+        }
+        let supervisor_id = if source_commits.is_empty() {
+            self.get_agent_id().map_err(|error| {
+                Self::error(ErrorCode::INVALID_PARAMS,
+                    format!("task request_changes requires registered supervisor identity: {error}"))
+            })?
+        } else {
+            self.resolve_live_supervisor_authority().map_err(|error| {
+                Self::error(ErrorCode::INVALID_PARAMS,
+                    format!("merge_source requires a live registered supervisor: {error:?}"))
+            })?.id
+        };
+        // First-park integration cannot decline a park that has not happened.
+        // Apply only the typed grant, with the same task revision still active.
+        if authorize_active {
+            let work_target = task.deliverables.work_target.as_ref().ok_or_else(|| {
+                Self::error(ErrorCode::INVALID_PARAMS, "merge_source requires a declared task work target")
+            })?;
+            let mut granted = task.clone();
+            for commit in &source_commits {
+                if granted.deliverables.authorized_merge_sources.iter().any(|source|
+                    &source.commit == commit && &source.work_target == work_target)
+                {
+                    continue;
+                }
+                granted.deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                    commit: commit.clone(),
+                    supervisor_id: supervisor_id.clone(),
+                    work_target: work_target.clone(),
+                });
+            }
+            if granted.deliverables.authorized_merge_sources != task.deliverables.authorized_merge_sources {
+                if !granted.notes.is_empty() {
+                    granted.notes.push_str("\n\n");
+                }
+                granted.notes.push_str(&format!(
+                    "[{}] DECISION: merge source authorized by {} for {}. {}",
+                    chrono::Utc::now().to_rfc3339(),
+                    supervisor_id,
+                    work_target.target_branch,
+                    req.reason.trim(),
+                ));
+                task_store.update_if_current_with_mutation_receipt(&granted, &task, "")
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
+                        format!("task merge source authorization rejected: {error}")))?;
+            }
+            return Ok(Self::success(format!(
+                "Authorized merge source for task {} at {}. The task remains InProgress.",
+                task.id, source_commits.join(", ")
+            )));
+        }
 
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
@@ -13492,6 +13538,8 @@ pub(crate) struct AdditiveOnlyViolation {
 /// pre-cas-9596 behavior: nothing is recognized as the task's own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TaskCommitIdentity {
+    /// Exact side parents the supervisor approved for this work target.
+    pub approved_merge_parents: Vec<String>,
     /// Validated start boundary. Backward receipt expansion must stop here;
     /// explicitly identified earlier-cycle work remains attributable.
     pub start_base: Option<String>,
@@ -13560,6 +13608,7 @@ pub(crate) fn task_commit_identity(
         }
     }
     TaskCommitIdentity {
+        approved_merge_parents: task_attribution::authorized_merge_parents(task),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits,
@@ -15304,6 +15353,7 @@ fn epic_anchor_content_presence_inner(
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: vec![anchor.to_string()],
@@ -16512,6 +16562,7 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(own);
     }
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: task.deliverables.factory_branch_anchor.clone().into_iter().collect(),
@@ -16861,6 +16912,7 @@ pub(crate) fn task_without_own_commits_judged(
         return false;
     }
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
@@ -17053,6 +17105,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         },
     };
     let fallback_content_identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
@@ -19647,6 +19700,7 @@ fn render_close_diff_stat(
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
                 identity: TaskCommitIdentity {
+                    approved_merge_parents: Vec::new(),
                     start_base: window.identity.start_base.clone(),
                     task_id: window.identity.task_id.clone(),
                     known_commits: filtered_commits,
@@ -22013,6 +22067,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         refname,
                         parent_branch,
                         &TaskCommitIdentity {
+                            approved_merge_parents: Vec::new(),
                             start_base: None,
                             task_id: Some(t.id.clone()),
                             known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
@@ -24554,6 +24609,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24576,6 +24632,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: vec![wip_sha],
@@ -24597,6 +24654,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24627,6 +24685,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24662,6 +24721,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -32600,6 +32660,7 @@ esac
             basis: "task work cycle",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some(task.id.clone()),
                 known_commits: vec![receipt.clone()],
@@ -34861,6 +34922,7 @@ esac
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-test1".to_string()),
                 known_commits: vec![receipt.clone()],
@@ -36987,7 +37049,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
-        let identity = TaskCommitIdentity { start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+        let identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
         let (dir, anchor) = build("");
         let presence =
@@ -37027,7 +37089,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
             let mut window = window_at(0, "historical delivery replay");
-            window.identity = TaskCommitIdentity { start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            window.identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
@@ -37304,6 +37366,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
     fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
         let mut window = window_at(0, "cas-f2eb fixture");
         window.identity = TaskCommitIdentity {
+            approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-test1".into()),
             known_commits: vec![receipt.to_string()],
@@ -45949,6 +46012,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -45995,6 +46059,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-41cd".to_string()),
                 known_commits: Vec::new(),
@@ -46072,6 +46137,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -46105,6 +46171,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),

@@ -824,6 +824,10 @@ pub(super) mod tests {
         nested.task_type = TaskType::Epic;
         nested.origin_project = Some("release-fixture".into());
         store.add(&nested).unwrap();
+        let mut successor = Task::new("cas-a003".into(), "Successor train".into());
+        successor.task_type = TaskType::Epic;
+        successor.origin_project = Some("release-fixture".into());
+        store.add(&successor).unwrap();
         // Fixture train predates project attribution; bind it explicitly.
         let mut train = train;
         train.origin_project = Some("release-fixture".into());
@@ -862,6 +866,8 @@ pub(super) mod tests {
             ("cas-b00a", "missing_mapping"),
             ("cas-b00b", "symbolic_anchor"),
             ("cas-b00c", "quarantined"),
+            ("cas-b00d", "successor"),
+            ("cas-b00e", "unstarted"),
         ] {
             let mut t = code.clone();
             t.id = id.into();
@@ -905,6 +911,16 @@ pub(super) mod tests {
                     t.deliverables.factory_branch_anchor =
                         Some(git(repo, &["rev-parse", "HEAD"]).unwrap());
                 }
+                "successor" => {
+                    t.deliverables.factory_branch_anchor = store.get("cas-b00a").unwrap()
+                        .deliverables.factory_branch_anchor;
+                    t.deliverables.factory_branch_start.as_mut().unwrap()
+                        .work_target.target_branch = "epic/successor".into();
+                }
+                "unstarted" => {
+                    t.status = TaskStatus::Open;
+                    t.deliverables = Default::default();
+                }
                 _ => {}
             }
             store.add(&t).unwrap();
@@ -919,7 +935,7 @@ pub(super) mod tests {
                 store
                     .add_dependency(&Dependency::new(
                         id.into(),
-                        nested.id.clone(),
+                        if scenario == "successor" { successor.id.clone() } else { nested.id.clone() },
                         DependencyType::ParentChild,
                     ))
                     .unwrap();
@@ -971,7 +987,11 @@ pub(super) mod tests {
             promotion_pr: Some(4396),
             release_tag: Some("v9.99.2".into()),
             constituent_epic_ids: vec![train.id],
-            included_task_ids: Vec::new(),
+            // These deliberately broken members are explicit obligations.
+            // Descendant discovery alone must not declare missing work shipped.
+            included_task_ids: ["cas-b004", "cas-b005", "cas-b006", "cas-b008",
+                "cas-b009", "cas-b00a", "cas-b00b", "cas-missing"]
+                .into_iter().map(str::to_string).collect(),
             proof_refs: Vec::new(),
             no_code_members: [(
                 "cas-b007".into(),
@@ -1039,9 +1059,17 @@ pub(super) mod tests {
                 ("cas-b009", Code::Cancelled),
                 ("cas-b00a", Code::MissingMapping),
                 ("cas-b00b", Code::MissingAnchor),
-                ("cas-b00c", Code::Quarantined)
+                ("cas-b00c", Code::Quarantined),
+                ("cas-missing", Code::MissingTask)
             ]
         );
+        let future = store.get("cas-b00d").unwrap();
+        assert_eq!(future.status, TaskStatus::AwaitingMerge);
+        assert_eq!(future.deliverables.factory_branch_start.unwrap().work_target.target_branch,
+            "epic/successor");
+        let unstarted = store.get("cas-b00e").unwrap();
+        assert_eq!(unstarted.status, TaskStatus::Open);
+        assert!(unstarted.deliverables.factory_branch_start.is_none());
         assert_eq!(
             git(repo, &["rev-parse", "HEAD"]).unwrap(),
             store

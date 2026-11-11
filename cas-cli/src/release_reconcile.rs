@@ -694,13 +694,23 @@ mod tests {
             release_id: scope.release_id.clone(),
             final_release_sha: scope.final_release_sha.clone(),
         };
-        let checkpoint = ReleaseOperation::open(temp.path(), key)
+        let mut checkpoint = ReleaseOperation::open(temp.path(), key.clone())
             .unwrap()
             .load()
             .unwrap()
             .unwrap();
         assert!(checkpoint["members"].get("cas-a").is_some());
         assert!(checkpoint["members"].get("cas-b").is_none());
+        // GH #1790: older inventory discovery persisted these unrelated holds.
+        for id in ["cas-unshipped", "cas-unstarted"] {
+            checkpoint["members"][id] = serde_json::to_value(
+                CassyMergeClose::Held("RELEASE_MEMBER_HELD".into())).unwrap();
+        }
+        checkpoint["exceptions"] = serde_json::json!([
+            {"task_id": "cas-unshipped", "code": "missing_mapping"},
+            {"task_id": "cas-unstarted", "code": "missing_anchor"}
+        ]);
+        ReleaseOperation::open(temp.path(), key).unwrap().save(&checkpoint).unwrap();
         assert!(
             completed_operation(
                 temp.path(),

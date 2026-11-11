@@ -12,11 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  release-member-candidate-approval:
-    title: Release closeout accepts a source-bound approved candidate only when its reviewed tree shipped
-    tasks: [cas-0d3f]
-    journeys: [CLI-RELEASE, FACTORY-CLOSE]
-    invariants: [FACTORY-RELEASE-CLOSEOUT]
   queued-blocked-successor-source:
     title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
     tasks: [cas-57df]
@@ -479,8 +474,8 @@ bug_families:
     tasks: [cas-f47a]
     journeys: [HUB-J6]
   nested-shell-worker-commit-scope:
-    title: Literal shell script calls with arguments and redirects are admitted while nested shell and eval history writes obey worktree and branch guards
-    tasks: [cas-4923e, cas-6837]
+    title: Literal script execution admits arguments and redirects while syntax checks require exact raw noexec flags and plain unquoted script paths; nested shell and eval history writes obey worktree and branch guards
+    tasks: [cas-4923e, cas-6837, cas-93e0]
     journeys: [FACTORY-SUPERVISE]
   regenerated-merge-candidate-bundle:
     title: Merge candidate bundles use merged sources and match the real merge; failed regeneration holds review
@@ -578,6 +573,11 @@ bug_families:
     title: One release verdict retains the published SHA across historical epic targets while QA target containment and member ancestry remain required
     tasks: [cas-bc58]
     journeys: [FACTORY-QA-RECEIPT]
+  release-member-candidate-approval:
+    title: Release closeout accepts a source-bound approved candidate only when its reviewed tree shipped
+    tasks: [cas-0d3f]
+    journeys: [CLI-RELEASE, FACTORY-CLOSE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

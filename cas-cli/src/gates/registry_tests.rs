@@ -96,12 +96,30 @@ fn every_registered_refusal_site_emits_its_code() {
     for (body, covered) in [
         (r#"if role == Worker { anyhow::bail!("denied"); }"#, false),
         (r#"if role == Worker { return Err("denied"); }"#, false),
+        (r#"anyhow::ensure!(role != Worker, "denied");"#, false),
+        (r#"Ok(CallToolResult::error(vec![]))"#, false),
         (r#"if role == Worker { return Err(tag("G-01", "denied")); }"#, true),
+        ("// gate-audit[error]: rejects malformed numeric input, not an executable request\nErr(\"invalid integer\")", true),
     ] {
         let source = format!("fn probe(role: Role) {{ tag(\"G-01\", \"unrelated\"); {body} }}");
         std::fs::write(policy_dir.join("gates_cmd.rs"), source).unwrap();
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{body}: {:?}", result.gaps);
+    }
+    std::fs::remove_file(policy_dir.join("gates_cmd.rs")).unwrap();
+    let scripts_dir = fixture.path().join("scripts");
+    std::fs::create_dir_all(&scripts_dir).unwrap();
+    for (exit, covered) in [
+        ("exit 1", false),
+        ("echo '[G-01] denied' >&2\nexit 1", true),
+        ("# gate-audit[error]: input syntax rejected before execution\nexit 2", true),
+    ] {
+        std::fs::write(scripts_dir.join("release-probe.sh"), exit).unwrap();
+        // Keep an independently tagged producer so registry completeness does
+        // not manufacture the failure being tested at the new exit site.
+        std::fs::write(source_dir.join("probe.rs"), "fn unrelated() { tag(\"G-01\", \"unrelated\"); }").unwrap();
+        let result = gate_audit::scan(fixture.path(), &fixture_registry);
+        assert_eq!(result.gaps.is_empty(), covered, "{exit}: {:?}", result.gaps);
     }
     let registry = REGISTRY.iter().map(|r| (r.code.into(), r.stage.into(), r.title.into(), r.source.into())).collect::<Vec<_>>();
     let root = crate::test_paths::crate_root().join("..");

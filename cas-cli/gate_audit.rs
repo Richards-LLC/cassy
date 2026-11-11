@@ -530,6 +530,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                 Err(e) => audit.gaps.push(format!("{relative}: AST scan failed: {e}")),
             }
         } else {
+            refusals::script(&relative, &source, &policy_files, &mut refusal_sites);
             let executable = source.lines().filter(|line| !line.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
             let codes = bracket_codes(&executable, "");
             let test_harness = relative.rsplit('/').next().is_some_and(|name| name.starts_with("test-") || name.starts_with("test_"));

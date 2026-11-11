@@ -2991,6 +2991,17 @@ fn collect_git_write_targets(
             } else {
                 args
             };
+            // A literal script file is opaque, just like executing it directly.
+            // Its remaining arguments are script data, not shell options.
+            if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
+                && args.first().is_some_and(|script| {
+                    !script.is_empty()
+                        && !script.starts_with(['-', '+'])
+                        && path_word(script).literal == Some(true)
+                })
+            {
+                continue;
+            }
             let payload = match args {
                 [flag, separator, payload, ..] if flag == "-c" && separator == "--" => Some(payload),
                 [flag, payload, ..] if flag == "-c"
@@ -12953,6 +12964,14 @@ mod worker_commit_guard_tests {
         }
         let mut mismatches = Vec::new();
         for (command, denied) in [
+            (format!("bash scripts/test-release.sh > '{linked_path}/shell.log' 2>&1"), false),
+            ("sh scripts/test-release.sh --check > shell.log 2>&1".into(), false),
+            // Script recognition must not bypass the later workspace-write guard.
+            ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), true),
+            ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
+            ("bash scripts/test-release.sh".into(), false),
+            ("bash".into(), true),
+            ("sh -s".into(), true),
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
             (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),

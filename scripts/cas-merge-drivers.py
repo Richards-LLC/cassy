@@ -3,7 +3,8 @@
 
     cas-merge-drivers.py install [<repo>]
         Register the drivers for every merge in the repository: git config
-        `merge.cas-generated.*`, `merge.cas-changelog.*`, and `merge.cas-journeys.*`, plus matching
+        `merge.cas-generated.*`, `merge.cas-changelog.*`, `merge.cas-journeys.*`
+        and `merge.cas-upkeep.*`, plus matching
         lines in `$GIT_COMMON_DIR/info/attributes`. `info/attributes` applies
         to every merge in the clone, including `git merge-tree --write-tree`,
         whatever `.gitattributes` the checked-out tree has. That matters while
@@ -22,6 +23,11 @@
         Competing edits to an entry stay conflicts. Other fields and unsupported
         YAML layouts use Git's ordinary merge.
 
+    cas-merge-drivers.py upkeep <base> <ours> <theirs> [<marker-size>]
+        Merge same-anchor additions to CODEMAP and PRODUCT_OVERVIEW only when
+        each added bullet has an independent path or feature identity. Edits,
+        deletions, unsupported prose and competing identities stay conflicts.
+
 `merge=cas-generated` (hub-web/dist and the builtin reference-history ledger)
 keeps ours with no conflict; the merge then rebuilds both with
 scripts/regenerate-generated-artifacts.sh.
@@ -39,6 +45,8 @@ from pathlib import Path
 ATTRIBUTES = (
     "CHANGELOG.md merge=cas-changelog",
     "docs/qa/journeys.yaml merge=cas-journeys",
+    ".claude/CODEMAP.md merge=cas-upkeep",
+    "docs/PRODUCT_OVERVIEW.md merge=cas-upkeep",
     "hub-web/dist/** merge=cas-generated",
     "cas-cli/src/builtins/reference-history.json merge=cas-generated",
 )
@@ -62,6 +70,8 @@ def install(repo):
     if source != driver.resolve():
         shutil.copyfile(source, driver)
     for key, value in (
+        ("merge.cas-upkeep.name", "upkeep Markdown: merge independent additions, refuse competing edits"),
+        ("merge.cas-upkeep.driver", f"python3 '{driver}' upkeep %O %A %B %L"),
         ("merge.cas-journeys.name", "journey registry: merge independent entries and newest updated date"),
         ("merge.cas-journeys.driver", f"python3 '{driver}' journeys %O %A %B %L"),
         ("merge.cas-generated.name", "generated build output: keep ours, regenerate after the merge"),
@@ -269,6 +279,59 @@ def journeys(base, ours, theirs, marker=7):
     return result
 
 
+def markdown_entries(text):
+    """Only keyed top-level bullets are safe to union, never arbitrary prose."""
+    blocks = re.split(r"(?m)(?=^- )", text)
+    if blocks[0] or len(blocks) < 2:
+        raise ValueError("unsupported Markdown additions")
+    entries = {}
+    for block in blocks[1:]:
+        label = re.match(r"- (`[^`\n]+`|\*\*[^*\n]+\*\*)", block)
+        if label is None or any(line and not line[0].isspace()
+                                for line in block.splitlines()[1:]):
+            raise ValueError("unsupported Markdown entry")
+        key = label[1].casefold() if label[1].startswith("**") else label[1]
+        if key in entries:
+            raise ValueError("duplicate Markdown identity")
+        entries[key] = block
+    return entries
+
+
+def upkeep(base, ours, theirs, marker=7):
+    result = subprocess.run(
+        ["git", "merge-file", "--diff3", "-p", f"--marker-size={marker}",
+         "-L", "ours", "-L", "base", "-L", "theirs", ours, base, theirs],
+        capture_output=True,
+    )
+    if result.returncode < 0 or result.returncode > 127:
+        return 2
+    text = result.stdout.decode("utf-8", "surrogateescape")
+    conflicts = re.compile(
+        rf"^{'<' * marker} ours\n(.*?)^{re.escape('|' * marker)} base\n(.*?)"
+        rf"^{'=' * marker}\n(.*?)^{'>' * marker} theirs\n", re.M | re.S,
+    )
+    unresolved = result.returncode
+
+    def resolve(match):
+        nonlocal unresolved
+        left, ancestor, right = match.groups()
+        if ancestor:
+            return match[0]
+        try:
+            entries, conflict = merge_registry_entries(
+                {}, markdown_entries(left), markdown_entries(right), marker,
+            )
+        except ValueError:
+            return match[0]
+        if conflict:
+            return match[0]
+        unresolved -= 1
+        return entries
+
+    Path(ours).write_text(conflicts.sub(resolve, text), encoding="utf-8", errors="surrogateescape")
+    return int(unresolved != 0)
+
+
 def ordinary_merge(base, ours, theirs, marker=7):
     result = subprocess.run(
         ["git", "merge-file", f"--marker-size={marker}",
@@ -281,9 +344,9 @@ def ordinary_merge(base, ours, theirs, marker=7):
 def main(argv):
     if len(argv) >= 2 and argv[1] == "install":
         return install(argv[2] if len(argv) > 2 else os.getcwd())
-    if len(argv) >= 5 and argv[1] in ("changelog", "journeys"):
+    if len(argv) >= 5 and argv[1] in ("changelog", "journeys", "upkeep"):
         marker = int(argv[5]) if len(argv) > 5 and argv[5].isdigit() else 7
-        driver = changelog if argv[1] == "changelog" else journeys
+        driver = {"changelog": changelog, "journeys": journeys, "upkeep": upkeep}[argv[1]]
         return driver(argv[2], argv[3], argv[4], marker)
     print(__doc__, file=sys.stderr)
     return 2

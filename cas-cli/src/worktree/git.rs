@@ -165,13 +165,16 @@ pub const REGENERATE_ARTIFACTS_SCRIPT: &str = "scripts/regenerate-generated-arti
 pub const CHANGELOG_MERGE_ATTRIBUTE: &str = "merge=cas-changelog";
 /// Registry driver: independent entries merge; competing edits conflict.
 pub const JOURNEYS_MERGE_ATTRIBUTE: &str = "merge=cas-journeys";
+/// Upkeep Markdown: independent additions merge; competing edits conflict.
+pub const UPKEEP_MERGE_ATTRIBUTE: &str = "merge=cas-upkeep";
 /// cas-7aa5: Cassy's merge drivers, embedded so a merge on any tree (or in
 /// `merge-tree`) runs the same driver whatever the checkout carries.
 const MERGE_DRIVERS_PY: &str = include_str!("../../../scripts/cas-merge-drivers.py");
 
 /// cas-0c988, cas-7aa5: register Cassy's merge drivers for every merge in
 /// the repository at `dir` when the checkout or the incoming revisions opt
-/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`, `merge=cas-journeys`).
+/// in through `.gitattributes` (`merge=cas-changelog`, `merge=cas-generated`,
+/// `merge=cas-journeys`, `merge=cas-upkeep`).
 ///
 /// The embedded `cas-merge-drivers.py` is written to the git common dir and
 /// its `install` registers `merge.cas-*` in git config and the attributes in
@@ -186,6 +189,7 @@ pub(crate) fn ensure_merge_drivers(dir: &Path, incoming: &[&str]) {
         text.contains(GENERATED_MERGE_ATTRIBUTE)
             || text.contains(CHANGELOG_MERGE_ATTRIBUTE)
             || text.contains(JOURNEYS_MERGE_ATTRIBUTE)
+            || text.contains(UPKEEP_MERGE_ATTRIBUTE)
     };
     let opted = std::fs::read_to_string(dir.join(".gitattributes")).is_ok_and(|text| marks(&text))
         || incoming.iter().any(|revision| {
@@ -1233,7 +1237,7 @@ impl GitOperations {
     /// whole CONFLICT line when a path can't be isolated — some conflict
     /// kinds (e.g. rename/delete) phrase the path differently and callers
     /// still want *something* actionable rather than silence.
-    fn extract_conflict_paths(combined: &str) -> Vec<String> {
+    pub(crate) fn extract_conflict_paths(combined: &str) -> Vec<String> {
         let mut paths = Vec::new();
         for line in combined.lines() {
             let line = line.trim();

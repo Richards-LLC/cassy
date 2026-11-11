@@ -25,3 +25,8 @@ CHANGELOG.md merge=cas-changelog
 # Merge independent registry entries by ID and keep the newest updated date.
 # Competing changes to the same entry and policy still use conflict review.
 docs/qa/journeys.yaml merge=cas-journeys
+
+# Keep independent upkeep bullets from both lanes. Competing edits and
+# same-identity additions still conflict; these docs are never keep-ours output.
+.claude/CODEMAP.md merge=cas-upkeep
+docs/PRODUCT_OVERVIEW.md merge=cas-upkeep

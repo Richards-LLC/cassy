@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-10'
+updated: '2026-11-11'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  parallel-upkeep-merge:
+    title: Same-anchor upkeep additions preserve both lanes while competing identities and edits refuse with paths and recovery commands
+    tasks: [cas-2426e]
+    journeys: [FACTORY-MERGE]
   queued-blocked-successor-source:
     title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
     tasks: [cas-57df]

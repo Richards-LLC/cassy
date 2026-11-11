@@ -93,6 +93,8 @@
 
 ## MCP, storage and delivery gates
 
+- `scripts/cas-merge-drivers.py`, `.gitattributes` - shared merge drivers; upkeep docs preserve independent keyed additions and refuse competing edits during candidate preparation and the real merge.
+
 - `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.

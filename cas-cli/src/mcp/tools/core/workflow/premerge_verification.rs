@@ -175,6 +175,20 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
         .output()
         .map_err(|error| format!("PREMERGE_GIT_IO: git at {}: {error}", repo.display()))?;
     if !output.status.success() {
+        // merge-tree reports content conflicts on stdout, with exit 1 and
+        // usually no stderr. Preserve paths instead of diagnosing missing output.
+        if args.first() == Some(&"merge-tree") && output.status.code() == Some(1) {
+            let combined = format!("{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            let paths = crate::worktree::GitOperations::extract_conflict_paths(&combined);
+            if !paths.is_empty() {
+                return Err(format!("PREMERGE_MERGE_CONFLICT: candidate `git {}`: {}",
+                    args.join(" "), paths.join(", "),
+                ));
+            }
+        }
         // cas-c5db: `merge-base --is-ancestor` answers "no" with an empty
         // stderr; name the whole command and its exit so a refusal is actionable.
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -189,8 +203,16 @@ fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Build the tree the merge will ship, including repository-owned regeneration.
-fn regenerated_merge_tree(repo: &Path, target: &str, source: &str) -> Result<String, String> {
-    let merged = git(repo, &["merge-tree", "--write-tree", target, source])?;
+fn regenerated_merge_tree(
+    repo: &Path, target: &str, source: &str, task_id: &str,
+) -> Result<String, String> {
+    let merged = git(repo, &["merge-tree", "--write-tree", target, source]).map_err(|error| {
+        if error.starts_with("PREMERGE_MERGE_CONFLICT:") {
+            format!("{error}. Run task action=request_changes id={task_id} reason=\"merge conflict\", then task action=start id={task_id}. On the assigned delivery branch run `git merge {target}`, resolve the listed paths, commit, push and re-park.")
+        } else {
+            error
+        }
+    })?;
     let tree = merged.lines().next().ok_or("merge candidate tree missing")?;
     if git(
         repo,
@@ -564,7 +586,7 @@ impl Candidate {
         if target == self.target_sha {
             return Ok(self.tree.clone());
         }
-        let tree = regenerated_merge_tree(&self.repository, target, &self.source_sha)?;
+        let tree = regenerated_merge_tree(&self.repository, target, &self.source_sha, &self.task_id)?;
         if tree == self.tree {
             return Ok(self.tree.clone());
         }
@@ -1453,7 +1475,7 @@ impl CasCore {
                 manifest.display(), dispatch.id,
             )));
         }
-        let tree = regenerated_merge_tree(repo, &target_sha, &source_sha).map_err(fail)?;
+        let tree = regenerated_merge_tree(repo, &target_sha, &source_sha, &task.id).map_err(fail)?;
         let candidate_sha = git(
             repo,
             &[
@@ -1822,9 +1844,12 @@ mod tests {
         let paths = [".claude/CODEMAP.md", "docs/PRODUCT_OVERVIEW.md"];
         commit_file(repo, ".gitattributes",
             ".claude/CODEMAP.md merge=cas-upkeep\ndocs/PRODUCT_OVERVIEW.md merge=cas-upkeep\n", "attributes");
-        // Exact competing row from 22fa7d738 and 47acd2191 (Nov 10 incident).
-        let row = "- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, portable report proof binding and ordinary no-code close, explicit parent acceptance, ordinary parent closure and SQLite operation records.\n";
-        let other = row.replace("portable report proof binding and ordinary no-code close", "retirement of unproven discovery holds");
+        // Exact ancestor and competing row edits from 22fa7d738 / 47acd2191.
+        let row = "- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, explicit parent acceptance, ordinary parent closure and SQLite operation records.\n";
+        let other = row.replace("durable release replay,", "durable release replay, retirement of unproven discovery holds,");
+        let content = |path: &str, body: &str| if path == paths[1] {
+            body.replace("`src/a.rs`", "**A**").replace("`src/b.rs`", "**B**")
+        } else { body.to_string() };
         let body = format!("# Upkeep\n\n{row}");
         for path in paths {
             commit_file(repo, path, &body, "base upkeep");
@@ -1837,21 +1862,21 @@ mod tests {
         ] {
             run(repo, &["checkout", "-q", "-b", branch, &base]);
             for path in paths {
-                commit_file(repo, path, &body.replace(row, &format!("{addition}{row}")), "upkeep addition");
+                commit_file(repo, path, &content(path, &body.replace(row, &format!("{addition}{row}"))), "upkeep addition");
             }
         }
         run(repo, &["checkout", "-q", "main"]);
         let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
         for branch in ["factory/a", "factory/b"] {
             let target = run(repo, &["rev-parse", "main"]);
-            let tree = regenerated_merge_tree(repo, &target, branch).unwrap();
+            let tree = regenerated_merge_tree(repo, &target, branch, "cas-replay").unwrap();
             assert!(operations.preflight_merge_conflicts(&target, branch).unwrap().is_empty());
             operations.merge_branch("main", branch, true).unwrap();
             assert_eq!(run(repo, &["rev-parse", "HEAD^{tree}"]), tree);
         }
         let expected = format!("# Upkeep\n\n- `src/a.rs` - A.\n- `src/b.rs` - B.\n{row}");
         for path in paths {
-            assert_eq!(std::fs::read_to_string(repo.join(path)).unwrap(), expected);
+            assert_eq!(std::fs::read_to_string(repo.join(path)).unwrap(), content(path, &expected));
         }
         // Two new entries with the same identity cannot be unioned either.
         assert_eq!(operations.preflight_merge_conflicts("main", "factory/conflict").unwrap(), paths);
@@ -1861,11 +1886,13 @@ mod tests {
         }
         run(repo, &["checkout", "-q", "-b", "epic/rewrite", &base]);
         for path in paths {
-            commit_file(repo, path, &body.replace(row, &row.replace("portable report proof binding and ordinary no-code close", "explicit portable report proof")), "independent rewrite");
+            commit_file(repo, path, &body.replace(row, &row.replace("durable release replay,", "durable release replay, portable report proof binding and ordinary no-code close,")), "independent rewrite");
         }
         let before = run(repo, &["rev-parse", "HEAD"]);
-        let refusal = git(repo, &["merge-tree", "--write-tree", "epic/rewrite", "factory/rewrite"]).unwrap_err();
+        let refusal = regenerated_merge_tree(repo, "epic/rewrite", "factory/rewrite", "cas-replay").unwrap_err();
         assert!(refusal.contains("PREMERGE_MERGE_CONFLICT"), "{refusal}");
+        assert!(refusal.contains("task action=request_changes id=cas-replay"), "{refusal}");
+        assert!(refusal.contains("git merge epic/rewrite"), "{refusal}");
         for path in paths {
             assert!(refusal.contains(path), "{refusal}");
         }

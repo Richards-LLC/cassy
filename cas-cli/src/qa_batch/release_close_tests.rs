@@ -46,6 +46,7 @@ fn published_train_closes_members_independently_cas_734b() {
                 base_sha: if id == "cas-equal" { anchor.clone() } else { base.clone() },
             });
         }
+        if id == "cas-closed" { task.deliverables.factory_branch_start = None; }
         tasks.add(&task).unwrap();
     }
     let artifact = cas_store::PublishedArtifact {
@@ -82,11 +83,42 @@ fn published_train_closes_members_independently_cas_734b() {
         promotion_pr: None, release_tag: Some("v9.99.0".into()), constituent_epic_ids: vec![],
         included_task_ids: ["cas-approved", "cas-unreviewed", "cas-report", "cas-closed", "cas-equal"].map(str::to_string).to_vec(),
         no_code_members: BTreeMap::from([("cas-report".into(), vec![proof])]), proof_refs: vec![], };
+    // A preview must leave the store, artifact cache and operation directory
+    // byte-for-byte unchanged. SQLite's transient reader locks live in -shm.
+    fn snapshot(path: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        if !path.exists() { return files; }
+        for entry in std::fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() { files.extend(snapshot(&path)); }
+            else if !path.to_string_lossy().ends_with("-shm") { files.insert(path.clone(), std::fs::read(path).unwrap()); }
+        }
+        files
+    }
+    let before = snapshot(&root);
+    let cache = env.home().join(".cas/artifacts");
+    let cache_before = snapshot(&cache);
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
+    let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    // Stale generations and unbound report approval hold only their member.
+    let mut stale = inventory.clone();
+    stale.deliveries.iter_mut().find(|d| d.task_id == "cas-approved").unwrap().generation = "stale".into();
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &stale).unwrap();
+    assert!(matches!(outcomes.get("cas-approved"), Some(CassyMergeClose::Held(reason)) if reason == "RELEASE_GENERATION_CHANGED"));
+    assert!(matches!(outcomes.get("cas-equal"), Some(CassyMergeClose::Closed { .. })));
+    let mut unbound = inventory.clone();
+    unbound.deliveries.iter_mut().find(|d| d.task_id == "cas-report").unwrap().proof_refs[0].size_bytes += 1;
+    let outcomes = crate::release_reconcile::preview_release(&root, &repo, &unbound).unwrap();
+    assert!(matches!(outcomes.get("cas-report"), Some(CassyMergeClose::Held(reason)) if reason.starts_with("RELEASE_NO_CODE_PROOF_BINDING:")));
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let result = runtime.block_on(crate::release_reconcile::reconcile_release(&root, &scope, &inventory,
         crate::release_reconcile::ReconcileTrigger::Publish { tag: "v9.99.0".into() })).unwrap();
-    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    assert_eq!(serde_json::to_value(&preview).unwrap(), serde_json::to_value(&result.members).unwrap());
     for id in ["cas-approved", "cas-report", "cas-equal"] {
         assert!(matches!(result.members.get(id), Some(CassyMergeClose::Closed { .. })), "{id}: {:?}", result.members.get(id));
         assert_eq!(tasks.get(id).unwrap().status, TaskStatus::Closed);

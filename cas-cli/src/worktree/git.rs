@@ -517,6 +517,8 @@ pub struct GitOperations {
     stale_checkout_notes: std::sync::Mutex<Vec<String>>,
 }
 
+pub(crate) type MergePublication<'a> = dyn FnMut(&str, &str) -> Result<String> + 'a;
+
 /// `rev-parse --show-toplevel` answers in milliseconds. A Git child that blocks
 /// (a LaunchAgent reading ~/Documents) held `cas release installed` for 4h40m.
 const REPO_ROOT_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -1551,7 +1553,21 @@ impl GitOperations {
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
             self.merge_branch_in_dir(dir, None, source_branch, no_ff)
-        })
+        }, None)
+    }
+
+    /// The manager validates scoped residue in the primary checkout before
+    /// using this publication path. Other linked checkouts retain their
+    /// existing clean-tree guard.
+    pub(crate) fn merge_branch_with_publication(
+        &self,
+        target_branch: &str,
+        source_branch: &str,
+        publication: &mut MergePublication<'_>,
+    ) -> Result<Option<String>> {
+        self.advance_via_temp_worktree(target_branch, |dir| {
+            self.merge_branch_in_dir(dir, None, source_branch, true)
+        }, Some(publication))
     }
 
     /// cas-dcc9: revert merge commits (`-m 1`, their mainline parent) on
@@ -1595,7 +1611,7 @@ impl GitOperations {
                 git(&["commit", "-q", "-m", message])?;
             }
             git(&["rev-parse", "HEAD"]).map(Some)
-        })
+        }, None)
     }
 
     /// Run `step` in a detached worktree at `target_branch`'s tip, then
@@ -1604,6 +1620,7 @@ impl GitOperations {
         &self,
         target_branch: &str,
         step: impl FnOnce(&Path) -> Result<Option<String>>,
+        publication: Option<&mut MergePublication<'_>>,
     ) -> Result<Option<String>> {
         let old_tip = self
             .resolve_commit(target_branch)
@@ -1615,6 +1632,9 @@ impl GitOperations {
         // the ref is still where that checkout expects it.
         let checkouts = self.linked_checkouts_of(target_branch)?;
         for checkout in &checkouts {
+            if publication.is_some() && checkout.path == self.repo_root {
+                continue;
+            }
             if let Some((change_count, first_change)) = dirty_summary(&checkout.path) {
                 return Err(GitError::TargetCheckedOutDirty {
                     branch: target_branch.to_string(),
@@ -1629,12 +1649,23 @@ impl GitOperations {
         let guard = self.add_temp_worktree(&old_tip)?;
         let merged = step(guard.path())?;
 
-        let new_tip = match merged {
+        let mut new_tip = match merged {
             Some(ref tip) if *tip != old_tip => tip.clone(),
             // "Already up to date" — nothing to advance, and nothing to
             // compare-and-swap.
             _ => return Ok(Some(old_tip)),
         };
+
+        if let Some(publish) = publication {
+            let actual = self.resolve_commit(target_branch);
+            if actual.as_deref() != Some(old_tip.as_str()) {
+                return Err(GitError::TargetTipChanged {
+                    branch: target_branch.to_string(), expected: old_tip,
+                    actual: actual.unwrap_or_else(|| "<unresolvable>".into()),
+                });
+            }
+            new_tip = publish(&new_tip, &old_tip)?;
+        }
 
         if self
             .compare_and_swap_ref(target_branch, &new_tip, &old_tip)

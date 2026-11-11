@@ -115,6 +115,7 @@ pub(crate) fn merge_refusal(
     merge_refusal_with_overrides(cas_root, supervisor_agent_id, supervisor_name, operator_session, subject, &mut Vec::new())
 }
 
+// gate-audit[override_reason]: bypass G-95 An operator note authorizes merging despite an unresolved ask.
 pub(crate) fn merge_refusal_with_overrides(
     cas_root: &Path,
     supervisor_agent_id: &str,

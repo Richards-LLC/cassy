@@ -798,6 +798,8 @@ pub(crate) fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<
     gate_with_overrides(cas_root, epic, release_notes, &mut Vec::new())
 }
 
+// gate-audit[recent_override]: bypass G-120 A recent operator note authorizes release publication/close despite an incomplete watch.
+// gate-audit[release_notes]: selector Selects publication vs epic-close diagnostic; both evaluate the same watch.
 pub fn gate_with_overrides(cas_root: &Path, epic: &Task, release_notes: bool, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();

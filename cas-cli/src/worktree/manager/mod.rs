@@ -221,6 +221,7 @@ impl WorktreeManager {
     /// abandon, remove_worker); pass `false` only when the worktree is
     /// merged but preserved (cleanup=false).
     // gate[G-138 worktree]: Dirty source worktree preservation
+    // gate-audit[will_remove]: selector Selects which dirty-file classes the requested operation affects; force remains the actual G-138 bypass.
     fn reject_or_warn_on_dirty(
         &self,
         git: &GitOperations,

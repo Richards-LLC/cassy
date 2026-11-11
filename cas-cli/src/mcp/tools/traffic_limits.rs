@@ -162,6 +162,7 @@ pub(crate) fn spill_message_to_artifact(
 /// caller can include its reason in the durable activity event metadata.
 // gate[G-131 note]: Appended task note body limit
 // gate-audit[supervisor_override]: bypass G-131 Pure validation helper; note producer tags accepted oversized notes.
+// gate-audit[registered_supervisor]: input Authenticated role, not a caller-provided admission flag.
 pub(crate) fn validate_note_body(
     note_type: &str,
     body: &str,

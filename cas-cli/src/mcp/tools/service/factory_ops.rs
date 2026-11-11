@@ -2330,6 +2330,7 @@ fn format_spawn_lifecycle_section(
     out
 }
 
+// gate-audit[is_supervisor]: input Authenticated supervisor role enforcing worker-hold authority.
 fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())
@@ -7217,6 +7218,7 @@ impl CasService {
 
     // gate-audit[force]: bypass G-137 Admits stale-worker dirty/mid-task synchronization; live workers and active rebases remain protected.
     // gate-audit[explicitly_targeted]: bypass G-149 Explicit worker selection can override measured branch affinity.
+    // gate-audit[affinity_override]: selector Derived accepted branch-affinity exception from explicit force; final G-149 tag is authoritative.
     pub(super) async fn factory_sync_all_workers(
         &self,
         req: FactoryRequest,

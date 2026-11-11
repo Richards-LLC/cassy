@@ -370,6 +370,7 @@ pub(crate) fn delivery_audit_text_rejection(value: &str) -> Option<&'static str>
 }
 
 // gate[G-32 park]: No-code intent and proof (code proof required, code intent violated, inline note rejected)
+// gate-audit[has_reviewable_code]: input Measured delivery content decides whether the no-code declaration is truthful; not an override.
 fn no_code_close_proof<'a>(
     task_id: &str,
     execution_note: Option<&str>,
@@ -4943,6 +4944,7 @@ fn validate_negative_result_reference(reference: &str) -> Result<(), TaskLifecyc
 }
 
 // gate[G-88 close-after-merge]: request_changes role gate (supervisor only)
+// gate-audit[is_supervisor]: input Derived authenticated role enforcing G-128, not an optional bypass.
 fn request_changes_role_gate(
     is_supervisor: bool,
     task_id: &str,
@@ -4959,6 +4961,8 @@ fn request_changes_role_gate(
 }
 
 // gate[G-22 park]: supervisor_override authority and non-empty reason
+// gate-audit[is_supervisor]: input Validates that a requested waiver has live supervisor authority.
+// gate-audit[requested]: input Validates waiver authority/reason; the final close separately records each check actually waived.
 pub(crate) fn validate_supervisor_override(
     requested: bool,
     reason: Option<&str>,
@@ -7752,6 +7756,7 @@ impl CasCore {
     // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
     // gate-audit[evidence_only]: selector Chooses a separately authorized, measured non-integration terminal disposition.
     // gate-audit[negative_result]: selector Chooses a separately authorized, measured negative result; no code delivery is approved.
+    // gate-audit[validate_supervisor_override]: selector Validation of authority; only explicit accepted_override_codes at actual waived checks count.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,

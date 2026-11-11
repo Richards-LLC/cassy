@@ -92,6 +92,8 @@ enum ForceStaleRefusal {
     PidExited { name: String, pid: u32 },
 }
 
+// gate-audit[force]: selector Confirms the requested session termination without an interactive prompt; PID identity checks still run.
+// gate-audit[force_stale]: selector Chooses explicit stale-process recovery, revalidating PID start time; does not skip that identity check.
 fn execute_kill_with_terminal_check(
     name: Option<&str>,
     force: bool,
@@ -936,6 +938,7 @@ mod tests {
 }
 
 /// Kill all factory sessions
+// gate-audit[force]: selector Confirms bulk termination; each session still uses kill_session_if_running safety.
 pub fn execute_kill_all(force: bool) -> Result<()> {
     let manager = SessionManager::new();
     let sessions = manager.list_sessions()?;

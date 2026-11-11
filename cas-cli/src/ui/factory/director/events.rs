@@ -2025,6 +2025,7 @@ impl DirectorEventDetector {
     /// Called only for stale checkpoint/activity candidates. An unset cas_root
     /// or failed worker resolution retains the checkpoint fallback; a resolved
     /// worker without transcript telemetry does not confirm a stall.
+    // gate-audit[transcript_age_override]: selector Deterministic test telemetry input; production callers never set it and no work is authorized.
     fn transcript_confirms_stall(
         &mut self, worker: &str, task: &str, now: DateTime<chrono::Utc>, threshold: u64,
     ) -> Option<bool> {

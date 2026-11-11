@@ -709,6 +709,7 @@ mod reused_factory_branch_tests {
 
 // gate[G-130 create]: User-facing task demo statement required
 // gate-audit[supervisor_override]: bypass G-130 The create/proposal producer tags an accepted missing-demo waiver.
+// gate-audit[is_supervisor]: input Authenticated role; supervisor waiver is tagged G-130 by the accepting create producer.
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
     labels: &[String],
@@ -1343,6 +1344,7 @@ impl CasCore {
 
     // gate-audit[supervisor_override]: bypass G-129,G-130 Missing-risk and missing-demo waivers use the same policy validators for attribution.
     // gate-audit[confirm_warning]: bypass G-147,G-148 Explicitly accepts a measured competing plan or duplicate create refusal.
+    // gate-audit[override_grant]: selector Newly issued source-claim approval from G-133; final creation response retains its tag.
     pub(crate) async fn cas_task_create_with_delivery_mode(
         &self,
         req: TaskCreateRequest,

@@ -23,6 +23,7 @@ pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
     denial_with_overrides(tool, input, cas_root, &mut Vec::new())
 }
 
+// gate-audit[recent_override]: bypass H-07 A recorded operator publication override authorizes this otherwise-held deliverable post.
 pub(crate) fn denial_with_overrides(tool: &str, input: Option<&Value>, cas_root: Option<&Path>, accepted_override_codes: &mut Vec<&'static str>) -> Option<String> {
     let posts = violet_posts(tool, input);
     if let Some(root) = cas_root

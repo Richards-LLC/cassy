@@ -44,7 +44,8 @@ impl ReleaseClose {
     /// Resolve membership afresh before granting any lifecycle authority.
     /// The caller keeps per-delivery exceptions; one bad member does not erase
     /// other shipped facts or make the release appear successfully finalized.
-    pub(crate) fn prepare(
+    // gate-audit[author_override]: selector Revalidates the release-bound evidence issued under G-116; replay does not mint a new author override.
+pub(crate) fn prepare(
         root: &Path,
         repo: &Path,
         inventory: &ReleaseInventory,

@@ -3518,6 +3518,8 @@ impl CasCore {
     ///
     /// Only the dirty and unmerged refusals are bypassable with `force`.
     // gate-audit[force]: bypass G-138 Only an actual successful dirty-worktree removal receives the tag.
+    // gate-audit[dirty_override]: selector Measured G-138 acceptance from force, tagged only after successful cleanup.
+    // gate-audit[dry_run]: selector Chooses preview without cleanup; never permits deletion.
     pub async fn worktree_cleanup(
         &self,
         id: Option<&str>,
@@ -3653,6 +3655,8 @@ impl CasCore {
 
     /// cas-f102 (GH #140): remove ONE worktree, resolved System A then System B.
     // gate-audit[force]: bypass G-138,G-139 Dirty and unmerged worktree preservation guards; live-owner guard remains enforced.
+    // gate-audit[dirty_override]: selector Measured G-138 acceptance from force, tagged only after successful cleanup.
+    // gate-audit[dry_run]: selector Chooses preview without cleanup; never permits deletion.
     async fn worktree_cleanup_target(
         &self,
         id: &str,
@@ -4443,6 +4447,10 @@ impl CasCore {
         Ok(result)
     }
 
+    // gate-audit[force]: bypass G-138 Accepts dirty source handling while preserving shared-target safety.
+    // gate-audit[supervisor_override]: bypass G-108 Accepts a measured red/unvalidated lane CI result with an audited reason.
+    // gate-audit[ci_override]: selector Derived accepted CI decision; external supervisor_override owns G-108.
+    // gate-audit[dirty_override]: selector Derived accepted dirty handling; external force owns G-138.
     async fn worktree_merge_attempt(
         &self,
         id: &str,

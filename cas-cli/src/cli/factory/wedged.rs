@@ -2385,6 +2385,7 @@ fn verify_death(pid: u32) -> bool {
 /// refused (fingerprint mismatch / no fingerprint) or that demonstrably
 /// didn't take never resets the task lease out from under a still-running
 /// worker.
+// gate-audit[fingerprint_override]: selector Derived G-143 acceptance from the explicit force request; final producer tags that exception.
 pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;

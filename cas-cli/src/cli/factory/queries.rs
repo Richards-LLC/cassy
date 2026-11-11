@@ -937,6 +937,7 @@ pub(super) fn execute_message(
     Ok(())
 }
 
+// gate-audit[cas_root_override]: selector Chooses the explicitly addressed Cassy store; never overrides message authority.
 fn message_root_for_session(
     session: &SessionInfo,
     project_dir: Option<&std::path::Path>,

@@ -138,6 +138,8 @@ fn driver_lock(
 
 impl CasCore {
     // gate[G-113 train-merge]: Train merge preconditions (supervisor, epic target, queue, entries)
+    // gate-audit[ci_override]: selector Derived newly accepted G-114 token; final receipt records it.
+    // gate-audit[prior_override]: selector Replayed stored decision token; reuse does not mint another override.
     pub(crate) fn train_merge(
         &self,
         train: &str,
@@ -327,6 +329,7 @@ fn published(queue: &Queue, entry: &Entry) -> Result<bool> {
 
 /// Existing daemon scan, off its control loop. No additional CI stage or
 /// model turn is needed to consume an approved candidate.
+// gate-audit[ci_override]: selector Derived accepted G-114 token forwarded in response; not another request flag.
 pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
     let paths = match std::fs::read_dir(directory(root)) {
         Ok(paths) => paths,

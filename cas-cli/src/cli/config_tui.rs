@@ -530,6 +530,7 @@ impl ConfigTuiApp {
         }
     }
 
+    // gate-audit[has_override]: selector Existing config value determines whether reset is offered; no policy exemption.
     fn reset_selected_option(&mut self) -> anyhow::Result<()> {
         if let Some(i) = self.option_state.selected() {
             if let Some(key) = self.option_keys.get(i) {

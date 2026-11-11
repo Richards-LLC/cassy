@@ -57,6 +57,7 @@ impl CasCore {
             }).map(|split| split.id)
     }
 
+    // gate-audit[source_claim_override]: selector Replays task-bound source approval already issued by G-133; immutable source identity is rechecked.
     pub(crate) async fn task_source_admission_for(
         &self,
         task: &crate::types::Task,
@@ -121,6 +122,7 @@ impl CasCore {
 
     /// Refuse a known competing owner before local task or staffing writes.
     /// Missing advisory infrastructure is visible, and never grants Slack authority.
+    // gate-audit[override_reason]: bypass G-133 Live supervisor accepts an actual peer-owned source claim.
     pub(crate) async fn task_source_admission(
         &self,
         source: Option<&str>,

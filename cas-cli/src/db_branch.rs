@@ -804,6 +804,7 @@ pub fn render_record(record: &DbBranchRecord) -> String {
 
 /// Only the supervisor holds the Neon credential. A worker asks for a branch
 /// with a blocker message instead.
+// gate-audit[is_supervisor]: input Derived authenticated role used to enforce H-45; never an optional override.
 pub fn role_gate(is_supervisor: bool, action: &str) -> Result<(), String> {
     if is_supervisor {
         Ok(())

@@ -99,6 +99,7 @@ pub fn parse_proof_targets(value: Option<&str>) -> Vec<String> {
 /// the supervisor override is explicit and audited by the caller.
 // gate[G-129 create]: Task risk declaration required
 // gate-audit[supervisor_override]: bypass G-129 Create/proposal producer tags accepted missing-risk declarations.
+// gate-audit[is_supervisor]: input Authenticated role used for the G-129 waiver; accepted creation response carries the tag.
 pub fn validate_task_risk_declaration(
     task_type: TaskType,
     risk: Option<&str>,

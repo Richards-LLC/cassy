@@ -51,6 +51,7 @@ impl CasCore {
     }
 
     // gate-audit[supervisor_override]: bypass G-131 Explicitly accepts an oversized decision/discovery note after supervisor authorization.
+    // gate-audit[override_accepted]: selector Derived oversized-note waiver already authorized under G-131; final note response carries its tag.
     pub async fn cas_task_notes(
         &self,
         Parameters(req): Parameters<TaskNotesRequest>,

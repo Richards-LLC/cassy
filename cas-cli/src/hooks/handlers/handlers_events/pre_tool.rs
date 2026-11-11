@@ -487,6 +487,8 @@ fn handle_pre_tool_use_inner(
     Ok(output)
 }
 
+// gate-audit[local_merge_push_override]: bypass H-23 Explicitly authorized env switch permits this local-merge push; later denials discard the accepted tag.
+// gate-audit[git_push_bypasses_required_hooks]: selector Detects forbidden hook skips; does not authorize them.
 fn handle_pre_tool_use_checked(
     input: &HookInput,
     cas_root: Option<&Path>,
@@ -2359,6 +2361,8 @@ fn git_push_bypasses_required_hooks(command: &str) -> bool {
 // gate-audit[bypasses_hooks]: selector Detects a prohibited Git configuration; it does not accept a bypass.
 // gate-audit[git_config_environment_bypass_in_shell]: selector Recursive detector for prohibited Git configuration; no authorization waiver.
 // gate-audit[nested_bypass]: selector Detector result for nested prohibited Git configuration; not a request option.
+// gate-audit[exported_override]: selector Detects a shell attempt to bypass required hooks and refuses it; cannot authorize one.
+// gate-audit[git_config_environment_override]: selector Detector predicate only; true causes denial.
 fn git_config_environment_bypass_in_shell(command: &str, depth: usize) -> bool {
     if depth > 6 {
         return false;
@@ -2568,6 +2572,7 @@ fn git_invocation_writes_hooks_path(git_words: &[String]) -> bool {
         || arguments.get(key_index + 1).is_some()
 }
 
+// gate-audit[git_global_hooks_path_override]: selector Detects forbidden Git hook configuration; true causes denial.
 fn git_invocation_bypasses_required_hooks(git_words: &[String]) -> bool {
     let Some(operation_index) = git_subcommand_index(git_words) else {
         return false;

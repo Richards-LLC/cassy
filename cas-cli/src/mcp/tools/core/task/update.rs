@@ -782,6 +782,8 @@ impl CasCore {
 
     // gate-audit[supervisor_override]: bypass G-07,G-132,G-133 Split assignment, stale assignment and peer-source ownership waivers are explicitly tagged.
     // gate-audit[proof_scope_fix]: bypass G-151 Authorized frozen-binding correction invalidates old proof; mandatory per-crate proof still runs.
+    // gate-audit[binding_override]: selector Derived authorized frozen-binding waiver recorded as G-151 on success.
+    // gate-audit[override_grant]: selector Newly issued source-claim approval carried through final G-133 response.
     pub(crate) async fn cas_task_update_with_delivery_mode(
         &self,
         req: TaskUpdateRequest,

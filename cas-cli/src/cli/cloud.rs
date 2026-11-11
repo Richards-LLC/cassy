@@ -7310,6 +7310,8 @@ fn execute_adopt_unknown(
 // gate[G-144 purge]: Destructive cloud purge safety state
 // gate-audit[force]: bypass G-144 Explicitly accepts recoverability safety refusals; proven-rule and majority limits remain enforced.
 // gate-audit[allow_majority_foreign]: bypass G-145 Explicitly accepts deleting a measured majority of foreign task rows.
+// gate-audit[bypass_tags]: selector Accumulates already accepted G-144/G-145 response tags; not an independent admission input.
+// gate-audit[emit_output]: selector Controls printing after purge; safety policy always runs.
 fn execute_purge_foreign_with_output(
     args: &CloudPurgeForeignArgs,
     cli: &Cli,

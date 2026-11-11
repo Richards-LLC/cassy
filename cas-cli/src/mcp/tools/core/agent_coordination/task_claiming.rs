@@ -729,6 +729,7 @@ impl CasCore {
     ///
     /// Safety: refuses to reset a `Closed` task (use `reopen` instead).
     // gate-audit[force]: bypass G-134 Live-worker reset safety refusal; only an actual live-owner reset receives the override tag.
+    // gate-audit[reset_override]: selector Derived acceptance of external supervisor_override; final G-134 tag records the actual waiver.
     pub async fn cas_task_reset(
         &self,
         Parameters(req): Parameters<TaskReleaseRequest>,

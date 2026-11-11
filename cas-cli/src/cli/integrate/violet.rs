@@ -2676,6 +2676,7 @@ fn stale_claude_note(state: WriteState, stale: Option<&'static str>) -> Option<S
 
 /// The authenticated tools/list verdict for a claude-code entry holding this
 /// machine's registration (GH #1164).
+// gate-audit[override_url]: selector Chooses the configured server URL for comparison; not a policy bypass.
 fn claude_entry_verdict(
     probe: &ProbeOutcome,
     override_url: Option<&str>,

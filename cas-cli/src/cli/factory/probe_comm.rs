@@ -297,6 +297,7 @@ pub(crate) fn run_probe_comm(config: ProbeCommConfig) -> Result<ProbeReport> {
     run_probe_comm_with_parent(config, None)
 }
 
+// gate-audit[allow_active_cas_root]: bypass G-146 Authorizes the measured active-parent probe; final CLI result emits its tag.
 pub(crate) fn run_probe_comm_with_parent(
     config: ProbeCommConfig,
     parent_cas_root: Option<&Path>,

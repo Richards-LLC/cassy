@@ -193,6 +193,7 @@ fn execute_event(event: &str, cli: &Cli) -> anyhow::Result<()> {
 
 /// Shared entry enclosing native fast validation and ordinary hook handlers.
 /// Native failures become a fail-closed H-01 output before leaving this entry.
+// gate-audit[native]: selector Chooses the harness projection; both routes share this final fact observer.
 pub(crate) fn process_hook_input(
     event: &str,
     input: Result<String, io::Error>,

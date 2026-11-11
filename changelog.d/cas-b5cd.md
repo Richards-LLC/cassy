@@ -12,3 +12,9 @@
   skips, record typed per-code facts. One MCP router boundary observes every
   tool's coded refusal or tagged accepted override; one outer hook entry covers
   ordinary and native fast paths. Release/pre-push reporters retain refusal exits.
+
+- **Measure actual policy exceptions** — Successful accepting producers emit
+  explicit override tags, including stored operator approvals; quoted codes and
+  read-only approval replay add no facts. A test-only AST inventory generates
+  refusal/override sites, candidate exclusions and recording boundaries, and
+  rejects unclassified or uncovered factory-policy candidates.

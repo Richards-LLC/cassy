@@ -518,6 +518,8 @@ pub(crate) fn inspect_capacity(cas_root: &Path, config: &FactoryConfig) -> Build
     inspect_task(cas_root, config, 1, None, false)
 }
 
+// gate-audit[build_guard_disabled_override]: bypass G-135 The operator disables soft capacity admission; successful spawn/build producer emits the tag after admission.
+// gate-audit[reclaim]: selector Controls capacity measurement cleanup, never authorizes an over-capacity build.
 fn inspect_task(
     cas_root: &Path,
     config: &FactoryConfig,

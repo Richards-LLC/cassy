@@ -209,6 +209,7 @@ impl Round {
             Err("shadow round is sealed to its two registered children".into())
         }
     }
+    // gate-audit[internal]: input Trusted server-internal execution identity; public callers still require a registered supervisor.
     fn require_supervisor(&self, caller: &Agent, internal: bool) -> ReviewResult<()> {
         require_supervisor(caller, internal)?;
         if caller.id != self.supervisor_agent_id {

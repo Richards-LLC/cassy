@@ -10,7 +10,7 @@ use syn::{
     visit::{self, Visit},
 };
 
-const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: every registered factory check, every bypass candidate, MCP/hook/script result producers and false-positive paths. Ordinary I/O, parse and input-validation errors are excluded. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
+const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. Ordinary I/O, parse and input-validation errors are excluded. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
 
 #[derive(Default)]
 pub struct Audit {
@@ -54,6 +54,7 @@ struct Function {
     conditional: BTreeSet<String>,
     policy: bool,
     annotations: BTreeMap<String, String>,
+    script_sink: bool,
     producer: Option<&'static str>,
     emissions: Vec<(String, &'static str, usize)>,
 }
@@ -80,6 +81,8 @@ fn candidate(name: &str) -> bool {
         || name.starts_with("skip_")
         || name.starts_with("allow_")
         || name.starts_with("CAS_SKIP_")
+        || name.ends_with("_waiver")
+        || name == "decision_reason"
 }
 fn test_only(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| {
@@ -145,7 +148,11 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_expr_call(self, expr);
     }
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
-        self.function.calls.insert(expr.method.to_string());
+        // A method spelling alone is not a resolved free-function call:
+        // `.get()`/`.find()` must not import unrelated gate handlers.
+        if matches!(expr.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
+            self.function.calls.insert(expr.method.to_string());
+        }
         // Explicit codes carried to the final close receipt after compaction.
         if expr.method == "push"
             && let syn::Expr::Path(path) = expr.receiver.as_ref()
@@ -177,8 +184,8 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_pat_ident(self, pat);
     }
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        if let Some(segment) = path.path.segments.last() {
-            self.function.calls.insert(segment.ident.to_string());
+        if path.path.segments.last().is_some_and(|segment| segment.ident == "FalsePositive") {
+            self.function.calls.insert("record_false_positive".into());
         }
         visit::visit_expr_path(self, path);
     }
@@ -229,6 +236,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
     }
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
         let s = lit.value();
+        self.function.script_sink |= s.contains("gates record-refusal") || s.contains("gates record-override");
         for (prefix, kind) in [("", "refusal"), ("override ", "override")] {
             for code in bracket_codes(&s, prefix) {
                 self.function.emissions.push((code, kind, lit.span().start().line));
@@ -481,7 +489,8 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                             line.split_once(&format!("gate-audit[{flag}]:"))
                                 .map(|(_, reason)| reason.trim())
                         })
-                        .filter(|reason| !reason.is_empty());
+                        .filter(|reason| !reason.is_empty())
+                        .or_else(|| relative.rsplit('/').next().filter(|name| name.starts_with("test-") || name.starts_with("test_")).map(|_| "excluded test harness: exercises runtime flags; does not authorize factory work"));
                     script_rows.push([
                         format!("script bypass candidate {flag}"),
                         format!("{relative}:{}", index + 1),
@@ -589,7 +598,24 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                 boundary.into(),
             ]);
         }
-        if f.name.contains("false_positive") || f.calls.contains("record_false_positive") {
+        for observer in ["observe_tool_result", "observe_hook_output", "observe_cli_output"] {
+            if f.calls.contains(observer) && !f.site.starts_with("cas-cli/src/gates/") {
+                audit.rows.push([
+                    format!("fact recording boundary {}", f.name), f.site.clone(),
+                    "registered codes in final result".into(), "deduplicated".into(), "explicit tags only".into(),
+                    format!("facts::{observer}"),
+                ]);
+            }
+        }
+        if f.script_sink {
+            audit.rows.push([
+                format!("embedded script sink {}", f.name), f.site.clone(),
+                f.refused.iter().cloned().collect::<Vec<_>>().join(", "),
+                "gates record-refusal".into(), "explicit reporter".into(),
+                "embedded Git hook EXIT trap preserves refusal status".into(),
+            ]);
+        }
+        if f.name.contains("false_positive") || f.calls.iter().any(|call| call.contains("false_positive")) {
             audit.rows.push([
                 format!("false-positive path {}", f.name),
                 f.site.clone(),
@@ -681,6 +707,17 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                 if covered { "yes" } else { "—" }.into(),
                 boundary,
             ]);
+        }
+    }
+    // Producers and recording boundaries are discovered by type/call AST.
+    // Dynamic MCP ToolRouter dispatch is checked at its one public entry;
+    // helper result rows name that topology, not an inferred code-flow proof.
+    for (entry, observer) in [("call_tool", "observe_tool_result"), ("process_hook_input", "observe_hook_output")] {
+        if functions.iter().any(|f| f.producer.is_some())
+            && !functions.iter().any(|f| f.name == entry && f.calls.contains(observer))
+            && registry.len() > 1
+        {
+            audit.gaps.push(format!("{entry}: result boundary does not invoke {observer}"));
         }
     }
     for (code, stage, title, site) in registry {

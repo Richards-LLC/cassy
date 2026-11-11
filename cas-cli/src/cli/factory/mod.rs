@@ -1343,6 +1343,7 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 let root = cas_root.ok_or_else(|| anyhow::anyhow!("train merge requires a Cassy project"))?;
                 let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
                 let receipt = core.train_merge(epic, (!tasks.is_empty()).then_some(tasks.as_slice()), *supervisor_override, reason.as_deref())?;
+                crate::gates::facts::observe_cli_output(root, &receipt);
                 if cli.json { println!("{}", serde_json::json!({"receipt": receipt})); }
                 else { println!("{receipt}"); }
                 Ok(())

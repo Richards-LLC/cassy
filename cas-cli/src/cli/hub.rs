@@ -718,6 +718,7 @@ enum StopWait {
 /// `settle_pid` is the hub we just signalled: quiescence additionally requires
 /// that process to be gone. `stale_pid` is never accepted as satisfying — the
 /// hub we are trying to replace must not be mistaken for the replacement.
+// gate-audit[force]: selector Non-factory Hub process-stop strategy; stopping replacement processes still requires the machine lock.
 fn wait_for_stop_or_satisfying_hub(
     paths: &HubRuntimePaths,
     settle_pid: Option<u32>,
@@ -1521,6 +1522,7 @@ fn peer_hub_record_after_child_exit(
     }
 }
 
+// gate-audit[force]: selector Non-factory Hub lifecycle recovery; lock ownership and process identity remain enforced.
 fn start_with_output_resolved(
     args: &HubServeArgs,
     cli: &Cli,

@@ -183,6 +183,8 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     agents.init().unwrap();
     agents.register(&Agent::new_with_role("gate-supervisor".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
     core.set_agent_id_for_testing("gate-supervisor".into());
+    assert!(core.load_config().verification_enabled());
+    crate::store::open_verification_store(dir.path()).unwrap();
     let tasks = crate::store::open_task_store(dir.path()).unwrap();
     tasks.init().unwrap();
     let mut task = Task::new("cas-override".into(), "External repair measured".into());
@@ -212,7 +214,7 @@ async fn refusals_overrides_and_false_positives_are_counted_per_code() {
     assert_ne!(response.is_error, Some(true), "{response:?}");
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed);
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-68"),
-        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }));
+        Some(&facts::Counts { refused: 0, overridden: 1, false_positive: 0 }), "{response:?}; {:?}", tasks.get(&task.id).unwrap().notes);
     client.cancel().await.unwrap();
     server.await.unwrap();
     assert_eq!(facts::summarize(&store, before).unwrap().get("G-116"),

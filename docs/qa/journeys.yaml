@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  release-member-candidate-approval:
+    title: Release closeout accepts a source-bound approved candidate only when its reviewed tree shipped
+    tasks: [cas-0d3f]
+    journeys: [CLI-RELEASE, FACTORY-CLOSE]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
   queued-blocked-successor-source:
     title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
     tasks: [cas-57df]
@@ -573,11 +578,6 @@ bug_families:
     title: One release verdict retains the published SHA across historical epic targets while QA target containment and member ancestry remain required
     tasks: [cas-bc58]
     journeys: [FACTORY-QA-RECEIPT]
-  release-member-candidate-approval:
-    title: Release closeout accepts a source-bound approved candidate only when its reviewed tree shipped
-    tasks: [cas-0d3f]
-    journeys: [CLI-RELEASE, FACTORY-CLOSE]
-    invariants: [FACTORY-RELEASE-CLOSEOUT]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1371,8 +1371,8 @@ invariants:
     check: Run imported_release_review_resolves_verified_peer_ledger_cas_52c1 through ReleaseClose.prepare with a producer path absent on the consumer; require imported receipt and task state retention, cold metadata hydration, and holds for foreign owner, altered remote or local bytes, local or remote revocation, unavailable Cloud and receipt mismatch.
     bug: {task: cas-52c1}
   HUB-J5-SELECTED-REPLY-RECOVERY:
-    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; reconnect can deliver it, while an unreceived zero-attempt selection expires after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
-    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race and WebSocket delivery.
+    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; each actual forward records an attempt and its next retry. A concrete authenticated device can settle a wildcard reply, including after a receipt write exhausts the daemon's SQLite budget. Unreceived selections expire after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
+    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, forwarding, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race, counted WebSocket delivery, authenticated wildcard receipts and a locked SQLite receipt with a spent caller budget.
   CLI-RELEASE-NOTICE-EXHAUSTION:
     statement: Installed post-release notices have a persisted attempt cap; exhaustion retains one failed receipt and reports once to the release owner without repeating reconciliation or requeuing the receipt.
     check: Run scripts/test-install-on-publish.sh with an always-failing older notice across timer restarts and legacy receipt rediscovery. Require exactly the configured attempts, one failed JSON and one failure report. Run failed_install_notice_reaches_owner_once_cas_fed1 to verify repeated reporting reaches the recorded owner once even after train rollover, without published-tag reconciliation.

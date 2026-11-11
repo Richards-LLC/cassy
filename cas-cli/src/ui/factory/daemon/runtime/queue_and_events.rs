@@ -8044,8 +8044,9 @@ impl FactoryDaemon {
             for reply in replies {
                 self.queue_jobs.stamp(
                     self.app.cas_dir(), reply.queued.id, "operator",
-                    super::prompt_queue_jobs::QueueStamp::OperatorReplyDeferred {
+                    super::prompt_queue_jobs::QueueStamp::OperatorReplyRetry {
                         retry_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+                        attempted: false,
                     },
                 );
             }
@@ -8095,6 +8096,13 @@ impl FactoryDaemon {
                 task_id: payload.task_id,
             };
             self.ws_broadcast(&reply);
+            self.queue_jobs.stamp(
+                self.app.cas_dir(), queued.id, "operator",
+                super::prompt_queue_jobs::QueueStamp::OperatorReplyRetry {
+                    retry_at: chrono::Utc::now() + chrono::Duration::seconds(delay.as_secs() as i64),
+                    attempted: true,
+                },
+            );
             tracing::info!(
                 target: "cas::coordination",
                 stage = "operator_reply_forwarded",
@@ -8138,12 +8146,29 @@ impl FactoryDaemon {
         notification_id: i64,
         device_id: &str,
     ) -> anyhow::Result<()> {
-        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        let device_id = device_id.to_owned();
+        let persist = move || -> anyhow::Result<bool> {
+            let queue = crate::store::open_prompt_queue_store(&cas_dir)?;
+            Ok(queue.record_operator_reply_persisted(notification_id, &session, &device_id)?)
+        };
         // cas-59da: only a receipt that closes the row proves its addressee
         // is reachable. A non-addressee's stored receipt leaves the row
         // pending; clearing the backoff then re-forwarded it every tick.
-        if queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)? {
-            self.queue_jobs.operator_reply_retries.clear();
+        match persist() {
+            Ok(true) => self.queue_jobs.operator_reply_retries.clear(),
+            Ok(false) => {},
+            Err(error) => {
+                let busy = matches!(error.downcast_ref::<cas_store::StoreError>(),
+                    Some(cas_store::StoreError::Database(sqlite)) if cas_store::shared_db::is_busy_error(sqlite));
+                if !busy { return Err(error); }
+                // A real device already kept this reply. The loop's spent
+                // SQLite budget must not discard its receipt.
+                let deferred = super::store_worker::defer("operator reply receipt", &error.to_string(),
+                    move || persist().map(drop));
+                if deferred == super::store_worker::Persisted::Dropped { return Err(error); }
+            }
         }
         Ok(())
     }
@@ -14205,6 +14230,8 @@ mod tests {
                 "provision-test",
             )
             .unwrap();
+        // Completed supervisor mirrors persist the broadcast marker explicitly.
+        queue.stamp_recipient_device(id, "*").unwrap();
         let reply = super::read_operator_replies(
             &root,
             queue.as_ref(),
@@ -14243,6 +14270,9 @@ mod tests {
         daemon.flush_ws_client_output().await;
         assert!(client.next().await.unwrap().unwrap().is_binary());
         assert_eq!(log_count(), 1);
+        let forwarded = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(forwarded.retry.delivery_attempts, 1);
+        assert!(forwarded.retry.next_attempt_at.is_some());
         // Independently specified intervals, including repeated capped retries.
         let mut attempts = 1;
         for seconds in [1, 2, 4, 8, 16, 32, 60, 60] {
@@ -14375,7 +14405,18 @@ mod tests {
                 .processed_at
                 .is_some()
         );
-        daemon.acknowledge_operator_reply(id, "*").unwrap();
+        // A receipt must survive the daemon pass spending its SQLite budget.
+        let writer = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let _spent = cas_store::wait_budget::bound_waits_for(Duration::ZERO);
+            daemon.handle_ws_message(0, crate::ui::factory::ClientMessage::OperatorReplyPersisted {
+                notification_id: id,
+                device_id: "paired-device".into(),
+            }).await;
+        }
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(super::super::store_worker::global().wait_idle(Duration::from_secs(5)));
         assert!(
             queue
                 .queued_prompt(id)
@@ -14384,6 +14425,10 @@ mod tests {
                 .processed_at
                 .is_some()
         );
+        daemon.queue_jobs.apply_completions();
+        let delivered = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(delivered.stage, cas_store::DeliveryStage::Delivered);
+        assert!(delivered.retry.delivery_attempts > 0);
     }
     #[tokio::test]
     async fn cas_5c2c_review_operator_fallback_is_consumed_and_acknowledged() {

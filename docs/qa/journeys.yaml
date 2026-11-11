@@ -456,11 +456,6 @@ bug_families:
     tasks: [cas-fd21]
     invariants: [FACTORY-CLOSE-LATE-PARK]
     journeys: [FACTORY-CLOSE]
-  late-close-park-refusals:
-    title: A late close reports every failed park gate and links to the complete refusal
-    tasks: [cas-5c77]
-    invariants: [FACTORY-CLOSE-LATE-PARK]
-    journeys: [FACTORY-CLOSE]
   peer-override-readable-reason:
     title: Peer override notices keep machine identity separate from operator reasons and retained code summaries fall back to the message
     tasks: [cas-ef6e]
@@ -556,6 +551,16 @@ bug_families:
     tasks: [cas-0d5e]
     journeys: [HUB-J17, HUB-J25, HUB-J26]
     invariants: [HUB-WORKER-TIMELINE-HEADER]
+  late-close-park-refusals:
+    title: A late close reports every failed park gate and links to the complete refusal
+    tasks: [cas-5c77]
+    invariants: [FACTORY-CLOSE-LATE-PARK]
+    journeys: [FACTORY-CLOSE]
+  supervisor-context-clear-skip:
+    title: Explain why a supervisor wake over the ledger cap did not clear context
+    tasks: [cas-253c]
+    journeys: [FACTORY-SUPERVISE]
+    invariants: [FACTORY-CONTEXT-CLEAR-SKIP]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1336,6 +1341,10 @@ invariants:
     statement: Missing Claude SessionStart canaries refuse admission while retaining bounded redacted boot output and worker/request identity; inspection does not invent process liveness or grant mutation authority, and only completed teardown releases a matching task binding.
     check: Run canary_failure_retains_boot_diagnostics_cas_4cdd through the real daemon with completed and unconfirmed teardown, debug and JSON is-wedged by worker/request; run launch_without_registration_records_failed_with_reason for retained lookup and fresh-retry identity.
     bug: {task: cas-4cdd}
+  FACTORY-CONTEXT-CLEAR-SKIP:
+    statement: An over-cap wake ledger total with latest-call occupancy below the context threshold leaves one quiet explanation for the supervisor. The occupancy threshold still controls checkpoint and clear.
+    check: Replay cached_wake_replay_uses_latest_call_and_reported_window through the turn scanner. Verify one passive notice on a fresh ledger event, no duplicate on replay, no reset from repeated cache reads, and a handoff when latest-call occupancy crosses the reported-window threshold.
+    bug: {task: cas-253c}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1355,7 +1364,7 @@ journeys:
   entry: {url: 'cli:cas factory', trigger: Start or resume a supervisor}
   steps: [Start the supervisor, Process a wake, Resume work with its recorded context]
   owners: [cas-cli/src/ui/factory/director/events.rs, cas-cli/src/ui/factory/director/supervisor_stall_tests.rs, cas-cli/src/ui/factory/app/assignment_evidence_tests.rs, cas-cli/src/supervisor_auto_clear.rs, cas-cli/src/factory_context_reset.rs, cas-cli/src/finding_triage.rs, cas-cli/src/ui/factory/daemon/runtime/prompt_queue_jobs.rs, cas-cli/src/supervisor_message_wakes.rs, cas-cli/src/cloud/peer_mailbox.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/mcp/tools/service/agent_search_system/message.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs, cas-cli/src/mcp/tools/core/memory.rs, cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs, cas-cli/src/mcp/server/mod.rs]
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-SCOPED-IDLE-STAFFING, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
+  invariants: [FACTORY-CONTEXT-CLEAR-SKIP, FACTORY-FINDING-PRIORITY, FACTORY-SCOPED-IDLE-STAFFING, FACTORY-CAPACITY-NOTICES, FACTORY-UNDELIVERED-RELAY-ACTION, FACTORY-PEER-CAP-FEEDBACK, FACTORY-WORKER-RESPAWN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-MERGE

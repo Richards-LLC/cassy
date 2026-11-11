@@ -374,6 +374,8 @@ is 80% of the harness-reported `model_context_window`, capped by
 `factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
 a reported window, only that configured per-call cap applies; capacity is never
 inferred from a model name. Cumulative wake billing cannot trigger a clear.
+If the wake ledger exceeds the cap while the latest call is below the context
+threshold, the supervisor inbox gets one quiet line with both measurements.
 It acts only at an idle
 boundary: the turn has ended, no newer turn is running, no delivery-target
 lock is held, no release train is frozen, no `release-repair` task is open, and

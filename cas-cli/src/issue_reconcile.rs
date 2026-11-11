@@ -836,8 +836,8 @@ mod tests {
 
         let inventory = |deliveries: &[&str]| -> crate::qa_batch::ReleaseInventory {
             serde_json::from_value(serde_json::json!({
-                "scope": {"project_id": "p", "repository": REPO, "release_id": "v4.14.0", "reviewed_sha": "a",
-                          "final_release_sha": "a", "promotion_pr": null, "release_tag": "v4.14.0"},
+                "scope": {"project_id": "p", "repository": REPO, "release_id": "v9.99.0", "reviewed_sha": "a",
+                          "final_release_sha": "a", "promotion_pr": null, "release_tag": "v9.99.0"},
                 "deliveries": deliveries.iter().map(|id| serde_json::json!({"task_id": id, "generation": "1", "anchor": null,
                     "base_sha": null, "shipped_commit": "a", "membership": "ancestry", "proof_refs": []})).collect::<Vec<_>>(),
                 "exceptions": [],

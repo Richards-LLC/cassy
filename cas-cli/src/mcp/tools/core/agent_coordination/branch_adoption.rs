@@ -158,31 +158,46 @@ pub(super) fn adopt_task_branch(
     if !git.run(&["status", "--porcelain"])?.is_empty() {
         return Err("receiver worktree has uncommitted work; commit it before adopting".into());
     }
-    let prior = task
+    let mut candidates: Vec<String> = task
         .assignee
         .as_deref()
-        .ok_or("task has no prior assignee")?;
-    let mut candidates = vec![worker_task_branch(prior, &task.id)];
+        .map(|prior| worker_task_branch(prior, &task.id))
+        .into_iter()
+        .collect();
+    // Reboot cleanup can clear the assignee while retaining the source
+    // recorded at start. Adopt that exact branch without reviving its owner.
+    if task.assignee.is_none() {
+        candidates.extend(
+            task.deliverables
+                .factory_branch_start
+                .as_ref()
+                .map(|start| start.branch.clone()),
+        );
+    }
     candidates.extend(task.deliverables.parked_branch.iter().cloned());
     candidates.extend(task.deliverables.handoff_branches.iter().rev().cloned());
-    candidates.push(crate::factory_isolation::expected_worker_branch(prior));
+    if let Some(prior) = task.assignee.as_deref() {
+        candidates.push(crate::factory_isolation::expected_worker_branch(prior));
+    }
     let mut source = None;
-    for branch in candidates {
+    'branches: for branch in candidates {
         if !branch.starts_with("factory/") {
             continue;
         }
-        let reference = format!("refs/heads/{branch}^{{commit}}");
-        let output = git.output(&["rev-parse", "--verify", "--end-of-options", &reference])?;
-        if output.status.success() {
-            source = Some((
-                branch,
-                String::from_utf8_lossy(&output.stdout).trim().to_string(),
-            ));
-            break;
+        for prefix in ["refs/heads", "refs/remotes/origin"] {
+            let reference = format!("{prefix}/{branch}^{{commit}}");
+            let output = git.output(&["rev-parse", "--verify", "--end-of-options", &reference])?;
+            if output.status.success() {
+                source = Some((
+                    branch,
+                    String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                ));
+                break 'branches;
+            }
         }
     }
     let (source_branch, source_head) =
-        source.ok_or("no local factory delivery branch found for this task")?;
+        source.ok_or("no factory delivery branch found for this task")?;
     let tip = if let Some(anchor) = &task.deliverables.factory_branch_anchor {
         let reference = format!("{anchor}^{{commit}}");
         let tip = git.run(&["rev-parse", "--verify", "--end-of-options", &reference])?;

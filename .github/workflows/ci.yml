@@ -57,11 +57,12 @@ on:
 
 # cas-12ab: a newer push to the same factory/* branch cancels the run it
 # supersedes (one worker pushed 6 times in 31 minutes: 12 workflow runs). Every
-# release-train push also replaces its older tip. Other events keep a run-id
-# group, so main, ordinary epics, tags and the merge queue remain independent.
+# release-train ref keeps one running and the newest pending run (cas-43ab).
+# Other events keep a run-id group, so main, ordinary epics, tags and the merge
+# queue remain independent.
 concurrency:
   group: ${{ (startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-'))) && format('ci-branch-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
-  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/epic/release-train-')) }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/factory/') }}
 
 env:
   CARGO_TERM_COLOR: always

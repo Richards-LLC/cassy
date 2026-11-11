@@ -711,6 +711,8 @@ mod tests {
                     fingerprint: "fixture".into(),
                 }),
                 key,
+                reconciler_version: Some(env!("CARGO_PKG_VERSION").into()),
+                reconciler_stale: false,
                 scope: scope.clone(),
                 triggers: vec![trigger],
                 members: BTreeMap::from([("cas-0001".into(), CassyMergeClose::AlreadyClosed)]),
@@ -893,17 +895,18 @@ mod tests {
         use cas_types::{Dependency, DependencyType, FactoryBranchStart, Task, TaskStatus, WorkTarget};
         let (temp, root, mut train, _, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();
+        let tag = format!("v{}", env!("CARGO_PKG_VERSION"));
         let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
         fs::write(repo.join("held.txt"), "held\n").unwrap();
         git(repo, &["add", "held.txt"]).unwrap();
         git(repo, &["commit", "-m", "held delivery"]).unwrap();
         let anchor = git(repo, &["rev-parse", "HEAD"]).unwrap();
-        git(repo, &["tag", "-a", "v9.99.2", "-m", "release"]).unwrap();
+        git(repo, &["tag", "-a", &tag, "-m", "release"]).unwrap();
         // Publish the tag to a local origin while keeping the GitHub identity.
         let bare = temp.path().join("origin.git");
         git(repo, &["init", "--bare", bare.to_str().unwrap()]).unwrap();
         git(repo, &["config", &format!("url.{}.insteadOf", bare.display()), "https://github.com/Example/Repo.git"]).unwrap();
-        git(repo, &["push", "origin", "v9.99.2"]).unwrap();
+        git(repo, &["push", "origin", &tag]).unwrap();
 
         let store = crate::store::open_task_store(&root).unwrap();
         train.origin_project = Some("release-fixture".into());
@@ -924,9 +927,9 @@ mod tests {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let _cwd = env.enter_dir(repo);
         for _ in 0..2 {
-            recover(&root, &train.id, "v9.99.2", ReconcileTrigger::Installed).unwrap();
+            recover(&root, &train.id, &tag, ReconcileTrigger::Installed).unwrap();
         }
-        let key = operation_key("release-fixture", "v9.99.2", &anchor);
+        let key = operation_key("release-fixture", &tag, &anchor);
         let record: ReleaseReconcileReceipt = serde_json::from_value(
             cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap(),
         ).unwrap();

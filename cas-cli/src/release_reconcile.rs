@@ -29,6 +29,10 @@ pub(crate) enum ReconcileTrigger {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct ReleaseReconcileReceipt {
     pub key: ReleaseOperationKey,
+    #[serde(default)]
+    pub reconciler_version: Option<String>,
+    #[serde(default)]
+    pub reconciler_stale: bool,
     pub scope: ReleaseScope,
     pub triggers: Vec<ReconcileTrigger>,
     pub members: BTreeMap<String, CassyMergeClose>,
@@ -77,6 +81,9 @@ pub(crate) enum ParentOutcome {
 /// Only effect boundaries are replaceable; the identity lock and checkpoint
 /// transactions are the production store in both replay tests and adapters.
 trait ReleaseEffects {
+    fn reconciler_version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
     fn sync_pending(&self, _ids: &[String]) -> Result<Vec<String>> {
         Ok(vec![])
     }
@@ -163,6 +170,8 @@ async fn resume(
         Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
         None => ReleaseReconcileReceipt {
             key,
+            reconciler_version: None,
+            reconciler_stale: false,
             scope: scope.clone(),
             triggers: vec![],
             members: BTreeMap::new(),
@@ -200,6 +209,30 @@ async fn resume(
             .save(&serde_json::to_value(receipt).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())
     };
+    let tag_version = release_version(&receipt.scope)?;
+    let stale = stale_reconciler(&receipt)?;
+    let version = effects.reconciler_version();
+    let current = semver::Version::parse(version)
+        .map_err(|_| "RELEASE_RECONCILER_VERSION_INVALID".to_string())?;
+    if tag_version.as_ref().is_some_and(|tag| &current < tag) {
+        // Never overwrite progress made by a qualified binary with an older one.
+        if stale {
+            receipt.reconciler_version = Some(version.into());
+            receipt.reconciler_stale = true;
+            receipt.complete = false;
+            save(&receipt)?;
+        }
+        return Err("RELEASE_RECONCILER_STALE".into());
+    }
+    if stale {
+        // Reevaluate old decisions once under qualified code. Saved intents
+        // continue to pin each delivery cycle; the core keeps closed tasks idempotent.
+        receipt.complete = false;
+        receipt.members.clear();
+        receipt.parents.clear();
+        receipt.issue_outcomes.clear();
+        receipt.residuals.clear();
+    }
     if receipt.complete {
         receipt.sync_pending = effects.sync_pending(
             &receipt
@@ -212,6 +245,8 @@ async fn resume(
         save(&receipt)?;
         return Ok(receipt);
     }
+    receipt.reconciler_version = Some(version.into());
+    receipt.reconciler_stale = false;
     retire_unproven_members(&mut receipt, inventory);
     receipt.scope = scope.clone();
     receipt.exceptions = inventory.exceptions.clone();
@@ -385,13 +420,30 @@ pub(crate) fn completed_operation(
     root: &Path,
     key: &ReleaseOperationKey,
 ) -> Result<Option<ReleaseReconcileReceipt>> {
-    cas_store::release_reconcile_store::load_release_operation(root, key)
+    let saved = cas_store::release_reconcile_store::load_release_operation(root, key)
         .map_err(|e| e.to_string())?
         .map(|value| {
             serde_json::from_value::<ReleaseReconcileReceipt>(value).map_err(|e| e.to_string())
         })
-        .transpose()
-        .map(|saved| saved.filter(|r| r.complete))
+        .transpose()?;
+    match saved {
+        Some(receipt) if receipt.complete && !stale_reconciler(&receipt)? => Ok(Some(receipt)),
+        _ => Ok(None),
+    }
+}
+
+fn release_version(scope: &ReleaseScope) -> Result<Option<semver::Version>> {
+    scope.release_tag.as_deref().map(|tag| {
+        semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag))
+            .map_err(|_| "RELEASE_TAG_VERSION_INVALID".to_string())
+    }).transpose()
+}
+
+fn stale_reconciler(receipt: &ReleaseReconcileReceipt) -> Result<bool> {
+    let Some(tag) = release_version(&receipt.scope)? else { return Ok(false); };
+    Ok(receipt.reconciler_version.as_deref()
+        .and_then(|version| semver::Version::parse(version).ok())
+        .is_none_or(|version| version < tag))
 }
 
 fn outcome_residuals(
@@ -632,6 +684,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     struct Effects {
+        version: String,
         closed: BTreeSet<String>,
         crash: bool,
         actual_closes: usize,
@@ -639,6 +692,7 @@ mod tests {
         owner: String,
     }
     impl ReleaseEffects for Effects {
+        fn reconciler_version(&self) -> &str { &self.version }
         fn intent(&self, id: &str) -> Result<serde_json::Value> {
             Ok(serde_json::json!({"cycle": id}))
         }
@@ -684,6 +738,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn newer_reconciler_replays_stale_operation_once_cas_cf7c() {
+        let current = env!("CARGO_PKG_VERSION");
+        // Missing stamps model receipts written before version tracking existed.
+        for recorded in [None, Some("0.0.0"), Some(current), Some("999.0.0")] {
+            let temp = tempfile::tempdir().unwrap();
+            let scope = ReleaseScope {
+                project_id: "project-a".into(), repository: "org/repo".into(),
+                release_id: format!("v{current}"), release_tag: Some(format!("v{current}")),
+                reviewed_sha: "a".repeat(40), final_release_sha: "a".repeat(40),
+                promotion_pr: None, constituent_epic_ids: vec![],
+                included_task_ids: vec!["cas-a".into()], no_code_members: BTreeMap::new(), proof_refs: vec![],
+            };
+            let inventory = ReleaseInventory { scope: scope.clone(), exceptions: vec![], deliveries: vec![
+                crate::qa_batch::ReleaseDelivery {
+                    task_id: "cas-a".into(), generation: "generation-a".into(),
+                    anchor: Some("a".repeat(40)), base_sha: Some("b".repeat(40)),
+                    shipped_commit: Some("a".repeat(40)),
+                    membership: crate::qa_batch::ReleaseMembership::Ancestry, proof_refs: vec![],
+                },
+            ] };
+            let mut effects = Effects {
+                version: "0.0.0".into(), closed: BTreeSet::new(), crash: false,
+                actual_closes: 0, parent_passes: 0, owner: "owner".into(),
+            };
+            let key = ReleaseOperationKey {
+                project_id: scope.project_id.clone(), release_id: scope.release_id.clone(),
+                final_release_sha: scope.final_release_sha.clone(),
+            };
+            // An installed binary older than the tag records its refusal without effects.
+            assert_eq!(resume(temp.path(), &scope, &inventory, ReconcileTrigger::Installed, &mut effects)
+                .await.unwrap_err(), "RELEASE_RECONCILER_STALE");
+            assert_eq!(effects.parent_passes, 0);
+            let old = cas_store::release_reconcile_store::load_release_operation(temp.path(), &key)
+                .unwrap().unwrap();
+            assert_eq!(old["reconciler_version"], "0.0.0");
+            assert_eq!(old["reconciler_stale"], true);
+            effects.version = current.into();
+            let receipt = resume(temp.path(), &scope, &inventory, ReconcileTrigger::Installed, &mut effects)
+                .await.unwrap();
+            assert!(receipt.complete);
+            // Replay a persisted historical completion, including pre-stamp rows.
+            let mut saved = serde_json::to_value(&receipt).unwrap();
+            saved.as_object_mut().unwrap().remove("reconciler_stale");
+            if let Some(version) = recorded { saved["reconciler_version"] = version.into(); }
+            else { saved.as_object_mut().unwrap().remove("reconciler_version"); }
+            ReleaseOperation::open(temp.path(), key.clone()).unwrap().save(&saved).unwrap();
+            let stale = recorded.is_none() || recorded == Some("0.0.0");
+            assert_eq!(completed_operation(temp.path(), &key).unwrap().is_none(), stale);
+            let before = effects.parent_passes;
+            for _ in 0..2 {
+                let replay = resume(temp.path(), &scope, &inventory, ReconcileTrigger::Backfill, &mut effects)
+                    .await.unwrap();
+                assert!(replay.complete);
+                assert_eq!(replay.key, receipt.key);
+                assert_eq!(replay.close_intents, receipt.close_intents);
+                assert_eq!(replay.members.len(), 1);
+                assert_eq!(replay.notice_intent.as_ref().unwrap().key, receipt.notice_intent.as_ref().unwrap().key);
+            }
+            assert_eq!(effects.parent_passes - before, usize::from(stale));
+            assert_eq!(effects.actual_closes, 1);
+            let final_receipt = completed_operation(temp.path(), &key).unwrap().unwrap();
+            let persisted = serde_json::to_value(final_receipt).unwrap();
+            assert_eq!(persisted["reconciler_version"], if stale { current } else { recorded.unwrap() });
+            assert_eq!(persisted["reconciler_stale"], false);
+        }
+    }
+
+    #[tokio::test]
     async fn release_replay_recovers_after_committed_effect_and_supervisor_turnover() {
         let temp = tempfile::tempdir().unwrap();
         let scope = ReleaseScope {
@@ -717,6 +839,7 @@ mod tests {
                 .collect(),
         };
         let mut effects = Effects {
+            version: "9.99.1".into(),
             closed: BTreeSet::new(),
             crash: true,
             actual_closes: 0,
@@ -814,6 +937,7 @@ mod tests {
         let mut concurrent_inventory = inventory.clone();
         concurrent_inventory.scope = concurrent_scope.clone();
         let effects_for = |owner: &str| Effects {
+            version: "9.99.1".into(),
             closed: BTreeSet::new(),
             crash: false,
             actual_closes: 0,

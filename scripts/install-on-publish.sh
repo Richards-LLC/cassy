@@ -28,7 +28,8 @@
 # Environment: CAS_RELEASE_REPO (default Richards-LLC/cassy), CAS_BIN (cas),
 # GH_BIN (gh), XDG_STATE_HOME, RELEASE_INSTALL_NOW (epoch, tests),
 # RELEASE_INSTALL_HOST (host label in the notes; default hostname -s),
-# RELEASE_NOTICE_TIMEOUT_SECONDS (notice deadline; default 45).
+# RELEASE_NOTICE_TIMEOUT_SECONDS (notice deadline; default 45),
+# RELEASE_NOTICE_MAX_ATTEMPTS (installed notice attempt cap; default 10).
 set -euo pipefail
 
 repo="${CAS_RELEASE_REPO:-Richards-LLC/cassy}"
@@ -38,8 +39,10 @@ state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/cassy"
 state_file="$state_dir/install-on-publish.last-failure"
 retry_seconds="${RELEASE_INSTALL_RETRY_SECONDS:-600}"
 notice_timeout="${RELEASE_NOTICE_TIMEOUT_SECONDS:-45}"
+notice_max_attempts="${RELEASE_NOTICE_MAX_ATTEMPTS:-10}"
 pending_dir="$state_dir/install-on-publish.pending.d"
 notified_dir="$state_dir/install-on-publish.notified.d"
+failed_dir="$state_dir/install-on-publish.failed.d"
 publication_pending_dir="$state_dir/install-on-publish.published.pending.d"
 publication_done_dir="$state_dir/install-on-publish.published.d"
 unit_name=cassy-install-on-publish
@@ -182,12 +185,13 @@ update_release() {
     fi
 }
 
-# Keep each installed publication until its notice succeeds, including receipts
+# Keep each installed publication until its notice succeeds or exhausts, including receipts
 # left by the old single-receipt installer before this script was upgraded.
 queue_notice() {
     local tag="$1" receipt="$2"
     mkdir -p "$pending_dir" "$notified_dir"
     [[ ! -e "$notified_dir/$tag" ]] || return 0
+    [[ ! -e "$failed_dir/$tag.json" && ! -e "$pending_dir/$tag.json" ]] || return 0
     cp "$receipt" "$pending_dir/$tag.json.tmp"
     mv "$pending_dir/$tag.json.tmp" "$pending_dir/$tag.json"
 }
@@ -225,6 +229,8 @@ preserve_pending() {
 # Bound the entire adapter, including startup, SQLite and close gates. Kill
 # descendants too: bounded Git probes can own separate process groups.
 deliver_notice() {
+    local phase="$1" receipt="$2"
+    shift 2
     [[ "$notice_timeout" =~ ^[1-9][0-9]*$ ]] || { log "invalid notice timeout: $notice_timeout"; return 1; }
     perl -MPOSIX=setpgid -e '
         my $seconds = shift @ARGV;
@@ -262,7 +268,7 @@ deliver_notice() {
         my $status = $?;
         alarm 0;
         exit(($status & 127) ? 128 + ($status & 127) : $status >> 8);
-    ' "$notice_timeout" "$cas_bin" release "$1" --receipt "$2" --repo "$repo"
+    ' "$notice_timeout" "$cas_bin" release "$phase" --receipt "$receipt" --repo "$repo" "$@"
 }
 
 # Reconcile only after version verification, using the same adapter deadline.
@@ -283,18 +289,46 @@ notify_published() {
     fi
 }
 
-notify_installed() {
+notice_attempts() {
+    perl -MJSON::PP -0777 -ne 'my $v = decode_json($_); print $v->{installer_notice_attempts} // 0;' "$1"
+}
+
+report_failed_notice() {
     local tag="$1"
+    [[ -r "$failed_dir/$tag.json" && ! -e "$failed_dir/$tag.reported" ]] || return 0
+    # The adapter's durable key also dedupes a crash before this local marker.
+    if deliver_notice installed "$failed_dir/$tag.json" --failed-attempts "$(notice_attempts "$failed_dir/$tag.json")"; then
+        touch "$failed_dir/$tag.reported"
+    fi
+}
+
+notify_installed() {
+    local tag="$1" attempts
     [[ -r "$pending_dir/$tag.json" ]] || return 0
     if [[ -e "$notified_dir/$tag" ]]; then
         rm -f "$pending_dir/$tag.json"
         return 0
     fi
-    if deliver_notice installed "$pending_dir/$tag.json"; then
-        touch "$notified_dir/$tag"
-        rm -f "$pending_dir/$tag.json"
-        printf '%s\n' "$tag" >"$state_dir/install-on-publish.notified.tmp"
-        mv "$state_dir/install-on-publish.notified.tmp" "$state_dir/install-on-publish.notified"
+    [[ "$notice_max_attempts" =~ ^[1-9][0-9]*$ ]] || { log "invalid notice attempt cap: $notice_max_attempts"; return 1; }
+    attempts="$(notice_attempts "$pending_dir/$tag.json")"
+    if (( attempts < notice_max_attempts )); then
+        # Persist before delivery so a killed adapter still consumes an attempt.
+        perl -MJSON::PP -0777 -ne 'my $v = decode_json($_); $v->{installer_notice_attempts} = ($v->{installer_notice_attempts} // 0) + 1; print encode_json($v);' \
+            "$pending_dir/$tag.json" >"$pending_dir/$tag.json.tmp"
+        mv "$pending_dir/$tag.json.tmp" "$pending_dir/$tag.json"
+        attempts=$((attempts + 1))
+        if deliver_notice installed "$pending_dir/$tag.json"; then
+            touch "$notified_dir/$tag"
+            rm -f "$pending_dir/$tag.json"
+            printf '%s\n' "$tag" >"$state_dir/install-on-publish.notified.tmp"
+            mv "$state_dir/install-on-publish.notified.tmp" "$state_dir/install-on-publish.notified"
+            return 0
+        fi
+    fi
+    if (( attempts >= notice_max_attempts )); then
+        mkdir -p "$failed_dir"
+        mv "$pending_dir/$tag.json" "$failed_dir/$tag.json"
+        log "post-release notice failed for $tag after $attempts attempts; retained at $failed_dir/$tag.json"
     else
         log "post-release notice pending for $tag; retrying on the next tick"
     fi
@@ -318,6 +352,14 @@ retry_pending() {
         [[ "$tag" != "$latest" ]] || continue
         if [[ -e "$notified_dir/$tag" ]]; then rm -f "$receipt"; continue; fi
         notify_installed "$tag"
+        break
+    done
+    # Reporting retries reuse the failed record and never re-run reconciliation.
+    for receipt in "$failed_dir"/*.json; do
+        [[ -f "$receipt" ]] || continue
+        tag="${receipt##*/}"; tag="${tag%.json}"
+        [[ ! -e "$failed_dir/$tag.reported" ]] || continue
+        report_failed_notice "$tag"
         break
     done
 }

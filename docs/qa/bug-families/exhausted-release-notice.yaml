@@ -1,0 +1,4 @@
+title: Stop exhausted installed-release notices and report once to their owner
+tasks: [cas-fed1]
+invariants: [CLI-RELEASE-NOTICE-EXHAUSTION]
+journeys: [CLI-RELEASE]

@@ -160,6 +160,9 @@ pub struct InstalledArgs {
     receipt: PathBuf,
     #[arg(long)]
     repo: String,
+    /// Report exhausted installer attempts once, without retrying reconciliation
+    #[arg(long)]
+    failed_attempts: Option<std::num::NonZeroU32>,
 }
 #[derive(Debug, Args)]
 pub struct BackfillArgs {
@@ -838,9 +841,18 @@ pub fn installed(args: &InstalledArgs, current_root: Option<&Path>) -> Result<()
     );
     let mut delivered = 0;
     for root in release_roots(current_root)? {
-        delivered += usize::from(installed_at_root(&root, &args.repo, &version)?);
+        delivered += usize::from(if let Some(attempts) = args.failed_attempts {
+            super::release_notice_failure::record(&root, &args.repo, &version, attempts, &args.receipt)?
+        } else {
+            installed_at_root(&root, &args.repo, &version)?
+        });
     }
-    println!("Post-release notice recorded for v{version} ({delivered} project(s))");
+    if args.failed_attempts.is_some() {
+        ensure!(delivered > 0, "no tracked release owner found for {version}; keep the failed receipt for reporting");
+        println!("Post-release failure recorded for v{version} ({delivered} project(s))");
+    } else {
+        println!("Post-release notice recorded for v{version} ({delivered} project(s))");
+    }
     Ok(())
 }
 
@@ -977,6 +989,7 @@ pub(super) mod tests {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, root, _, owner, mut args) = fixture();
+        args.version = env!("CARGO_PKG_VERSION").into();
         let repo = temp.path();
         fs::write(root.join("config.toml"), format!(
             "[project]\ncanonical_id='release-fixture'\n[verification]\nenabled=false\n[factory]\nartifacts_root={:?}\n",
@@ -1104,6 +1117,18 @@ pub(super) mod tests {
         assert_eq!(crate::release_reconcile::reconcile_release(
             &root, &undeclared, &extra, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap_err(), "RELEASE_IDENTITY_CHANGED");
+        // Release close now requires an approval bound to the report's own
+        // anchor, independently of the release-wide reviewed commit.
+        cas_store::import_qa_batch_receipt(&root, &cas_store::QaBatchReceipt {
+            schema_version: cas_store::RELEASE_VERDICT_SCHEMA, id: "qab-report-approved".into(),
+            project_id: "release-fixture".into(), ledger_artifact_id: "art-review".into(),
+            ledger_path: "/peer/report-review.md".into(), ledger_sha256: "b".repeat(64),
+            ledger_size_bytes: 20, staging_sha: args.commit.clone(),
+            task_heads: std::collections::BTreeMap::from([("cas-e3041".into(), args.commit.clone())]),
+            recorder_agent_id: "supervisor".into(), recorded_at: chrono::Utc::now().to_rfc3339(),
+            release_tag: None, ledger_author_id: Some("reviewer".into()),
+            ledger_author_role: Some("sub_agent".into()), author_overrides: Default::default(), imported: true,
+        }).unwrap();
         let first = crate::release_reconcile::reconcile_release(
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();
@@ -1487,7 +1512,7 @@ pub(super) mod tests {
         let before = open_task_store(&root).unwrap().get(&train.id).unwrap();
         for _ in 0..2 {
             installed(&InstalledArgs {
-                receipt: publication_path.clone(), repo: "example/repo".into(),
+                receipt: publication_path.clone(), repo: "example/repo".into(), failed_attempts: None,
             }, Some(&root)).unwrap();
         }
         let after = open_task_store(&root).unwrap().get(&train.id).unwrap();
@@ -1509,8 +1534,40 @@ pub(super) mod tests {
             "tag_name": "v999.0.0", "draft": false, "published_at": "2026-11-05T23:00:00Z",
         })).unwrap()).unwrap();
         assert!(installed(&InstalledArgs {
-            receipt: publication_path, repo: "example/repo".into(),
+            receipt: publication_path, repo: "example/repo".into(), failed_attempts: None,
         }, Some(&root)).is_err());
+    }
+
+    #[test]
+    fn failed_install_notice_reaches_owner_once_cas_fed1() {
+        use clap::Parser;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, mut train, owner, mut tracking) = fixture();
+        tracking.version = "0.1.0".into();
+        track_on_train(&tracking, &root, temp.path(), &train).unwrap();
+        // The receipt retains ownership after the release train has rolled over.
+        train.status = TaskStatus::Closed;
+        train.epic_verification_owner = None;
+        open_task_store(&root).unwrap().update(&train).unwrap();
+        let publication = root.join("failed-publication.json");
+        let before = open_task_store(&root).unwrap().get(&train.id).unwrap();
+        fs::write(&publication, r#"{"tag_name":"v0.1.0","draft":false,"published_at":"2026-11-05T23:00:00Z"}"#).unwrap();
+        let cli = super::super::Cli::try_parse_from([
+            "cas", "release", "installed", "--receipt", publication.to_str().unwrap(),
+            "--repo", "example/repo", "--failed-attempts", "3",
+        ]).unwrap();
+        let Some(super::super::Commands::Release(super::super::ReleaseCommands::Installed(args))) = cli.command else { panic!("wrong command"); };
+        for _ in 0..2 { installed(&args, Some(&root)).unwrap(); }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, owner.name);
+        assert!(crate::supervisor_notices::is_action_envelope(&rows[0].prompt));
+        let notices = crate::store::open_supervisor_queue_store(&root).unwrap()
+            .get_by_transition_key(&format!("supervisor-notice:release_post_publish_failed:{}:0.1.0:{}", train.id, owner.id)).unwrap();
+        assert!(notices.is_some());
+        // There is deliberately no published tag or Git transport for reconciliation.
+        assert_eq!(open_task_store(&root).unwrap().get(&train.id).unwrap().updated_at, before.updated_at);
     }
 
     #[test]

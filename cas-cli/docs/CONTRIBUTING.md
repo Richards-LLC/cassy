@@ -2022,6 +2022,10 @@ from its own context. Cassy adopts the task's recorded delivery on
 updates its assignment while retaining that delivery tip as the anchor. Commit
 there; the isolation guard still rejects the old owner on that branch.
 
+If reboot cleanup cleared the assignee, adoption uses the task's recorded source
+branch. A source present only in the local `origin` tracking refs is also usable;
+the transfer does not require reassigning the departed worker first.
+
 The receiver must have a clean isolated worktree in the task's repository,
 with its own HEAD able to fast-forward to the delivery or already containing
 it. A HEAD or existing receiver task branch ahead of the delivery is retained
@@ -4169,6 +4173,12 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    Publication reconciliation runs after that version check. Pending older
    publications retain per-version receipts and retry after the latest install,
    with one bounded older publication retry per tick.
+   Installed post-release notices stop after ten attempts (override with
+   `RELEASE_NOTICE_MAX_ATTEMPTS`). The exhausted publication JSON, including
+   its attempt count, stays in `install-on-publish.failed.d/v<version>.json`
+   under the same state directory. One keyed failure record reaches the
+   release's owning supervisor; failed reporting retries independently without
+   repeating reconciliation or creating duplicate records.
    On macOS, inspect `launchctl print gui/$(id -u)/dev.cassy.install-on-publish`
    and `~/.local/state/cassy/install-on-publish.log` (under `XDG_STATE_HOME`
    when set); `--uninstall` unloads and removes the per-user scheduler.
@@ -4190,7 +4200,21 @@ The example uses the latest saved publication. Confirm its `tag_name` identifies
 the release being repaired. Older failed publications are retained under
 `install-on-publish.published.pending.d/v<version>.json` in the same state
 directory. A held operation retries its remaining gates while retaining
-successful closes. A completed operation reuses its recorded result.
+successful closes. Operation receipts include `reconciler_version` and
+`reconciler_stale`. A binary older than the release tag records a stale refusal
+without running close effects. A binary at or above the tag replays an unstamped
+or older-binary operation once, preserving the release identity, saved delivery
+cycles and notice key. A receipt stamped at or above the tag reuses its completed
+result even after a later binary upgrade. Unversioned promotion operations retain
+their existing replay behavior.
+
+For an exhausted installed notice, inspect the failed JSON and the owning
+supervisor's failure record. After repairing the cause, manually run
+`cas release installed --receipt <failed JSON> --repo Richards-LLC/cassy`.
+This uses the existing idempotent release operation; the timer keeps its failed
+receipt for inspection and does not restart automatic attempts. The timer's
+`--failed-attempts <count>` reporting option only records the exhaustion, using
+the cut receipt's owner, and never reruns reconciliation.
 
 Recovery and dry runs: `gh workflow run release.yml -f dry_run=false` on
 `main` republishes after a failed run and refuses an existing release. On any

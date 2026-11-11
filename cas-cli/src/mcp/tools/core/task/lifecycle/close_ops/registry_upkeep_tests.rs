@@ -862,3 +862,34 @@ fn registry_upkeep_existing_catalog_drift_g1_escape_preserves_g3() {
     f.decision("no case: copy correction reviewed despite catalog migration");
     f.run(&head).expect("explicit G3 waiver remains separate from G1");
 }
+
+#[test]
+fn accepted_finding_subset_survives_merge_without_expanding_authority_cas_5bbe() {
+    let mut f = Fixture::new(YAML);
+    git(f.repo.path(), &["checkout", "-qb", "delivery"]);
+    write(f.repo.path(), "src/gates/check.rs", "gate");
+    write(f.repo.path(), "docs/product-overview.d/entry.md", "overview");
+    let head = commit(f.repo.path());
+    let input = ".claude/CODEMAP.md";
+    let finding = |detail: &str| Finding {
+        gate: "G5", token: "codemap unchanged:", title: "CODEMAP DRIFT", detail: detail.into(),
+    };
+    let original = finding("src/gates\ndocs/product-overview.d");
+    append_close_decision_note(&f.store, &mut f.task,
+        &format!("✅ DECISION {} release prep owns generated documentation", original.scoped_token(input, &head)));
+    finish(&mut CloseNoteTracker::new(&f.store, &f.task), &mut f.task, f.repo.path(), &head,
+        RegistryEnforcement::Enforce, input, vec![original], &[], None).unwrap();
+    git(f.repo.path(), &["checkout", "-q", "main"]);
+    git(f.repo.path(), &["merge", "-q", "--no-ff", "delivery", "-m", "land delivery"]);
+    assert!(finish(&mut CloseNoteTracker::new(&f.store, &f.task), &mut f.task, f.repo.path(), &head,
+        RegistryEnforcement::Enforce, input, vec![finding("src/gates")], &[], None).is_ok());
+    let merge = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    for (scope, path, delivery) in [
+        ("src/gates\nsrc/other", input, head.as_str()),
+        ("src/gates", "docs/OTHER.md", head.as_str()),
+        ("src/gates", input, merge.as_str()),
+    ] {
+        assert!(finish(&mut CloseNoteTracker::new(&f.store, &f.task), &mut f.task, f.repo.path(), delivery,
+            RegistryEnforcement::Enforce, path, vec![finding(scope)], &[], None).is_err());
+    }
+}

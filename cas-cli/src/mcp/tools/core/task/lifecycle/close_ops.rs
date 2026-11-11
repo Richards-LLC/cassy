@@ -31129,7 +31129,7 @@ esac
     /// own delivery is on its target no longer holds the close, and the
     /// timed-out verifier dispatch passes only when the reason names it.
     #[tokio::test]
-    async fn shipped_override_close_passes_shipped_blocker_and_named_timeout_cas_4b22() {
+    async fn shipped_override_close_passes_batch_pending_blocker_and_named_timeout_cas_5bbe() {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -31191,12 +31191,19 @@ esac
         blocker.status = TaskStatus::AwaitingMerge;
         blocker.deliverables.factory_branch_anchor = Some(blocker_anchor);
         blocker.deliverables.work_target = Some(target.clone());
+        // Replay the administrative post-merge return and evidence-only restart.
+        let accepted = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        cas_store::record_observed_delivery_merge(&cas_dir, &blocker.id, "factory/idle-heron-4b22",
+            "main", &accepted, &receipt, actor).unwrap();
+        cas_store::defer_qa_batch_evidence(&cas_dir, &blocker.id, &accepted).unwrap();
+        blocker.deliverables.decline_factory_branch_anchor();
+        blocker.status = TaskStatus::Blocked;
         store.add(&blocker).unwrap();
         // Merged, closed and reopened for rework: only history names the old tip.
         let mut reopened = worker_task("idle-heron-4b22");
         reopened.id = "cas-4b22-reopened".into();
         reopened.status = TaskStatus::Open;
-        reopened.deliverables.historical_factory_branch_anchors = vec![blocker.deliverables.factory_branch_anchor.clone().unwrap()];
+        reopened.deliverables.historical_factory_branch_anchors = vec![accepted.clone()];
         reopened.deliverables.work_target = blocker.deliverables.work_target.clone();
         store.add(&reopened).unwrap();
         let mut task = worker_task("brisk-otter-4b22");
@@ -31247,7 +31254,7 @@ esac
         store.remove_dependency(&task.id, &reopened.id).unwrap();
 
         // Another task's commit on origin/main is not this task's shipped receipt.
-        let foreign = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        let foreign = accepted.clone();
         let (refused, text) = close(named.clone(), &foreign).await;
         assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
 

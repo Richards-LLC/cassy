@@ -1091,6 +1091,44 @@ mod tests {
         assert!(note.chars().count() <= 800, "{note}");
     }
 
+    #[test]
+    fn automatic_post_merge_recovery_keeps_delivery_and_notifies_supervisor_once_cas_5bbe() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "recovery-session");
+        let repo = tempfile::tempdir().unwrap();
+        git(repo.path(), &["init", "-q", "-b", "main"]);
+        git(repo.path(), &["commit", "-q", "--allow-empty", "-m", "delivery"]);
+        let head = git(repo.path(), &["rev-parse", "HEAD"]);
+        let root = crate::store::init_cas_dir(repo.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [("sup-id", "supervisor", cas_types::AgentRole::Supervisor),
+            ("worker-id", "worker", cas_types::AgentRole::Worker)] {
+            let mut agent = cas_types::Agent::new_with_role(id.into(), name.into(), role);
+            agent.factory_session = Some("recovery-session".into());
+            agents.register(&agent).unwrap();
+        }
+        let mut task = Task::new("cas-recovery".into(), "parked delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        task.deliverables.green_merge_commit = Some(head);
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        tasks.add(&task).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("sup-id".into());
+        for _ in 0..2 {
+            core.return_merged_delivery_for_source_fix(&task, repo.path(), "main", "upkeep refusal");
+        }
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.status, TaskStatus::AwaitingMerge);
+        assert_eq!(serde_json::to_value(&after.deliverables).unwrap(), serde_json::to_value(&task.deliverables).unwrap());
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "supervisor");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("recovery-session"));
+    }
+
     /// cas-e9d6: agents share one Git identity, so a tip someone else pushed
     /// to the worker's origin branch is told apart by the worker's own local
     /// branch, which never received it.

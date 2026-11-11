@@ -637,7 +637,9 @@ impl CasCore {
         } else {
             let factory_config = self.load_config().factory();
             let preferred_sync = resolve_assignment_freshness_branch(task_store, task);
-            if (factory_config.warn_stale_assignment || factory_config.block_stale_assignment)
+            // Supervisors own integration checkouts, not worker delivery lanes.
+            if worker.role != cas_types::AgentRole::Supervisor
+                && (factory_config.warn_stale_assignment || factory_config.block_stale_assignment)
                 && let Some(clone_path) = worker.metadata.get("clone_path")
                 && let Some((behind_count, branch)) =
                     check_worktree_staleness(clone_path, preferred_sync.as_deref())

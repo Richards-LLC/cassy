@@ -5237,7 +5237,7 @@ impl FactoryDaemon {
             self.queue_jobs.normal_probe_jobs.forget_row(row_id);
             return;
         }
-        let rows: Vec<_> = (0..pane.rows()).map(|row| pane.dump_row(row).unwrap_or_default()).collect();
+        let rows: Vec<_> = (0..pane.rows()).map(|row| pane.dump_live_row(row).unwrap_or_default()).collect();
         if probe.nudges == 0 && evidence != NormalDeliveryTurnEvidence::RecipientBusy
             && !pane.is_composer_dirty() && !self.app.mux.pane_inject_busy(&probe.pane)
             && startup_composer_unsent(&rows, row_id)
@@ -7814,13 +7814,13 @@ impl FactoryDaemon {
 
     /// Setup and approval pages can outlive the startup grace. Claude's chooser
     /// is not a composer: require its ruled input. Codex can queue operator
-    /// text mid-tool; other harnesses retain their tool-call veto. Inspect the current viewport,
-    /// never scrollback; a safe working composer still accepts operator text.
+    /// text mid-tool; other harnesses retain their tool-call veto. Inspect the live
+    /// screen even when a viewer is scrolled into history.
     fn commander_native_input_ready(&self, pane_id: &str) -> bool {
         let cli = self.app.harness_for(pane_id);
         let Some(pane) = self.app.mux.get(pane_id) else { return false };
         let rows: Vec<_> = (0..pane.rows())
-            .map(|row| pane.dump_row(row).unwrap_or_default())
+            .map(|row| pane.dump_live_row(row).unwrap_or_default())
             .collect();
         if cli != cas_mux::SupervisorCli::Claude {
             // cas-aa152: verified operator input can steer a running Codex

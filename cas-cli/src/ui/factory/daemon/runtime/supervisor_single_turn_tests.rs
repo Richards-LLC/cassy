@@ -125,11 +125,12 @@ async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_rep
         let elapsed = sent.elapsed();
         let at = Utc::now();
         let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
-        writeln!(file, "{}\n{}", serde_json::json!({"type":"user","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
+        writeln!(file, "{}\n{}", serde_json::json!({"type":"user","uuid":"terminal-checkpoint","timestamp":at,"message":{"role":"user","content":"Terminal checkpoint"}}),
             serde_json::json!({"type":"assistant","timestamp":at+chrono::Duration::milliseconds(1),"message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"Fixture supervisor answer"}]}})).unwrap();
         let reply = loop {
-            if let DaemonMessage::OperatorReply { notification_id, device_id, .. } = next(&mut socket).await {
+            if let DaemonMessage::OperatorReply { notification_id, device_id, message, .. } = next(&mut socket).await {
                 assert_eq!(device_id, "*");
+                assert_eq!(message, "Fixture supervisor answer");
                 break notification_id;
             }
         };
@@ -141,8 +142,12 @@ async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_rep
     let (_, (command_accepted, reached_pane, elapsed)) = tokio::join!(driver, client);
     hub.abort();
     assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
+    eprintln!("command_accepted={command_accepted}; reached_pane={reached_pane}; message_elapsed={elapsed:?}");
     assert!(command_accepted, "command admission must use the live input screen");
     assert!(reached_pane && elapsed < Duration::from_secs(10), "operator message must reach the live composer within 10 seconds");
+    let input = std::fs::read_to_string(root.path().join("input")).unwrap();
+    assert_eq!(input.matches("/mcp reconnect cas").count(), 1);
+    assert_eq!(input.matches("idle-hub-probe").count(), 1);
 }
 
 // PTY preflight reads ambient PATH. Re-exec with a private harmless cas;
@@ -650,9 +655,13 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
         assert_eq!(original.matches('\r').count(), 1);
         // Replay the incident's native composer, with the startup frame still at
         // the input marker. No transcript exists, so echo cannot count as a turn.
+        daemon.app.mux.get_mut(&name).unwrap().feed("startup history\r\n".repeat(40).as_bytes()).unwrap();
         daemon.app.mux.get_mut(&name).unwrap().feed(
             format!("\x1b[2J\x1b[H────────────────────\r\n❯ [cas #{} agent-authored 5s first] startup draft\r\n────────────────────", row.id).as_bytes(),
         ).unwrap();
+        daemon.app.mux.get_mut(&name).unwrap().scroll(-10).unwrap();
+        let offset = daemon.app.mux.get(&name).unwrap().scroll_offset();
+        assert!(offset > 0);
         daemon.normal_delivery_probes.get_mut(&row.id).expect("startup observation remains owned")
             .next_check_at = Some(Instant::now());
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -662,6 +671,7 @@ async fn claude_first_boot_requires_native_turn_and_retries_only_submit_cas_aa10
                 tokio::task::yield_now().await;
             }
         }).await.expect("the unsent first-boot draft receives one bare submit retry");
+        assert_eq!(daemon.app.mux.get(&name).unwrap().scroll_offset(), offset);
         assert_eq!(std::fs::read(root.path().join("input")).unwrap(), format!("{original}\r").as_bytes(),
             "retry never repeats the startup body or appends a nudge");
         // No native evidence even after recovery: remain unconfirmed, never keep

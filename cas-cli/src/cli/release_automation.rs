@@ -86,7 +86,7 @@ impl ReleasePreview {
                     value.would_hold += 1;
                     let code = reason.split(':').next().unwrap_or(reason).trim();
                     if code == "REVIEW_MISSING" { value.review_missing.push(id.clone()); }
-                    code
+                    if code == "RELEASE_MEMBER_HELD" { reason.as_str() } else { code }
                 }
             };
             *value.by_reason.entry(reason.to_string()).or_default() += 1;

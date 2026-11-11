@@ -203,7 +203,7 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
 /// every QA/review receipt recorded at that candidate. No review: the final
 /// commit with no proof, so closes hold as named residuals.
 fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str) -> Result<(String, Vec<ReleaseProofRef>)> {
-    let receipts = cas_store::list_qa_batch_receipts(root, project)?;
+    let receipts = crate::qa_batch::release_close::read_receipts(root, project).map_err(anyhow::Error::msg)?;
     let reviewed = receipts
         .iter()
         .filter(|r| r.schema_version == cas_store::RELEASE_VERDICT_SCHEMA)

@@ -778,7 +778,6 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         Ok((from, to)) => gate_changes(repo, &from, &to),
         Err(reason) => unknown(reason),
     };
-    let history=cas_store::quality_events_between(cas_root,None,None)?;
     let mut grouped=BTreeMap::<String,Vec<QualityEvent>>::new();
     let releases=cas_store::quality_release_events(cas_root)?;
     for event in history.into_iter().filter(|e| matches!(e.payload,QualityPayload::EstimateOutcome {..})) {

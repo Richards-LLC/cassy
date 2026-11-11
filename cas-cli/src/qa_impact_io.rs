@@ -425,7 +425,10 @@ fn upkeep(
 ) -> Upkeep {
     let mut upkeep = docs_upkeep(
         changes,
-        &report.registry.path,
+        changes.iter().any(|change| {
+            change.file == report.registry.path
+                || change.old_file.as_deref() == Some(report.registry.path.as_str())
+        }),
         codemap,
         overview,
         registry,
@@ -472,7 +475,7 @@ fn upkeep(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn docs_upkeep(
     changes: &[Change],
-    registry_path: &str,
+    registry_touched: bool,
     codemap: Option<&str>,
     overview: bool,
     registry: Option<&Registry>,
@@ -554,17 +557,16 @@ pub(crate) fn docs_upkeep(
                 }
             }
         }
-        if let Some(registry) = registry {
+        if registry_touched && let Some(registry) = registry {
             for journey in &registry.journeys {
                 let old = previous.and_then(|r| r.journeys.iter().find(|j| j.id == journey.id));
-                if (journey.status == "live" && old.is_none() && touched(registry_path))
-                    || (touched(registry_path)
-                        && old.is_some_and(|old| {
-                            matches!(
-                                (old.status.as_str(), journey.status.as_str()),
-                                ("live", "dead") | ("dead", "live")
-                            )
-                        }))
+                if (journey.status == "live" && old.is_none())
+                    || old.is_some_and(|old| {
+                        matches!(
+                            (old.status.as_str(), journey.status.as_str()),
+                            ("live", "dead") | ("dead", "live")
+                        )
+                    })
                 {
                     upkeep.product_overview.reasons.push(format!(
                         "journey {} added live or changed live/dead status",

@@ -6,7 +6,7 @@ mod docs_upkeep;
 mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
-mod gate_preflight;
+pub(crate) mod gate_preflight;
 pub(crate) use gate_preflight::is_merge_handoff;
 use crate::mcp::tools::core::task::close_refusal;
 #[cfg(test)]
@@ -8569,6 +8569,7 @@ impl CasCore {
         // proven on the default branch; that branch's tip then stands in for
         // the hand-supplied commit_receipt the delivery-tip gate needs.
         let mut gone_epic_branch_receipt: Option<String> = None;
+        let mut published_epic_proof = None;
         // For Epics: Check that all worker branches are merged before verification
         // This ensures epic-level verification runs on the complete merged code
         if task.task_type == TaskType::Epic {
@@ -8589,21 +8590,24 @@ impl CasCore {
                 }
                 None => "master".to_string(),
             };
-            // cas-7f60 (GH #1232): an epic branch deleted after it merged
-            // resolves neither locally nor on origin. Measure the epic and
-            // the children that targeted it against the default branch
-            // instead: their content must be there, or the gate refuses.
-            // Only with children whose recorded deliveries the gate can then
-            // prove there; a gone branch with nothing to prove stays
-            // fail-closed (cas-04c6).
-            let gone = (req.commit_receipt.is_none())
-                .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
-                .flatten()
-                .filter(|_| {
-                    task_store
-                        .get_subtasks(&req.id)
-                        .is_ok_and(|children| epic_autoclose::children_prove_delivery(&children))
-                });
+            let subtasks = task_store.get_subtasks(&req.id).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!(
+                    "epic-close merge gate: failed to read subtasks of {}: {error}", req.id,
+                )),
+                data: None,
+            })?;
+            let published = (task.delivery_mode != cas_types::DeliveryMode::LocalMerge)
+                .then(|| epic_autoclose::published_retired_epic_target(
+                    &close_project_root, &target_branch, req.commit_receipt.as_deref(), &subtasks,
+                ))
+                .flatten();
+            // Preserve the existing no-receipt recovery for legacy epics.
+            let gone = published.as_ref().map(|(branch, _)| branch.clone()).or_else(|| {
+                (req.commit_receipt.is_none() && epic_autoclose::children_prove_delivery(&subtasks))
+                    .then(|| epic_autoclose::gone_epic_target(&close_project_root, &target_branch))
+                    .flatten()
+            });
             let (target_branch, gone_epic_branch) = match gone {
                 Some(default) => (default, Some(target_branch)),
                 None => (target_branch, None),
@@ -8641,23 +8645,6 @@ impl CasCore {
             // epic branch. Bypass-immune (data-state guard, not a
             // review gate). Diagnostic surface for in-flight queries
             // is `mcp__cas__factory action=epic_status id=<epic>`.
-            //
-            // Errors from `get_subtasks` MUST surface as a hard error,
-            // never a silent empty-list pass. Round-1 cas-code-review
-            // (correctness P1) caught the `unwrap_or_default()` failure
-            // mode: a transient SQLite error would map to "no children"
-            // and the gate would Proceed — defeating the entire
-            // enforcement that this task adds. Mirror the conservative
-            // pattern at line ~869 (`epic_subtask_receipts_cover`)
-            // where a store error is treated as gate-blocking.
-            let subtasks = task_store.get_subtasks(&req.id).map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
-                    "epic-close merge gate: failed to read subtasks of {epic_id}: {e}",
-                    epic_id = req.id
-                )),
-                data: None,
-            })?;
             let subtasks = if crate::qa_batch::release_close::parent_authority(&self.cas_root, &task.id).is_some() {
                 subtasks.into_iter().map(|mut child| {
                     if let Some(target) = child.deliverables.work_target.as_mut() { target.target_branch = target_branch.clone(); }
@@ -8760,19 +8747,25 @@ impl CasCore {
                     ));
                 }
             }
-            // cas-7f60: the gate proved every child on the default branch.
+            // Carry the same published boundary through verification and
+            // pre-close lint. The task's persisted WorkTarget remains intact.
+            if let Some((branch, proof)) = published {
+                if let Some(context) = declared_repo_context.as_mut() {
+                    context.target_branch = branch;
+                }
+                published_epic_proof = Some(proof);
+            }
             if let Some(gone) = gone_epic_branch.as_deref() {
-                gone_epic_branch_receipt =
+                gone_epic_branch_receipt = published_epic_proof.clone().or_else(|| {
                     epic_autoclose::default_branch_ref(&close_project_root).and_then(|reference| {
                         resolve_branch_sha(&close_project_root, &format!("{reference}^{{commit}}"))
-                    });
+                    })
+                });
                 close_notes.record(
                     &mut task,
                     &format!(
-                        "decision: epic branch `{gone}` is gone locally and on origin, so this \
-                         close measured the epic and its children against the default branch \
-                         `{target_branch}`, and used that branch's tip as the epic's delivery \
-                         (cas-7f60)."
+                        "decision: epic branch `{gone}` is retired. Close measured the epic and \
+                         its children against the default branch `{target_branch}`."
                     ),
                 );
             }
@@ -10330,7 +10323,9 @@ impl CasCore {
                         // Epics have no worker delivery transaction. Their declared
                         // target (or legacy epic branch) is the verification tree,
                         // even while the supervisor checkout carries unrelated work.
-                        let epic_proof_ref = if is_epic
+                        let epic_proof_ref = if published_epic_proof.is_some() {
+                            published_epic_proof.clone()
+                        } else if is_epic
                             && crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(&close_project_root)
                         {
                             let branch = if gone_epic_branch_receipt.is_some() {
@@ -10876,7 +10871,7 @@ impl CasCore {
                 &task,
                 context,
                 worker_worktree_path.as_deref(),
-                req.commit_receipt.as_deref(),
+                published_epic_proof.as_deref().or(req.commit_receipt.as_deref()),
                 supervisor_override,
             ) {
                 Ok(evidence) => Some(evidence),
@@ -13367,21 +13362,6 @@ impl CasCore {
                 format!("Task not found: {error}"),
             )
         })?;
-        if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!(
-                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
-                    task.id, task.status
-                ),
-            ));
-        }
-        let supervisor_id = self.get_agent_id().map_err(|error| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("task request_changes requires registered supervisor identity: {error}"),
-            )
-        })?;
         // Only this supervisor request is a command. QA/verifier findings and
         // queue-ejection detail reach the store as inert review text.
         let source_commits = req.reason.split_whitespace()
@@ -13395,6 +13375,67 @@ impl CasCore {
                 }
                 Ok(source.to_ascii_lowercase())
             }).collect::<Result<Vec<_>, _>>()?;
+
+        let authorize_active = task.status == TaskStatus::InProgress && !source_commits.is_empty();
+        if !authorize_active && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!(
+                    "task request_changes rejected: {} is {} rather than awaiting_merge or blocked. This action declines a recorded parked delivery.",
+                    task.id, task.status
+                ),
+            ));
+        }
+        let supervisor_id = if source_commits.is_empty() {
+            self.get_agent_id().map_err(|error| {
+                Self::error(ErrorCode::INVALID_PARAMS,
+                    format!("task request_changes requires registered supervisor identity: {error}"))
+            })?
+        } else {
+            self.resolve_live_supervisor_authority().map_err(|error| {
+                Self::error(ErrorCode::INVALID_PARAMS,
+                    format!("merge_source requires a live registered supervisor: {error:?}"))
+            })?.id
+        };
+        // First-park integration cannot decline a park that has not happened.
+        // Apply only the typed grant, with the same task revision still active.
+        if authorize_active {
+            let work_target = task.deliverables.work_target.as_ref().ok_or_else(|| {
+                Self::error(ErrorCode::INVALID_PARAMS, "merge_source requires a declared task work target")
+            })?;
+            let mut granted = task.clone();
+            for commit in &source_commits {
+                if granted.deliverables.authorized_merge_sources.iter().any(|source|
+                    &source.commit == commit && &source.work_target == work_target)
+                {
+                    continue;
+                }
+                granted.deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                    commit: commit.clone(),
+                    supervisor_id: supervisor_id.clone(),
+                    work_target: work_target.clone(),
+                });
+            }
+            if granted.deliverables.authorized_merge_sources != task.deliverables.authorized_merge_sources {
+                if !granted.notes.is_empty() {
+                    granted.notes.push_str("\n\n");
+                }
+                granted.notes.push_str(&format!(
+                    "[{}] DECISION: merge source authorized by {} for {}. {}",
+                    chrono::Utc::now().to_rfc3339(),
+                    supervisor_id,
+                    work_target.target_branch,
+                    req.reason.trim(),
+                ));
+                task_store.update_if_current_with_mutation_receipt(&granted, &task, "")
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
+                        format!("task merge source authorization rejected: {error}")))?;
+            }
+            return Ok(Self::success(format!(
+                "Authorized merge source for task {} at {}. The task remains InProgress.",
+                task.id, source_commits.join(", ")
+            )));
+        }
 
         // Deliberately no delivery/dispatch precondition: GH #55 and #82 both
         // deadlocked because the recovery action refused parked tasks whose
@@ -13497,6 +13538,8 @@ pub(crate) struct AdditiveOnlyViolation {
 /// pre-cas-9596 behavior: nothing is recognized as the task's own.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TaskCommitIdentity {
+    /// Exact side parents the supervisor approved for this work target.
+    pub approved_merge_parents: Vec<String>,
     /// Validated start boundary. Backward receipt expansion must stop here;
     /// explicitly identified earlier-cycle work remains attributable.
     pub start_base: Option<String>,
@@ -13565,6 +13608,7 @@ pub(crate) fn task_commit_identity(
         }
     }
     TaskCommitIdentity {
+        approved_merge_parents: task_attribution::authorized_merge_parents(task),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits,
@@ -15309,6 +15353,7 @@ fn epic_anchor_content_presence_inner(
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: vec![anchor.to_string()],
@@ -16517,6 +16562,7 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(own);
     }
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: task.deliverables.factory_branch_anchor.clone().into_iter().collect(),
@@ -16866,6 +16912,7 @@ pub(crate) fn task_without_own_commits_judged(
         return false;
     }
     let identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
@@ -17058,6 +17105,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         },
     };
     let fallback_content_identity = TaskCommitIdentity {
+        approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
         known_commits: Vec::new(),
@@ -19652,6 +19700,7 @@ fn render_close_diff_stat(
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
                 identity: TaskCommitIdentity {
+                    approved_merge_parents: Vec::new(),
                     start_base: window.identity.start_base.clone(),
                     task_id: window.identity.task_id.clone(),
                     known_commits: filtered_commits,
@@ -22018,6 +22067,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         refname,
                         parent_branch,
                         &TaskCommitIdentity {
+                            approved_merge_parents: Vec::new(),
                             start_base: None,
                             task_id: Some(t.id.clone()),
                             known_commits: recorded_anchor.map(str::to_string).into_iter().collect(),
@@ -24559,6 +24609,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24581,6 +24632,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: vec![wip_sha],
@@ -24602,6 +24654,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24632,6 +24685,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -24667,6 +24721,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -25145,7 +25200,7 @@ pub(crate) fn run_declared_pre_close_hook(
     // authority. Only an epic's proven release merge gets the default-branch door.
     let target_contains = |repo: &std::path::Path, commit: &str| {
         released_receipt == Some(commit)
-            || if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+            || if task.task_type == TaskType::Epic || task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
                 git_commit_is_ancestor(repo, commit, &live_target_ref)
             } else {
                 commit_is_merged_into_parent(repo, commit, &repo_context.target_branch)
@@ -32605,6 +32660,7 @@ esac
             basis: "task work cycle",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some(task.id.clone()),
                 known_commits: vec![receipt.clone()],
@@ -34866,6 +34922,7 @@ esac
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-test1".to_string()),
                 known_commits: vec![receipt.clone()],
@@ -36992,7 +37049,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
-        let identity = TaskCommitIdentity { start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+        let identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
         let (dir, anchor) = build("");
         let presence =
@@ -37032,7 +37089,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
             let mut window = window_at(0, "historical delivery replay");
-            window.identity = TaskCommitIdentity { start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            window.identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
@@ -37309,6 +37366,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
     fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
         let mut window = window_at(0, "cas-f2eb fixture");
         window.identity = TaskCommitIdentity {
+            approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-test1".into()),
             known_commits: vec![receipt.to_string()],
@@ -45954,6 +46012,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -46000,6 +46059,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-41cd".to_string()),
                 known_commits: Vec::new(),
@@ -46077,6 +46137,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),
@@ -46110,6 +46171,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
                 known_commits: Vec::new(),

@@ -374,6 +374,8 @@ is 80% of the harness-reported `model_context_window`, capped by
 `factory.supervisor_wake_input_budget` (default 1,000,000; 0 disables). Without
 a reported window, only that configured per-call cap applies; capacity is never
 inferred from a model name. Cumulative wake billing cannot trigger a clear.
+If the wake ledger exceeds the cap while the latest call is below the context
+threshold, the supervisor inbox gets one quiet line with both measurements.
 It acts only at an idle
 boundary: the turn has ended, no newer turn is running, no delivery-target
 lock is held, no release train is frozen, no `release-repair` task is open, and
@@ -4328,6 +4330,13 @@ Only the authenticated supervisor request handler parses these markers and
 passes explicit SHA grants to storage. QA/verifier findings and queue-ejection
 details remain review text: quoting a valid or malformed marker grants nothing
 and cannot prevent the delivery from returning to its worker.
+
+For a task that is still InProgress, a live registered supervisor can use
+`task action=request_changes` with `merge_source=<full commit SHA>` to record
+the same grant before the first park. This preserves the task's status, assignee,
+branch anchor and proof. The grant applies to that exact merge parent in the
+task's declared work target. Close checks every other side parent and measures
+the approved merge's delivered diff against the ordinary pushed-tip proof gates.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

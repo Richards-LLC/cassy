@@ -6,8 +6,19 @@ use crate::config::{QaMode, RegistryEnforcement, UpkeepStage};
 
 /// One reply for every refusal of a park attempt. A lone refusal keeps its own
 /// text, which workers and the classifiers that count bounces already read.
-pub(super) fn park_reply(mut refusals: Vec<String>) -> String {
+pub(crate) fn park_reply(mut refusals: Vec<String>) -> String {
     refusals.dedup();
+    if let Some(receipt) = crate::mcp::tools::service::mutation_receipt::current()
+        .filter(|receipt| receipt.tool() == "task" && receipt.action() == "close")
+    {
+        let mut summary = String::from("refused:");
+        // Upkeep may group multiple headings in one collected refusal.
+        for gate in refusals.iter().flat_map(|refusal| refusal.split("\n\n⚠️ ")) {
+            summary.push_str("\n- ");
+            summary.push_str(&compact_gate(gate));
+        }
+        let _ = receipt.park_refusal_summary.set(summary);
+    }
     if refusals.len() == 1 {
         return refusals.remove(0);
     }
@@ -15,6 +26,22 @@ pub(super) fn park_reply(mut refusals: Vec<String>) -> String {
         "PARK REFUSED: more than one close gate failed, and every failure is listed below. Fix them all, then retry close.\n\n{}",
         refusals.join("\n\n")
     )
+}
+
+fn compact_gate(gate: &str) -> String {
+    let heading = gate.trim_start_matches("⚠️ ").lines().next().unwrap_or_default();
+    let (code, inline) = heading.split_once(": ").unwrap_or((heading, ""));
+    // Prefer an explicit remedy over measured facts, which can be much longer.
+    let action = gate.split_once("\n\nNext: ")
+        .map(|(_, next)| next.split("\n\n").next().unwrap_or_default())
+        .or_else(|| gate.rsplit_once("\n\n").map(|(_, last)| last))
+        .unwrap_or(inline);
+    let code = crate::mcp::tools::truncate_str(code, 96);
+    if action.is_empty() {
+        return code;
+    }
+    let action = action.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{code}: {}", crate::mcp::tools::truncate_str(&action, 320))
 }
 
 /// A prerequisite failure stops dependent checks, retaining every refusal

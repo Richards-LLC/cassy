@@ -103,8 +103,8 @@ pub(crate) struct ReleaseInventoryException {
 
 /// Read-only, deterministic inventory at an exact commit. No network, branch
 /// discovery, commit-subject parsing, proof approval or lifecycle writes.
-/// Declared epics include terminal descendants; outside that scope only live
-/// recorded deliveries are considered, so earlier shipped close debt is kept.
+/// Epic descendants and live recorded deliveries are discovery candidates.
+/// Only declared tasks or proven shipped work create closeout obligations.
 pub(crate) fn resolve_release_inventory(
     root: &Path,
     repo: &Path,
@@ -174,12 +174,13 @@ pub(crate) fn resolve_release_inventory(
         deliveries: Vec::new(),
         exceptions: Vec::new(),
     };
-    let mut expected: BTreeSet<String> = scope
+    let expected: BTreeSet<String> = scope
         .included_task_ids
         .iter()
         .cloned()
         .chain(scope.no_code_members.keys().cloned())
         .collect();
+    let mut candidates = expected.clone();
     let mut pending = scope.constituent_epic_ids.clone();
     let mut epics = BTreeSet::new();
     while let Some(id) = pending.pop() {
@@ -213,11 +214,10 @@ pub(crate) fn resolve_release_inventory(
             {
                 pending.push(edge.from_id.clone());
             } else {
-                expected.insert(edge.from_id.clone());
+                candidates.insert(edge.from_id.clone());
             }
         }
     }
-    let mut candidates = expected.clone();
     candidates.extend(
         tasks
             .values()
@@ -241,9 +241,40 @@ pub(crate) fn resolve_release_inventory(
             })
         };
         let Some(t) = tasks.get(&id) else {
-            issue(ReleaseInventoryCode::MissingTask);
+            if expected.contains(&id) {
+                issue(ReleaseInventoryCode::MissingTask);
+            }
             continue;
         };
+        let d = &t.deliverables;
+        let base = d.factory_branch_start.as_ref()
+            .and_then(|start| recorded_commit(&start.base_sha));
+        let recorded = d.factory_branch_anchor.as_ref()
+            .or(d.green_merge_commit.as_ref())
+            .or(d.delivery_pr_merge_commit.as_ref())
+            .or(d.merge_commit.as_ref());
+        let anchor = recorded.and_then(|sha| recorded_commit(sha));
+        let valid_base = |anchor: &str| base.as_deref()
+            .is_some_and(|base| ancestor(repo, base, anchor) == Some(true) && base != anchor);
+        let shipped_mapping = |anchor: &str| {
+            if ancestor(repo, anchor, &scope.final_release_sha) == Some(true) {
+                Some((anchor.to_string(), ReleaseMembership::Ancestry))
+            } else {
+                valid_base(anchor)
+                    .then(|| close_ops::find_squash_tree_match(repo, anchor, &scope.final_release_sha))
+                    .flatten()
+                    .filter(|mapped| ancestor(repo, mapped, &scope.final_release_sha) == Some(true))
+                    .map(|mapped| (mapped, ReleaseMembership::SquashTree))
+            }
+        };
+        let shipped = anchor.as_deref().and_then(&shipped_mapping);
+        if !expected.contains(&id) && shipped.is_none()
+            && !d.historical_factory_branch_anchors.iter()
+                .filter_map(|sha| recorded_commit(sha))
+                .any(|historical| shipped_mapping(&historical).is_some())
+        {
+            continue;
+        }
         if !task::task_owned_by_project(t, root, Some(&project)) || t.task_type == TaskType::Epic {
             issue(ReleaseInventoryCode::ForeignScope);
             continue;
@@ -265,11 +296,6 @@ pub(crate) fn resolve_release_inventory(
                 continue;
             }
         }
-        let d = &t.deliverables;
-        let base = d
-            .factory_branch_start
-            .as_ref()
-            .and_then(|s| recorded_commit(&s.base_sha));
         let explicit = scope.no_code_members.get(&id);
         let (anchor, shipped_commit, membership, proofs) = if crate::qa_pass::is_no_code(t)
             || t.deliverables.evidence_only.is_some()
@@ -284,9 +310,7 @@ pub(crate) fn resolve_release_inventory(
                             && p.reviewed_sha == scope.reviewed_sha
                     })
             }) else {
-                if expected.contains(&id) {
-                    issue(ReleaseInventoryCode::MissingNoCodeProof);
-                }
+                issue(ReleaseInventoryCode::MissingNoCodeProof);
                 continue;
             };
             (
@@ -301,35 +325,16 @@ pub(crate) fn resolve_release_inventory(
                 issue(ReleaseInventoryCode::RetiredAnchor);
                 continue;
             }
-            let recorded = d
-                .factory_branch_anchor
-                .as_ref()
-                .or(d.green_merge_commit.as_ref())
-                .or(d.delivery_pr_merge_commit.as_ref())
-                .or(d.merge_commit.as_ref());
-            let Some(anchor) = recorded.and_then(|sha| recorded_commit(sha)) else {
+            let Some(anchor) = anchor else {
                 issue(ReleaseInventoryCode::MissingAnchor);
                 continue;
             };
-            let base_valid = base
-                .as_ref()
-                .is_some_and(|base| ancestor(repo, base, &anchor) == Some(true) && base != &anchor);
             if base.is_none() {
                 issue(ReleaseInventoryCode::MissingBase);
-            } else if !base_valid {
+            } else if !valid_base(&anchor) {
                 issue(ReleaseInventoryCode::InvalidBase);
             }
-            let (shipped, membership) = if ancestor(repo, &anchor, &scope.final_release_sha)
-                == Some(true)
-            {
-                (anchor.clone(), ReleaseMembership::Ancestry)
-            } else if let Some(mapped) = base_valid
-                .then(|| close_ops::find_squash_tree_match(repo, &anchor, &scope.final_release_sha))
-                .flatten()
-                .filter(|mapped| ancestor(repo, mapped, &scope.final_release_sha) == Some(true))
-            {
-                (mapped, ReleaseMembership::SquashTree)
-            } else {
+            let Some((shipped, membership)) = shipped else {
                 issue(ReleaseInventoryCode::MissingMapping);
                 continue;
             };
@@ -560,11 +565,9 @@ pub(crate) fn validate_ledger(
     artifact_id: &str,
     path: &Path,
 ) -> Result<(cas_store::PublishedArtifact, PathBuf), String> {
-    let artifact = cas_store::SqliteArtifactStore::open(root)
-        .map_err(|e| e.to_string())?
-        .get(artifact_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("ledger artifact is not published in this project")?;
+    let artifact = crate::artifacts::lookup_metadata(root, None, artifact_id)
+        .map_err(|e| e.to_string())?;
+    crate::artifacts::require_available(&artifact).map_err(|e| e.to_string())?;
     if !matches!(artifact.mime.as_str(), "text/markdown" | "text/plain") {
         return Err("published ledger must be Markdown or plain text".into());
     }
@@ -582,8 +585,20 @@ pub(crate) fn validate_ledger(
         config.factory().artifacts_root.as_deref(),
     );
     let roots = crate::artifacts::paths::PublishRoots::new(root, &paths.base, &artifact.task_id);
-    let path = crate::artifacts::paths::resolve_publishable_path(path, &roots)
-        .map_err(|e| e.to_string())?;
+    let path = match crate::artifacts::paths::resolve_publishable_path(path, &roots) {
+        Ok(path) => path,
+        Err(crate::artifacts::paths::PathRefusal::Missing(_)) => {
+            let (resolved, path) = crate::artifacts::proof::fetch_task(
+                root, &artifact.task_id, artifact_id,
+            ).map_err(|e| e.to_string())?;
+            if !crate::artifacts::proof::same_artifact(&artifact, &resolved) {
+                return Err("ledger metadata changed while resolving its bytes".into());
+            }
+            crate::artifacts::paths::resolve_publishable_path(&path, &roots)
+                .map_err(|e| e.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let mut bytes = Vec::new();
     std::fs::File::open(&path)
         .map_err(|e| e.to_string())?

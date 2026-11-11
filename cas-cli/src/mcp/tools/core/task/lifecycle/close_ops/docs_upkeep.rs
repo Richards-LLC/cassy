@@ -46,7 +46,7 @@ pub(super) fn at_park(
     let qa = config.qa();
     let result = (|| -> anyhow::Result<_> {
         let mut changes = crate::qa_impact::io::changes_for_diff(repo, &base, Some(&head))?;
-        if let Some(paths) = paths {
+        if let Some(paths) = &paths {
             changes.retain(|c| {
                 paths.contains(&c.file) || c.old_file.as_ref().is_some_and(|p| paths.contains(p))
             });
@@ -81,13 +81,42 @@ pub(super) fn at_park(
                 }
             }
         };
-        let before = registry(&base, &before_paths)?;
+        let registry_touched = paths.as_ref().map_or_else(
+            || {
+                changes.iter().any(|change| {
+                    change.file == qa.registry.path
+                        || change.old_file.as_deref() == Some(qa.registry.path.as_str())
+                })
+            },
+            |paths| paths.contains(&qa.registry.path),
+        );
+        // The attributed base can predate a target sync that supplied live
+        // journeys. Compare statuses against the target history in this delivery.
+        // Keep the attributed base for landed receipts and newer start boundaries.
+        let registry_base = if g6_on
+            && overview
+            && window.is_some()
+            && registry_touched
+        {
+            git_merge_base(repo, &head, &freshest_target_ref(repo, target)).filter(|shared| {
+                shared != &head && shared != &base && !git_commit_is_ancestor(repo, shared, &base)
+            })
+        } else {
+            None
+        };
+        let registry_base_paths = registry_base
+            .as_deref()
+            .map(|revision| tracked(repo, revision))
+            .transpose()?;
+        let registry_base_paths = registry_base_paths.as_deref().unwrap_or(&before_paths);
+        let before = registry(registry_base.as_deref().unwrap_or(&base), registry_base_paths)?;
         let after = registry(&head, &after_paths)?;
         // An unreadable old registry cannot prove a newly added live journey.
-        let registry_comparable = before.is_some() || !before_paths.contains(&qa.registry.path);
+        let registry_comparable =
+            before.is_some() || !registry_base_paths.contains(&qa.registry.path);
         let facts = crate::qa_impact::io::docs_upkeep(
             &changes,
-            &qa.registry.path,
+            registry_touched,
             codemap.as_deref(),
             overview,
             after.as_ref().filter(|_| registry_comparable),

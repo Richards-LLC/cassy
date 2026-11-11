@@ -1,0 +1,3 @@
+title: Worktree merge publishes its detached candidate with compare-and-swap before moving the shared local target
+tasks: [cas-53f2, cas-7daf]
+journeys: [FACTORY-MERGE]

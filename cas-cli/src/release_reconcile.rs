@@ -106,6 +106,31 @@ trait ReleaseEffects {
     }
 }
 
+fn retire_unproven_members(receipt: &mut ReleaseReconcileReceipt, inventory: &ReleaseInventory) {
+    // Older discovery treated unshipped work as declared membership. Retire
+    // only those unproven holds when the current inventory excludes them.
+    // A saved close intent pins a real delivery cycle and is never discarded.
+    let current_members: std::collections::BTreeSet<_> = inventory.deliveries.iter()
+        .map(|delivery| delivery.task_id.as_str())
+        .chain(inventory.exceptions.iter().map(|exception| exception.task_id.as_str()))
+        .chain(inventory.scope.included_task_ids.iter().map(String::as_str))
+        .chain(inventory.scope.no_code_members.keys().map(String::as_str))
+        .collect();
+    let discarded: std::collections::BTreeSet<_> = receipt.exceptions.iter()
+        .filter(|exception| matches!(exception.code,
+            crate::qa_batch::ReleaseInventoryCode::MissingAnchor
+            | crate::qa_batch::ReleaseInventoryCode::MissingMapping
+            | crate::qa_batch::ReleaseInventoryCode::MissingNoCodeProof))
+        .filter(|exception| !current_members.contains(exception.task_id.as_str())
+            && !receipt.close_intents.contains_key(&exception.task_id)
+            && matches!(receipt.members.get(&exception.task_id), Some(CassyMergeClose::Held(_))))
+        .map(|exception| exception.task_id.clone())
+        .collect();
+    receipt.members.retain(|id, _| !discarded.contains(id));
+    receipt.sync_pending.retain(|id| !discarded.contains(id));
+    receipt.residuals.retain(|residual| !discarded.contains(&residual.task_id));
+}
+
 async fn resume(
     root: &Path,
     scope: &ReleaseScope,
@@ -158,6 +183,10 @@ async fn resume(
     let immutable = |scope: &ReleaseScope| {
         let mut scope = scope.clone();
         scope.proof_refs.clear();
+        scope.included_task_ids.extend(scope.no_code_members.keys().cloned());
+        scope.included_task_ids.sort();
+        scope.included_task_ids.dedup();
+        scope.no_code_members.clear();
         serde_json::to_value(scope).map_err(|e| e.to_string())
     };
     if immutable(&receipt.scope)? != immutable(scope)? {
@@ -183,6 +212,7 @@ async fn resume(
         save(&receipt)?;
         return Ok(receipt);
     }
+    retire_unproven_members(&mut receipt, inventory);
     receipt.scope = scope.clone();
     receipt.exceptions = inventory.exceptions.clone();
     let successful = |outcome: &CassyMergeClose| {
@@ -428,6 +458,37 @@ fn outcome_residuals(
     Ok(residuals)
 }
 
+/// Validate portable artifact identity without interpreting a report as review
+/// approval. Ordinary no-code close still owns all verification/evidence gates.
+pub(crate) fn validate_no_code_proofs(
+    root: &Path,
+    scope: &ReleaseScope,
+    task_id: &str,
+    proofs: &[crate::qa_batch::ReleaseProofRef],
+) -> Result<()> {
+    if proofs.is_empty() {
+        return Err(format!("RELEASE_NO_CODE_PROOF_MISSING: {task_id}"));
+    }
+    let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    for proof in proofs {
+        let artifact = crate::artifacts::proof::lookup_metadata(root, None, &proof.artifact_id)
+            .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}: {e}"))?;
+        let owner = tasks.get(&artifact.task_id).map_err(|e| e.to_string())?;
+        if proof.reviewed_sha != scope.reviewed_sha
+            || proof.sha256.len() != 64 || !proof.sha256.bytes().all(|b| b.is_ascii_hexdigit())
+            || proof.sha256 != artifact.sha256 || proof.size_bytes == 0
+            || proof.size_bytes != artifact.size_bytes
+            || !crate::mcp::tools::core::task::task_owned_by_project(&owner, root, Some(&scope.project_id))
+            || (proof.kind == crate::qa_batch::ReleaseProofKind::Report && artifact.task_id != task_id)
+        {
+            return Err(format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}"));
+        }
+        crate::artifacts::proof::validate(&artifact, &artifact.task_id)
+            .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {task_id}: {e}"))?;
+    }
+    Ok(())
+}
+
 struct CoreEffects<'a> {
     root: &'a Path,
     repo: std::path::PathBuf,
@@ -457,10 +518,61 @@ impl ReleaseEffects for CoreEffects<'_> {
         inventory: &ReleaseInventory,
         checkpoint: &mut impl FnMut(&str, CassyMergeClose) -> Result<()>,
     ) -> Result<()> {
-        self.core
-            .close_release_inventory_with_checkpoint(inventory, checkpoint)
-            .await
-            .map(|_| ())
+        use crate::qa_batch::{ReleaseMembership, release_close::ReleaseClose};
+        // Code-delivery finalization deliberately refuses anchorless reports.
+        // Keep that boundary and route explicit reports to their ordinary close.
+        let mut code = inventory.clone();
+        code.deliveries.retain(|d| d.membership != ReleaseMembership::ExplicitNoCode);
+        self.core.close_release_inventory_with_checkpoint(&code, checkpoint).await?;
+        let reports: Vec<_> = inventory.deliveries.iter()
+            .filter(|d| d.membership == ReleaseMembership::ExplicitNoCode).collect();
+        if reports.is_empty() { return Ok(()); }
+        let context = match ReleaseClose::prepare(self.root, &self.repo, inventory) {
+            Ok(context) => context,
+            Err(error) => {
+                for report in reports {
+                    checkpoint(&report.task_id, CassyMergeClose::Held(error.clone()))?;
+                }
+                return Ok(());
+            }
+        };
+        context.scope(async {
+            let tasks = crate::store::open_task_store(self.root).map_err(|e| e.to_string())?;
+            for report in reports {
+                let id = &report.task_id;
+                let task = tasks.get(id).map_err(|e| e.to_string())?;
+                let validation = crate::qa_batch::release_close::validate_task(self.root, &task)
+                    .and_then(|()| validate_no_code_proofs(self.root, &inventory.scope, id, &report.proof_refs));
+                let outcome = if task.status == cas_types::TaskStatus::Closed {
+                    CassyMergeClose::AlreadyClosed
+                } else if let Err(error) = validation {
+                    CassyMergeClose::Held(error)
+                } else {
+                    let request = crate::mcp::tools::TaskCloseRequest {
+                        id: id.clone(),
+                        reason: Some(task.deliverables.parked_close_reason.clone().unwrap_or_else(|| format!(
+                            "Release {}: explicitly bound report artifacts {}.", inventory.scope.release_id,
+                            report.proof_refs.iter().map(|p| p.artifact_id.as_str()).collect::<Vec<_>>().join(", "),
+                        ))),
+                        supervisor_override: None, no_delivery: None,
+                        stranded_branch_override: None, search_manifest: None, commit_receipt: None,
+                    };
+                    let close = crate::async_runtime::heap_future(|| self.core.cas_task_close(rmcp::handler::server::wrapper::Parameters(request)));
+                    let result = crate::mcp::tools::core::task::lifecycle::close_ops::as_cassy_merge_close(close).await;
+                    let text = match result {
+                        Ok(result) => result.content.iter().filter_map(|c| match &c.raw {
+                            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()), _ => None,
+                        }).collect::<Vec<_>>().join("\n"),
+                        Err(error) => error.message.to_string(),
+                    };
+                    if tasks.get(id).is_ok_and(|t| t.status == cas_types::TaskStatus::Closed) {
+                        CassyMergeClose::Closed { notice: text }
+                    } else { CassyMergeClose::Held(text) }
+                };
+                checkpoint(id, outcome)?;
+            }
+            Ok(())
+        }).await
     }
     fn issues(
         &mut self,
@@ -694,13 +806,24 @@ mod tests {
             release_id: scope.release_id.clone(),
             final_release_sha: scope.final_release_sha.clone(),
         };
-        let checkpoint = ReleaseOperation::open(temp.path(), key)
+        let mut checkpoint = ReleaseOperation::open(temp.path(), key.clone())
             .unwrap()
             .load()
             .unwrap()
             .unwrap();
         assert!(checkpoint["members"].get("cas-a").is_some());
         assert!(checkpoint["members"].get("cas-b").is_none());
+        // GH #1790: older inventory discovery persisted these unrelated holds.
+        for id in ["cas-unshipped", "cas-unstarted", "cas-undeclared-report"] {
+            checkpoint["members"][id] = serde_json::to_value(
+                CassyMergeClose::Held("RELEASE_MEMBER_HELD".into())).unwrap();
+        }
+        checkpoint["exceptions"] = serde_json::json!([
+            {"task_id": "cas-unshipped", "code": "missing_mapping"},
+            {"task_id": "cas-unstarted", "code": "missing_anchor"},
+            {"task_id": "cas-undeclared-report", "code": "missing_no_code_proof"}
+        ]);
+        ReleaseOperation::open(temp.path(), key).unwrap().save(&checkpoint).unwrap();
         assert!(
             completed_operation(
                 temp.path(),

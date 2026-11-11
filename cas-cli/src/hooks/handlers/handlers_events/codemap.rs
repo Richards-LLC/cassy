@@ -550,48 +550,6 @@ fn make_staleness(total_changes: usize, file_list: Vec<String>, commit_info: Str
     }
 }
 
-/// Best-effort codemap reminder for Stop hook.
-///
-/// Returns a reminder string if there are pending structural changes.
-/// Checks both pending file and git history.
-pub fn codemap_stop_reminder(cas_root: &Path) -> Option<String> {
-    let pending_path = cas_root.join(CODEMAP_PENDING_FILE);
-
-    // Check pending file first (don't use ? here — read failure must not skip git fallback)
-    if pending_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&pending_path) {
-            let total: usize = content
-                .lines()
-                .filter_map(|line| serde_json::from_str::<CodemapPending>(line.trim()).ok())
-                .map(|p| p.changes.len())
-                .sum();
-
-            if total > 0 {
-                return Some(format!(
-                    "Note: CODEMAP.md has {total} pending structural change(s) that should be updated."
-                ));
-            }
-        }
-    }
-
-    // Fall back to git-based check
-    let project_root = cas_root.parent()?;
-    let codemap_path = project_root.join(".claude/CODEMAP.md");
-    if !codemap_path.exists() {
-        return None;
-    }
-
-    let changes = get_structural_changes_after_codemap(project_root)?;
-    if changes.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "Note: CODEMAP.md has {} pending structural change(s) that should be updated.",
-        changes.len()
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

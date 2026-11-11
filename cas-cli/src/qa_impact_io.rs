@@ -274,11 +274,8 @@ pub(super) fn analyze(
         }
     }
     let mut warnings = Vec::new();
-    let watch = crate::hooks::handlers::handlers_events::project_overview::watch_targets(repo);
     if !overview_present {
         warnings.push("PRODUCT_OVERVIEW.md is missing: journeys have no product context. Run the project-overview skill.".into());
-    } else if let Some(warning) = &watch.warning {
-        warnings.push(format!("PRODUCT_OVERVIEW watch targets: {warning}."));
     }
     if codemap.is_none() {
         warnings.push(
@@ -314,20 +311,7 @@ pub(super) fn analyze(
     }
     warnings.append(&mut report.warnings);
     report.warnings = warnings;
-    report.upkeep = upkeep(
-        &watch,
-        changes,
-        &report,
-        codemap.as_deref(),
-        overview_present,
-        registry.as_ref(),
-        previous.as_ref(),
-        before
-            .as_ref()
-            .map(|s| s.paths.as_slice())
-            .unwrap_or(&tree.paths),
-        &tree.paths,
-    );
+    report.upkeep = upkeep(changes, &report, registry.as_ref());
     Ok(report)
 }
 
@@ -412,31 +396,10 @@ fn legacy_metadata(text: &str) -> Vec<crate::qa_registry::Journey> {
     journeys
 }
 
-fn upkeep(
-    watch: &crate::hooks::handlers::handlers_events::project_overview::WatchTargets,
-    changes: &[Change],
-    report: &Impact,
-    codemap: Option<&str>,
-    overview: bool,
-    registry: Option<&Registry>,
-    previous: Option<&Registry>,
-    base_paths: &[String],
-    head_paths: &[String],
-) -> Upkeep {
-    let mut upkeep = docs_upkeep(
-        changes,
-        changes.iter().any(|change| {
-            change.file == report.registry.path
-                || change.old_file.as_deref() == Some(report.registry.path.as_str())
-        }),
-        codemap,
-        overview,
-        registry,
-        previous,
-        watch,
-        base_paths,
-        head_paths,
-    );
+/// Registry upkeep facts for impact reports; the lane lint enforces them
+/// (cas-4b33). CODEMAP and PRODUCT_OVERVIEW are regenerated at release prep.
+fn upkeep(changes: &[Change], report: &Impact, registry: Option<&Registry>) -> Upkeep {
+    let mut upkeep = Upkeep::default();
     if registry.is_some() {
         upkeep.registry.reasons.extend(
             report
@@ -458,128 +421,8 @@ fn upkeep(
             }
         }
     }
-    for item in [
-        &mut upkeep.codemap,
-        &mut upkeep.product_overview,
-        &mut upkeep.registry,
-    ] {
-        item.reasons.sort();
-        item.reasons.dedup();
-        item.required = !item.reasons.is_empty();
-    }
-    upkeep
-}
-
-/// Shared G5/G6 facts for impact reports and park-time enforcement. Callers
-/// select snapshots and watch configuration; this function performs no I/O.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn docs_upkeep(
-    changes: &[Change],
-    registry_touched: bool,
-    codemap: Option<&str>,
-    overview: bool,
-    registry: Option<&Registry>,
-    previous: Option<&Registry>,
-    watch: &crate::hooks::handlers::handlers_events::project_overview::WatchTargets,
-    base_paths: &[String],
-    head_paths: &[String],
-) -> Upkeep {
-    use std::collections::BTreeSet;
-    let mut upkeep = Upkeep::default();
-    let touched = |path: &str| {
-        changes
-            .iter()
-            .any(|c| c.file == path || c.old_file.as_deref() == Some(path))
-    };
-    if let Some(codemap) = codemap.filter(|_| !touched(".claude/CODEMAP.md")) {
-        let labels = codemap_labels(codemap);
-        // CODEMAP lists direct children of these parents. Git has no directory
-        // records, so existence is established from tracked snapshot paths.
-        let parent = |path: &str| path.rsplit_once('/').map_or("", |(p, _)| p).to_owned();
-        let enumerated: BTreeSet<String> =
-            labels.iter().map(|label| parent(&label.prefix)).collect();
-        for change in changes {
-            let removed = if change.status.starts_with('D') {
-                Some(change.file.as_str())
-            } else if change.status.starts_with('R') {
-                change.old_file.as_deref()
-            } else {
-                None
-            };
-            if let Some(removed) = removed {
-                for label in &labels {
-                    if contains_path(&label.prefix, removed)
-                        && base_paths
-                            .iter()
-                            .any(|old| contains_path(&label.prefix, old))
-                        && !head_paths
-                            .iter()
-                            .any(|now| contains_path(&label.prefix, now))
-                    {
-                        upkeep
-                            .codemap
-                            .reasons
-                            .push(format!("deleted or renamed mapped path {}", label.prefix));
-                    }
-                }
-            }
-            if change.status.starts_with(['A', 'R']) {
-                let mut dir = change.file.rsplit_once('/').map(|(p, _)| p);
-                while let Some(path) = dir {
-                    let parent = parent(path);
-                    if enumerated.contains(&parent)
-                        && !base_paths.iter().any(|old| contains_path(path, old))
-                    {
-                        upkeep.codemap.reasons.push(format!(
-                            "new directory {path} under enumerated {}",
-                            if parent.is_empty() {
-                                "repository root"
-                            } else {
-                                &parent
-                            }
-                        ));
-                    }
-                    dir = path.rsplit_once('/').map(|(p, _)| p);
-                }
-            }
-        }
-    }
-    if overview && !touched("docs/PRODUCT_OVERVIEW.md") {
-        for change in changes {
-            for path in std::iter::once(change.file.as_str()).chain(change.old_file.as_deref()) {
-                if watch.is_domain_path(path)
-                    || (change.status.starts_with(['A', 'D', 'R']) && watch.is_in_watch_dir(path))
-                {
-                    upkeep
-                        .product_overview
-                        .reasons
-                        .push(format!("watched product path {path}"));
-                }
-            }
-        }
-        if registry_touched && let Some(registry) = registry {
-            for journey in &registry.journeys {
-                let old = previous.and_then(|r| r.journeys.iter().find(|j| j.id == journey.id));
-                if (journey.status == "live" && old.is_none())
-                    || old.is_some_and(|old| {
-                        matches!(
-                            (old.status.as_str(), journey.status.as_str()),
-                            ("live", "dead") | ("dead", "live")
-                        )
-                    })
-                {
-                    upkeep.product_overview.reasons.push(format!(
-                        "journey {} added live or changed live/dead status",
-                        journey.id
-                    ));
-                }
-            }
-        }
-    }
-    for item in [&mut upkeep.codemap, &mut upkeep.product_overview] {
-        item.reasons.sort();
-        item.reasons.dedup();
-        item.required = !item.reasons.is_empty();
-    }
+    upkeep.registry.reasons.sort();
+    upkeep.registry.reasons.dedup();
+    upkeep.registry.required = !upkeep.registry.reasons.is_empty();
     upkeep
 }

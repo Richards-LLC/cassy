@@ -24,7 +24,7 @@ pub(crate) use attribution::{
 #[cfg(test)]
 pub use codemap::check_codemap_freshness;
 pub use codemap::{
-    CodemapStaleness, codemap_stop_reminder,
+    CodemapStaleness,
     detect_codemap_structural_changes,
 };
 pub use message_display::handle_message_display;

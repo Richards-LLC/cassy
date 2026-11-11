@@ -7,6 +7,42 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.15.0] - 2026-11-11
+
+### Fixed — Factory
+
+- **Supervisor context clear explains a skip** — A wake over the ledger input cap gets one quiet explanation when the latest call stays below the context threshold.
+- **Keep failed merges off the shared target** — Worktree merges prepare their commit in a detached checkout, publish against the observed origin SHA, and then advance the local target. A failed push leaves the target at its previous tip so later lanes can continue. Closes #1794.
+- **Complete late park refusals** — A close that finishes after the MCP response deadline records each failed park gate and its next action, with a link to the full refusal.
+- **Green frozen trains wake their supervisor again** — The train CI observer ran `scripts/train-ci.py` from the project checkout's working tree. A checkout on an older main had no such script, so every scan failed quietly, no receipt was recorded, and a green frozen train got neither a ready-to-cut wake nor an auto-cut. The observer now runs the script the train tip carries.
+- **Close epics after their branch is retired** — Cassy can verify and close a shipped epic after its target branch is deleted or only a stale local ref remains. The published default branch must contain the recorded child deliveries and any supplied receipt. Closes #1786.
+
+### Fixed — Release automation
+
+- **Carry report proof through release closeout** — Audited cut and promotion inputs retain explicit portable report bindings. Missing or mismatched bindings stop tracking before the train freezes, and valid no-code members close through ordinary evidence and verification gates with replay protection.
+- **Show actual release closeout results** — Notices and CLI summaries distinguish successful closes, already closed members, held and ineligible members, residuals and operation completion. A fully held operation no longer looks like completed deliveries; the durable notice retains typed counts and replay deduplication.
+
+### Fixed — Factory upkeep
+
+- **Keep target journeys out of a delivery's overview findings** — Parking a conflict repair attributes overview upkeep to the delivery’s own new live journeys and live/dead status changes.
+
+### Fixed — Release closeout
+
+- **Read release reviews across machines** — Release closeout resolves published review ledgers from synced artifact references and verifies their downloaded bytes on the consuming machine. Artifact ownership, revocation and immutable receipt bindings remain checked.
+
+### Fixed — Releases
+
+- **Release closeout membership** — Unstarted descendants and undeclared unshipped deliveries no longer create missing-anchor or missing-mapping release obligations. Declared missing members and proven shipped debt retain their holds. Retry removes obsolete discovery holds while preserving saved delivery cycles. Fixes #1790.
+- **One purged task no longer fails every release issue** — Issue reconciliation read every quarantined task. A quarantine marker whose task had been deliberately purged made the whole release's reconciliation fail with "task not found", across all its deliveries (33 in v4.14.0). An unrelated purged marker is now ignored. A delivered task whose row is gone gets its own failed outcome. Present quarantined tasks still hold their issues open.
+
+### Fixed — Factory delivery
+
+- **Approved epic merge attribution** — A live supervisor can approve an exact epic merge parent before an integration task parks. Close measures the merge diff at its pushed tip and still checks other side parents. Closes #1785.
+
+### Fixed — Release
+
+- **A blocked Git probe can no longer hang `cas release installed`** — Each tracked project's root lookup ran `git rev-parse --show-toplevel` with no deadline. On a Mac, a Git child that blocked under the install-on-publish LaunchAgent (for example in a project under ~/Documents) held `cas release installed` for 4h40m after the v4.13.0 install, so v4.14.0 never installed. The probe now stops after 10 seconds and the lookup falls back to the directory walk it already uses outside Git.
+
 ## [4.14.0] - 2026-11-11
 
 ### Fixed — Violet

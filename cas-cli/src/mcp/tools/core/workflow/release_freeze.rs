@@ -514,10 +514,10 @@ mod tests {
         let now = Utc::now();
         assert_eq!(remaining_minutes(&root, &train, now), Err("train suite"));
         for (key, payload) in [
-            ("a", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(20.0) }),
-            ("b", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(30.0) }),
-            ("c", cas_store::QualityPayload::CheckRun { check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(90.0) }),
-            ("d", cas_store::QualityPayload::CheckRun { check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
+            ("a", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(20.0) }),
+            ("b", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(30.0) }),
+            ("c", cas_store::QualityPayload::CheckRun { review: None, check_id: "train_full_gate".into(), stage: cas_store::CheckStage::Lane, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(90.0) }),
+            ("d", cas_store::QualityPayload::CheckRun { review: None, check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
             ("e", cas_store::QualityPayload::Release { commit_to_main_minutes: None, main_to_published_minutes: Some(5.0), ejections: 0, rescues: 0 }),
         ] {
             let mut event = cas_store::NewQualityEvent::new(key, payload);

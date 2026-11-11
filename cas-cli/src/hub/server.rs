@@ -1451,7 +1451,7 @@ async fn session_operation<R: SessionReadModel>(
     let operation_session = session.clone();
     let expected = request.expected;
     let outcome =
-        run_fleet_operation(cas_dir, operation_session, operation, expected, attribution).await;
+        run_fleet_operation(cas_dir.clone(), operation_session, operation, expected, attribution).await;
 
     use crate::ops::fleet::OperationError;
     let (status, body, audit_outcome, detail) = match outcome {
@@ -1498,6 +1498,15 @@ async fn session_operation<R: SessionReadModel>(
         tracing::warn!(%error, %session, action, "cas-566b: operation outcome audit row could not be written");
     }
     if status == StatusCode::OK {
+        let kind = match action {
+            "operation:lift_train_freeze" => cas_store::InterventionKind::TrainFreezeLift,
+            "operation:set_auto_cut_paused" => cas_store::InterventionKind::AutoCutPause,
+            _ => cas_store::InterventionKind::CommanderAction,
+        };
+        crate::quality_ledger::intervention(&cas_dir, kind,
+            format!("commander|{}|{op_id}", context.device_id),
+            body["outcome"]["epic_id"].as_str().or_else(|| body["outcome"]["task_id"].as_str()),
+            Some(&context.device_id), Some(action));
         state.events.fleet_changed(&session);
     }
     replays.insert(

@@ -409,7 +409,7 @@ fn record_task(root: &Path, task: &cas_types::Task) -> Result<usize> {
     };
     let mut event = NewQualityEvent::new(
         format!("task_duration|{}|{}", task.id, at.timestamp()),
-        QualityPayload::CheckRun {
+        QualityPayload::CheckRun { review: None,
             check_id: format!("task_duration:{}", task.task_type),
             stage: CheckStage::Lane,
             outcome: CheckOutcome::Pass,
@@ -548,7 +548,7 @@ pub(crate) fn record_pipeline_completion(
     }
     let mut row = NewQualityEvent::new(
         format!("github_stage|{stage}|{id}"),
-        QualityPayload::CheckRun {
+        QualityPayload::CheckRun { review: None,
             check_id: stage.into(),
             stage: if stage == "merge_queue" {
                 CheckStage::Queue

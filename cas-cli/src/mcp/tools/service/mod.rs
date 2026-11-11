@@ -436,8 +436,19 @@ impl CasService {
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
                 "close" => {
+                    let manual = if req.supervisor_override.unwrap_or(false) { None }
+                        else { this.inner.resolve_live_supervisor_authority().ok() };
+                    let was_closed = this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                        .is_some_and(|task| task.status == cas_types::TaskStatus::Closed);
                     let result = this.task_close(req).await;
                     if result.is_ok() {
+                        if !was_closed && let Some(actor) = manual
+                            && this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())
+                                .is_some_and(|task| task.status == cas_types::TaskStatus::Closed) {
+                            crate::quality_ledger::intervention(&this.inner.cas_root, cas_store::InterventionKind::ManualClose,
+                                format!("manual_close|{event_task_id}|{}", chrono::Utc::now().timestamp_millis()),
+                                Some(&event_task_id), Some(&actor.id), None);
+                        }
                         mutation_receipt::task_committed(&event_task_id);
                         this.db_branch_after_task_end(&event_task_id).await;
                     }

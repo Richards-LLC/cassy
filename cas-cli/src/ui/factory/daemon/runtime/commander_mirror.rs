@@ -1190,6 +1190,24 @@ mod tests {
                     "director", &agent.name, "Review the task", Some("factory-1"),
                     None, None, false, Some(&cas_store::QueueOrigin::Daemon),
                 ).unwrap().id();
+                // Typed daemon notice, independent of its rendered body.
+                let legacy_lifecycle = cli == cas_mux::SupervisorCli::Claude && role == AgentRole::Supervisor;
+                let notice_kind = if legacy_lifecycle { "task_lifecycle" }
+                    else if role == AgentRole::Supervisor { "merge_ready" } else { "ci_completed" };
+                let stored_kind = if role == AgentRole::Supervisor {
+                    "merge_ready:[\"supervisor-id\",\"cas-task\",\"anchor\"]"
+                } else { "ci_completed" };
+                rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                    "UPDATE prompt_queue SET kind = ?1 WHERE id = ?2", rusqlite::params![stored_kind, id]).unwrap();
+                if legacy_lifecycle {
+                    use cas_store::SupervisorQueueStore;
+                    let notices = cas_store::SqliteSupervisorQueueStore::open(&root).unwrap();
+                    notices.init().unwrap();
+                    let event = notices.notify(&agent.id, "task_lifecycle", "{}", cas_store::NotificationPriority::Normal).unwrap();
+                    rusqlite::Connection::open(root.join("cas.db")).unwrap().execute(
+                        "UPDATE prompt_queue SET kind = NULL, source = ?1 WHERE id = ?2",
+                        rusqlite::params![format!("lifecycle-wake:{event}"), id]).unwrap();
+                }
                 let prompt = if cli == cas_mux::SupervisorCli::Claude {
                     if role == AgentRole::Supervisor {
                         format!("<teammate-message teammate_id=\"director\">\n[cas #{id} agent-authored 0s first]\nReview the task\n</teammate-message>")
@@ -1240,7 +1258,8 @@ mod tests {
                 assert_eq!(turns.len(), 1, "completed {cli:?} {role:?} turn must be recorded once");
                 let payload = serde_json::to_value(&turns[0].payload).unwrap();
                 // pin: ledger wire fields preserve the authenticated director channel and measured usage.
-                assert_eq!(payload["woken_by"], "director");
+                assert_eq!(payload["woken_by"], if legacy_lifecycle { "daemon" } else { "director" });
+                assert_eq!(payload["notice_kind"], notice_kind);
                 assert_eq!(payload["no_op"], false);
                 assert!(payload["actions"].as_array().is_some_and(|actions| !actions.is_empty()));
                 assert_eq!(payload["input_tokens"], 30);

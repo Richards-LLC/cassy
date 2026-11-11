@@ -217,12 +217,25 @@ pub(crate) fn row_counter(deliverables: &cas_types::TaskDeliverables) -> u32 {
 /// closing one; the current anchor lands in the open newest cycle, numbered
 /// by the row's replicated `delivery_cycle` when it is set.
 pub(crate) fn backfill_with_conn(conn: &Connection, default_project: Option<&str>) -> Result<()> {
-    let candidates = "FROM tasks t
-         WHERE t.status NOT IN ('closed', 'cancelled')
+    backfill_selected_with_conn(conn, default_project, false)
+}
+
+/// Explicit ledger history recovery includes terminal tasks; ordinary store
+/// open keeps its bounded open-task recovery.
+pub fn backfill_delivery_cycles(root: &std::path::Path, project: &str) -> Result<()> {
+    let conn = Connection::open(root.join("cas.db"))?;
+    crate::shared_db::install_busy_handler(&conn)?;
+    backfill_selected_with_conn(&conn, Some(project), true)
+}
+
+fn backfill_selected_with_conn(conn: &Connection, default_project: Option<&str>, terminal: bool) -> Result<()> {
+    let status = if terminal { "1" } else { "t.status NOT IN ('closed', 'cancelled')" };
+    let candidates = format!("FROM tasks t
+         WHERE {status}
            AND NOT EXISTS (SELECT 1 FROM delivery_cycles c WHERE c.task_id = t.id)
            AND json_valid(t.deliverables) AND json_type(t.deliverables) = 'object'
            AND (json_extract(t.deliverables, '$.factory_branch_anchor') IS NOT NULL
-                OR json_array_length(t.deliverables, '$.historical_factory_branch_anchors') > 0)";
+                OR json_array_length(t.deliverables, '$.historical_factory_branch_anchors') > 0)");
     let pending: bool = conn.query_row(&format!("SELECT EXISTS (SELECT 1 {candidates})"), [], |row| row.get(0))?;
     if !pending {
         return Ok(());

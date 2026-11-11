@@ -293,27 +293,44 @@ fn release_range(repo: &Path, release: &str, published: bool) -> Result<(String,
 }
 
 
-/// Per delivery (each first-parent landing on main), minutes from its earliest
-/// authored commit to the landing.
-fn delivery_landing_spread(repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
-    let Some(landings) =
-        git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")])
-    else {
+/// First-parent main landings carry a train's individual deliveries. Recorded
+/// merges identify train boundaries; Git also retains deliveries whose local
+/// observation was lost. A release preparation commit is not another delivery.
+fn delivery_landing_spread(root: &Path, repo: &Path, from: &str, to: &str) -> Measure<LandingSpread> {
+    let Some(landings) = git_output(repo, &["log", "--first-parent", "--format=%H %cI", &format!("{from}..{to}")]) else {
         return unknown(format!("git log {from}..{to} failed"));
     };
-    let mut minutes: Vec<f64> = landings
-        .lines()
-        .filter_map(|landing| {
-            let (sha, landed_at) = landing.split_once(' ')?;
-            let landed_at = parse_time(landed_at)?;
-            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{sha}^1..{sha}")])?;
-            let first = authored.lines().filter_map(parse_time).min()?;
-            Some(minutes_between(first, landed_at))
-        })
-        .collect();
-    if minutes.is_empty() {
-        return unknown(format!("no deliveries landed in {from}..{to}"));
+    let recorded = cas_store::observed_delivery_merges(root).unwrap_or_default();
+    let known: std::collections::BTreeSet<_> = recorded.iter().map(|m| m.merge_commit_sha.as_str()).collect();
+    let mut minutes = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for landing in landings.lines() {
+        let Some((sha, at)) = landing.split_once(' ') else { continue };
+        let Some(at) = parse_time(at) else { continue };
+        let incoming = git(repo, &["log", "--first-parent", "--format=%H %P", &format!("{sha}^1..{sha}^2")])
+            .unwrap_or_default();
+        let train = incoming.lines().any(|line| line.split_whitespace().next().is_some_and(|id| known.contains(id)));
+        let deliveries: Vec<_> = if train {
+            incoming.lines().filter_map(|line| {
+                let parts: Vec<_> = line.split_whitespace().collect();
+                (parts.len() >= 3 || parts.first().is_some_and(|id| known.contains(id))).then(|| parts[0].to_string())
+            }).collect()
+        } else { vec![sha.to_string()] };
+        for delivery in deliveries {
+            let recorded = recorded.iter().find(|m| m.merge_commit_sha == delivery);
+            let identity = recorded.and_then(|m| {
+                let cycles = cas_store::delivery_cycles(root, &m.task_id).ok()?;
+                cycles.into_iter().find(|c| c.anchors.contains(&m.source_commit_sha)).map(|c| c.cycle_id)
+            }).unwrap_or_else(|| recorded.map_or_else(|| delivery.clone(), |m| m.task_id.clone()));
+            if !seen.insert(identity) { continue }
+            let authored = git(repo, &["log", "--no-merges", "--format=%aI", &format!("{delivery}^1..{delivery}"), "--not", from])
+                .unwrap_or_default();
+            if let Some(first) = authored.lines().filter_map(parse_time).min() {
+                minutes.push(minutes_between(first, at));
+            }
+        }
     }
+    if minutes.is_empty() { return unknown(format!("no deliveries landed in {from}..{to}")) }
     minutes.sort_by(f64::total_cmp);
     Measure::Known(LandingSpread {
         median_minutes: median(minutes.clone()).unwrap_or_default(),
@@ -437,6 +454,7 @@ fn new_checks(repo: &Path, from: &str, to: &str) -> Measure<NewChecks> {
 }
 
 fn release_shape(
+    root: &Path,
     repo: &Path,
     release: &str,
     published: bool,
@@ -447,7 +465,7 @@ fn release_shape(
         main_to_published(repo, release, published, recorded_publish_minutes, published_at);
     match release_range(repo, release, published) {
         Ok((from, to)) => (
-            SpeedRow { commit_to_main: delivery_landing_spread(repo, &from, &to), main_to_published_minutes },
+            SpeedRow { commit_to_main: delivery_landing_spread(root, repo, &from, &to), main_to_published_minutes },
             ComplexityRow {
                 lines: line_churn(repo, &from, &to),
                 config_keys: new_config_keys(repo, &from, &to),
@@ -505,7 +523,7 @@ fn record_release(cas_root: &Path, repo: &Path, receipt: &Path) -> Result<String
     // A full release sample uses the receipt's request-to-publication endpoint.
     if let Some(seconds)=fields.get("REQUEST_TO_PUBLISHED_SECS").and_then(|v|v.parse::<f64>().ok()) {
         let mut sample=cas_store::NewQualityEvent::new(format!("release_duration|{version}"),
-            QualityPayload::CheckRun { check_id:"release_total".into(),stage:cas_store::CheckStage::Lane,
+            QualityPayload::CheckRun { review: None, check_id:"release_total".into(),stage:cas_store::CheckStage::Lane,
                 outcome:CheckOutcome::Pass,sha:None,minutes:Some(seconds/60.0) });
         sample.occurred_at=published_at; sample.release_version=Some(version.clone());
         crate::quality_ledger::emit(cas_root,&sample);
@@ -578,6 +596,58 @@ impl TurnTotals {
 }
 
 #[derive(Debug, Serialize)]
+struct ReviewRound {
+    verification_id: String,
+    outcome: CheckOutcome,
+    provenance: String,
+    at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeliveryReviews {
+    project: String,
+    task: String,
+    cycle_id: Option<String>,
+    rounds: Vec<ReviewRound>,
+}
+
+#[derive(Debug, Serialize)]
+struct InterventionRow {
+    kind: &'static str,
+    title: Option<String>,
+    at: DateTime<Utc>,
+    actor: Option<String>,
+    source: Option<String>,
+}
+
+/// Detail rows retain each verdict, including errors and legacy unknowns.
+fn review_rows(events: &[QualityEvent]) -> Vec<DeliveryReviews> {
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::CheckRun { review: Some(r), .. } => r.supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        _ => None,
+    }).collect();
+    let mut rows = BTreeMap::<(String, String, Option<String>), Vec<ReviewRound>>::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for event in events {
+        let QualityPayload::CheckRun { check_id, outcome, review, .. } = &event.payload else { continue };
+        if check_id != "task_verifier" || superseded.contains(&(event.project_id.as_str(), event.id.as_str())) { continue }
+        let Some(task) = &event.task_id else { continue };
+        let id = review.as_ref().map_or(event.id.as_str(), |r| r.verification_id.as_str());
+        if !seen.insert((event.project_id.clone(), id.to_string())) { continue }
+        rows.entry((project_name(event), task.clone(), review.as_ref().and_then(|r| r.cycle_id.clone())))
+            .or_default().push(ReviewRound {
+                verification_id: id.to_string(), outcome: *outcome,
+                provenance: review.as_ref().map_or_else(|| "unknown".into(), |r| if r.provenance == "legacy" { "unknown".into() } else { r.provenance.clone() }),
+                at: event.occurred_at,
+            });
+    }
+    rows.into_iter().map(|((project, task, cycle_id), mut rounds)| {
+        rounds.sort_by_key(|r| (r.at, r.verification_id.clone()));
+        DeliveryReviews { project, task, cycle_id, rounds }
+    }).collect()
+}
+
+#[derive(Debug, Serialize)]
 struct LedgerReport {
     release: String,
     published: bool,
@@ -586,6 +656,7 @@ struct LedgerReport {
     events: usize,
     projects: Vec<String>,
     turns: TurnTotals,
+    turns_by_notice_kind: BTreeMap<String, TurnTotals>,
     turns_by_channel: BTreeMap<&'static str, TurnTotals>,
     /// Turns per supervisor (its agent id), then per wake channel.
     turns_by_actor: BTreeMap<String, BTreeMap<&'static str, TurnTotals>>,
@@ -596,6 +667,8 @@ struct LedgerReport {
     merged: Vec<MergedRow>,
     /// Skills, guards, rules and gates the release changed, from git between its tags.
     changes: Measure<Vec<String>>,
+    reviews: Vec<DeliveryReviews>,
+    intervention_rows: Vec<InterventionRow>,
     interventions_total: u32,
     interventions: BTreeMap<&'static str, u32>,
     commit_to_main_minutes: Option<f64>,
@@ -668,7 +741,20 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 }),
         );
     }
+    let history = cas_store::quality_events_between(cas_root, None, None)?;
+    events.retain(|event| !matches!(event.payload, QualityPayload::Intervention { .. })
+        || event.release_version.as_deref().is_none_or(|version| version == name));
+    for event in history.iter().filter(|e| matches!(e.payload, QualityPayload::Intervention { .. })
+        && e.release_version.as_deref() == Some(name.as_str())) {
+        if !events.iter().any(|e| e.id == event.id && e.project_id == event.project_id) { events.push(event.clone()); }
+    }
     let mut report = aggregate(name, published, from, to, &events);
+    // Review is the delivery's history, not merely checks that happened between
+    // tag timestamps. Keep later/earlier rounds visible with their own dates.
+    let reviewed: std::collections::BTreeSet<_> = report.reviews.iter().map(|r| (r.project.clone(), r.task.clone())).collect();
+    let reviews: Vec<_> = history.iter().filter(|e| e.task_id.as_ref()
+        .is_some_and(|task| reviewed.contains(&(project_name(e), task.clone())))).cloned().collect();
+    report.reviews = review_rows(&reviews);
     let published_at = published
         .then(|| cas_store::quality_release_events(cas_root))
         .transpose()?
@@ -679,6 +765,7 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
                 .map(|event| event.occurred_at)
         });
     (report.speed, report.complexity) = release_shape(
+        cas_root,
         repo,
         &report.release,
         published,
@@ -691,7 +778,6 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         Ok((from, to)) => gate_changes(repo, &from, &to),
         Err(reason) => unknown(reason),
     };
-    let history=cas_store::quality_events_between(cas_root,None,None)?;
     let mut grouped=BTreeMap::<String,Vec<QualityEvent>>::new();
     let releases=cas_store::quality_release_events(cas_root)?;
     for event in history.into_iter().filter(|e| matches!(e.payload,QualityPayload::EstimateOutcome {..})) {
@@ -810,11 +896,14 @@ fn aggregate(
         events: events.len(),
         projects: Vec::new(),
         turns: TurnTotals::default(),
+        turns_by_notice_kind: BTreeMap::new(),
         turns_by_channel: BTreeMap::new(),
         turns_by_actor: BTreeMap::new(),
         deliveries: unknown("no merge record read"),
         merged: Vec::new(),
         changes: unknown("no repository read"),
+        reviews: review_rows(events),
+        intervention_rows: Vec::new(),
         interventions_total: 0,
         interventions: BTreeMap::new(),
         commit_to_main_minutes: None,
@@ -837,13 +926,23 @@ fn aggregate(
         estimates: crate::quality_ledger::estimates::calibration(events),
         estimate_trend: Vec::new(),
     };
+    let superseded: std::collections::BTreeSet<_> = events.iter().filter_map(|e| match &e.payload {
+        QualityPayload::CheckRun { review: Some(r), .. } => r.supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        QualityPayload::Turn { supersedes, .. } => supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
+        _ => None,
+    }).collect();
     for event in events {
+        if superseded.contains(&(event.project_id.as_str(), event.id.as_str())) { continue }
         let project = project_name(event);
         if !report.projects.contains(&project) {
             report.projects.push(project.clone());
         }
         match &event.payload {
-            QualityPayload::Turn { woken_by, no_op, input_tokens, output_tokens, minutes, .. } => {
+            QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, .. } => {
+                report.turns_by_notice_kind.entry(notice_kind.as_ref()
+                    .filter(|kind| !kind.bytes().all(|b| b.is_ascii_digit())).cloned()
+                    .unwrap_or_else(|| "unknown".into())).or_default()
+                    .add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns_by_channel.entry(woken_by.as_str()).or_default()
                     .add(*no_op, *input_tokens, *output_tokens, *minutes);
@@ -854,6 +953,8 @@ fn aggregate(
                 }
             }
             QualityPayload::Intervention { intervention, .. } => {
+                report.intervention_rows.push(InterventionRow { kind: intervention.as_str(), title: event.title.clone(), at: event.occurred_at,
+                    actor: event.actor.clone(), source: event.local_note.clone() });
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
             }
@@ -1086,9 +1187,23 @@ fn render(report: &LedgerReport) -> String {
         }
     }
 
+    for (kind, row) in &report.turns_by_notice_kind {
+        let _ = writeln!(out, "  notice {kind}: {} wakes, {} no-op", row.wakes, row.no_op_wakes);
+    }
+    let _ = writeln!(out, "\nDelivery review history");
+    for row in &report.reviews {
+        let _ = writeln!(out, "  {} {}: {} rounds", row.task, row.cycle_id.as_deref().unwrap_or("cycle unknown"), row.rounds.len());
+        for (index, round) in row.rounds.iter().enumerate() {
+            let _ = writeln!(out, "    {}. {:?} {} {} ({})", index + 1, round.outcome, round.provenance, round.verification_id, when(round.at));
+        }
+    }
     let _ = writeln!(out, "\nInterventions: {}", report.interventions_total);
     for (kind, count) in &report.interventions {
         let _ = writeln!(out, "  {kind:<16}{count:>4}");
+    }
+
+    for row in report.intervention_rows.iter().filter(|r| r.source.as_deref().is_some_and(|s| s.starts_with("supervisor-attested:"))) {
+        let _ = writeln!(out, "  {} {} {}: {}", when(row.at), row.kind, row.title.as_deref().unwrap_or_default(), row.source.as_deref().unwrap_or_default());
     }
 
     let minutes = |minutes: &f64| duration(Some(*minutes));
@@ -1196,7 +1311,7 @@ mod tests {
         let root=crate::store::init_cas_dir(temp.path()).unwrap();
         env.set("CAS_ROOT",&root);
         for (i, m) in [8.0, 12.0, 16.0, 20.0, 31.0].into_iter().enumerate() {
-            crate::quality_ledger::emit(&root,&NewQualityEvent::new(format!("ref-{i}"),QualityPayload::CheckRun {
+            crate::quality_ledger::emit(&root,&NewQualityEvent::new(format!("ref-{i}"),QualityPayload::CheckRun { review: None,
                 check_id:"merge_queue".into(),stage:cas_store::CheckStage::Queue,outcome:CheckOutcome::Pass,sha:None,minutes:Some(m) }));
         }
         let early = estimate(
@@ -1342,6 +1457,91 @@ mod tests {
         let cas_root = repo.join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
         cas_root
+    }
+
+    #[test]
+    fn report_keeps_review_rounds_and_wake_notice_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut events = Vec::new();
+        for (id, outcome, provenance) in [("ver-1", "fail", "independent"), ("ver-2", "fail", "independent"), ("ver-3", "pass", "supervisor_direct")] {
+            let payload = serde_json::from_value(serde_json::json!({
+                "kind": "check_run", "check_id": "task_verifier", "stage": "verifier", "outcome": outcome,
+                "review": {"verification_id": id, "cycle_id": "dc-delivery", "provenance": provenance}
+            })).unwrap();
+            let mut event = cas_store::NewQualityEvent::new(id, payload);
+            event.task_id = Some("cas-b5cd".into());
+            cas_store::record_quality_event(dir.path(), &event).unwrap();
+        }
+        let payload = serde_json::from_value(serde_json::json!({"kind": "turn", "woken_by": "daemon",
+            "notice_kind": "ci_completed", "actions": [], "no_op": true,
+            "input_tokens": null, "output_tokens": null, "minutes": null})).unwrap();
+        let mut wake = cas_store::NewQualityEvent::new("wake", payload);
+        let mut old = wake.clone();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut old.payload { *notice_kind = None; }
+        crate::quality_ledger::emit_checked(dir.path(), &old).unwrap();
+        let original_id = cas_store::quality_events_between(dir.path(), None, None).unwrap().last().unwrap().id.clone();
+        let mut legacy_detail = wake.clone();
+        legacy_detail.natural_key = "turn_detail|wake".into();
+        if let QualityPayload::Turn { notice_kind, supersedes, .. } = &mut legacy_detail.payload {
+            *notice_kind = Some("102644".into());
+            *supersedes = Some(original_id);
+        }
+        crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (false, false));
+        let mut missing_stamp = wake.clone();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut missing_stamp.payload { *notice_kind = None; }
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp).unwrap(), (false, false));
+        // A new completed turn remains one new wake.
+        wake.natural_key = "fresh-wake".into();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
+        let mut untyped = wake.clone();
+        untyped.natural_key = "untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut untyped.payload { *notice_kind = None; }
+        crate::quality_ledger::emit_checked(dir.path(), &untyped).unwrap();
+        let original_id = cas_store::quality_events_between(dir.path(), None, None).unwrap().last().unwrap().id.clone();
+        let mut legacy_detail = untyped.clone();
+        legacy_detail.natural_key = "turn_detail|untyped-wake".into();
+        if let QualityPayload::Turn { notice_kind, supersedes, .. } = &mut legacy_detail.payload {
+            *notice_kind = Some("102644".into());
+            *supersedes = Some(original_id);
+        }
+        crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
+        events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
+        let report = aggregate("v9.99.0".into(), true, None, None, &events);
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["reviews"][0]["rounds"].as_array().map(Vec::len), Some(3));
+        assert_eq!(json["reviews"][0]["cycle_id"], "dc-delivery");
+        assert_eq!(json["reviews"][0]["rounds"][2]["provenance"], "supervisor_direct");
+        assert_eq!(json["turns_by_notice_kind"]["ci_completed"]["no_op_wakes"], 2);
+        assert_eq!(json["turns"]["wakes"], 3);
+        assert_eq!(json["turns_by_notice_kind"]["unknown"]["wakes"], 1);
+        assert!(json["turns_by_notice_kind"].get("102644").is_none());
+    }
+
+    #[test]
+    fn report_measures_deliveries_inside_a_release_train() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = release_fixture(dir.path());
+        // The release train carries three recorded deliveries in one main merge.
+        for (task, rev, source) in [("cas-feature", "v1.1.0~2", "v1.1.0~2^2"),
+            ("cas-config", "v1.1.0~1", "v1.1.0~1"), ("cas-lint", "v1.1.0", "v1.1.0")] {
+            let merge = git(dir.path(), &["rev-parse", &format!("{rev}^{{commit}}")]).unwrap();
+            let anchor = git(dir.path(), &["rev-parse", &format!("{source}^{{commit}}")]).unwrap();
+            cas_store::record_observed_delivery_merge(&root, task, "factory/worker", "epic/train", &anchor, &merge, "supervisor").unwrap();
+        }
+        git_in(dir.path(), &["branch", "train"]);
+        git_in(dir.path(), &["checkout", "-q", "main"]);
+        git_in(dir.path(), &["reset", "--hard", "v1.0.0"]);
+        git_dated(dir.path(), &["merge", "-q", "--no-ff", "-m", "land train", "train"],
+            "2026-10-01T15:00:00Z", "2026-10-01T15:00:00Z");
+        git_in(dir.path(), &["tag", "-f", "v1.1.0"]);
+        let report = build_report(&root, dir.path(), Some("v1.1.0")).unwrap();
+        assert_eq!(report.speed.commit_to_main,
+            Measure::Known(LandingSpread { median_minutes: 90.0, p90_minutes: 240.0, deliveries: 3 }));
     }
 
     /// Commit to main is per delivery, from its first commit to its landing.
@@ -1521,7 +1721,7 @@ mod tests {
             ("no-op turn", at(2, 7), cas_store::WakeChannel::Worker, true, None),
             ("future turn", at(3, 6), cas_store::WakeChannel::Director, false, Some(900)),
         ] {
-            let mut event = NewQualityEvent::new(key, QualityPayload::Turn {
+            let mut event = NewQualityEvent::new(key, QualityPayload::Turn { supersedes: None, notice_kind: None,
                 woken_by: channel, actions: if no_op { vec![] } else { vec![cas_store::TurnAction::TaskMutation] },
                 no_op, input_tokens: usage, output_tokens: usage.map(|_| 5), minutes: usage.map(|_| 0.5),
             });
@@ -1606,7 +1806,7 @@ mod tests {
         // alias. The append-only ledger retains that row across the upgrade.
         let mut old_ejection = NewQualityEvent::new(
             "merge_queue|cas-legacy|1447|queue-exit:2026-10-02T05:00:00Z:merge-group-run:41246801444",
-            QualityPayload::CheckRun { check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
+            QualityPayload::CheckRun { review: None, check_id: crate::quality_ledger::MERGE_QUEUE_CHECK.into(),
                 stage: cas_store::CheckStage::Queue, outcome: CheckOutcome::Fail,
                 sha: None, minutes: None },
         );

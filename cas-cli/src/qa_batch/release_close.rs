@@ -697,7 +697,7 @@ pub(crate) fn reconcile_members(
                 closed.pending_verification = false;
                 closed.pending_worktree_merge = false;
                 let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
-                store.update_if_current(&closed, &task).map_err(|_| "RELEASE_GENERATION_CHANGED".to_string())?;
+                store.update_if_current(&closed, &task).map_err(|error| format!("RELEASE_CLOSE_WRITE: {error}"))?;
             }
             Ok(CassyMergeClose::Closed { notice: "completion included in release receipt".into() })
         };

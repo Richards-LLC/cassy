@@ -112,7 +112,7 @@ fn published_train_closes_members_independently_cas_734b() {
     let mut unbound = inventory.clone();
     unbound.deliveries.iter_mut().find(|d| d.task_id == "cas-report").unwrap().proof_refs[0].size_bytes += 1;
     let outcomes = crate::release_reconcile::preview_release(&root, &repo, &unbound).unwrap();
-    assert!(matches!(outcomes.get("cas-report"), Some(CassyMergeClose::Held(reason)) if reason.starts_with("RELEASE_NO_CODE_PROOF_BINDING:")));
+    assert!(matches!(outcomes.get("cas-report"), Some(CassyMergeClose::Held(reason)) if reason.split(':').next() == Some("RELEASE_NO_CODE_PROOF_BINDING")));
     assert_eq!(snapshot(&root), before);
     assert_eq!(snapshot(&cache), cache_before);
     let runtime = tokio::runtime::Runtime::new().unwrap();

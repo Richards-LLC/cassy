@@ -10,6 +10,9 @@ use syn::{
     visit::{self, Visit},
 };
 
+#[path = "gate_audit_refusals.rs"]
+mod refusals;
+
 const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. Ordinary I/O, parse and input-validation errors are excluded. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
 
 #[derive(Default)]
@@ -493,6 +496,11 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
     }
     paths.sort();
     let mut functions = Vec::new();
+    let mut refusal_sites = Vec::new();
+    let policy_files = registry.iter().filter(|(code, _, _, _)|
+        code.starts_with('G') || code.starts_with('H') || code.starts_with('C'))
+        .filter_map(|(_, _, _, site)| site.rsplit_once(':').map(|(path, _)| path.to_owned()))
+        .collect::<BTreeSet<_>>();
     let mut script_rows = Vec::new();
     let mut all_refused = BTreeSet::new();
     let mut all_overridden = BTreeSet::new();
@@ -508,12 +516,17 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         };
         if path.extension().is_some_and(|e| e == "rs") {
             match syn::parse_file(&source) {
-                Ok(file) => Functions {
+                Ok(file) => {
+                    Functions {
                     path: &relative,
                     lines: source.lines().collect(),
                     output: &mut functions,
                 }
-                .visit_file(&file),
+                    .visit_file(&file);
+                    if refusals::policy_module(&relative, &policy_files) {
+                        refusals::rust(&relative, &source, &file, &mut refusal_sites);
+                    }
+                },
                 Err(e) => audit.gaps.push(format!("{relative}: AST scan failed: {e}")),
             }
         } else {
@@ -656,6 +669,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         all_overridden.extend(f.overridden.clone());
     }
     let registered: BTreeSet<_> = registry.iter().map(|r| r.0.clone()).collect();
+    refusals::finish(refusal_sites, &functions, &registered, &mut audit);
     for f in &functions {
         for code in f.refused.union(&f.overridden) {
             if !registered.contains(code) {

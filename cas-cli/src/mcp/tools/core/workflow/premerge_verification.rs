@@ -1155,7 +1155,7 @@ impl CasCore {
                     )));
                 }
                 return Err(fail(format!(
-                    "task {} holds on dispatch {} ({:?}); finish this exact verdict before retrying the merge",
+                    "task {}: merge held on verification dispatch {} ({:?}); finish this exact verdict before retrying the merge",
                     task.id, dispatch.id, dispatch.state
                 )));
             }
@@ -1229,12 +1229,12 @@ impl CasCore {
         .map_err(fail)?;
         if self.emit_premerge_review_handoff(task, &dispatch)?.is_some() || automatic::owns(&self.cas_root, &cas_store::get_verification_dispatch(&self.cas_root, &dispatch.id).map_err(fail)?) {
             return Err(fail(format!(
-                "task {}: dispatch {} needs approval. The automatic verifier is running on it; retry the merge after its verdict. Do not spawn another verifier",
+                "task {}: merge held on verification dispatch {}. Automatic verifier startup is scheduled. Approval continues the merge automatically; verdicts needing attention wake you. Do not spawn another verifier",
                 task.id, dispatch.id
             )));
         }
         Err(fail(format!(
-            "task {}: dispatch {} needs approval. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
+            "task {}: merge held on verification dispatch {}. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
             task.id, dispatch.id, task.id,
             crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
         )))

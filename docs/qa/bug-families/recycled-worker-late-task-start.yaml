@@ -1,0 +1,3 @@
+title: A task start finishing during worker teardown cannot leave the replacement blocked by the old session's lease
+tasks: [cas-625c]
+journeys: [FACTORY-SUPERVISE, HUB-J26]

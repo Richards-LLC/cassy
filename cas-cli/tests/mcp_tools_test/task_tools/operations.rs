@@ -5602,6 +5602,62 @@ fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
 }
 
 #[tokio::test]
+async fn transfer_adopt_branch_recovers_unassigned_recorded_source_cas_fa05() {
+    for remote_only in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let BranchAdoptionFixture { temp, destination, service, mut task, source, receiver, tip } =
+            branch_adoption_fixture(&mut env);
+        let root = temp.path();
+        let cas_dir = root.join(".cas");
+        let git = branch_transfer_git;
+        let recorded = format!("factory/departed-worker-{}", task.id);
+        git(root, &["branch", "-m", &recorded]);
+        let base = git(root, &["rev-parse", "HEAD^"]);
+        let delivery = std::fs::read(root.join("delivery.txt")).unwrap();
+        let origin = tempfile::TempDir::new().unwrap();
+        git(origin.path(), &["init", "--bare"]);
+        git(root, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(root, &["push", "origin", &recorded]);
+        if remote_only {
+            git(root, &["switch", "--detach", &base]);
+            git(root, &["branch", "-D", &recorded]);
+        }
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.release_lease(&task.id, &source.id).unwrap();
+        task.status = cas::types::TaskStatus::Open;
+        task.assignee = None;
+        task.deliverables.parked_branch = None;
+        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+            work_target: cas::types::WorkTarget {
+                repo_selector: "project:reboot-fixture".into(), target_branch: "main".into(),
+            },
+            assignee: "departed-worker".into(), branch: recorded.clone(), base_sha: base,
+        });
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.update(&task).unwrap();
+        promote_default_test_agent(&cas_dir);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": task.id, "to_agent": receiver.name,
+            "adopt_branch": true, "supervisor_override": true,
+        })).unwrap();
+        service.task(Parameters(request)).await.expect("recover the unassigned task in one transfer");
+
+        let expected = format!("factory/{}-{}", receiver.name, task.id);
+        assert_eq!(git(destination.path(), &["branch", "--show-current"]), expected);
+        assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), tip);
+        assert_eq!(std::fs::read(destination.path().join("delivery.txt")).unwrap(), delivery);
+        assert_eq!(git(root, &["rev-parse", &format!("refs/remotes/origin/{recorded}")]), tip);
+        let after = tasks.get(&task.id).unwrap();
+        assert_eq!(after.assignee.as_deref(), Some(receiver.name.as_str()));
+        assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected.as_str()));
+        assert_eq!(after.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()));
+        assert!(after.deliverables.handoff_branches.contains(&recorded));
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, receiver.id);
+    }
+}
+
+#[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
     for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {
         let mut env = TestEnvGuard::temp_home();

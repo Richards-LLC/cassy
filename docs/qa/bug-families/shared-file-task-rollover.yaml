@@ -1,0 +1,3 @@
+title: Queued successors and retired file claims do not warn workers about themselves while active peers retain task and branch diagnostics
+tasks: [cas-15f5]
+journeys: [FACTORY-SUPERVISE]

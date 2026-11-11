@@ -4871,6 +4871,7 @@ mod related_recall_response_tests {
             env.remove(key);
         }
         env.set("CAS_FACTORY_MODE", "1");
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let temp = TempDir::new().unwrap();
         let repo = temp.path();
         let git = |args: &[&str]| {

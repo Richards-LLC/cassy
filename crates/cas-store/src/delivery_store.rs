@@ -1340,6 +1340,21 @@ mod tests {
         forget_cycles(&peer.id);
         SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
         assert_eq!(peer_shape(), [(peer_id, 3, vec!["f".repeat(40)])]);
+        // A legacy row with no counter but one declined delivery [A] and a
+        // current B is in cycle 2 whether a sync creates it or a backfill
+        // finds it.
+        let mut legacy = Task::new("cas-legacy".into(), "legacy peer delivery".into());
+        legacy.deliverables.historical_factory_branch_anchors = vec!["a".repeat(40)];
+        legacy.deliverables.declined_factory_branch_anchors = Some(vec!["a".repeat(40)]);
+        legacy.deliverables.mint_or_append(&"b".repeat(40));
+        task_store.add(&legacy).unwrap();
+        let open_cycle = || crate::delivery_cycles(root.path(), &legacy.id).unwrap()
+            .into_iter().filter(|c| !c.ended).map(|c| (c.cycle, c.cycle_id, c.anchors)).collect::<Vec<_>>();
+        let expected = [(2, crate::delivery_cycle_id("", &legacy.id, 2), vec!["b".repeat(40)])];
+        assert_eq!(open_cycle(), expected, "fresh sync creation");
+        forget_cycles(&legacy.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(open_cycle(), expected, "backfill");
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

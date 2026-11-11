@@ -179,14 +179,18 @@ fn wake(
     let may_answer = channel == WakeChannel::Operator
         || (channel != WakeChannel::Unknown
             && (row.kind.as_deref() == Some("ask") || row.prompt.contains('?')));
-    let notice = row.kind.or_else(|| if row.origin == Some(QueueOrigin::Daemon) {
+    // Lifecycle kinds carry an episode key after the category (for example
+    // merge_ready:[supervisor,task,head]); only the category is a notice kind.
+    let notice = row.kind.as_deref().and_then(|kind| kind.split(':').next()).map(str::to_string)
+        .or_else(|| if row.origin == Some(QueueOrigin::Daemon) {
         match row.source.as_str() {
             "worker-check" => Some("worker_check".into()),
             "task-assignment" => Some("task_assignment".into()),
             "delivery-watchdog" => Some("delivery_watchdog".into()),
             "relay-watchdog" => Some("relay_watchdog".into()),
             "director" => Some("director".into()),
-            source if source.starts_with("lifecycle-wake:") => source.split(':').nth(1).map(str::to_string),
+            source if source.starts_with("lifecycle-wake:") => source.split(':').nth(1)
+                .filter(|kind| kind.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())).map(str::to_string),
             _ => None,
         }
     } else { None });

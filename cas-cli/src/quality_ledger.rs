@@ -97,8 +97,12 @@ pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent) -> cas_
     if matches!(&event.payload, QualityPayload::Turn { notice_kind: Some(_), .. })
         && let Some(old) = cas_store::quality_event_by_id(root, &event.id())?
         && matches!(old.payload, QualityPayload::Turn { notice_kind: None, .. }) {
-        if let QualityPayload::Turn { supersedes, .. } = &mut event.payload { *supersedes = Some(old.id); }
-        event.natural_key = format!("turn_detail|{}", event.natural_key);
+        let legacy_key = format!("turn_detail|{}", event.natural_key);
+        event.natural_key = legacy_key.clone();
+        let prior = cas_store::quality_event_by_id(root, &event.id())?;
+        let QualityPayload::Turn { supersedes, notice_kind, .. } = &mut event.payload else { unreachable!() };
+        *supersedes = Some(prior.map_or(old.id, |row| row.id));
+        event.natural_key = format!("{legacy_key}|{}", notice_kind.as_deref().unwrap_or("unknown"));
         return Ok((cas_store::record_quality_event(root, &event)?, false));
     }
     Ok((false, false))

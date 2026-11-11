@@ -12953,6 +12953,12 @@ mod worker_commit_guard_tests {
         }
         let mut mismatches = Vec::new();
         for (command, denied) in [
+            ("bash scripts/test-release.sh > /tmp/cas-6837.log 2>&1".into(), false),
+            ("sh scripts/test-release.sh --check > /tmp/cas-6837.log 2>&1".into(), false),
+            ("bash 'scripts/test release.sh' --flag -c 'git commit -m argument'".into(), false),
+            ("bash scripts/test-release.sh".into(), false),
+            ("bash".into(), true),
+            ("sh -s".into(), true),
             (format!("cd '{repo_path}' && git commit --allow-empty -m probe"), true),
             (format!("bash -c 'cd \"{repo_path}\" && git commit --allow-empty -m probe'"), true),
             (format!("bash -c -- 'cd \"{repo_path}\" && git commit -m probe'"), true),

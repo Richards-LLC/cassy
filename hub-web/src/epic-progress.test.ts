@@ -18,11 +18,12 @@ it("reads status only for the selected project's sessions on every machine", () 
 });
 
 it("discloses tasks in place, shows five rows before Show more and never draws unreported progress", () => {
-  const live = [epic("counted", { counts: { open: 4, in_progress: 2, merged: 6, total: 12 }, blocked: 1 }), ...["b", "c", "d", "e", "f", "g"].map(key => epic(key))];
+  const live = [epic("counted", { stale: true, counts: { open: 4, in_progress: 2, merged: 6, total: 12 }, blocked: 1 }), ...["b", "c", "d", "e", "f", "g"].map(key => epic(key))];
   const render = () => liveEpicsSection(document, { project: "cas-src", live, quiet: 7, multiMachine: false, explorerHref: "https://cloud.test/explorer/tasks?project_id=p", pending: [], failed: [], retry: () => {} })!;
   let section = render(); document.body.replaceChildren(section);
   expect(section.querySelector("h3")?.textContent).toContain("7");
   const [first, second] = section.querySelectorAll<HTMLButtonElement>(".live-epic-toggle");
+  expect(first!.closest("li")?.dataset.freshness).toBe("last-known");
   expect(first!.textContent).toContain("6/12");
   expect(first!.textContent).toMatch(new RegExp("(?=[\\s\\S]*4)(?=[\\s\\S]*2)(?=[\\s\\S]*6)(?=[\\s\\S]*1)"));
   expect(first!.querySelector(".split-bar")?.getAttribute("aria-label")).toBeTruthy();

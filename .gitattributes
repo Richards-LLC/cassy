@@ -22,6 +22,6 @@ cas-cli/src/builtins/reference-history.json merge=cas-generated
 # deliveries write changelog.d/<task-id>.md fragments instead (cas-f2be).
 CHANGELOG.md merge=cas-changelog
 
-# Parallel workers add independent QA cases at the top of the registry.
-# Keep both families and the newest updated date; same-family edits conflict.
+# Merge independent registry entries by ID and keep the newest updated date.
+# Competing changes to the same entry and policy still use conflict review.
 docs/qa/journeys.yaml merge=cas-journeys

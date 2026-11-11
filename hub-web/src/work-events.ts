@@ -416,12 +416,3 @@ export function rowText(event: WorkEvent): string {
   }
   return event.label || event.kind;
 }
-
-/** A worker's state in the words of its timeline header. */
-export function workerState(status: string | undefined, currentTask: string | undefined): "working" | "waiting" | "parked" | "idle" {
-  const value = (status ?? "").toLowerCase();
-  if (/parked|awaiting|merge/.test(value)) return "parked";
-  if (/block|wait|stall/.test(value)) return "waiting";
-  if (currentTask || /active|busy|work|running/.test(value)) return "working";
-  return "idle";
-}

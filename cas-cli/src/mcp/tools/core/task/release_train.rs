@@ -4,8 +4,8 @@
 //! A task created with no epic and no explicit target joins the repository's
 //! open release-train epic (cut from the integration branch) instead of
 //! targeting that branch directly, so its delivery merges locally into the
-//! train lane. A train whose content has landed on the integration branch is
-//! closed here, and the next one opens lazily on the next create.
+//! train lane. A landed train is finalized by release reconciliation; the next
+//! train opens lazily on the next create.
 
 use std::fs::File;
 use std::path::Path;
@@ -324,20 +324,9 @@ impl CasCore {
                     ),
                 );
             }
-            let mut closed = train.clone();
-            closed.status = TaskStatus::Closed;
-            closed.terminal_outcome = Some(cas_types::TaskTerminalOutcome::Delivered);
-            closed.closed_at = Some(chrono::Utc::now());
-            closed.updated_at = chrono::Utc::now();
-            closed.close_reason = Some(format!(
-                "Release landed: train lane is on `{integration}`; the next train opens on the next create."
+            receipt.push_str(&format!(
+                "\n\nRELEASE TRAIN: {} landed on `{integration}`; its terminal lifecycle belongs to release reconciliation.", train.id
             ));
-            if store.update(&closed).is_ok() {
-                receipt.push_str(&format!(
-                    "\n\nRELEASE TRAIN: {} landed on `{integration}` and is closed.",
-                    train.id
-                ));
-            }
         }
         let request: TaskCreateRequest = match serde_json::from_value(serde_json::json!({
             "title": RELEASE_TRAIN_TITLE,
@@ -368,7 +357,10 @@ impl CasCore {
                 ),
             );
         }
-        match open_trains(store, &integration).into_iter().find(|train| !accepts_no_work(train)) {
+        match open_trains(store, &integration)
+            .into_iter()
+            .find(|train| !accepts_no_work(train) && !landed(store, &repo, train, &integration))
+        {
             Some(train) => {
                 let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
                 let published = if lane == integration {
@@ -563,8 +555,9 @@ mod tests {
 
     /// A train is not landed while a child is in flight, before any child
     /// delivered, or while its lane holds work the integration branch lacks.
-    #[test]
-    fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+    #[tokio::test]
+    async fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+        let _env = TestEnvGuard::temp_home();
         let temp = repo();
         let repo = temp.path();
         git(repo, &["branch", "epic/train"]);
@@ -599,5 +592,10 @@ mod tests {
         assert!(!landed(store.as_ref(), repo, &train, "main"), "lane ahead of main");
         git(repo, &["merge", "-q", "--no-ff", "epic/train"]);
         assert!(landed(store.as_ref(), repo, &train, "main"));
+        std::fs::create_dir_all(repo.join(".cas")).unwrap();
+        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
+        let (next, _) = core.release_train_for_new_task(store.as_ref()).await;
+        assert_ne!(next.as_deref(), Some(train.id.as_str()));
+        assert_ne!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
     }
 }

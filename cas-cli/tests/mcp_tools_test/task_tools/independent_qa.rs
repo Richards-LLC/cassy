@@ -787,9 +787,10 @@ async fn gabber_findings_derive_priority_and_ready_order() {
         assert_eq!(task.priority.0, expected, "{title}: {:?}", task.labels);
         assert!(task.labels.iter().any(|label| label == "from-finding"));
         if title == "Contradictory reader output" {
-            service.task(Parameters(serde_json::from_value(serde_json::json!({
+            let error = service.task(Parameters(serde_json::from_value(serde_json::json!({
                 "action":"update", "id":id, "priority":0,
-            })).unwrap())).await.unwrap();
+            })).unwrap())).await.expect_err("a conflicting derived priority is rejected");
+            assert_eq!(error.data.unwrap()["rule_id"], "finding_priority_derived");
             assert_eq!(open_task_store(&cas_dir).unwrap().get(&id).unwrap().priority.0, 4,
                 "manual priority cannot promote a theoretical finding");
         }

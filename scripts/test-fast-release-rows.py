@@ -403,8 +403,9 @@ esac
         calls = self.repo / ".git" / "validator-calls"
         explicit = self.fast_from(base, CAS_BIN=str(validator))
         self.assertEqual(explicit.returncode, 0, explicit.stdout + explicit.stderr)
-        self.assertNotIn("config get qa.registry.enforce", calls.read_text().splitlines())
-        self.assertIn("qa impact " + base + " --json", calls.read_text().splitlines())
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertNotIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertIn(["qa", "impact", base, "--json"], argv)
 
         # A missing header still needs config, and a failed lookup fails closed.
         calls.unlink()
@@ -412,8 +413,9 @@ esac
         self.commit()
         fallback = self.fast_from(base, CAS_BIN=str(validator))
         self.assertEqual(fallback.returncode, 1, fallback.stdout + fallback.stderr)
-        self.assertIn("config get qa.registry.enforce", calls.read_text().splitlines())
-        self.assertNotIn("qa impact " + base + " --json", calls.read_text().splitlines())
+        argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+        self.assertIn(["config", "get", "qa.registry.enforce"], argv)
+        self.assertNotIn(["qa", "impact", base, "--json"], argv)
 
     def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
         validator = self.repo / ".git" / "legacy-cas"

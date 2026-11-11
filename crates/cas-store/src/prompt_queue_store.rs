@@ -20911,9 +20911,9 @@ mod tests {
                 let report = recovered.message_delivery_report(id).unwrap().unwrap();
                 assert_eq!(report.stage, if failed { DeliveryStage::Abandoned }
                     else if state == "reconnected" { DeliveryStage::Delivered } else { DeliveryStage::Enqueued }, "{mirror}/{state}");
+                assert_eq!(report.retry.delivery_attempts, u32::from(attempted || state == "reconnected"));
                 if failed {
                     assert_eq!(report.pending_reason, Some(PendingReason::OperatorDeliveryExpired));
-                    assert_eq!(report.retry.delivery_attempts, u32::from(attempted));
                     assert!(report.retry.next_attempt_at.is_none());
                 }
                 let notices = || recovered.peek_for_targets(&["supervisor"], Some("factory-a"), 50).unwrap();

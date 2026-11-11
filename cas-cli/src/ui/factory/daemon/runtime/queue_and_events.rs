@@ -8146,12 +8146,29 @@ impl FactoryDaemon {
         notification_id: i64,
         device_id: &str,
     ) -> anyhow::Result<()> {
-        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        let cas_dir = self.app.cas_dir().to_path_buf();
+        let session = self.session_name.clone();
+        let device_id = device_id.to_owned();
+        let persist = move || -> anyhow::Result<bool> {
+            let queue = crate::store::open_prompt_queue_store(&cas_dir)?;
+            Ok(queue.record_operator_reply_persisted(notification_id, &session, &device_id)?)
+        };
         // cas-59da: only a receipt that closes the row proves its addressee
         // is reachable. A non-addressee's stored receipt leaves the row
         // pending; clearing the backoff then re-forwarded it every tick.
-        if queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)? {
-            self.queue_jobs.operator_reply_retries.clear();
+        match persist() {
+            Ok(true) => self.queue_jobs.operator_reply_retries.clear(),
+            Ok(false) => {},
+            Err(error) => {
+                let busy = matches!(error.downcast_ref::<cas_store::StoreError>(),
+                    Some(cas_store::StoreError::Database(sqlite)) if cas_store::shared_db::is_busy_error(sqlite));
+                if !busy { return Err(error); }
+                // A real device already kept this reply. The loop's spent
+                // SQLite budget must not discard its receipt.
+                let deferred = super::store_worker::defer("operator reply receipt", &error.to_string(),
+                    move || persist().map(drop));
+                if deferred == super::store_worker::Persisted::Dropped { return Err(error); }
+            }
         }
         Ok(())
     }

@@ -83,6 +83,7 @@ async fn cas_3cd4_real_hub_reaches_scrolled_idle_supervisor_and_receives_its_rep
             daemon.process_ws_client_input().await;
             daemon.last_commander_mirror_scan = None;
             daemon.process_prompt_queue().await.unwrap();
+            daemon.serve_ws_clients().await;
             tokio::task::yield_now().await;
         }
     };

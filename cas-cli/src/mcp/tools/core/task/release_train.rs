@@ -357,7 +357,10 @@ impl CasCore {
                 ),
             );
         }
-        match open_trains(store, &integration).into_iter().find(|train| !accepts_no_work(train)) {
+        match open_trains(store, &integration)
+            .into_iter()
+            .find(|train| !accepts_no_work(train) && !landed(store, &repo, train, &integration))
+        {
             Some(train) => {
                 let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
                 let published = if lane == integration {

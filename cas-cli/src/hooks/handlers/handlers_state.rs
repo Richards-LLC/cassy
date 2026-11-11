@@ -677,21 +677,14 @@ pub(crate) fn owns_native_subagent(root: &Path, parent: &str, child: &str) -> bo
 ///
 /// Called when a Claude Code subagent (Task tool call) finishes.
 ///
-/// The session_id is the parent's; agent_id identifies the native child.
-/// Remove only that native-message ownership marker. Native children may not
-/// be registered as Cassy agents, so never clean up the parent's CAS identity.
-///
-/// Only the parent's Stop hook should clean up agents and PID mappings.
+/// Completion preserves the parent/child ownership recorded at SubagentStart:
+/// native SendMessage can resume a completed child by its ID. These markers
+/// grant no CAS identity or verifier authority. Never clean up the parent's
+/// CAS identity here; only the parent's Stop hook owns that cleanup.
 pub fn handle_subagent_stop(
-    input: &HookInput,
-    cas_root: Option<&Path>,
+    _input: &HookInput,
+    _cas_root: Option<&Path>,
 ) -> Result<HookOutput, MemError> {
-    if let (Some(root), Some(child)) = (cas_root, input.agent_id.as_deref())
-        && let Some(path) = native_subagent_marker(root, &input.session_id, child)
-    {
-        let _ = std::fs::remove_file(path);
-    }
-
     // NOTE: Do NOT call cleanup_subagent_leases or any agent cleanup here!
     // The session_id is the parent's, not the subagent's.
 

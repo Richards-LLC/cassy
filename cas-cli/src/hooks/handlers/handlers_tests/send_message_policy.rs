@@ -108,6 +108,9 @@ fn factory_worker_native_messages_follow_child_ownership() {
     handle_subagent_stop(&start, Some(root.path())).unwrap();
     let mut input = send_message_input(Some(serde_json::json!({"to":"a-owned"})));
     input.agent_role = Some("worker".into());
+    // Completion preserves ownership: SendMessage resumes the same native child.
+    assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_none());
+    input.tool_input = Some(serde_json::json!({"to":"a-foreign"}));
     assert!(deny_reason(&handle_pre_tool_use(&input, Some(root.path())).unwrap()).is_some());
     assert!(agents.get("a-owned").is_err());
     assert_eq!(agents.get("test-session").unwrap().role, AgentRole::Worker);

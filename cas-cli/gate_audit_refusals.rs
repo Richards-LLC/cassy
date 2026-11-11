@@ -1,4 +1,4 @@
-//! Discover error-producing syntax independently of declarations and bypasses.
+//! Discover authority-conditioned refusals independently of gate markers.
 use super::{Audit, Body, Function, Flags, bracket_codes, test_only};
 use std::collections::{BTreeMap, BTreeSet};
 use syn::{spanned::Spanned, visit::{self, Visit}};
@@ -23,6 +23,7 @@ pub(super) fn policy_module(path: &str, declared: &BTreeSet<String>) -> bool {
 #[derive(Default, Clone)]
 struct Payload {
     codes: BTreeSet<String>,
+    authority: bool,
     calls: BTreeSet<String>,
     variables: BTreeSet<String>,
 }
@@ -32,7 +33,7 @@ impl Payload {
         Body { function: &mut f }.visit_expr(expr);
         let mut names = Flags::default();
         names.visit_expr(expr);
-        Self { codes: f.refused, calls: f.calls, variables: names.0 }
+        Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
     }
     fn mac(mac: &syn::Macro) -> Self {
         if let Ok(expr) = syn::parse2::<syn::Expr>(mac.tokens.clone()) {
@@ -42,7 +43,11 @@ impl Payload {
         Body { function: &mut f }.visit_macro(mac);
         let mut names = Flags::default();
         names.visit_macro(mac);
-        Self { codes: f.refused, calls: f.calls, variables: names.0 }
+        Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
+    }
+    fn reads_authority(&self, helpers: &BTreeSet<String>, bindings: &BTreeMap<String, Payload>, seen: &mut BTreeSet<String>) -> bool {
+        self.authority || self.calls.iter().any(|call| helpers.contains(call)) || self.variables.iter().any(|variable|
+            seen.insert(variable.clone()) && bindings.get(variable).is_some_and(|value| value.reads_authority(helpers, bindings, seen)))
     }
     fn resolve(&self, functions: &BTreeMap<String, BTreeSet<String>>, bindings: &BTreeMap<String, Payload>, seen: &mut BTreeSet<String>) -> BTreeSet<String> {
         let mut codes = self.codes.clone();
@@ -60,26 +65,26 @@ impl Payload {
     }
 }
 
+
+/// Stable identity fields and predicates, never human diagnostic wording.
+pub(super) fn authority_symbol(name: &str) -> bool {
+    matches!(name, "role" | "agent_role" | "caller_role" | "caller_id" | "agent_id"
+        | "assignee" | "owner" | "holder" | "lease_holder" | "supervisor_id" | "worker_id"
+        | "AgentRole" | "Worker" | "Supervisor" | "Operator" | "CAS_AGENT_ROLE"
+        | "current_agent_id" | "get_agent_id" | "resolve_caller_agent_id"
+        | "resolve_live_supervisor_authority" | "resolve_registered_caller")
+        || ["is_supervisor", "is_worker", "is_operator", "is_factory_agent", "caller_is_",
+            "require_supervisor", "require_operator", "has_live_supervisor", "owns_"].iter().any(|prefix| name.starts_with(prefix))
+}
+
 pub(super) struct Site {
     path: String,
     function: String,
     line: usize,
-    kind: &'static str,
     payload: Payload,
+    condition: Payload,
     bindings: BTreeMap<String, Payload>,
-    exclusion: Option<String>,
 }
-
-fn exclusion(lines: &[&str], line: usize) -> Option<String> {
-    // A per-site annotation, never the surrounding function/module's waiver.
-    [line.saturating_sub(1), line.saturating_sub(2)].into_iter()
-        .filter_map(|n| lines.get(n))
-        .find_map(|line| line.trim_start().strip_prefix("//")
-            .or_else(|| line.trim_start().strip_prefix('#'))
-            .and_then(|comment| comment.trim_start().strip_prefix("gate-audit[error]:"))
-            .map(str::trim).filter(|reason| !reason.is_empty()).map(str::to_owned))
-}
-
 #[derive(Default)]
 struct Bindings {
     values: BTreeMap<String, Payload>,
@@ -103,86 +108,70 @@ impl<'ast> Visit<'ast> for Bindings {
     }
 }
 
+
 struct Errors<'a> {
     path: &'a str,
     function: String,
-    lines: Vec<&'a str>,
     bindings: BTreeMap<String, Payload>,
-    forwarded: BTreeSet<String>,
+    condition: Option<Payload>,
     sites: &'a mut Vec<Site>,
     nested: bool,
 }
 impl Errors<'_> {
-    fn record(&mut self, line: usize, kind: &'static str, payload: Payload, automatic: Option<String>) {
-        self.sites.push(Site {
-            path: self.path.into(), function: self.function.clone(), line, kind, payload,
-            bindings: self.bindings.clone(), exclusion: exclusion(&self.lines, line).or(automatic),
-        });
+    fn record(&mut self, line: usize, payload: Payload) {
+        if let Some(condition) = &self.condition {
+            self.sites.push(Site {
+                path: self.path.into(), function: self.function.clone(), line, payload,
+                condition: condition.clone(), bindings: self.bindings.clone(),
+            });
+        }
     }
     fn body(&mut self, name: String, block: &syn::Block) {
         let prior_name = std::mem::replace(&mut self.function, name);
         let prior_bindings = std::mem::take(&mut self.bindings);
+        let prior_condition = self.condition.take();
         let mut bindings = Bindings::default(); bindings.visit_block(block);
         self.bindings = bindings.values.into_iter().filter(|(name, _)|
             bindings.counts.get(name) == Some(&1) && !bindings.invalid.contains(name)).collect();
         self.visit_block(block);
         self.bindings = prior_bindings;
         self.function = prior_name;
-    }
-    fn forwarding(&self, payload: &Payload) -> Option<String> {
-        let uses_error = payload.variables.iter().any(|name| self.forwarded.contains(name));
-        let adapter = payload.calls.iter().all(|name| matches!(name.as_str(),
-            "Err" | "error" | "invalid_params" | "internal_error" | "anyhow" | "format" | "Other" | "from"));
-        let values = payload.variables.iter().all(|name| self.forwarded.contains(name)
-            || name.chars().next().is_some_and(char::is_uppercase)
-            || matches!(name.as_str(), "self" | "error" | "invalid_params" | "internal_error" | "anyhow" | "format" | "to_string" | "into" | "from"));
-        (uses_error && adapter && values).then(||
-            "adapts a matched operation error diagnostic; no independent refusal condition".into())
+        self.condition = prior_condition;
     }
 }
 impl<'ast> Visit<'ast> for Errors<'_> {
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         if !test_only(&item.attrs) { visit::visit_item_mod(self, item); }
     }
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !test_only(&item.attrs) { self.body(item.sig.ident.to_string(), &item.block); }
-    }
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
         if !test_only(&item.attrs) { visit::visit_item_impl(self, item); }
+    }
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if !test_only(&item.attrs) { self.body(item.sig.ident.to_string(), &item.block); }
     }
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
         if !test_only(&item.attrs) { self.body(item.sig.ident.to_string(), &item.block); }
     }
-    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-        let prior = self.forwarded.clone();
-        if let syn::Pat::TupleStruct(pat) = &arm.pat
-            && pat.path.segments.last().is_some_and(|s| s.ident == "Err")
-            && let Some(syn::Pat::Ident(binding)) = pat.elems.first()
-        { self.forwarded.insert(binding.ident.to_string()); }
-        visit::visit_arm(self, arm);
-        self.forwarded = prior;
+    fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
+        self.visit_expr(&expr.cond);
+        let prior = self.condition.replace(Payload::expression(&expr.cond));
+        self.visit_block(&expr.then_branch);
+        if let Some((_, branch)) = &expr.else_branch { self.visit_expr(branch); }
+        self.condition = prior;
     }
-    fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
-        if expr.method == "map_err" && let Some(syn::Expr::Closure(closure)) = expr.args.first() {
-            // A direct error adapter cannot introduce a new conditional policy
-            // refusal. Branching closures still go through ordinary discovery.
-            let body = match closure.body.as_ref() {
-                syn::Expr::Block(block) if block.block.stmts.len() == 1 =>
-                    match &block.block.stmts[0] { syn::Stmt::Expr(expr, _) => Some(expr), _ => None },
-                expr => Some(expr),
-            };
-            if body.is_some_and(|body| matches!(body, syn::Expr::Call(_) | syn::Expr::MethodCall(_) | syn::Expr::Macro(_))) {
-                let prior = self.forwarded.clone();
-                for argument in &closure.inputs {
-                    if let syn::Pat::Ident(name) = argument { self.forwarded.insert(name.ident.to_string()); }
-                }
-                self.visit_expr(&expr.receiver);
-                for argument in &expr.args { self.visit_expr(argument); }
-                self.forwarded = prior;
-                return;
-            }
+    fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+        self.visit_expr(&expr.expr);
+        let prior = self.condition.replace(Payload::expression(&expr.expr));
+        for arm in &expr.arms { self.visit_arm(arm); }
+        self.condition = prior;
+    }
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        let prior = self.condition.clone();
+        if let Some((_, guard)) = &arm.guard {
+            self.condition = Some(Payload::expression(guard));
         }
-        visit::visit_expr_method_call(self, expr);
+        self.visit_expr(&arm.body);
+        self.condition = prior;
     }
     fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
         let name = match expr.func.as_ref() {
@@ -195,84 +184,89 @@ impl<'ast> Visit<'ast> for Errors<'_> {
             _ => false,
         };
         if !self.nested && refusal {
-            let payload = Payload::expression(&syn::Expr::Call(expr.clone()));
-            let automatic = if name.as_deref() == Some("Err") {
-                expr.args.first().and_then(|value| match value {
-                    syn::Expr::Path(path) if path.path.get_ident().is_some_and(|id| self.forwarded.contains(&id.to_string())) =>
-                        Some("forwards the matched operation error unchanged; does not originate a policy decision".into()),
-                    syn::Expr::Call(call) => if let syn::Expr::Path(path) = call.func.as_ref() {
-                        path.path.segments.last().filter(|s| matches!(s.ident.to_string().as_str(),
-                            "Io" | "Database" | "Json" | "Yaml" | "Parse" | "Type" | "TaskNotFound" | "NotInitialized"))
-                            .map(|s| format!("typed {} data/I/O error; no authority decision", s.ident))
-                    } else { None },
-                    _ => None,
-                })
-            } else { None };
-            let automatic = automatic.or_else(|| self.forwarding(&payload));
-            self.record(expr.span().start().line, "Rust error", payload, automatic);
+            self.record(expr.span().start().line, Payload::expression(&syn::Expr::Call(expr.clone())));
             self.nested = true;
             visit::visit_expr_call(self, expr);
             self.nested = false;
         } else { visit::visit_expr_call(self, expr); }
     }
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if !self.nested && mac.path.segments.last().is_some_and(|s| matches!(s.ident.to_string().as_str(), "bail" | "ensure")) {
-            let payload = Payload::mac(mac);
-            let automatic = self.forwarding(&payload);
-            self.record(mac.span().start().line, "Rust refusal macro", payload, automatic);
+        let Some(name) = mac.path.segments.last() else { return; };
+        if self.nested { return; }
+        if name.ident == "ensure" {
+            use syn::{parse::Parser, punctuated::Punctuated, Token};
+            if let Ok(args) = Punctuated::<syn::Expr, Token![,]>::parse_terminated.parse2(mac.tokens.clone())
+                && let Some(condition) = args.first()
+            {
+                let prior = self.condition.replace(Payload::expression(condition));
+                self.record(mac.span().start().line, Payload::mac(mac));
+                self.condition = prior;
+            }
+        } else if name.ident == "bail" {
+            self.record(mac.span().start().line, Payload::mac(mac));
         }
     }
 }
 
-pub(super) fn rust(path: &str, source: &str, file: &syn::File, sites: &mut Vec<Site>) {
-    Errors { path, function: String::new(), lines: source.lines().collect(), bindings: BTreeMap::new(), forwarded: BTreeSet::new(), sites, nested: false }.visit_file(file);
+pub(super) fn rust(path: &str, _source: &str, file: &syn::File, sites: &mut Vec<Site>) {
+    Errors { path, function: String::new(), bindings: BTreeMap::new(), condition: None, sites, nested: false }.visit_file(file);
 }
 
 pub(super) fn script(path: &str, source: &str, declared: &BTreeSet<String>, sites: &mut Vec<Site>) {
     let name = path.rsplit('/').next().unwrap_or(path);
     if name.starts_with("test-") || name.starts_with("test_") { return; }
     if !declared.contains(path) && !["scripts/release", "scripts/factory", "scripts/worker", "scripts/assembly", "scripts/qa-", "scripts/fast-rows", "scripts/train-", "scripts/ci_tiers/"].iter().any(|root| path.starts_with(root)) { return; }
-    let error = regex::Regex::new(r"\b(exit|return)\s+([1-9][0-9]*)(\b|;)|\braise\b|\b(sys\.exit|exit)\s*\(\s*[1-9]|^\s*(die|fatal|fail)\s+").unwrap();
+    let error = regex::Regex::new(r"\b(exit|return)\s+[1-9][0-9]*\b|\braise\b|\bsys\.exit\s*\(\s*[1-9]|^\s*(die|fatal|fail)\s+").unwrap();
+    let words = regex::Regex::new(r"[A-Za-z_][A-Za-z0-9_]*").unwrap();
     let lines = source.lines().collect::<Vec<_>>();
+    let mut conditions = Vec::<(usize, bool)>::new();
     for (index, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || !error.is_match(line) { continue; }
-        let mut codes = bracket_codes(line, "");
-        // A shell/Python diagnostic immediately followed by its exit belongs
-        // to that basic block, never an unrelated tag elsewhere in the file.
-        for previous in lines[..index].iter().rev().take(3) {
-            let prior = previous.trim();
-            if prior.is_empty() || matches!(prior, "fi" | "else" | "else:" | "done" | "}") || prior.starts_with("elif ") { break; }
-            codes.extend(bracket_codes(previous, ""));
+        if trimmed.starts_with('#') { continue; }
+        let indent = line.len() - line.trim_start().len();
+        if path.ends_with(".py") && !trimmed.is_empty() {
+            while conditions.last().is_some_and(|(depth, _)| *depth >= indent) { conditions.pop(); }
         }
-        let automatic = (trimmed == "raise" || trimmed.starts_with("raise SystemExit(main("))
-            .then(|| "rethrows an existing script failure or forwards the entry point result".into());
-        sites.push(Site {
-            path: path.into(), function: "script".into(), line: index + 1, kind: "script error",
-            payload: Payload { codes, ..Default::default() }, bindings: BTreeMap::new(),
-            exclusion: exclusion(&lines, index + 1).or(automatic),
-        });
+        if matches!(trimmed, "fi" | "esac") { conditions.pop(); continue; }
+        if trimmed.starts_with("if ") || trimmed.starts_with("elif ") || trimmed.starts_with("case ") {
+            if trimmed.starts_with("elif ") { conditions.pop(); }
+            let condition = trimmed.split("then").next().unwrap_or(trimmed).split(':').next().unwrap_or(trimmed);
+            conditions.push((indent, words.find_iter(condition).any(|word| authority_symbol(word.as_str()))));
+        }
+        if error.is_match(line) && conditions.last().is_some_and(|(_, authority)| *authority) {
+            let mut codes = bracket_codes(line, "");
+            for previous in lines[..index].iter().rev().take(3) {
+                if previous.trim().is_empty() { break; }
+                codes.extend(bracket_codes(previous, ""));
+            }
+            sites.push(Site {
+                path: path.into(), function: "script".into(), line: index + 1,
+                payload: Payload { codes, ..Default::default() }, condition: Payload { authority: true, ..Default::default() }, bindings: BTreeMap::new(),
+            });
+        }
+        if trimmed.ends_with("; fi") { conditions.pop(); }
     }
 }
 
 pub(super) fn finish(sites: Vec<Site>, functions: &[Function], registered: &BTreeSet<String>, audit: &mut Audit) {
     let mut names = BTreeMap::<String, Vec<&Function>>::new();
     for f in functions { names.entry(f.name.clone()).or_default().push(f); }
+    let helpers = names.iter().filter_map(|(name, functions)|
+        (functions.len() == 1 && functions[0].authority).then(|| name.clone())).collect();
     let functions = names.into_iter().filter_map(|(name, functions)|
         (functions.len() == 1).then(|| (name, functions[0].refused.clone()))).collect();
     for site in sites {
+        if !site.condition.reads_authority(&helpers, &site.bindings, &mut BTreeSet::new()) { continue; }
         let codes = site.payload.resolve(&functions, &site.bindings, &mut BTreeSet::new());
         let covered = !codes.is_empty() && codes.iter().all(|code| registered.contains(code));
-        let reason = if covered { "registered code in error payload or its resolved value/helper".into() }
-            else if let Some(reason) = site.exclusion { reason }
-            else {
-                audit.gaps.push(format!("{}:{} {}: unclassified {}", site.path, site.line, site.function, site.kind));
-                "UNCLASSIFIED: needs a gate tag or per-site gate-audit[error] exclusion".into()
-            };
+        if !covered {
+            audit.gaps.push(format!("{}:{} {}: uncoded authority refusal", site.path, site.line, site.function));
+        }
         audit.rows.push([
-            format!("{} ({})", site.kind, site.function), format!("{}:{}", site.path, site.line),
+            format!("authority refusal ({})", site.function), format!("{}:{}", site.path, site.line),
             codes.into_iter().collect::<Vec<_>>().join(", "),
-            if covered { "resolved" } else { "—" }.into(), "—".into(), reason,
+            if covered { "resolved" } else { "NO" }.into(), "—".into(),
+            "controlling condition reads caller role, identity, ownership, registration or authority; ordinary error conditions excluded by construction".into(),
         ]);
     }
 }

@@ -97,11 +97,14 @@ fn every_registered_refusal_site_emits_its_code() {
         (r#"if role == Worker { anyhow::bail!("denied"); }"#, false),
         (r#"if role == Worker { return Err("denied"); }"#, false),
         (r#"anyhow::ensure!(role != Worker, "denied");"#, false),
-        (r#"Ok(CallToolResult::error(vec![]))"#, false),
+        (r#"Ok(CallToolResult::error(vec![]))"#, true),
+        (r#"if role == Worker { Ok(CallToolResult::error(vec![])) }"#, false),
+        (r#"if role == Worker { if read_failed { anyhow::bail!("io failed"); } }"#, true),
+        (r#"let allowed = may_run(role); if !allowed { anyhow::bail!("denied"); }"#, false),
         (r#"if role == Worker { return Err(tag("G-01", "denied")); }"#, true),
-        ("// gate-audit[error]: rejects malformed numeric input, not an executable request\nErr(\"invalid integer\")", true),
+        (r#"if input.is_empty() { return Err("required"); }"#, true),
     ] {
-        let source = format!("fn probe(role: Role) {{ tag(\"G-01\", \"unrelated\"); {body} }}");
+        let source = format!("fn may_run(value: Role) -> bool {{ value != Worker }}\nfn probe(role: Role) {{ tag(\"G-01\", \"unrelated\"); {body} }}");
         std::fs::write(policy_dir.join("gates_cmd.rs"), source).unwrap();
         let result = gate_audit::scan(fixture.path(), &fixture_registry);
         assert_eq!(result.gaps.is_empty(), covered, "{body}: {:?}", result.gaps);
@@ -110,9 +113,11 @@ fn every_registered_refusal_site_emits_its_code() {
     let scripts_dir = fixture.path().join("scripts");
     std::fs::create_dir_all(&scripts_dir).unwrap();
     for (exit, covered) in [
-        ("exit 1", false),
+        ("exit 1", true),
+        ("if [ \"$CAS_AGENT_ROLE\" = worker ]; then\nexit 1\nfi", false),
         ("echo '[G-01] denied' >&2\nexit 1", true),
-        ("# gate-audit[error]: input syntax rejected before execution\nexit 2", true),
+        ("if [ -z \"$INPUT\" ]; then\nexit 2\nfi", true),
+        ("if [ \"$CAS_AGENT_ROLE\" = worker ]; then\necho '[G-01] denied' >&2\nexit 1\nfi", true),
     ] {
         std::fs::write(scripts_dir.join("release-probe.sh"), exit).unwrap();
         // Keep an independently tagged producer so registry completeness does
@@ -128,6 +133,8 @@ fn every_registered_refusal_site_emits_its_code() {
     std::fs::create_dir_all(report.parent().unwrap()).unwrap();
     std::fs::write(&report, audit.markdown(REGISTRY.len())).unwrap();
     std::fs::write(root.join("target/gate-audit-gaps.txt"), audit.gaps.join("\n")).unwrap();
+    let authority_rows = audit.rows.iter().filter(|row| row[0].starts_with("authority refusal (")).map(|row| row.join("\t")).collect::<Vec<_>>();
+    std::fs::write(root.join("target/gate-audit-authority.tsv"), authority_rows.join("\n")).unwrap();
     assert!(audit.gaps.is_empty(), "mechanical gate audit gaps:\n{}", audit.gaps.join("\n"));
     // Replay the two uncoded script boundaries from the rejected delivery.
     let fixture = tempfile::tempdir().unwrap();

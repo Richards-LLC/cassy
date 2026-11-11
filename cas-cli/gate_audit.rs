@@ -13,7 +13,7 @@ use syn::{
 #[path = "gate_audit_refusals.rs"]
 mod refusals;
 
-const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. Ordinary I/O, parse and input-validation errors are excluded. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
+const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. The marker-independent scan discovers only refusals controlled by caller identity/authority (roles, registration, ownership, assignee, leases or live-supervisor predicates). Ordinary I/O, parse, input-validation and not-found error conditions are excluded by construction. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
 
 #[derive(Default)]
 pub struct Audit {
@@ -57,6 +57,7 @@ struct Function {
     flags: BTreeSet<String>,
     conditional: BTreeSet<String>,
     policy: bool,
+    authority: bool,
     annotations: BTreeMap<String, String>,
     script_sink: bool,
     producer: Option<&'static str>,
@@ -167,6 +168,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_expr_call(self, expr);
     }
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
+        self.function.authority |= refusals::authority_symbol(&expr.method.to_string());
         self.function.methods.insert(expr.method.to_string());
         // A method spelling alone is not a resolved free-function call:
         // `.get()`/`.find()` must not import unrelated gate handlers.
@@ -208,10 +210,17 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_pat_ident(self, pat);
     }
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
+        self.function.authority |= path.path.segments.iter().any(|s| refusals::authority_symbol(&s.ident.to_string()));
         if path.path.segments.last().is_some_and(|segment| segment.ident == "FalsePositive") {
             self.function.calls.insert("record_false_positive".into());
         }
         visit::visit_expr_path(self, path);
+    }
+    fn visit_member(&mut self, member: &'ast syn::Member) {
+        if let syn::Member::Named(name) = member {
+            self.function.authority |= refusals::authority_symbol(&name.to_string());
+        }
+        visit::visit_member(self, member);
     }
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         fn tokens(body: &mut Body<'_>, stream: proc_macro2::TokenStream, guard: bool) {
@@ -230,6 +239,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
                     }
                     proc_macro2::TokenTree::Ident(ident) => {
                         let name = ident.to_string();
+                        body.function.authority |= refusals::authority_symbol(&name);
                         if guard && candidate(&name) {
                             body.function.flags.insert(name.clone());
                             body.function.conditional.insert(name.clone());
@@ -260,6 +270,7 @@ impl<'ast> Visit<'ast> for Body<'_> {
     }
     fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
         let s = lit.value();
+        self.function.authority |= s == "CAS_AGENT_ROLE";
         self.function.script_sink |= s.contains("gates record-refusal") || s.contains("gates record-override");
         for (prefix, kind) in [("", "refusal"), ("override ", "override")] {
             for code in bracket_codes(&s, prefix) {
@@ -636,7 +647,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         }
     }
     loop {
-        let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
+        let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>, bool)>::new();
         let mut occurrences = BTreeMap::<String, usize>::new();
         for f in &functions {
             *occurrences.entry(f.name.clone()).or_default() += 1;
@@ -648,18 +659,20 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
             let entry = known.entry(f.name.clone()).or_default();
             entry.0.extend(f.refused.clone());
             entry.1.extend(f.overridden.clone());
+            entry.2 |= f.authority;
         }
         let mut changed = false;
         for f in &mut functions {
-            let prior = (f.refused.len(), f.overridden.len());
+            let prior = (f.refused.len(), f.overridden.len(), f.authority);
             if let Some(codes) = carried.get(&f.site) { f.overridden.extend(codes.clone()); }
             for call in &f.calls {
-                if let Some((refused, overridden)) = known.get(call) {
+                if let Some((refused, overridden, authority)) = known.get(call) {
                     f.refused.extend(refused.clone());
                     f.overridden.extend(overridden.clone());
+                    f.authority |= authority;
                 }
             }
-            changed |= prior != (f.refused.len(), f.overridden.len());
+            changed |= prior != (f.refused.len(), f.overridden.len(), f.authority);
         }
         if !changed {
             break;

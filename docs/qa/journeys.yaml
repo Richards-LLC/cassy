@@ -134,8 +134,8 @@ bug_families:
     invariants: [FACTORY-VERIFIER-CRASH-RETRY]
     journeys: [FACTORY-MERGE]
   approved-dispatch-close-owner:
-    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing after train publication; immutable release finalization retains full delivery effects, reviewed transformations and dedicated review gates
-    tasks: [cas-abb0, cas-e06c, cas-3806, cas-9c84f]
+    title: Approved dispatch and batch receipt recovery retain the recorded reviewed landing; release finalization closes independently approved shipped members and reports individual residuals
+    tasks: [cas-abb0, cas-e06c, cas-3806, cas-9c84f, cas-734b]
     invariants: [HUB-J26-GOAL]
     journeys: [HUB-J26, FACTORY-CLOSE]
   unread-supervisor-mail-succession:
@@ -674,8 +674,8 @@ invariants:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
   FACTORY-RELEASE-CLOSEOUT:
-    statement: Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle.
-    check: Run release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
+    statement: Release finalization closes unchanged approved shipped members independently, preserves already-closed outcomes and leaves REVIEW_MISSING as an individual residual; preview produces the same decisions without store or cache writes. Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle.
+    check: Run published_train_closes_members_independently_cas_734b (real store, verification on, review SHA different from tag, bound report, equal base/anchor, already closed, missing approval, stale generation and zero-write preview), release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
   FACTORY-MERGE-QUEUE-CI-IDENTITY:
     statement: Successful canonical or legacy merge-group CI evidence can prove an exact landed delivery, including punctuated run citations, while unrelated or failed runs remain refused.
     check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
@@ -1357,13 +1357,13 @@ invariants:
     statement: Imported release reviews resolve committed artifact metadata and verified bytes on the consuming machine while preserving owner project, revocation, receipt hash and size bindings.
     check: Run imported_release_review_resolves_verified_peer_ledger_cas_52c1 through ReleaseClose.prepare with a producer path absent on the consumer; require imported receipt and task state retention, cold metadata hydration, and holds for foreign owner, altered remote or local bytes, local or remote revocation, unavailable Cloud and receipt mismatch.
     bug: {task: cas-52c1}
+  HUB-J5-SELECTED-REPLY-RECOVERY:
+    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; reconnect can deliver it, while an unreceived zero-attempt selection expires after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
+    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race and WebSocket delivery.
   CLI-RELEASE-NOTICE-EXHAUSTION:
     statement: Installed post-release notices have a persisted attempt cap; exhaustion retains one failed receipt and reports once to the release owner without repeating reconciliation or requeuing the receipt.
     check: Run scripts/test-install-on-publish.sh with an always-failing older notice across timer restarts and legacy receipt rediscovery. Require exactly the configured attempts, one failed JSON and one failure report. Run failed_install_notice_reaches_owner_once_cas_fed1 to verify repeated reporting reaches the recorded owner once even after train rollover, without published-tag reconciliation.
     bug: {task: cas-fed1}
-  HUB-J5-SELECTED-REPLY-RECOVERY:
-    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; reconnect can deliver it, while an unreceived zero-attempt selection expires after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
-    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race and WebSocket delivery.
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

@@ -125,12 +125,12 @@
 ## QA, Commander and services
 
 - `hub-web/src/main.ts`, `hub-web/src/styles.css` - Tasks & progress worker-card composition and shared desktop rail/phone sheet presentation. `hub-web/e2e/journeys/fleet-ops.journey.ts` checks named worker headers.
-- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, retirement of unproven discovery holds, portable report proof binding and ordinary no-code close, explicit parent acceptance, ordinary parent closure and SQLite operation records.
+- `cas-cli/src/release_reconcile.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs`, `crates/cas-store/src/release_reconcile_store.rs` - durable release replay, retirement of unproven discovery holds, portable report proof binding, shared no-write member preview and guarded release close, explicit parent acceptance, ordinary parent closure and SQLite operation records.
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs`, `cas-cli/src/qa_ledger.rs`, `cas-cli/src/cli/qa_ledger.rs` - journey selection, registry validation, ledger parsing and declared coverage.
 - `cas-cli/src/qa_pass.rs`, `cas-cli/src/qa_pass/` - independent review dispatch, head/pass evidence paths and verdict validation.
 - `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_deployed_origins.rs`, `cas-cli/src/qa_walk_progress.rs` - evidence manifests, capture origins and walk progress.
-- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/release_close.rs`, `cas-cli/src/qa_batch/release_close_tests.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership admitted by frozen declarations or shipping proof, portable ledger resolution, release-bound close and reviewed transformation proofs, release verdicts, authorship rules and owner-scoped receipt notices.
+- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/release_close.rs`, `cas-cli/src/qa_batch/release_close_tests.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership admitted by frozen declarations or shipping proof, portable ledger resolution, independent per-member release close, no-write preview and legacy transformation proofs, release verdicts, authorship rules and owner-scoped receipt notices.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
 - `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.

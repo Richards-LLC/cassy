@@ -335,8 +335,6 @@ pub(super) fn finish(
                     text
                 ),
             );
-            notes.record(task, &format!("✅ DECISION {token} supervisor override: {}", reason.trim()));
-            notes.record(task, &finding.scope_note(input_path, delivery_head));
         } else if stage == RegistryEnforcement::Observe {
             notices.push(format!(
                 "UPKEEP OBSERVE {}: {} (see task notes)",

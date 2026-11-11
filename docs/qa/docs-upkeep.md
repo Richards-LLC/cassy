@@ -41,7 +41,9 @@ The `journey-catalog` fast row runs two checks:
   G1 (registry problems the diff caused) and G2 (new surface files no journey
   owns; strict also checks modified files), through
   `cas qa journeys --check --base <lane base>` or, on a release before that
-  flag, the same facts from `cas qa impact <lane base> --json`. The row uses
+  flag, the new-file facts from `cas qa impact <lane base> --json` under
+  non-strict policy. Strict policy fails closed when the validator lacks
+  `--base`, since legacy impact omits modified-file ownership. The row uses
   `CAS_BIN`, else installs the latest release with `scripts/cas-install.sh`
   (SHA-256 checked) into a temporary directory, so lane CI needs no workflow
   step. With no validator available the row fails.

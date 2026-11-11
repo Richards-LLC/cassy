@@ -340,6 +340,29 @@ class FastRows(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL journey-catalog", result.stdout)
 
+    def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
+        validator = self.repo / ".git" / "legacy-cas"
+        validator.write_text('''#!/usr/bin/env bash
+case "$*" in
+    'qa journeys --help'|'qa journeys --check') exit 0 ;;
+    'config get qa.registry.enforce') echo enforce ;;
+    'qa impact '*) echo '{"upkeep":{"registry":{"required":false,"reasons":[]}}}' ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: strict\n")
+        self.write("hub-web/src/email.ts", "pre-existing unowned surface\n")
+        self.commit()
+        base = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
+        self.write("hub-web/src/email.ts", "modified unowned surface\n")
+        # The stricter base policy must survive a delivery's downgrade.
+        self.write("docs/qa/journeys.yaml", REGISTRY + "enforce: enforce\n")
+        self.commit()
+        result = self.fast_from(base, CAS_BIN=str(validator))
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
     @unittest.skipUnless(shutil.which("cas"), "needs a released cas to provision")
     def test_self_provisioned_validator_catches_an_unowned_surface_cas_4b33(self):
         installer = self.repo / ".git" / "fake-install.sh"

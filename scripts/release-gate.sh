@@ -1807,7 +1807,25 @@ check_registry_upkeep() {
         "$cas_bin" qa journeys --check --base "$base"
         return
     fi
-    # A validator released before --base: the same G1/G2 facts from qa impact.
+    # Legacy impact omits modified-file ownership. Strict policy needs --base;
+    # use the stricter header at base/HEAD, with local config as fallback.
+    if ! "$cas_bin" config get qa.registry.enforce | python3 -c '
+import subprocess, sys, yaml
+fallback = sys.stdin.read().strip()
+if fallback not in ("off", "observe", "enforce", "strict"):
+    sys.exit(1)
+for revision in (sys.argv[1], "HEAD"):
+    snapshot = subprocess.run(["git", "show", revision + ":docs/qa/journeys.yaml"],
+                              capture_output=True, text=True)
+    registry = yaml.safe_load(snapshot.stdout) or {}
+    if registry.get("enforce", fallback) == "strict":
+        sys.exit(1)
+' "$base"; then
+        printf 'journey-catalog: FAIL: strict registry policy requires a validator with --base support\n'
+        printf 'FIX: set CAS_BIN to a cas supporting qa journeys --check --base, then rerun\n'
+        return 1
+    fi
+    # Non-strict policy can use the new-file G1/G2 facts from legacy impact.
     "$cas_bin" qa impact "$base" --json | python3 -c '
 import json, sys
 registry = json.load(sys.stdin)["upkeep"]["registry"]

@@ -2993,8 +2993,18 @@ fn collect_git_write_targets(
             };
             // A literal script file is opaque, just like executing it directly.
             // Its remaining arguments are script data, not shell options.
+            // Syntax checks use that same operand without executing its body.
+            // Only strip the exact leading option: +n or other shell options
+            // must still go through the executable command-scope checks.
+            let script_args = match args {
+                [flag, rest @ ..] if matches!(flag.as_str(), "-n" | "--noexec") => match rest {
+                    [separator, rest @ ..] if separator == "--" => rest,
+                    _ => rest,
+                },
+                _ => args,
+            };
             if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
-                && args.first().is_some_and(|script| {
+                && script_args.first().is_some_and(|script| {
                     !script.is_empty()
                         && !script.starts_with(['-', '+'])
                         && path_word(script).literal == Some(true)

@@ -428,7 +428,7 @@ print(json.dumps(state))\n");
         epic.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_LABEL.into());
         epic.branch = Some(lane.into());
         epic.epic_verification_owner = Some(owner.id.clone());
-        crate::store::open_task_store(&root).unwrap().create(&epic).unwrap();
+        crate::store::open_task_store(&root).unwrap().add(&epic).unwrap();
         crate::mcp::tools::core::workflow::release_freeze::freeze(&root, "cas-train", "sup", Some("cut")).unwrap();
         // The verifier auto-merges the release repair into the frozen train,
         // and the operator's checkout goes back to its old main.

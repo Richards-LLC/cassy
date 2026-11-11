@@ -764,6 +764,9 @@ fn report_names(report: &str, task: &str) -> bool {
         .any(|word| word == task)
 }
 
+// gate-audit[author_override]: bypass G-116 Accepts a new receipt from a lineage author under stored operator approval.
+// gate-audit[release_author_waiver]: bypass G-116 Accepts a new release verdict under its exact-head QA-author waiver.
+// gate-audit[accepted_by]: verification_batch_receipt
 pub(crate) fn prepare_receipt(
     root: &Path,
     recorder: &cas_types::Agent,

@@ -127,6 +127,15 @@ fn literal(expr: &syn::Expr) -> Option<String> {
 struct Body<'a> {
     function: &'a mut Function,
 }
+impl Body<'_> {
+    fn condition(&mut self, expr: &syn::Expr) {
+        let mut flags = Flags::default();
+        flags.visit_expr(expr);
+        let flags = flags.0.into_iter().filter(|name| candidate(name) || self.function.flags.contains(name)).collect::<BTreeSet<_>>();
+        self.function.conditional.extend(flags.clone());
+        self.function.flags.extend(flags);
+    }
+}
 impl<'ast> Visit<'ast> for Body<'_> {
     fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = expr.func.as_ref() {
@@ -167,16 +176,20 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_expr_method_call(self, expr);
     }
     fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
-        let mut flags = Flags::default();
-        flags.visit_expr(&expr.cond);
-        let flags = flags
-            .0
-            .into_iter()
-            .filter(|name| candidate(name) || self.function.flags.contains(name))
-            .collect::<BTreeSet<_>>();
-        self.function.conditional.extend(flags.clone());
-        self.function.flags.extend(flags);
+        self.condition(&expr.cond);
         visit::visit_expr_if(self, expr);
+    }
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if let Some((_, condition)) = &arm.guard { self.condition(condition); }
+        visit::visit_arm(self, arm);
+    }
+    fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+        self.condition(&expr.expr);
+        visit::visit_expr_match(self, expr);
+    }
+    fn visit_expr_while(&mut self, expr: &'ast syn::ExprWhile) {
+        self.condition(&expr.cond);
+        visit::visit_expr_while(self, expr);
     }
     fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
         let name = pat.ident.to_string();
@@ -267,6 +280,18 @@ impl<'ast> Visit<'ast> for Body<'_> {
 #[derive(Default)]
 struct Flags(BTreeSet<String>);
 impl<'ast> Visit<'ast> for Flags {
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        fn collect(tokens: proc_macro2::TokenStream, names: &mut BTreeSet<String>) {
+            for token in tokens {
+                match token {
+                    proc_macro2::TokenTree::Ident(name) => { names.insert(name.to_string()); }
+                    proc_macro2::TokenTree::Group(group) => collect(group.stream(), names),
+                    _ => {}
+                }
+            }
+        }
+        collect(mac.tokens.clone(), &mut self.0);
+    }
     fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
         let name = segment.ident.to_string();
         self.0.insert(name);
@@ -565,6 +590,18 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
             ]);
         }
     }
+    let mut carried = BTreeMap::<String, BTreeSet<String>>::new();
+    for f in &functions {
+        if let Some(source) = f.annotations.get("tags_from")
+            && f.calls.contains("override_codes_in") && f.calls.contains("override_tag")
+            && let Some((path, name)) = source.split_once('#')
+            && reaches(&functions, f, name)
+        {
+            for producer in functions.iter().filter(|producer| producer.name == name && producer.site.rsplit_once(':').unwrap().0.ends_with(path)) {
+                carried.entry(f.site.clone()).or_default().extend(producer.overridden.clone());
+            }
+        }
+    }
     loop {
         let mut known = BTreeMap::<String, (BTreeSet<String>, BTreeSet<String>)>::new();
         let mut occurrences = BTreeMap::<String, usize>::new();
@@ -582,6 +619,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         let mut changed = false;
         for f in &mut functions {
             let prior = (f.refused.len(), f.overridden.len());
+            if let Some(codes) = carried.get(&f.site) { f.overridden.extend(codes.clone()); }
             for call in &f.calls {
                 if let Some((refused, overridden)) = known.get(call) {
                     f.refused.extend(refused.clone());

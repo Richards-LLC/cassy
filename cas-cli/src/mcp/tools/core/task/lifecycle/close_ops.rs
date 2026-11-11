@@ -7762,6 +7762,7 @@ impl CasCore {
     // gate-audit[negative_result]: selector Chooses a separately authorized, measured negative result; no code delivery is approved.
     // gate-audit[validate_supervisor_override]: selector Validation of authority; only explicit accepted_override_codes at actual waived checks count.
     // gate-audit[shipped_timeout_waiver]: selector Replays a previously issued exact-dispatch approval; lookup does not mint an override.
+    // gate-audit[tags_from]: registry_upkeep.rs#finish
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,

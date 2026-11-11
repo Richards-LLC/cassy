@@ -331,7 +331,9 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
 fn fail(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        crate::gates::tag("G-104",
+            format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        ),
     )
 }
 
@@ -790,9 +792,9 @@ impl Approval {
                 verdict.id == self.verdict_id && verdict.status == VerificationStatus::Approved
             })
         {
-            return Err("the exact candidate approval is no longer current".into());
+            return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
-        self.candidate.validate(root, task)
+        self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
     /// Reconciled delivery can close on its original mapping after other
@@ -936,6 +938,7 @@ impl CasCore {
         Ok(())
     }
 
+    // gate[N-15 notice]: Candidate verification handoff or automatic verifier launch
     pub(crate) fn emit_premerge_review_handoff(
         &self,
         task: &Task,
@@ -1048,6 +1051,7 @@ impl CasCore {
 
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
+    // gate[G-104 merge-admission]: Pre-merge verification hold on the candidate
     pub(crate) fn prepare_premerge_verification(
         &self,
         task: &Task,
@@ -1235,6 +1239,7 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        // gate[N-12 notice]: Premerge candidate verification dispatch
         let dispatch = cas_store::create_verification_dispatch_bound(
             &self.cas_root,
             &task.id,

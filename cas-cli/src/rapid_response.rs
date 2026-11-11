@@ -344,11 +344,12 @@ pub fn migration_review_refusal(cas_root: &Path, task: &Task) -> Option<String> 
     let delivery = recorded_delivery(cas_root.parent()?, task)?;
     let migration = delivery.paths.iter().find(|path| is_migration_path(path))?;
     let reviewed = load(cas_root).ok()?.migration_reviews.iter().any(|review| review.task == task.id);
+    // gate[G-66 park]: Rapid-response migration review
     (!reviewed).then(|| {
-        format!(
+        crate::gates::tag("G-66", format!(
             "MIGRATION REVIEW REQUIRED (rapid response): {} changes {migration} while its epic is in a rapid-response window, so a human must review the migration before close. Ask the operator to run `cas qa rapid-response review-migration {} --note \"<what they checked>\"`, then retry the close.",
             task.id, task.id
-        )
+        ))
     })
 }
 

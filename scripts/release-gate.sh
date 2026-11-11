@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-37 release-script]: Full release gate (row scheduler)
 # Mechanical, fail-closed validation gate for an assembled epic worktree.
 #
 # The version bump, Cargo.lock refresh, CHANGELOG section, and Slack draft must

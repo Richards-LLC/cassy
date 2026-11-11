@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-40 ci]: Web-input classifier (selects Commander web and journeys checks)
 """Print whether a diff touches the Commander web check's inputs (true/false).
 
 The Commander step (typecheck, unit tests, build, visual QA, dist drift and the

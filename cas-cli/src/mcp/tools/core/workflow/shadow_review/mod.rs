@@ -220,7 +220,7 @@ impl Round {
 
 fn require_supervisor(caller: &Agent, internal: bool) -> ReviewResult<()> {
     if caller.role != AgentRole::Supervisor || !internal || !caller.is_alive() {
-        return Err("shadow start/show/apply requires an active registered supervisor with server-internal identity".into());
+        return Err(crate::gates::tag("H-45", "shadow start/show/apply requires an active registered supervisor with server-internal identity"));
     }
     Ok(())
 }

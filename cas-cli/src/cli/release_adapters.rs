@@ -183,6 +183,10 @@ fn send_notice(root: &Path, scope: &ReleaseScope, receipt: &ReleaseReconcileRece
             ));
         }
     }
+    // A held or partial closeout is the reconciler's hold; a complete one is not.
+    if !receipt.complete {
+        detail = crate::gates::tag("G-128", detail);
+    }
     let intent = receipt.notice_intent.as_ref().context("release operation has no notice intent")?;
     let agents = crate::store::open_agent_store(root)?.list(None)?;
     let recipient = crate::supervisor_notices::resolve(&agents, Some(&intent.recipient), None);

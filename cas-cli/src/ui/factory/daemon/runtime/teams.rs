@@ -1923,6 +1923,7 @@ impl TeamsManager {
     ///
     /// Shell-form (`#!/bin/sh`) per the cas-7ecd scar — exec-form hooks trip
     /// Claude Code's /doctor validator regardless of Anthropic #58441 state.
+    // gate[H-39 git-hook]: Worker pre-commit guard (layer 2)
     pub const WORKER_PRE_COMMIT_HOOK: &'static str = "#!/bin/sh
 # Cassy factory worker guard — installed by `cas factory` when spawning isolated workers.
 # Workers may ONLY commit on their own factory/<name> branch, or on their own
@@ -1944,7 +1945,7 @@ own_task_branch() {
 }
 if [ -n \"$CAS_AGENT_NAME\" ] && [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
   echo \"Cassy COMMIT GUARD: worker '$CAS_AGENT_NAME' cannot commit from '$branch'.\" >&2
-  echo \"Expected the exact worker branch '$expected', or your per-task branch '$expected-<task-id>'. The checkout may belong to another worker.\" >&2
+  echo \"Expected the exact worker branch '$expected', or your per-task branch '$expected-<task-id>'. The checkout may belong to another worker. [H-39]\" >&2
   exit 1
 fi
 case \"$branch\" in
@@ -1957,7 +1958,7 @@ case \"$branch\" in
     else
       echo \"Cassy COMMIT GUARD: Cannot commit on '$branch'.\" >&2
     fi
-    echo \"Workers may only commit on their factory/<name> branch.\" >&2
+    echo \"Workers may only commit on their factory/<name> branch. [H-39]\" >&2
     exit 1
     ;;
 esac
@@ -1966,6 +1967,7 @@ esac
     /// Push-time hard floor for cas-0efb / GH #337/#339. PreToolUse catches
     /// the ordinary model-visible path; this hook rechecks at Git's own push
     /// boundary, after any preceding command in a compound shell invocation.
+    // gate[H-40 git-hook]: Worker pre-push guard
     pub const WORKER_PRE_PUSH_HOOK: &'static str = "#!/bin/sh
 # Cassy factory worker push guard — installed by cas factory in the worker-private hooksPath.
 branch=$(git symbolic-ref --short HEAD 2>/dev/null)
@@ -1988,13 +1990,13 @@ record_push_rejection() {
     cas hook WorkerPushRejected >/dev/null 2>&1 || true
 }
 if [ -z \"$CAS_AGENT_NAME\" ]; then
-  echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns.\" >&2
+  echo \"Cassy PUSH GUARD: CAS_AGENT_NAME is missing; cannot prove which factory branch this worker owns. [H-40]\" >&2
   exit 1
 fi
 if [ \"$branch\" != \"$expected\" ] && ! own_task_branch \"$branch\"; then
   record_push_rejection \"<head:$branch>\"
   echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' cannot push from '$branch' — this is not your branch.\" >&2
-  echo \"Expected the exact worker branch '$expected' or your per-task branch '$expected-<task-id>'. Refusing to graft the current HEAD onto another branch.\" >&2
+  echo \"Expected the exact worker branch '$expected' or your per-task branch '$expected-<task-id>'. Refusing to graft the current HEAD onto another branch. [H-40]\" >&2
   exit 1
 fi
 # Per-task work pushes only to its own name. On the reusable lane, also
@@ -2009,7 +2011,7 @@ while read local_ref local_sha remote_ref remote_sha; do
     own_task_branch \"${remote_ref#refs/heads/}\";
   }; then
     record_push_rejection \"$remote_ref\"
-    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch.\" >&2
+    echo \"Cassy PUSH GUARD: worker '$CAS_AGENT_NAME' on '$branch' may push only to 'refs/heads/$branch', not '$remote_ref' — this is not your branch. [H-40]\" >&2
     exit 1
   fi
   # A pushed factory tip is the delivery boundary recorded when work is
@@ -2020,7 +2022,7 @@ while read local_ref local_sha remote_ref remote_sha; do
   }; then
     record_push_rejection \"$remote_ref\"
     echo \"Cassy PUSH GUARD: non-fast-forward would rewrite the parked delivery.\" >&2
-    echo \"Merge the target in, don't rebase.\" >&2
+    echo \"Merge the target in, don't rebase. [H-40]\" >&2
     exit 1
   fi
   refs=\"$refs$local_ref $local_sha $remote_ref $remote_sha
@@ -2045,10 +2047,10 @@ if [ -n \"$local_gate\" ]; then
   (cd \"$(git rev-parse --show-toplevel)\" && $limiter sh -c \"$local_gate\")
   gate_status=$?
   if [ \"$gate_status\" -eq 124 ] && [ -n \"$limiter\" ]; then
-    echo \"Cassy PUSH GUARD: the project's local gate timed out after ${limit}s (factory.worker_local_gate: $local_gate).\" >&2
+    echo \"Cassy PUSH GUARD: the project's local gate timed out after ${limit}s (factory.worker_local_gate: $local_gate). [H-40]\" >&2
     exit 1
   elif [ \"$gate_status\" -ne 0 ]; then
-    echo \"Cassy PUSH GUARD: the project's local gate failed (factory.worker_local_gate: $local_gate). Fix it before pushing.\" >&2
+    echo \"Cassy PUSH GUARD: the project's local gate failed (factory.worker_local_gate: $local_gate). Fix it before pushing. [H-40]\" >&2
     exit 1
   fi
 fi

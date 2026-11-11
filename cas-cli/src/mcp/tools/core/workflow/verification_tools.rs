@@ -1460,6 +1460,7 @@ impl CasCore {
         }
     }
 
+    // gate[N-13 notice]: Supervisor recovery re-dispatch
     fn recover_parked_verification_dispatch(
         &self,
         task: &Task,

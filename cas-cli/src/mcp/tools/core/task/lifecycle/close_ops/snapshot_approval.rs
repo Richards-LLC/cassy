@@ -36,6 +36,7 @@ fn delivered_file_digest(repo: &Path, tip: &str, path: &str) -> Option<String> {
 /// compatibility, one actual changed line (literal or digest):
 /// snapshot-approved: path — file-sha256:<digest> — reason
 /// snapshot-approved: path — +changed line / sha256:<digest> — reason
+// gate[G-75 park]: Snapshot approval required
 pub(super) fn rejection(
     repo: &Path,
     base: Option<&str>,

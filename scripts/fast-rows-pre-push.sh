@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-07 git-hook]: Pre-push fast rows (worker and main checkout)
 # Git pre-push gate for factory worker branches (cas-043b).
 #
 # Cassy installs a pre-push hook in worker worktrees that delegates here. A
@@ -25,6 +26,7 @@ unset $(git rev-parse --local-env-vars)
 receipts="$common/cas/fast-rows"
 status=0
 
+# gate[H-38 git-hook]: Main-checkout pre-push (factory ref needs a same-tip fast-rows PASS)
 while read -r _local_ref local_sha remote_ref remote_sha; do
     [[ "$remote_ref" == refs/heads/factory/* && "$local_sha" != "$zero" ]] || continue
     if head -n1 "$receipts/$local_sha.pass" 2>/dev/null | grep -q "^fast-rows: PASS $local_sha "; then

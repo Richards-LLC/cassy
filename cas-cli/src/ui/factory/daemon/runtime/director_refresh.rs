@@ -823,6 +823,7 @@ impl DirectorRefresh {
 
     /// Resolve the git half of the supervisor-stall evidence as a `CiStatus`
     /// job on the external lane, unless one is in flight (review M1).
+    // gate[W-49 watchdog]: Director lane-CI evidence (CiStatus)
     pub(crate) fn start_ci_status(&mut self, app: &FactoryApp, jobs: &mut QueueJobs) {
         if self.ci_status.busy() {
             return;

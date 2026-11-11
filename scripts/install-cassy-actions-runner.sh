@@ -201,6 +201,7 @@ install -o root -g root -m 0644 "$prune_service_source" \
     /etc/systemd/system/cassy-actions-cache-prune.service
 install -o root -g root -m 0644 "$prune_timer_source" \
     /etc/systemd/system/cassy-actions-cache-prune.timer
+# gate[W-66 watchdog]: systemd Actions runner restart (Restart=always unit)
 install -o root -g root -m 0644 "$unit_source" "/etc/systemd/system/$service_name"
 systemctl daemon-reload
 systemctl enable --now cassy-actions-cache-prune.timer

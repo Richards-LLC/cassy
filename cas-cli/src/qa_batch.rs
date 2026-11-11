@@ -883,16 +883,17 @@ pub(crate) fn prepare_receipt(
 /// Prepare a receipt whose explicit verdict kind is a published tag. The tag
 /// must contain each named delivery's tree effect; no QA ledger or ledger
 /// author is invented for this evidence.
+// gate[G-117 release-verdict]: Release tag verdict carries each delivery's tree effect
 pub(crate) fn prepare_release_tag_receipt(
     root: &Path,
     task_ids: &[String],
     tag: &str,
 ) -> Result<QaBatchReceipt, String> {
     if task_ids.is_empty() || task_ids.len() > 500 {
-        return Err("release tag verdict needs 1 to 500 task IDs".into());
+        return Err(crate::gates::tag("G-117", "release tag verdict needs 1 to 500 task IDs"));
     }
     if tag.is_empty() || tag.starts_with('-') {
-        return Err("release tag is invalid".into());
+        return Err(crate::gates::tag("G-117", "release tag is invalid"));
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
@@ -901,19 +902,19 @@ pub(crate) fn prepare_release_tag_receipt(
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
         if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
-            return Err(format!("task {id} belongs to another project or has no project binding"));
+            return Err(crate::gates::tag("G-117", format!("task {id} belongs to another project or has no project binding")));
         }
         let (repo, target) = task_context(root, &task)?;
         let candidate = commit(&repo, &format!("refs/tags/{tag}"))
-            .ok_or_else(|| format!("published release tag {tag} is unavailable in {}", repo.display()))?;
+            .ok_or_else(|| crate::gates::tag("G-117", format!("published release tag {tag} is unavailable in {}", repo.display())))?;
         if tag_sha.as_ref().is_some_and(|prior| prior != &candidate) {
-            return Err(format!("release tag {tag} resolves differently across task repositories"));
+            return Err(crate::gates::tag("G-117", format!("release tag {tag} resolves differently across task repositories")));
         }
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
-            .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
+            .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
         if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
-            return Err(format!("release tag {tag} does not contain task {id}'s delivery tree effect"));
+            return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
     }
@@ -1196,6 +1197,7 @@ pub(crate) fn debt_refusal(task: &str) -> String {
 
 /// Final transition guard, independent of QA mode, classification, merge
 /// outcome and whether the earlier optional evidence gate was reached.
+// gate[G-83 close-after-merge]: Deferred batch QA debt (waiting for batch receipt)
 pub(crate) fn ensure_deferred_close(
     root: &Path,
     task: &Task,

@@ -1488,7 +1488,7 @@ impl CasCore {
         {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(message.to_string()),
+                message: Cow::from(crate::gates::tag("G-86", message.to_string())),
                 data: None,
             });
         }
@@ -1665,7 +1665,7 @@ impl CasCore {
             if caller.role == cas_types::AgentRole::Worker {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
-                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                    crate::gates::tag("H-45", "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it."),
                 ));
             }
         }
@@ -2168,7 +2168,7 @@ impl CasCore {
             }
             if new_status == TaskStatus::Closed && task.status != TaskStatus::Closed {
                 if let Err(message) = crate::qa_batch::ensure_deferred_close(&self.cas_root, &task, None, None) {
-                    return Ok(Self::tool_error(message));
+                    return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
                 }
                 let parent_epic = task_store.get_parent_epic(&task.id).map_err(|error| {
                     Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to resolve effective task target: {error}"))
@@ -2204,9 +2204,9 @@ impl CasCore {
                         )
                         .map_err(|message| McpError {
                             code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!(
+                            message: Cow::from(crate::gates::tag("G-41", format!(
                                 "PRE-CLOSE HOOK FAILED for task update status=closed: {message}"
-                            )),
+                            ))),
                             data: None,
                         })?,
                     );
@@ -2216,7 +2216,7 @@ impl CasCore {
                     &task,
                     close_repo_context.as_ref(),
                 ) {
-                    return Ok(Self::tool_error(message.to_string()));
+                    return Ok(Self::tool_error(crate::gates::tag("G-86", message.to_string())));
                 }
             }
             if new_status != task.status {

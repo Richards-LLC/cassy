@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-41 qa]: Journey selection for QA (journeys-for-diff.py)
 """Map changed paths to the user journeys they touch (docs/qa/journeys.md).
 
 Usage:

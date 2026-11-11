@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-35 release-script]: Train full-set receipt precondition (train-ci.py check)
 """Whole-set CI receipts, release admission and checked queue reuse.
 
 This never launches tests. CI owns execution; the daemon and release command

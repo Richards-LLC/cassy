@@ -28,7 +28,15 @@ pub(crate) fn park_reply(mut refusals: Vec<String>) -> String {
     )
 }
 
-fn compact_gate(gate: &str) -> String {
+fn compact_gate(mut gate: &str) -> String {
+    // Trailing `[CODE]` gate tokens are not the remedy paragraph.
+    while let Some((body, last)) = gate.trim_end().rsplit_once("\n\n")
+        && last.starts_with('[')
+        && last.ends_with(']')
+        && crate::gates::find(&last[1..last.len() - 1]).is_some()
+    {
+        gate = body;
+    }
     let heading = gate.trim_start_matches("⚠️ ").lines().next().unwrap_or_default();
     let (code, inline) = heading.split_once(": ").unwrap_or((heading, ""));
     // Prefer an explicit remedy over measured facts, which can be much longer.
@@ -59,6 +67,7 @@ impl CasCore {
     /// The close requirements knowable at task start, for the start context.
     /// Each line is conditional on the same inputs its gate reads, so a project
     /// or task the gate would skip does not list it.
+    // gate[N-36 notice]: Task-note context blocks (start close checks, test principle, QA impact)
     pub(crate) fn close_requirements(&self, task: &Task) -> String {
         if std::env::var_os("CAS_FACTORY_MODE").is_none()
             || matches!(task.task_type, TaskType::Epic | TaskType::Gate)

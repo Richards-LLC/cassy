@@ -68,6 +68,7 @@ pub fn operator_credential_stores(lookup: impl Fn(&str) -> Option<OsString>) -> 
 
 /// The program and arguments that actually start a worker: `None` keeps the
 /// configured command, `Some` is the masking wrapper, `Err` refuses the spawn.
+// gate[H-46 spawn]: Worker store isolation (bwrap)
 pub(crate) fn worker_launch(
     command: &str,
     args: &[String],
@@ -188,7 +189,7 @@ pub(crate) fn isolation_available() -> Result<(), String> {
                      must be hidden from workers (GH #1293), but bubblewrap could not create a \
                      user mount namespace ({}). Install bubblewrap (`bwrap`) and allow \
                      unprivileged user namespaces, or set {STORE_ISOLATION_ENV}=off in the \
-                     factory daemon environment to accept the exposure.",
+                     factory daemon environment to accept the exposure.\n\n[H-46]",
                     match outcome {
                         Ok(status) => format!("probe exited with {status}"),
                         Err(error) => format!("bwrap: {error}"),

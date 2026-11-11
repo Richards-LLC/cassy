@@ -162,6 +162,7 @@ pub fn execute(
             Some(post),
             cas_root,
         )
+        .map(|reason| if crate::gates::codes_in(&reason).is_empty() { crate::gates::tag("H-07", reason) } else { reason })
     };
     let mut connect = || -> Result<Box<dyn Hub>, VioletError> { connect_live(cas_root) };
     let reply_claim = |reply_to: &str| match cas_root {

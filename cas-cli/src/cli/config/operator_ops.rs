@@ -67,14 +67,15 @@ pub(crate) fn guard_operator_config(
     if let Some(refusal) =
         crate::config::operator_policy::operator_config_refusal(&changed, &context())
     {
-        anyhow::bail!(refusal);
+        anyhow::bail!(crate::gates::tag("H-41", refusal));
     }
     Ok(())
 }
 
+// gate[H-41 cli]: Operator-only CLI context check
 fn require_operator() -> anyhow::Result<()> {
     if let Some(refusal) = operator_context_refusal(&InvocationContext::from_process()) {
-        anyhow::bail!(refusal);
+        anyhow::bail!(crate::gates::tag("H-41", refusal));
     }
     Ok(())
 }
@@ -86,7 +87,7 @@ fn confirm(prompt: &str, expected: &str) -> anyhow::Result<()> {
     let mut line = String::new();
     std::io::stdin().lock().read_line(&mut line)?;
     if line.trim() != expected {
-        anyhow::bail!("not confirmed; nothing changed");
+        anyhow::bail!(crate::gates::tag("H-41", "not confirmed; nothing changed"));
     }
     Ok(())
 }
@@ -172,7 +173,7 @@ pub(crate) fn set_project_write_roots(
     cgroup: &str,
 ) -> anyhow::Result<WriteRootsChange> {
     if let Some(refusal) = crate::config::operator_policy::worker_cgroup_refusal(cgroup) {
-        anyhow::bail!(refusal);
+        anyhow::bail!(crate::gates::tag("H-41", refusal));
     }
     let mut roots = parse_project_write_roots(value, cas_root)?;
     let clearing = roots.is_empty();

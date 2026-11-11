@@ -2334,9 +2334,9 @@ fn worker_hold_role_gate(is_supervisor: bool, action: &str) -> Result<(), String
     if is_supervisor {
         Ok(())
     } else {
-        Err(format!(
+        Err(crate::gates::tag("H-45", format!(
             "coordination {action} rejected: only supervisors may change a worker's director hold state"
-        ))
+        )))
     }
 }
 

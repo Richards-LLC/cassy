@@ -186,6 +186,7 @@ prune_slot() {
     log "slot=$((index + 1)) target=$target_bytes sccache=$sccache_bytes total=$((target_bytes + sccache_bytes)) cap=$slot_budget_bytes"
 }
 
+# gate[W-65 watchdog]: Scheduled Actions cache prune when runners are idle
 prune_all() {
     local mode="$1" index state
     exec 9>>"$cache_root/.cassy-actions-cache-job.lock"

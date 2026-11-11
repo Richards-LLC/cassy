@@ -253,19 +253,20 @@ fn approved_repository_is_unchanged(cas_root: &Path, task: &Task) -> bool {
 /// This guard must run immediately after loading the task, before receipt
 /// parsing, repository resolution, hook execution, dependency writes, or task
 /// projection updates.
+// gate[G-29 park]: Delivery proof scope locked
 pub(crate) fn guard_task_proof_scope(
     cas_root: &Path,
     task: &Task,
     operation: ProofScopeOperation<'_>,
 ) -> Result<(), TaskLifecycleGateError> {
-    let reject = |message: String| TaskLifecycleGateError::ProofScope { message };
+    let reject = |message: String| TaskLifecycleGateError::ProofScope { message: crate::gates::tag("G-29", message) };
     if matches!(operation, ProofScopeOperation::CompletionReceipt)
         && super::stale_close_guard::is_terminal_closed(task.status)
     {
-        return Err(reject(format!(
+        return Err(TaskLifecycleGateError::ProofScope { message: crate::gates::tag("G-28", format!(
             "DELIVERY RECEIPT REJECTED: task {} is already Closed. A terminal task cannot accept or replay a completion receipt; task, delivery, dispatch, verdict, and event state were left unchanged.",
             task.id
-        )));
+        )) });
     }
 
     let mut locked_fields = operation.locked_fields();

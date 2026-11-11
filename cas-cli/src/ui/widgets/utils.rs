@@ -110,6 +110,7 @@ pub fn event_type_color(event_type: &cas_types::EventType, palette: &Palette) ->
         EventType::VerificationAdded => palette.status_success,
         // Audit / integrity events
         EventType::AuditTrailGap => palette.status_error,
+        EventType::GateRefused | EventType::GateOverridden | EventType::GateFalsePositive => palette.status_warning,
     }
 }
 

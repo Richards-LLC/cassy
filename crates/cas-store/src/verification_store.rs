@@ -1442,6 +1442,7 @@ pub fn expired_verification_dispatches(
 /// supplies positively dead process snapshots; status/PID/fingerprint are
 /// compared again under the write lock so a revived owner is never displaced.
 /// Missing registry rows require matching machine/session retirement evidence.
+// gate[W-40 watchdog]: Orphaned verification dispatch adoption
 pub fn adopt_orphaned_verification_dispatches(
     cas_dir: &Path,
     supervisor_id: &str,

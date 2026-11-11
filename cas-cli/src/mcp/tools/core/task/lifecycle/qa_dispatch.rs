@@ -350,7 +350,7 @@ impl CasCore {
         };
         let reject = |error: cas_store::StoreError| McpError {
             code: ErrorCode::INVALID_PARAMS,
-            message: Cow::from(format!("Cannot start QA task {}: {error}", qa_task.id)),
+            message: Cow::from(crate::gates::tag("G-17", format!("Cannot start QA task {}: {error}", qa_task.id))),
             data: None,
         };
         // Check the session id too: an assignee recorded as an id must not
@@ -371,10 +371,11 @@ impl CasCore {
         // env files and test-account capacity before the round is claimed,
         // so a setup gap is a clear blocker instead of a stalled round.
         let preflight = self.qa_reviewer_preflight(qa_task, &pass);
+        // gate[G-17 start]: QA preflight blocked (QA round claim at start)
         if let Some(report) = preflight.as_ref().filter(|report| !report.is_ready()) {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-17", format!(
                     "QA PREFLIGHT BLOCKED: {} was not started and round {} for {} @{} was not \
                      claimed, because this reviewer's environment is not ready:\n{}\n\
                      Tell the supervisor: `{}coordination action=message target=supervisor \
@@ -388,7 +389,7 @@ impl CasCore {
                     crate::mcp::tools::core::guidance::caller_prefix(),
                     qa_task.id,
                     qa_task.id,
-                )),
+                ))),
                 data: None,
             });
         }
@@ -1166,6 +1167,7 @@ impl CasCore {
     }
 
     /// Tell the reviewer of a superseded round to stop (cas-ce39).
+    // gate[N-22 notice]: QA round superseded
     fn notify_superseded_reviewer(&self, retired: &QaPass, reviewer: &str, next_desc: &str) -> String {
         let queue = match crate::store::open_prompt_queue_store(&self.cas_root) {
             Ok(queue) => queue,
@@ -1272,6 +1274,7 @@ impl CasCore {
     /// - a live supervisor's override with a reason records a waiver against
     ///   that commit;
     /// - code already on trunk is never sent for review.
+    // gate[G-64 close-after-merge]: Independent QA required at close (passed or waived QA at landed tip)
     pub(crate) fn independent_qa_close_gate(
         &self,
         task: &Task,
@@ -1781,6 +1784,7 @@ impl CasCore {
         Ok(id)
     }
 
+    // gate[N-23 notice]: QA rejection escalation
     fn escalate_qa_rounds(&self, task: &Task, failed_rounds: u32, latest: &QaPass) {
         let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_root) else {
             return;

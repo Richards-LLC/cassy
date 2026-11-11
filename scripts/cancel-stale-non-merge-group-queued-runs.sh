@@ -29,6 +29,7 @@ while IFS=$'\t' read -r run_id attempt_started_at event head_branch; do
         continue
     fi
     age_seconds=$((now_epoch - attempt_epoch))
+    # gate[W-63 watchdog]: GitHub stale queued-run watchdog
     (( age_seconds > queue_seconds )) || continue
 
     # The list endpoint is eventually consistent. Re-read status so a run

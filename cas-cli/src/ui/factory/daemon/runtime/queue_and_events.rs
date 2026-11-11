@@ -674,6 +674,7 @@ pub(crate) fn closed_death_group(
 /// during boot. Claude Code emits these messages before a rejected worker
 /// necessarily exits, so polling this signal closes the gap between pane
 /// output and `PaneExited` delivery.
+// gate[W-13 watchdog]: Boot model error before registration
 fn boot_model_error_detail(cli: cas_mux::SupervisorCli, pane_tail: Option<&str>) -> Option<String> {
     let tail = pane_tail.filter(|tail| !tail.trim().is_empty())?;
     let lower = tail.to_ascii_lowercase();
@@ -698,6 +699,7 @@ fn boot_model_error_detail(cli: cas_mux::SupervisorCli, pane_tail: Option<&str>)
 /// registers. Fail the spawn with the named reason as soon as the screen shows
 /// instead of waiting out the generic registration timeout. A registered
 /// worker is past that screen, so its pane text is never judged (cas-6591).
+// gate[W-14 watchdog]: Codex hook-review screen during boot
 fn boot_hook_review_detail(
     cli: cas_mux::SupervisorCli,
     registered: bool,
@@ -3444,6 +3446,7 @@ pub(super) fn normal_delivery_probe_due(
 
 /// Decision seam for the delivered-unsurfaced watchdog (GH #224, GH #1153).
 /// Called only for a due probe.
+// gate[W-27 watchdog]: Normal-delivery watchdog pane nudge, then supervisor flag
 pub(super) fn normal_delivery_probe_action(
     evidence: NormalDeliveryTurnEvidence,
     nudges: u32,
@@ -3754,6 +3757,7 @@ pub(super) fn deferred_inbox_drain_phase(
 /// turn ended after the message arrived (transcript), or — with no transcript
 /// — its pane has been silent that long. A recipient that is working again is
 /// not idle and is left to the wake path.
+// gate[W-33 watchdog]: Idle-unacked message relay
 pub(super) fn idle_unacked_relay_due(
     now: chrono::DateTime<chrono::Utc>,
     message_created_at: chrono::DateTime<chrono::Utc>,
@@ -3898,6 +3902,7 @@ pub(super) fn escalate_undelivered_supervisor_relays(
 
 /// The read half of [`escalate_undelivered_supervisor_relays`]: lifecycle
 /// relays past the escalation window whose task has not moved on.
+// gate[W-34 watchdog]: Relay watchdog for lifecycle relays the supervisor never received
 pub(super) fn undelivered_supervisor_relay_candidates(
     cas_dir: &std::path::Path,
     queue: &dyn cas_store::PromptQueueStore,
@@ -4160,6 +4165,7 @@ impl FactoryDaemon {
 
     /// Decide on a usage-limit read: the dedupe state lives here, the relay
     /// write runs on the store worker (cas-4491f).
+    // gate[W-24 watchdog]: Worker usage-limit scan (worker_unavailable)
     fn decide_usage_limited_workers(
         &mut self,
         basis: u64,
@@ -4549,6 +4555,7 @@ impl FactoryDaemon {
     /// Decide on a permission-request read (cas-4491f): answer a request CAS
     /// already allowed, and relay one still pending past the wake window,
     /// once per request.
+    // gate[W-26 watchdog]: Worker permission approval pending
     fn decide_worker_permission_requests(
         &mut self,
         basis: u64,
@@ -4656,6 +4663,7 @@ impl FactoryDaemon {
     }
 
     /// Decide on an account-failure read (cas-4491f): one relay per episode.
+    // gate[W-25 watchdog]: Harness auth-failure scan (harness_auth)
     fn decide_auth_failed_workers(
         &mut self,
         basis: u64,
@@ -4773,6 +4781,7 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         let session = self.session_name.clone();
         let targets: Vec<String> = valid_targets.to_vec();
+        // gate[W-36 watchdog]: Stale prompt quarantine (poison-store sweep)
         self.relay_jobs.submit_write(&mut self.queue_jobs, "poison-store-sweep", None, move || {
             let Ok(queue) = super::prompt_queue_jobs::job_thread_prompt_queue(&cas_dir) else { return super::relay_jobs::RelayOutput::ProbeWritten; };
             let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
@@ -4986,6 +4995,7 @@ impl FactoryDaemon {
         let unread: Vec<_> = rows.iter().filter(|candidate| !candidate.consumed && candidate.row.target.eq_ignore_ascii_case(&supervisor)
             && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&candidate.row.source))
             .map(|candidate| candidate.row.clone()).collect();
+        // gate[W-32 watchdog]: Supervisor unread backlog (supervisor_unread)
         if !unread.is_empty() {
             let cas_dir = context.cas_dir.clone();
             let live = self.queue_jobs.poison_jobs.epoch(&supervisor);
@@ -5795,6 +5805,7 @@ impl FactoryDaemon {
         self.urgent_wake_probes.remove(&queued.id);
         self.normal_delivery_probes.remove(&queued.id);
         self.queue_jobs.normal_probe_jobs.forget_row(queued.id);
+        // gate[W-29 watchdog]: Claude worker wake budget exhausted
         if silent {
             self.notify_wake_starved_supervisor(queued, pane_target, attempts);
         }
@@ -5960,6 +5971,7 @@ impl FactoryDaemon {
     }
 
     /// Handle worker crash
+    // gate[N-08 notice]: Worker died (pane exit)
     pub(super) async fn handle_worker_crash(
         &mut self,
         worker_name: &str,
@@ -6370,6 +6382,7 @@ impl FactoryDaemon {
 
     /// cas-26c8 L1: submit every closed group that has no write in flight,
     /// each under its own key, lone deaths included.
+    // gate[W-22 watchdog]: Correlated worker deaths fold (workers_died_together)
     fn advance_correlated_worker_deaths(&mut self) {
         let now = chrono::Utc::now();
         for group in
@@ -6423,6 +6436,7 @@ impl FactoryDaemon {
     /// session's folded relays and deaths whose prompt never reached the
     /// queue; deaths this daemon still holds (window open, or group write in
     /// flight) are skipped when the read reports.
+    // gate[W-23 watchdog]: Worker-death sweep re-drive
     fn sweep_recorded_worker_deaths(&mut self) {
         use super::relay_jobs::Relay;
         const DEATH_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -6604,6 +6618,7 @@ impl FactoryDaemon {
                     now.saturating_duration_since(verification.launched_at),
                     crate::factory_hook_canary::HOOK_CANARY_TIMEOUT,
                 );
+                // gate[W-15 watchdog]: Hook canary failed during boot
                 if canary == crate::factory_hook_canary::CanaryVerdict::Failed {
                     let tail = boot_output_tail(pane_tail.as_deref());
                     return Some((
@@ -6645,6 +6660,7 @@ impl FactoryDaemon {
                                     agent,
                                 )
                         });
+                        // gate[W-16 watchdog]: Post-registration harness exit or disappearance
                         if process_exited {
                             return Some((
                                 worker.clone(),
@@ -6684,6 +6700,7 @@ impl FactoryDaemon {
                 } else if now.saturating_duration_since(verification.launched_at)
                     >= SPAWN_REGISTRATION_TIMEOUT
                 {
+                    // gate[W-12 watchdog]: Spawn registration timeout (worker harness failed during boot)
                     let trust_paths = self.app.worker_codex_trust_paths(worker);
                     return Some((worker.clone(), VerificationAction::Failed(registration_timeout_detail(
                         SPAWN_REGISTRATION_TIMEOUT,
@@ -10318,6 +10335,7 @@ impl FactoryDaemon {
                         // message. A spent wake budget says nothing about the
                         // task; keep its body available to hooks and inbox_poll.
                         // Preserve the dedicated worker-death failure report.
+                        // gate[W-35 watchdog]: Undelivered worker-death notice
                         if Self::row_is_supervisor_wake(
                             &wake_sender,
                             self.app.supervisor_name(),
@@ -11652,6 +11670,7 @@ impl FactoryDaemon {
         // cas-2702 (GH #59): provisioning that never returns must not hold the
         // FIFO hostage. Abandon the generation, tell the supervisor why, and let
         // the queue keep draining.
+        // gate[W-17 watchdog]: Spawn worktree provisioning timeout
         if !spawn_finished
             && self.spawn_task.is_some()
             && self.spawn_started_at.is_some_and(|started| {

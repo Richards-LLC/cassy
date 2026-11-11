@@ -11,6 +11,7 @@ use crate::coordination::external_work::{
     SqliteRequestJournal, VioletThreadResolver,
 };
 
+// gate[W-67 watchdog]: External-work reconcile against Cloud and Violet
 pub(crate) fn reconcile_due(cas_dir: &Path) -> Result<usize, String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
     let journal = SqliteRequestJournal::open(cas_dir).map_err(|error| error.to_string())?;

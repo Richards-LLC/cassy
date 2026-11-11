@@ -32,6 +32,7 @@ while IFS=$'\t' read -r run_id workflow_name head_branch run_status; do
         continue
     fi
     age_seconds=$((now_epoch - started_epoch))
+    # gate[W-62 watchdog]: GitHub merge-queue stale run watchdog
     (( age_seconds > hang_seconds )) || continue
     current_status="$(gh api "repos/$repository/actions/runs/$run_id" --jq '.status')"
     if [[ "$current_status" != queued && "$current_status" != in_progress ]]; then

@@ -156,6 +156,7 @@ fn validate(
 }
 
 impl CasCore {
+    // gate[G-48 park]: Rule references required
     pub(super) fn check_rule_reference_delivery(
         &self,
         task: &Task,
@@ -176,10 +177,10 @@ impl CasCore {
         }
         let rules = self
             .open_rule_store()
-            .map_err(|error| format!("{PREFIX}: {error}"))?
+            .map_err(|error| crate::gates::tag("G-48", format!("{PREFIX}: {error}")))?
             .list()
-            .map_err(|error| format!("{PREFIX}: cannot read cited rules: {error}"))?;
+            .map_err(|error| crate::gates::tag("G-48", format!("{PREFIX}: cannot read cited rules: {error}")))?;
         validate(repo, head, task, receipt, &rules)
-            .map_err(|message| format!("{PREFIX}:\n{message}"))
+            .map_err(|message| crate::gates::tag("G-48", format!("{PREFIX}:\n{message}")))
     }
 }

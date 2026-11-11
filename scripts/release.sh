@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-34 release-script]: One-command release cut (scripts/release.sh)
 #
 # One-command release for CAS (cas-f95b). Run it from the epic branch (or a
 # train branch) once the work is code-done:

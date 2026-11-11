@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# gate[C-32 release-script]: Install on publish (systemd timer or LaunchAgent)
 # Install each published CAS release on this host, with no agent hop (cas-f95b).
 #
 #   scripts/install-on-publish.sh --install     # install the user timer (once per host)
@@ -293,6 +294,7 @@ retry_pending() {
     done
 }
 
+# gate[W-64 watchdog]: Install-on-publish timer check
 run_once() {
     local tag latest current started last_version last_at publication
     publication="$("$gh_bin" api "repos/$repo/releases/latest" 2>/dev/null)" || {

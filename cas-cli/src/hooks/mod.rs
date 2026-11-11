@@ -199,6 +199,9 @@ pub fn handle_hook(event_name: &str, mut input: HookInput) -> Result<HookOutput,
     if result.is_ok() && let Some(root) = cas_root.as_deref() {
         crate::agent_model::record_hook(root, event_name, &input);
     }
+    if let (Ok(output), Some(root)) = (&result, cas_root.as_deref()) {
+        crate::gates::facts::observe_hook_output(root, output);
+    }
     if event_name == "UserPromptSubmit" && result.is_ok() {
         if let Some(root) = cas_root.as_deref() {
             turn_context::record_prompt_hook(root, &input);

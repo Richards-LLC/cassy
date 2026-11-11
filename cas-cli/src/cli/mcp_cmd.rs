@@ -449,11 +449,12 @@ fn guard_supervisor_only_in(
     use crate::config::operator_policy::{
         supervisor_only_mcp_cli_refusal, supervisor_only_mcp_refusal,
     };
+    // gate[H-42 cli]: cas mcp CLI supervisor-only guard
     match supervisor_only_mcp_cli_refusal(
         supervisor_only_mcp_refusal(name, added, config, supervisor_only),
         context,
     ) {
-        Some(refusal) => anyhow::bail!(refusal),
+        Some(refusal) => anyhow::bail!(crate::gates::tag("H-42", refusal)),
         None => Ok(()),
     }
 }

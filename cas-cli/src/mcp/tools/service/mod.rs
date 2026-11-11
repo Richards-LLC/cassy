@@ -403,6 +403,8 @@ impl CasService {
                     "branch is supported only for task action=rebind_branch"));
             }
             let event_task_id = req.id.clone().unwrap_or_default();
+            let override_reason = (req.supervisor_override == Some(true))
+                .then(|| req.reason.clone().unwrap_or_default());
             let is_mutating = matches!(
                 action.as_str(),
                 "create"
@@ -477,6 +479,14 @@ impl CasService {
                     ),
                 )),
             };
+
+            crate::gates::facts::observe_task_result(
+                &this.inner.cas_root,
+                &action,
+                &event_task_id,
+                override_reason.as_deref(),
+                &result,
+            );
 
             if let Err(error) = &result {
                 let _ = crate::hooks::handlers::session_hygiene::append_factory_session_event(

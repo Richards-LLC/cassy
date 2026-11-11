@@ -792,6 +792,7 @@ fn recent_override(notes: &str, now: DateTime<Utc>) -> Option<&str> {
     })
 }
 /// Shared by Violet hook/CLI and epic close. Publish/deploy/merge never call it.
+// gate[G-120 epic-close]: Post-release watch before epic close or release notes
 pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String> {
     configured(cas_root)?;
     let now = Utc::now();
@@ -844,7 +845,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         .and_then(|receipt| watch_first_line(&receipt.watch_first))
         .map(|line| format!(" {line}."))
         .unwrap_or_default();
-    Some(format!(
+    Some(crate::gates::tag("G-120", format!(
         "{}: epic {} check {progress}. Run `cas qa post-release start --epic {} --sha <release-sha>` and wait for clean, or record an operator decision note `{OVERRIDE_MARKER} <operator's words>` (valid 6 hours).{watch}",
         if release_notes {
             format!("RELEASE NOTES BLOCKED (post_release_{state})")
@@ -853,7 +854,7 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
         },
         epic.id,
         epic.id
-    ))
+    )))
 }
 fn run_summary(run: &Run) -> String {
     if let Some(error) = &run.error {

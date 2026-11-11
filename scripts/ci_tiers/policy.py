@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-39 ci]: CI policy pins and contract checks
 """CI policy assertions over parsed data, with independent executable selectors.
 
 Step names are display text. IDs, actions, command anchors and directories bind

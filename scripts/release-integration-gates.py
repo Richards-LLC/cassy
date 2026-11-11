@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# gate[C-38 ci]: Fast-row catalog
 """No-build row catalog shared by CI and the factory pre-push gate."""
 import argparse
 

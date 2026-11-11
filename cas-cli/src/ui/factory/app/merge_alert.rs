@@ -84,6 +84,7 @@ pub(super) fn prune_ready_receipts(cache: &ProbeCache, cas_dir: &Path, now: Date
 
 /// Atomic per-delivery admission, shared across daemon lifetimes. Failure to
 /// write defers the signal instead of claiming a receipt that cannot survive.
+// gate[W-48 watchdog]: WorkerIdle MERGE REQUIRED merge alert
 pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
     use std::io::Write;
     let path = ready_receipt_path(cas_dir, &ready.evidence.task_id, &ready.tip);

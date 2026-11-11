@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.17.0] - 2026-11-11
+
+### Fixed — Release closeout
+
+- **Retain premerge candidate approvals** — Release finalization recognizes an approved synthetic candidate when its immutable manifest binds the delivery source and its reviewed tree shipped. Members without an approved verdict remain held for review.
+
+### Fixed — Supervisor session-start budget
+
+- **Supervisor guidance fits the session-start budget again** — The supervisor skill body was 7,238 bytes after the new close, review and notice rules, leaving less than the 2,400 bytes the rest of the session-start context needs. It is now 6,695 bytes: merge triggers, the hold rule, operator-ask limits and the assignment-acceptance line already ship in every supervisor's launch contract and no longer repeat in the skill body.
+
+### Fixed — Commander
+
+- **Commands and messages reach a scrolled supervisor** — Supervisor command readiness, operator-message delivery, and startup submit recovery inspect the live terminal screen while preserving the viewer's scroll position.
+- **Wildcard reply receipts** — Supervisor mirrors addressed to every device now settle when a paired device saves them. Forwarding attempts and retries survive daemon restarts, and a receipt that hits SQLite contention retries off the daemon loop.
+
+### Changed — Supervisor guidance
+
+- **One close-recovery rule** — The supervisor skill no longer says "never close tasks for workers" while Cassy's approved-verdict notice asks the supervisor to close: after an approved verdict the supervisor runs Cassy's close recovery as an ordinary close, never an override.
+- **Independent review for decisions** — Supervisor-direct verdicts are limited to mechanical evidence (counts, receipts, logs, CI). Designs, spikes and operator-approved deliverables need an independent reviewer, and verification dispatch and verifier text no longer invite a supervisor-direct verdict.
+- **Group repeated notices** — The supervisor groups per-task notices such as close holds by cause and acts once per group.
+
+### Fixed — Release preparation
+
+- **Review included deliveries before cutting** — Release preparation refuses when any delivery included in the release lacks its review receipt, even if other members can close. The refusal names those deliveries and the receipt action; older-release review debt remains a residual, and memberless hotfixes keep their existing flow.
+
+### Fixed — Factory
+
+- **Shell syntax checks** — Workers can validate plain, unquoted checkout script paths using only exact leading `-n` or `--noexec` flags. Redirects, other options, quoting, escaping and shell expansions retain the nested shell scope guard, including forms that disable noexec and execute a payload.
+
+### Fixed — Release review
+
+- **One receipt, one close action** — Batch QA and release receipts send one supervisor notice after member closes settle, showing the closed count and held deliveries grouped by refusal kind with each delivery's next action. Each task keeps its full close detail, and replaying the receipt stays quiet.
+
 ## [4.16.0] - 2026-11-11
 
 ### Fixed — Release cuts

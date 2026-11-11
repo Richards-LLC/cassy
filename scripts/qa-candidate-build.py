@@ -37,7 +37,7 @@ def run(scope, command, **kwargs):
 
 
 def verify_candidate_version(output, declared, revision):
-    match = re.fullmatch(r"cas (\S+) \(([0-9a-f]{7}) (\d{4}-\d{2}-\d{2})\)", output)
+    match = re.fullmatch(r"cas (\S+) \(([0-9a-f]{7,40}) (\d{4}-\d{2}-\d{2})\)", output)
     if not match:
         raise ValueError(f"candidate version has unexpected format: {output!r}")
     if match.group(1) != declared or not revision.startswith(match.group(2)):

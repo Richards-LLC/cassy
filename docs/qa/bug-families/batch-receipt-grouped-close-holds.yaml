@@ -1,0 +1,3 @@
+title: A receipt sends one grouped close-hold notice after its member outcomes settle and retains per-task detail
+tasks: [cas-d31ab]
+journeys: [FACTORY-QA-RECEIPT, FACTORY-CLOSE]

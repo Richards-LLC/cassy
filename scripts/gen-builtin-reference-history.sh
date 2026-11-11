@@ -70,8 +70,7 @@ content = (
     "does not authenticate a distinct reviewer, even with a dispatch ID. Return "
     "identity evidence to the supervisor before review; do not register or submit "
     "a verdict, including status=error. Use Cassy's daemon-owned verifier for "
-    "candidate reviews or a separately registered reviewer. A supervisor may "
-    "review and submit directly with supervisor_direct provenance.\n\n"
+    "candidate reviews or a separately registered reviewer.\n\n"
     + body + "\n'''\n"
     # A verifier reads one task: the role drops the native skill listing even
     # under a parent launched with the full catalog. `$name` still expands.

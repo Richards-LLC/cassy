@@ -3503,8 +3503,8 @@ impl FactoryApp {
 
         let cas_dir = self.cas_dir().to_path_buf();
 
-        // Mark agent as shutdown in Cassy first; this must succeed so supervisor sees errors
-        // instead of silently leaving stale idle agents in director panels.
+        // Resolve the exact old identities before teardown; the replacement
+        // must never be included in their retirement.
         let matching_agents =
             worker_registry_rows_for_shutdown(&agents, name, self.factory_session.as_deref());
         let agent = matching_agents.first().copied().ok_or_else(|| {
@@ -3561,15 +3561,6 @@ impl FactoryApp {
         let has_open_tasks =
             worker_has_open_tasks(&cas_dir, name) || worker_has_open_tasks(&cas_dir, &agent_id);
 
-        // Retire every same-name row in this factory session. Older builds
-        // allowed nested headless Claude calls to register child session IDs
-        // under the parent worker name; shutting down only `.find()` left the
-        // remaining rows fresh/Active after the pane and worktree were gone.
-        if let Some(detail) = retire_worker_identities(&cas_dir, agent_store.as_ref(), name, &matching_agents) {
-            tracing::warn!(worker = name, "{detail}");
-            self.set_error(detail);
-        }
-
         // Kill the worker's PTY process tree and remove from mux (cas-8c5a).
         // kill_worker signals the entire process group (SIGKILL when force=true,
         // SIGTERM when false), ensuring the full node→codex tree is terminated,
@@ -3600,6 +3591,15 @@ impl FactoryApp {
         }
         if let Some(pgid) = process_group {
             self.untrack_worker_process_group_if_gone(pgid).await;
+        }
+
+        // cas-625c: release leases after teardown. An in-flight task start
+        // can still claim while the old process is handling SIGTERM. Retiring
+        // before the kill leaves that later lease blocking its replacement.
+        // Retire every captured same-name row, including nested sessions.
+        if let Some(detail) = retire_worker_identities(&cas_dir, agent_store.as_ref(), name, &matching_agents) {
+            tracing::warn!(worker = name, "{detail}");
+            self.set_error(detail);
         }
 
         // Reclaim safe terminal/parked output for shutdown AND replacement.

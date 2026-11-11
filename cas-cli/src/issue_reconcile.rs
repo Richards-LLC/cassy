@@ -462,17 +462,37 @@ pub(crate) fn reconcile_release_issues(
     inventory: &crate::qa_batch::ReleaseInventory,
     close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
 ) -> Vec<IssueOutcome> {
-    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-    let default_repo = Some(inventory.scope.repository.as_str());
     let failed = |error: String| vec![IssueOutcome {
         issue: inventory.scope.repository.clone(), action: IssueAction::Failed,
         comment_or_error: error,
         task_ids: inventory.deliveries.iter().map(|d| d.task_id.clone()).collect(),
     }];
-    let tasks = match release_issue_tasks(root) {
-        Ok(tasks) => tasks,
+    let (tasks, purged) = match release_issue_tasks(root) {
+        Ok(read) => read,
         Err(error) => return failed(error),
     };
+    // GH #1792: a purged task's quarantine marker outlives it. Only a delivery
+    // of this release that is gone matters, and it fails on its own.
+    let missing: Vec<String> = inventory.deliveries.iter()
+        .map(|d| d.task_id.clone()).filter(|id| purged.contains(id)).collect();
+    let mut outcomes: Vec<IssueOutcome> = (!missing.is_empty()).then(|| IssueOutcome {
+        issue: inventory.scope.repository.clone(), action: IssueAction::Failed,
+        comment_or_error: format!("Delivered task rows are gone, so their issues cannot be read: {}", missing.join(", ")),
+        task_ids: missing,
+    }).into_iter().collect();
+    outcomes.extend(reconcile_issues(root, repo, inventory, close_results, &tasks));
+    outcomes
+}
+
+fn reconcile_issues(
+    root: &Path,
+    repo: &Path,
+    inventory: &crate::qa_batch::ReleaseInventory,
+    close_results: &BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
+    tasks: &BTreeMap<String, Task>,
+) -> Vec<IssueOutcome> {
+    use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
+    let default_repo = Some(inventory.scope.repository.as_str());
     let mut issues = BTreeMap::new();
     for delivery in &inventory.deliveries {
         if let Some(task) = tasks.get(&delivery.task_id) {
@@ -541,7 +561,7 @@ pub(crate) fn reconcile_release_issues(
         // GitHub reads may take seconds. A changed or newly linked task must
         // not inherit the old snapshot's permission to close this issue.
         let current = match release_issue_tasks(root) {
-            Ok(tasks) => tasks,
+            Ok((tasks, _)) => tasks,
             Err(error) => {
                 outcome.action = IssueAction::Failed;
                 outcome.comment_or_error = error;
@@ -551,7 +571,7 @@ pub(crate) fn reconcile_release_issues(
         let versions = |tasks: &BTreeMap<String, Task>| tasks.values()
             .filter(|t| references_issue(t, &issue, default_repo))
             .map(|t| (t.id.clone(), t.updated_at)).collect::<BTreeMap<_, _>>();
-        if versions(&tasks) != versions(&current) {
+        if versions(tasks) != versions(&current) {
             outcome.action = IssueAction::Partial;
             outcome.comment_or_error = "Referencing tasks changed during reconciliation; retry with a fresh inventory.".into();
             outcome.task_ids = versions(&current).into_keys().collect();
@@ -580,16 +600,22 @@ fn references_issue(task: &Task, issue: &IssueRef, default_repo: Option<&str>) -
 }
 
 /// List suppression must never hide an unfinished part of a fix from closing.
-fn release_issue_tasks(root: &Path) -> Result<BTreeMap<String, Task>, String> {
+/// Quarantine markers whose task row is gone come back separately: a purged
+/// task links no issue, so it cannot fail the release on its own (GH #1792).
+fn release_issue_tasks(root: &Path) -> Result<(BTreeMap<String, Task>, BTreeSet<String>), String> {
     let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
     let mut tasks: BTreeMap<_, _> = store.list(None).map_err(|e| e.to_string())?
         .into_iter().map(|t| (t.id.clone(), t)).collect();
+    let mut purged = BTreeSet::new();
     let queue = crate::cloud::SyncQueue::open_read_only(root).map_err(|e| e.to_string())?;
     for id in queue.quarantined_ids(crate::cloud::QUARANTINE_TASK).map_err(|e| e.to_string())? {
-        let task = store.get(&id).map_err(|e| e.to_string())?;
-        tasks.insert(id, task);
+        match store.get(&id) {
+            Ok(task) => { tasks.insert(id, task); }
+            Err(cas_store::StoreError::TaskNotFound(_)) => { purged.insert(id); }
+            Err(error) => return Err(error.to_string()),
+        }
     }
-    Ok(tasks)
+    Ok((tasks, purged))
 }
 
 #[cfg(test)]
@@ -787,6 +813,41 @@ mod tests {
 
         let offline = FakeStates::new("other/repo", &[]);
         let error = shipped_open_issues(&tasks, Some(REPO), &offline, &tags).unwrap_err();
+    }
+
+    /// GH #1792 (v4.14 closeout): one purged task's quarantine marker failed
+    /// issue reconciliation for all 33 deliveries with "task not found".
+    #[test]
+    fn a_purged_quarantine_marker_fails_only_a_delivery_it_names() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        store.add(&task("cas-ship", TaskStatus::Closed, "Shipped fix")).unwrap();
+        store.add(&task("cas-quar", TaskStatus::InProgress, "GH #1792: quarantined part")).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        for id in ["cas-quar", "cas-0019", "cas-gone"] {
+            queue.quarantine_row(crate::cloud::QUARANTINE_TASK, id, "fixture").unwrap();
+        }
+        let (tasks, purged) = release_issue_tasks(&root).unwrap();
+        assert!(tasks.contains_key("cas-quar"), "a present quarantined fix still links its issue");
+        assert_eq!(purged.into_iter().collect::<Vec<_>>(), ["cas-0019", "cas-gone"]);
+
+        let inventory = |deliveries: &[&str]| -> crate::qa_batch::ReleaseInventory {
+            serde_json::from_value(serde_json::json!({
+                "scope": {"project_id": "p", "repository": REPO, "release_id": "v9.99.0", "reviewed_sha": "a",
+                          "final_release_sha": "a", "promotion_pr": null, "release_tag": "v9.99.0"},
+                "deliveries": deliveries.iter().map(|id| serde_json::json!({"task_id": id, "generation": "1", "anchor": null,
+                    "base_sha": null, "shipped_commit": "a", "membership": "ancestry", "proof_refs": []})).collect::<Vec<_>>(),
+                "exceptions": [],
+            })).unwrap()
+        };
+        let outcomes = reconcile_release_issues(&root, dir.path(), &inventory(&["cas-ship"]), &BTreeMap::new());
+        assert!(outcomes.is_empty(), "an unrelated purged marker fails nothing: {outcomes:?}");
+        let outcomes = reconcile_release_issues(&root, dir.path(), &inventory(&["cas-ship", "cas-gone"]), &BTreeMap::new());
+        assert_eq!(outcomes.iter().map(|o| (&o.action, o.task_ids.clone())).collect::<Vec<_>>(),
+            [(&IssueAction::Failed, vec!["cas-gone".to_string()])], "a gone delivery stays explicit, alone");
     }
 
     #[test]

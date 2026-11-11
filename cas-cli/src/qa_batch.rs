@@ -565,11 +565,9 @@ pub(crate) fn validate_ledger(
     artifact_id: &str,
     path: &Path,
 ) -> Result<(cas_store::PublishedArtifact, PathBuf), String> {
-    let artifact = cas_store::SqliteArtifactStore::open(root)
-        .map_err(|e| e.to_string())?
-        .get(artifact_id)
-        .map_err(|e| e.to_string())?
-        .ok_or("ledger artifact is not published in this project")?;
+    let artifact = crate::artifacts::lookup_metadata(root, None, artifact_id)
+        .map_err(|e| e.to_string())?;
+    crate::artifacts::require_available(&artifact).map_err(|e| e.to_string())?;
     if !matches!(artifact.mime.as_str(), "text/markdown" | "text/plain") {
         return Err("published ledger must be Markdown or plain text".into());
     }
@@ -587,8 +585,20 @@ pub(crate) fn validate_ledger(
         config.factory().artifacts_root.as_deref(),
     );
     let roots = crate::artifacts::paths::PublishRoots::new(root, &paths.base, &artifact.task_id);
-    let path = crate::artifacts::paths::resolve_publishable_path(path, &roots)
-        .map_err(|e| e.to_string())?;
+    let path = match crate::artifacts::paths::resolve_publishable_path(path, &roots) {
+        Ok(path) => path,
+        Err(crate::artifacts::paths::PathRefusal::Missing(_)) => {
+            let (resolved, path) = crate::artifacts::proof::fetch_task(
+                root, &artifact.task_id, artifact_id,
+            ).map_err(|e| e.to_string())?;
+            if !crate::artifacts::proof::same_artifact(&artifact, &resolved) {
+                return Err("ledger metadata changed while resolving its bytes".into());
+            }
+            crate::artifacts::paths::resolve_publishable_path(&path, &roots)
+                .map_err(|e| e.to_string())?
+        }
+        Err(error) => return Err(error.to_string()),
+    };
     let mut bytes = Vec::new();
     std::fs::File::open(&path)
         .map_err(|e| e.to_string())?

@@ -31,9 +31,21 @@ def _pinned_linter():
 LINTER = _pinned_linter()
 if LINTER:
     os.environ["MARKDOWNLINT_CLI2"] = LINTER
-# The journey-catalog row's registry upkeep needs a Cassy binary; keep the
-# fixture rows hermetic (cas-4b33). qa_upkeep's Rust test covers the check.
-os.environ["CAS_BIN"] = "/nonexistent/cas"
+# The journey-catalog row's registry upkeep needs a Cassy validator; keep the
+# fixture rows hermetic (cas-4b33): no CAS_BIN and an installer that fails.
+os.environ.pop("CAS_BIN", None)
+os.environ["CAS_VALIDATOR_INSTALLER"] = "/nonexistent/cas-install.sh"
+REGISTRY = """version: 1
+updated: '2026-11-11'
+surfaces: ['hub-web/src/**']
+journeys:
+  - id: J1
+    status: live
+    seeded: true
+    entry: {url: /signup, trigger: Open}
+    owners: ['hub-web/src/signup.ts']
+    traffic: {share_pct: null, basis: fixture}
+"""
 
 
 EXAMPLE_SKILL = "---\nname: example\ndescription: Use when exercising the fixture contract.\n---\nfixture contract\n"
@@ -110,7 +122,8 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
-        self.write("docs/qa/journeys.yaml", "version: 1\njourneys:\n- id: J1\n")
+        self.write("docs/qa/journeys.yaml", REGISTRY)
+        self.write("hub-web/src/signup.ts", "signup\n")
         self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/migration/migrations/m001_first.rs", "pub const MIGRATION: Migration = Migration {\n    id: 1,\n};\n")
@@ -319,6 +332,28 @@ class FastRows(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
                 self.assertIn("FAIL " + row, result.stdout)
 
+
+    def test_registry_upkeep_fails_closed_without_a_validator_cas_4b33(self):
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        result = self.fast()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("FAIL journey-catalog", result.stdout)
+
+    @unittest.skipUnless(shutil.which("cas"), "needs a released cas to provision")
+    def test_self_provisioned_validator_catches_an_unowned_surface_cas_4b33(self):
+        installer = self.repo / ".git" / "fake-install.sh"
+        installer.write_text('#!/usr/bin/env bash\ninstall -m 755 "$REAL_CAS" "$CAS_INSTALL_DIR/cas"\n')
+        env = {"CAS_VALIDATOR_INSTALLER": str(installer), "REAL_CAS": shutil.which("cas")}
+        self.write("hub-web/src/email.ts", "new entry\n")
+        self.commit()
+        unowned = self.fast_from(self.base, **env)
+        self.assertEqual(unowned.returncode, 1, unowned.stdout + unowned.stderr)
+        self.assertIn("FAIL journey-catalog", unowned.stdout)
+        self.write("docs/qa/journeys.yaml", REGISTRY + "ignore: ['hub-web/src/email.ts']\n")
+        self.commit()
+        owned = self.fast_from(self.base, **env)
+        self.assertIn("PASS journey-catalog", owned.stdout, owned.stdout + owned.stderr)
 
     def test_script_test_for_a_changed_script_runs_and_its_failure_is_named(self):
         self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n"

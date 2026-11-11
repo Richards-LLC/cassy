@@ -9,6 +9,11 @@ Deliveries never edit the shared generated docs (cas-4b33). They add:
   exist in `docs/PRODUCT_OVERVIEW.md`, each followed by the text to append to
   that section.
 
+`needs-upkeep --base <ref>` prints `yes` when the diff from <ref> touches a
+registry input or a registry `surfaces` path (or the registry declares no
+surfaces), so the fast row knows it must run Cassy's registry and ownership
+validator, and `no` otherwise.
+
 `check` is the lane lint (the `journey-catalog` fast row runs it): the
 registry parses, journey ids are unique, bug families are well formed with
 unique keys across the inline map and the fragment files, their journey and
@@ -23,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
+import subprocess
 import sys
 
 import yaml
@@ -235,6 +242,40 @@ def compile_overview(root: Path) -> int:
     return len(files)
 
 
+def glob_regex(pattern: str) -> re.Pattern:
+    out, i = "", 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out, i = out + "(?:.*/)?", i + 3
+        elif pattern.startswith("**", i):
+            out, i = out + ".*", i + 2
+        elif pattern[i] == "*":
+            out, i = out + "[^/]*", i + 1
+        elif pattern[i] == "?":
+            out, i = out + "[^/]", i + 1
+        else:
+            out, i = out + re.escape(pattern[i]), i + 1
+    return re.compile(out + r"\Z")
+
+
+def needs_upkeep(root: Path, base: str) -> bool:
+    """Whether the diff from `base` touches the registry or a user-facing surface."""
+    if not (root / REGISTRY).is_file():
+        return False
+    changed = subprocess.run(["git", "diff", "--name-only", "--no-renames", base, "--"], cwd=root,
+                             check=True, capture_output=True, text=True).stdout.split()
+    if any(path == REGISTRY or path.startswith(FAMILIES + "/") for path in changed):
+        return True
+    try:
+        surfaces = (yaml.safe_load((root / REGISTRY).read_text()) or {}).get("surfaces")
+    except yaml.YAMLError:
+        return True
+    if surfaces is None:  # inherits qa.user_facing_paths: assume any path may be a surface
+        return bool(changed)
+    patterns = [glob_regex(glob) for glob in surfaces if isinstance(glob, str)]
+    return any(pattern.match(path) for path in changed for pattern in patterns)
+
+
 def report(problems: Problems) -> None:
     for subject, code, message, fix in problems:
         print(f"ERROR {subject} [{code}]: {message}")
@@ -243,10 +284,16 @@ def report(problems: Problems) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=("check", "compile"))
+    parser.add_argument("command", choices=("check", "compile", "needs-upkeep"))
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument("--base", help="needs-upkeep: diff base")
     args = parser.parse_args(argv)
     root = args.root.resolve()
+    if args.command == "needs-upkeep":
+        if not args.base:
+            parser.error("needs-upkeep requires --base")
+        print("yes" if needs_upkeep(root, args.base) else "no")
+        return 0
     problems = check(root)
     if problems:
         report(problems)

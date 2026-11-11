@@ -412,7 +412,9 @@ That list is display only and never changes the verdict.
 ## Registry upkeep in the lane
 
 Task park no longer runs registry upkeep (cas-4b33). The `journey-catalog` fast
-row runs `cas qa journeys --check --base <lane base>` on every lane: the full
+row runs `cas qa journeys --check --base <lane base>` on lanes that touch the
+registry, a bug family or a `surfaces` path, and fails when no validator is
+available ([documentation upkeep](docs-upkeep.md#lane-lint)): the full
 validator plus G1 (registry problems the diff caused; deletions that orphan a
 glob or spec) and G2 (added or renamed surface files without an owner, owner
 group or ignore match; `strict` also checks modified files). The header

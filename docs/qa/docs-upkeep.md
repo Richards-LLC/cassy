@@ -35,12 +35,16 @@ The `journey-catalog` fast row runs two checks:
   does not parse, repeated journey IDs, duplicate or malformed bug families,
   family references that do not resolve, and overview fragments that name a
   missing section.
-- `cas qa journeys --check --base <lane base>` on every lane diff: the full
-  registry validator plus the former park gates G1 (registry problems the diff
-  caused) and G2 (new surface files no journey owns; strict also checks
-  modified files). The row uses `CAS_BIN` or `cas` on `PATH` and says
-  "registry upkeep not checked" when that binary is missing or predates
-  `--base`.
+- Cassy's registry validator on every lane diff that touches the registry, a
+  bug family or a registry `surfaces` path (any path when the registry
+  declares no surfaces): `cas qa journeys --check` plus the former park gates
+  G1 (registry problems the diff caused) and G2 (new surface files no journey
+  owns; strict also checks modified files), through
+  `cas qa journeys --check --base <lane base>` or, on a release before that
+  flag, the same facts from `cas qa impact <lane base> --json`. The row uses
+  `CAS_BIN`, else installs the latest release with `scripts/cas-install.sh`
+  (SHA-256 checked) into a temporary directory, so lane CI needs no workflow
+  step. With no validator available the row fails.
 
 Each problem prints its code and a `FIX:` line. The former bug-case gate (G3)
 needs the task type, which a lane does not have; the close checks list it as

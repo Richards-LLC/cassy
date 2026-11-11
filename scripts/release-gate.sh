@@ -1771,6 +1771,54 @@ lane_touches() {
     ! git diff --quiet "${fast_base:-HEAD^}" -- "$@"
 }
 
+registry_upkeep_needed() {
+    [[ -f docs/qa/journeys.yaml ]] || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    [[ "$(python3 scripts/doc-fragments.py needs-upkeep --base "${fast_base:-HEAD^}")" == yes ]]
+}
+
+# A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else the latest
+# release installed by scripts/cas-install.sh (SHA-256 checked against the
+# release receipt) into a temporary directory. Lane CI needs no workflow step.
+registry_validator() {
+    local dir
+    local candidate="${CAS_BIN:-}"
+    if [[ -n "$candidate" && -x "$candidate" ]] && "$candidate" qa journeys --help >/dev/null 2>&1; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/cas-registry-validator.XXXXXX")" || return 1
+    printf 'journey-catalog: installing the released cas validator into %s\n' "$dir" >&2
+    CAS_INSTALL_DIR="$dir" CAS_WIRE_PATH=0 bash "${CAS_VALIDATOR_INSTALLER:-scripts/cas-install.sh}" >&2 || return 1
+    "$dir/cas" qa journeys --help >/dev/null 2>&1 || return 1
+    printf '%s\n' "$dir/cas"
+}
+
+check_registry_upkeep() {
+    local cas_bin base="${fast_base:-HEAD^}"
+    if ! cas_bin="$(registry_validator)"; then
+        printf 'journey-catalog: FAIL: this diff needs journey registry and ownership validation, but no Cassy validator is available\n'
+        printf 'FIX: put a released cas on PATH or set CAS_BIN, or let scripts/cas-install.sh reach GitHub Releases, then rerun\n'
+        return 1
+    fi
+    "$cas_bin" qa journeys --check || return 1
+    [[ "$fast_rows" == true ]] || return 0
+    if "$cas_bin" qa journeys --help 2>/dev/null | grep -q -- '--base'; then
+        "$cas_bin" qa journeys --check --base "$base"
+        return
+    fi
+    # A validator released before --base: the same G1/G2 facts from qa impact.
+    "$cas_bin" qa impact "$base" --json | python3 -c '
+import json, sys
+registry = json.load(sys.stdin)["upkeep"]["registry"]
+for reason in registry["reasons"]:
+    print("UPKEEP registry: " + reason)
+if registry["required"]:
+    print("FIX: own each new surface file (owner glob, owner group or ignore) and repair the registry problems this diff caused")
+    sys.exit(1)
+'
+}
+
 check_journey_catalog() {
     local ran=false
     if lane_touches docs/qa/journeys.md hub-web/e2e scripts/journeys-for-diff.py; then
@@ -1784,17 +1832,11 @@ check_journey_catalog() {
         python3 scripts/doc-fragments.py check || return 1
         ran=true
     fi
-    # Registry validation plus ownership of new user-facing surface files for
-    # every lane diff (formerly the park gate G-49), through Cassy's validator.
-    local cas_bin="${CAS_BIN:-cas}" base=()
-    [[ "$fast_rows" != true ]] || base=(--base "${fast_base:-HEAD^}")
-    if [[ -f docs/qa/journeys.yaml ]]; then
-        if "$cas_bin" qa journeys --help 2>/dev/null | grep -q -- '--base'; then
-            "$cas_bin" qa journeys --check "${base[@]}" || return 1
-            ran=true
-        else
-            printf 'journey-catalog: registry upkeep not checked: %s lacks `qa journeys --check --base` (set CAS_BIN)\n' "$cas_bin"
-        fi
+    # Registry validation plus ownership of new user-facing surface files
+    # (formerly the park gate G-49), through Cassy's own validator. Fails closed.
+    if registry_upkeep_needed; then
+        check_registry_upkeep || return 1
+        ran=true
     fi
     [[ "$ran" == true ]] || printf 'journey-catalog: no journey catalog, registry, fragment or spec change\n'
 }

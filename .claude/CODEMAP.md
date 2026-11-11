@@ -42,7 +42,7 @@
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/account_lifecycle.rs`, `cas-cli/src/account_links.rs` - recommendations, guarded account mutations and link repair. `cas-cli/src/config/` and `cas-cli/src/mcp/tools/service/factory_ops.rs` resolve local `factory.codex_home` preferences before worker recommendations.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs`, `cas-cli/src/agent_model.rs` - harness launches, account choice and role model observations.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` - hosted exact-SHA prechecks, dispatch recovery and receipt cleanup.
-- `cas-cli/src/cli/release_automation.rs`, `scripts/release.sh` - read-only per-member cut previews, zero-closure refusal before push, candidate reuse and cut receipts with missing-review residuals.
+- `cas-cli/src/cli/release_automation.rs`, `scripts/release.sh` - read-only per-member cut previews, zero-closure and unreviewed included-delivery refusal before push, candidate reuse and cut receipts with older-release missing-review residuals.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update/`, `cas-cli/src/factory_preflight.rs`, `cas-cli/src/gh_budget.rs` - health, update receipts and GitHub request budgets.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - command/config registry and operator policy.
 - `cas-cli/src/cli/hook/`, `cas-cli/src/hooks/handlers/`, `cas-cli/src/hooks/handoff_updates.rs` - lifecycle policy, canonical artifact-root diagnostics, inherited process-signal guards and Violet handoff reads.

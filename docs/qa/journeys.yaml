@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  reconnect-reader-position-mode:
+    title: Reconnect assertions distinguish a reader parked above the tail from a reader following the latest turn
+    tasks: [cas-07ed]
+    journeys: [HUB-J4]
+    invariants: [HUB-J4-GOAL]
   queued-blocked-successor-source:
     title: Queued untouched successors replace stale source metadata at start without discarding prior delivery or checkout work
     tasks: [cas-57df]
@@ -896,7 +901,8 @@ invariants:
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
     check: 'Run the render-before-scroll regression in conversation-view.test.ts with a pending tail pin;
-      scrolling up to Load earlier must survive an intervening render. Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
+      scrolling up to Load earlier must survive an intervening render. In the open reports part, park above the tail before checking line stability through drop and reconnect; separately verify a tail-follower remains at max scroll when the file note changes.
+      Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: history pages come from
       the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`'
     bug:

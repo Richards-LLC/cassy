@@ -34,9 +34,19 @@ esac
 EOF
 cat >"$tmp/bin/cas" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$1" == --version ]]; then echo "cas $(cat "$FAKE_INSTALLED") (abc 2026-10-15)"; exit 0; fi
+if [[ "$1" == --version ]]; then
+    version="$(cat "$FAKE_INSTALLED")"
+    printf 'version=%s\n' "$version" >>"$FAKE_LOG"
+    echo "cas $version (abc 2026-10-15)"
+    exit 0
+fi
 printf 'cas %s\n' "$*" >>"$FAKE_LOG"
-[[ "$1 $2" == "release published" ]] && exit 0
+if [[ "$1 $2" == "release published" ]]; then
+    publication_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
+    printf 'publish=%s@%s\n' "$publication_tag" "$(cat "$FAKE_INSTALLED")" >>"$FAKE_LOG"
+    [[ "${FAKE_PUBLISH_FAIL_TAG:-}" == "$publication_tag" ]] && exit 1
+    exit 0
+fi
 if [[ "$1 $2" == "release installed" ]]; then
     notice_tag="$(perl -MJSON::PP -0777 -ne 'print decode_json($_)->{tag_name}' "$4")"
     printf 'notice=%s\n' "$notice_tag" >>"$FAKE_LOG"
@@ -117,7 +127,13 @@ check 'grep -q "<!-- cas-release-timer pr=4242 opened=$opened published=$publish
 check '! grep -q "Installed: pending" "$FAKE_BODY"' 'the pending timer is replaced'
 
 check '[[ "$(grep -c "^cas release installed --receipt " "$FAKE_LOG")" == 1 ]]' 'cas-61e0: fake publication and verified install notify the owning supervisor once'
-check '[[ "$(grep -c "^cas release published --receipt " "$FAKE_LOG")" == 1 ]] && [[ "$(grep -n "^cas release published" "$FAKE_LOG" | cut -d: -f1)" -lt "$(grep -n "^cas update" "$FAKE_LOG" | cut -d: -f1)" ]]' 'cas-6429: the publication triggers one reconciliation, before the install'
+if python3 - "$FAKE_LOG" <<'PY_INSTALL_ORDER'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+assert lines.count("publish=v9.99.2@9.99.2") == 1
+assert lines.index("cas update --yes --version 9.99.2") < lines.index("version=9.99.2") < lines.index("publish=v9.99.2@9.99.2")
+PY_INSTALL_ORDER
+then ok 'the installed version is verified before its publication reconciles'; else bad 'the installed version is verified before its publication reconciles'; fi
 
 # 2. An installed release is a no-op: no update, no notes edit.
 : >"$FAKE_LOG"
@@ -156,6 +172,30 @@ assert json.loads((state / "install-on-publish.pending.d/v9.99.2.json").read_tex
 PY_ORDER
     [[ $? == 0 ]] || exit 1
 ) && ok 'a newer install precedes retries and retains the older pending notice' || bad 'a newer install precedes retries and retains the older pending notice'
+
+# A failed older publication stays pending even if its install notice succeeds.
+# A newer install must happen before either publication is reconciled again.
+(
+    export XDG_STATE_HOME="$tmp/published-order-state"
+    echo 9.99.2 >"$FAKE_INSTALLED"
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.2 FAKE_PUBLISH_FAIL_TAG=v9.99.2 "$installer" --once >/dev/null
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 "$installer" --once >/dev/null
+    python3 - "$FAKE_LOG" <<'PY_PUBLICATION_ORDER'
+import pathlib, sys
+lines = pathlib.Path(sys.argv[1]).read_text().splitlines()
+installed = lines.index("cas update --yes --version 9.99.3")
+verified = lines.index("version=9.99.3")
+for tag in ["v9.99.2", "v9.99.3"]:
+    assert lines.count(f"publish={tag}@9.99.3") == 1
+    assert installed < verified < lines.index(f"publish={tag}@9.99.3")
+PY_PUBLICATION_ORDER
+    [[ $? == 0 ]] || exit 1
+    : >"$FAKE_LOG"
+    FAKE_LATEST=v9.99.3 "$installer" --once >/dev/null
+    ! grep -q '^publish=' "$FAKE_LOG"
+) && ok 'a newer install precedes both pending publications and successful replays stay deduped' || bad 'a newer install precedes both pending publications and successful replays stay deduped'
 
 # Exercise a hung notice with a TERM-ignoring child in its own process group.
 # A separate test deadline
@@ -222,6 +262,7 @@ FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2000 "$installer" --
 status=$?
 set -e
 check '[[ $status -ne 0 ]] && grep -q "^cas update --yes --version 9.99.3$" "$FAKE_LOG"' 'a failed install exits non-zero'
+check '! grep -q "^publish=" "$FAKE_LOG" && [[ -r "$XDG_STATE_HOME/cassy/install-on-publish.published.pending.d/v9.99.3.json" ]]' 'an unverified install keeps its publication pending without reconciling'
 : >"$FAKE_LOG"
 FAKE_LATEST=v9.99.3 FAKE_UPDATE_FAILS=1 RELEASE_INSTALL_NOW=2100 "$installer" --once >/dev/null || true
 check '! grep -q "update" "$FAKE_LOG"' 'a failed version is not retried inside the back-off'

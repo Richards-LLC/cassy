@@ -1,0 +1,4 @@
+title: Install and verify the newest binary before reconciling current and pending older releases
+tasks: [cas-bca3]
+invariants: [CLI-RELEASE-INSTALLED-RECONCILER]
+journeys: [CLI-RELEASE]

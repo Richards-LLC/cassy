@@ -21,8 +21,9 @@
 # "PR #N opened -> published" with a marker; the first host to install adds
 # "-> installed", the one timer from PR opened to installed. A failed install
 # is retried after RELEASE_INSTALL_RETRY_SECONDS (default 600). Each newly seen
-# publication first runs `cas release published` once (the release's one
-# reconciliation); `cas release installed` after it is recovery only.
+# publication runs `cas release published` after the installed version is
+# verified; failed publications retry on that binary after newer installs.
+# `cas release installed` after it is recovery on the same operation.
 #
 # Environment: CAS_RELEASE_REPO (default Richards-LLC/cassy), CAS_BIN (cas),
 # GH_BIN (gh), XDG_STATE_HOME, RELEASE_INSTALL_NOW (epoch, tests),
@@ -39,6 +40,8 @@ retry_seconds="${RELEASE_INSTALL_RETRY_SECONDS:-600}"
 notice_timeout="${RELEASE_NOTICE_TIMEOUT_SECONDS:-45}"
 pending_dir="$state_dir/install-on-publish.pending.d"
 notified_dir="$state_dir/install-on-publish.notified.d"
+publication_pending_dir="$state_dir/install-on-publish.published.pending.d"
+publication_done_dir="$state_dir/install-on-publish.published.d"
 unit_name=cassy-install-on-publish
 agent_label=dev.cassy.install-on-publish
 platform="$(uname -s)"
@@ -189,11 +192,26 @@ queue_notice() {
     mv "$pending_dir/$tag.json.tmp" "$pending_dir/$tag.json"
 }
 
+queue_publication() {
+    local tag="$1" receipt="$2"
+    mkdir -p "$publication_pending_dir" "$publication_done_dir"
+    [[ ! -e "$publication_done_dir/$tag" ]] || return 0
+    if [[ -r "$state_dir/install-on-publish.published" ]] &&
+       [[ "$(cat "$state_dir/install-on-publish.published")" == "$tag" ]]; then
+        touch "$publication_done_dir/$tag"
+        return 0
+    fi
+    cp "$receipt" "$publication_pending_dir/$tag.json.tmp"
+    mv "$publication_pending_dir/$tag.json.tmp" "$publication_pending_dir/$tag.json"
+}
+
 preserve_pending() {
     local current="$1" receipt="$state_dir/install-on-publish.pending.json" tag
-    [[ -r "$receipt" && -n "$current" ]] || return 0
+    [[ -r "$receipt" ]] || return 0
     tag="$(perl -MJSON::PP -0777 -ne 'my $v = eval { decode_json($_) }; print $v->{tag_name} if $v;' "$receipt")"
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+    queue_publication "$tag" "$receipt"
+    [[ -n "$current" ]] || return 0
     version_greater "${tag#v}" "$current" && return 0
     if [[ -r "$state_dir/install-on-publish.notified" ]] &&
        [[ "$(cat "$state_dir/install-on-publish.notified")" == "$tag" ]]; then
@@ -247,14 +265,17 @@ deliver_notice() {
     ' "$notice_timeout" "$cas_bin" release "$1" --receipt "$2" --repo "$repo"
 }
 
-# Reconcile the publication before installation, using the same adapter deadline.
+# Reconcile only after version verification, using the same adapter deadline.
 notify_published() {
     local tag="$1"
-    if [[ -r "$state_dir/install-on-publish.published" ]] &&
-       [[ "$(cat "$state_dir/install-on-publish.published")" == "$tag" ]]; then
+    [[ -r "$publication_pending_dir/$tag.json" ]] || return 0
+    if [[ -e "$publication_done_dir/$tag" ]]; then
+        rm -f "$publication_pending_dir/$tag.json"
         return 0
     fi
-    if deliver_notice published "$state_dir/install-on-publish.pending.json"; then
+    if deliver_notice published "$publication_pending_dir/$tag.json"; then
+        touch "$publication_done_dir/$tag"
+        rm -f "$publication_pending_dir/$tag.json"
         printf '%s\n' "$tag" >"$state_dir/install-on-publish.published.tmp"
         mv "$state_dir/install-on-publish.published.tmp" "$state_dir/install-on-publish.published"
     else
@@ -279,10 +300,18 @@ notify_installed() {
     fi
 }
 
-# At most one older retry per tick, after the latest install/notice. Backlogs
-# therefore cannot turn several bounded failures into an unbounded lock hold.
+# At most one older publication and notice retry per tick, after the latest
+# install. Backlogs cannot turn bounded failures into an unbounded lock hold.
 retry_pending() {
-    local latest="$1" receipt tag
+    local latest="$1" current="$2" receipt tag
+    for receipt in "$publication_pending_dir"/*.json; do
+        [[ -f "$receipt" ]] || continue
+        tag="${receipt##*/}"; tag="${tag%.json}"
+        [[ "$tag" != "$latest" ]] || continue
+        version_greater "${tag#v}" "$current" && continue
+        notify_published "$tag"
+        break
+    done
     for receipt in "$pending_dir"/*.json; do
         [[ -f "$receipt" ]] || continue
         tag="${receipt##*/}"; tag="${tag%.json}"
@@ -309,13 +338,14 @@ run_once() {
     preserve_pending "$current"
     printf '%s\n' "$publication" >"$state_dir/install-on-publish.pending.json.tmp"
     mv "$state_dir/install-on-publish.pending.json.tmp" "$state_dir/install-on-publish.pending.json"
-    notify_published "$tag"
+    queue_publication "$tag" "$state_dir/install-on-publish.pending.json"
     if [[ -n "$current" ]] && ! version_greater "$latest" "$current"; then
+        notify_published "$tag"
         if [[ "$current" == "$latest" ]]; then
             queue_notice "$tag" "$state_dir/install-on-publish.pending.json"
             notify_installed "$tag"
         fi
-        retry_pending "$tag"
+        retry_pending "$tag" "$current"
         return 0
     fi
     if [[ -f "$state_file" ]]; then
@@ -330,14 +360,16 @@ run_once() {
     update_release "$latest" || status=$?
     # A project refresh can fail (it is reported in the update summary and at
     # SessionStart) after the binary is current; the release is still installed.
-    if [[ "$(installed_version)" == "$latest" ]]; then
+    current="$(installed_version || true)"
+    if [[ "$current" == "$latest" ]]; then
         rm -f "$state_file"
         log "installed $tag in $(( $(now) - started )) s"
         (( status == 0 )) || log "cas update exited $status after installing $tag; its summary names the failed project refresh"
         complete_timer "$tag" "$(now)"
+        notify_published "$tag"
         queue_notice "$tag" "$state_dir/install-on-publish.pending.json"
         notify_installed "$tag"
-        retry_pending "$tag"
+        retry_pending "$tag" "$current"
     else
         mkdir -p "$state_dir"
         printf '%s %s\n' "$latest" "$(now)" >"$state_file"

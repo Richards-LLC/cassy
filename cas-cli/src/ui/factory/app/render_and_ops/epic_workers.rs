@@ -8081,7 +8081,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn recycle_releases_late_start_lease_before_replacement_starts_cas_625c() {
-        use crate::mcp::{CasCore, tools::types::IdRequest};
+        use crate::mcp::{CasCore, tools::IdRequest};
         use rmcp::handler::server::wrapper::Parameters;
 
         let mut env = crate::test_env_guard::TestEnvGuard::temp_home();

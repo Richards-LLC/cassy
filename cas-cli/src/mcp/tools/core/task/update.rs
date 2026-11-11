@@ -648,6 +648,7 @@ impl CasCore {
                 {
                     warnings.push(note);
                 } else {
+                    // gate[G-132 assign]: Stale worker assignment blocked
                     let mut assignment_override_applied = false;
                     if factory_config.block_stale_assignment
                         && behind_count >= factory_config.stale_threshold_commits
@@ -720,6 +721,7 @@ impl CasCore {
                                 visible_branch,
                                 reason,
                             ));
+                            warnings.push(crate::gates::override_tag("G-132", ""));
                             assignment_override_applied = true;
                         } else {
                             let [rebase] = crate::worktree::GitOperations::git_remedies([
@@ -729,10 +731,10 @@ impl CasCore {
                                 crate::worktree::GitOperations::visible_git_label(&branch);
                             let worker_name =
                                 crate::worktree::GitOperations::visible_git_label(worker_name);
-                            return Err(format!(
+                            return Err(crate::gates::tag("G-132", format!(
                                 "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
                                 factory_config.stale_threshold_commits,
-                            ));
+                            )));
                         }
                     }
                     if !assignment_override_applied {
@@ -2885,6 +2887,7 @@ impl CasCore {
         if !warnings.is_empty() {
             response = format!("{}\n\n{}", response, warnings.join("\n"));
         }
+        if split_takeover.is_some() { response = crate::gates::override_tag("G-07", response); }
 
         Ok(update_result(&task, response))
     }

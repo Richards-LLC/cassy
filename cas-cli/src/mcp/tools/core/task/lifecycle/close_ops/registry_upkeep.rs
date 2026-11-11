@@ -196,6 +196,7 @@ pub(super) fn finish(
             crate::mcp::tools::core::guidance::caller_prefix(),
         );
         if let Some(reason) = override_reason.filter(|reason| !reason.trim().is_empty()) {
+            notices.push(crate::gates::override_tag("G-51", ""));
             notes.record(
                 task,
                 &format!(

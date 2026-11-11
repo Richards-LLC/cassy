@@ -186,14 +186,14 @@ pub fn observe_tool_result(
             }
         }).collect::<Vec<_>>().join("\n")),
     };
-    let codes = codes_in(&text);
-    if codes.is_empty() { return; }
     let value = |name: &str| arguments.and_then(|args| args.get(name));
     let task_id = value("task_id").and_then(|id| id.as_str())
         .or_else(|| value("id").and_then(|id| id.as_str()).filter(|id| id.starts_with("cas-")));
-    if refused {
+    if refused && !codes_in(&text).is_empty() {
         observe_refusal(cas_root, task_id, &text);
-    } else if value("supervisor_override").and_then(|flag| flag.as_bool()) == Some(true) {
+    } else if !refused {
+        let codes = super::override_codes_in(&text);
+        if codes.is_empty() { return; }
         let reason = value("reason").and_then(|reason| reason.as_str()).unwrap_or(&text);
         let recorded = crate::store::open_event_store(cas_root)
             .map_err(anyhow::Error::from)

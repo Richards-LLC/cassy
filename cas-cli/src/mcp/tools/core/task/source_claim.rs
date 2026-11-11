@@ -230,6 +230,7 @@ impl CasCore {
                 _fence: fence,
                 ..Default::default()
             }),
+            // gate[G-133 create]: Source claim held by a peer
             Acquire::PeerHolds(hold) => {
                 let conflict = format!(
                     "SOURCE HELD BY A PEER — {source} is owned by {} until {}",
@@ -257,7 +258,7 @@ impl CasCore {
                         supervisor.id
                     );
                     return Ok(SourceAdmission {
-                        notice,
+                        notice: crate::gates::override_tag("G-133", notice),
                         override_grant: Some(cas_types::SourceClaimOverride {
                             source_key,
                             supervisor_id: supervisor.id,
@@ -268,9 +269,9 @@ impl CasCore {
                 }
                 Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
-                    format!(
+                    crate::gates::tag("G-133", format!(
                         "{conflict}. Ask the owner to hand off using factory action=release_claim resource_id=<GitHub URL>. A deliberate second task requires task create/update supervisor_override=true reason=<agreement>; the decision is recorded on that task."
-                    ),
+                    )),
                 ))
             }
             Acquire::StalePeer(hold) => Ok(unchecked(&format!(

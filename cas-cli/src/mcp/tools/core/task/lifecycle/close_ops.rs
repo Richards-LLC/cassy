@@ -7845,6 +7845,8 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        let mut accepted_override_codes = Vec::new();
+
         // This is a declaration for one attempt, never a sticky methodology
         // or a new close disposition. Delivered keeps its verification and
         // dirty-work checks even after absence of delivery has been proven.
@@ -9010,6 +9012,9 @@ impl CasCore {
         // already carry the worker's next task or a force-push. The live tip
         // counts only as an attributable continuation of this delivery
         // (GH #744). An anchor that cannot be resolved refuses the close.
+        if shipped_timeout_waiver.is_some() { accepted_override_codes.push("G-35"); }
+        if deferred_epic_override_note.is_some() { accepted_override_codes.push("G-125"); }
+        if epic_override_note_pending { accepted_override_codes.push("G-125"); }
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
@@ -9065,6 +9070,7 @@ impl CasCore {
                 }
                 Ok(None) => None,
                 Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-45");
                     close_notes.record(
                         &mut task,
                         &format!(
@@ -9293,6 +9299,7 @@ impl CasCore {
                     }
                 }
                 Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-53");
                     close_notes.record(
                         &mut task,
                         &format!(
@@ -9805,6 +9812,10 @@ impl CasCore {
                 }))
             });
 
+        if skip_verification && matches!(skip_reason, VerificationSkipReason::SupervisorBypass) {
+            accepted_override_codes.push("G-68");
+        }
+
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
         let supervisor_is_assignee = is_supervisor_from_env()
@@ -9887,7 +9898,9 @@ impl CasCore {
                 ),
                 // cas-bc15: a live supervisor's reasoned override waives the
                 // release verdict for this delivery, and the task records it.
-                Ok(None) if supervisor_override => close_notes.record(
+                Ok(None) if supervisor_override => {
+                    accepted_override_codes.push("G-67");
+                    close_notes.record(
                     &mut task,
                     &format!(
                         "[{}] ✅ DECISION supervisor_override waived the release verdict at {}: {}",
@@ -9895,7 +9908,8 @@ impl CasCore {
                         decision.tip,
                         req.reason.as_deref().unwrap_or_default().trim(),
                     ),
-                ),
+                );
+                },
                 Ok(None) => {
                     return Ok(Self::tool_error(crate::gates::tag("G-67", gate_text::waiting_for_release_verdict(
                         &req.id,
@@ -11274,6 +11288,9 @@ impl CasCore {
                 })
             };
 
+        if supervisor_override && matches!(task.execution_note.as_deref(), Some("additive-only" | "value-only")) {
+            accepted_override_codes.push("G-74");
+        }
         let mut waived_risk_gate = None;
         let mut accepted_inherited_scoped_failures = None;
         let mut accepted_merge_queue_proof = None;
@@ -11334,6 +11351,7 @@ impl CasCore {
                 match epic_build_proof_basis(&task, delivered_tip.as_deref(), proof_repo) {
                     Ok(basis) => basis,
                     Err(message) if supervisor_override => {
+                        accepted_override_codes.push("G-71");
                         let audit = format!("decision: epic tip already contained in the default branch; supervisor overrode {message} Reason: {}", req.reason.as_deref().unwrap_or_default());
                         close_notes.record(&mut task, &audit);
                         Some(audit)
@@ -11602,6 +11620,7 @@ impl CasCore {
                 if !supervisor_override {
                     return Ok(Self::tool_error(epic_refusal(message)));
                 }
+                accepted_override_codes.extend(crate::gates::codes_in(&message));
                 // Supervisor authority and a non-empty reason were checked at
                 // entry. Waive only the declared-risk mismatch; the mandatory
                 // scoped proof derived from the actual diff still runs.
@@ -11650,7 +11669,10 @@ impl CasCore {
                                 scoped_proof_base.as_deref(),
                                 &required_targets,
                             ) {
-                                Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
+                                Ok(measurement) => {
+                                    accepted_override_codes.push("G-79");
+                                    accepted_inherited_scoped_failures = Some(measurement);
+                                },
                                 Err(audit_error) => {
                                     return Ok(Self::tool_error(epic_refusal(format!(
                                         "{scoped_error} Inherited base-red audit rejected: {audit_error}. Alternatively, cite merge_group_run=<run id> in the supervisor override reason to reuse successful CI for a landed tree containing this delivery."
@@ -11794,6 +11816,7 @@ impl CasCore {
             if !supervisor_override {
                 return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
             }
+            accepted_override_codes.push("G-83");
             close_notes.record(&mut task, &format!(
                 "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -12676,6 +12699,11 @@ impl CasCore {
         } else {
             receipt = gate_text::upkeep_receipt(&self.cas_root,
                 configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
+        }
+        for code in accepted_override_codes.into_iter()
+            .chain(crate::gates::override_codes_in(&registry_upkeep_notices.join("\n")))
+        {
+            receipt = crate::gates::override_tag(code, receipt);
         }
         Ok(Self::success(receipt))
     }

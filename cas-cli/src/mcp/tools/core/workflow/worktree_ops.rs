@@ -78,9 +78,9 @@ const BRANCH_CI_ENDPOINT: &str = "repos/<unresolved-repository>/commits/{sha}/ch
 const BRANCH_CI_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const CI_ADVISORY_POLICY_NOTICE: &str = "Merge policy: merge proceeded because CI is advisory.\n\n";
 const CI_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n[G-108]\n\n";
+    "Merge policy: red CI was explicitly overridden by a registered supervisor.\n\n[override G-108]\n\n";
 const CI_CODE_OVERRIDE_POLICY_NOTICE: &str =
-    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n[G-108]\n\n";
+    "Merge policy: unconfirmed code CI was explicitly overridden by a registered supervisor.\n\n[override G-108]\n\n";
 const CI_VALIDATED_POLICY_NOTICE: &str =
     "Merge policy: merge proceeded on successful validation.\n\n";
 
@@ -6767,6 +6767,7 @@ impl CasCore {
             detail.push('\n');
             detail.push_str(&notice);
         }
+        if ci_override { detail = crate::gates::override_tag("G-108", detail); }
         Ok(Self::success(detail))
     }
 

@@ -228,8 +228,12 @@ claude_rs_e2e = []
 [build-dependencies]
 chrono = "0.4"
 dotenvy = "0.15"
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 
 [dev-dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"

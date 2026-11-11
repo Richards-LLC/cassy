@@ -88,13 +88,28 @@ pub fn tag(code: &'static str, message: impl Into<String>) -> String {
     message
 }
 
+/// Mark a successful operation's explicit gate bypass. The common result
+/// observer consumes this machine tag without inferring acceptance from flags.
+pub fn override_tag(code: &'static str, message: impl Into<String>) -> String {
+    debug_assert!(find(code).is_some(), "{code} has no gate[...] declaration");
+    format!("{}\n\n[override {code}]", message.into())
+}
+
 /// Registered codes emitted as `[CODE]` tokens in `text`, in order, deduplicated.
 pub fn codes_in(text: &str) -> Vec<&'static str> {
+    tagged_codes(text, "")
+}
+
+pub fn override_codes_in(text: &str) -> Vec<&'static str> {
+    tagged_codes(text, "override ")
+}
+
+fn tagged_codes(text: &str, prefix: &str) -> Vec<&'static str> {
     let mut codes = Vec::new();
     for (start, _) in text.match_indices('[') {
         let rest = &text[start + 1..];
         let Some(end) = rest.find(']') else { break };
-        if let Some(row) = find(&rest[..end])
+        if let Some(row) = rest[..end].strip_prefix(prefix).and_then(find)
             && !codes.contains(&row.code)
         {
             codes.push(row.code);

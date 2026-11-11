@@ -212,6 +212,9 @@ impl CasCore {
         for warning in warnings {
             response.push_str(&format!("\nWarning: {warning}"));
         }
+        if override_accepted && req.note.chars().count() > crate::mcp::tools::traffic_limits::note_body_limit(&self.load_config()) {
+            response = crate::gates::override_tag("G-131", response);
+        }
         Ok(Self::success(response))
     }
 

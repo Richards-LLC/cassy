@@ -707,6 +707,7 @@ mod reused_factory_branch_tests {
     }
 }
 
+// gate[G-130 create]: User-facing task demo statement required
 pub(crate) fn validate_demo_statement_requirement(
     task_type: TaskType,
     labels: &[String],
@@ -750,9 +751,9 @@ pub(crate) fn validate_demo_statement_requirement(
         .map(|label| label.trim())
         .collect::<Vec<_>>()
         .join(", ");
-    Err(format!(
+    Err(crate::gates::tag("G-130", format!(
         "TASK CREATE REJECTED: label(s) [{matched_labels}] mark this as user-facing, so a non-empty demo_statement is required. Expected shape: \"As a <user>, I <do X> and see <Y>\". Add demo_statement=... or ask a supervisor to use supervisor_override=true."
-    ))
+    )))
 }
 
 /// cas-5f28: refusal for a start whose task a peer on another machine holds.
@@ -1409,6 +1410,15 @@ impl CasCore {
             data: None,
         })?;
 
+        let mut policy_override_tags = String::new();
+        if supervisor_override {
+            if crate::mcp::tools::types::validate_task_risk_declaration(task_type,
+                req.risk.as_deref(), req.proof_targets.as_deref(), false, true, None).is_err()
+            { policy_override_tags = crate::gates::override_tag("G-129", policy_override_tags); }
+            if validate_demo_statement_requirement(task_type, &labels, req.demo_statement.as_deref(),
+                false, true, &self.load_config().qa().user_facing_labels).is_err()
+            { policy_override_tags = crate::gates::override_tag("G-130", policy_override_tags); }
+        }
         let status = TaskStatus::Open;
         let blocked_by_ids: Vec<String> = req
             .blocked_by
@@ -2232,7 +2242,7 @@ impl CasCore {
             task.created_at,
         );
         Ok(Self::success(format!(
-            "Created task: {} - {} (P{}){}{}{}{}{}",
+            "Created task: {} - {} (P{}){}{}{}{}{}{}",
             id,
             task.title,
             task.priority.0,
@@ -2241,6 +2251,7 @@ impl CasCore {
             branch_info.unwrap_or_default() + &related_context,
             no_code_external_ref_guidance(&task),
             assignment_warning,
+            policy_override_tags,
         )))
     }
 
@@ -2673,7 +2684,7 @@ impl CasCore {
                         })
                 });
                 match authorization {
-                    Some(authorization) => hold.override_note(&req.id, authorization),
+                    Some(authorization) => crate::gates::override_tag("G-07", hold.override_note(&req.id, authorization)),
                     None => return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
@@ -3308,6 +3319,7 @@ impl CasCore {
                     ));
                 }
                 Acquire::PeerHolds(hold) => {
+                    peer_notes = crate::gates::override_tag("G-15", peer_notes);
                     peer_notes.push_str(&format!(
                         "\n\n⚠️  PEER CLAIM OVERRIDE — {} holds the claim on {} until {}; started anyway (force=true). Tell them, so you don't both work it: {}coordination action=message target={} summary=\"took over {}\" message=\"...\"",
                         hold.describe(),

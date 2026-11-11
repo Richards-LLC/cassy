@@ -327,7 +327,7 @@ impl Functions<'_> {
         for line in &self.lines[annotation_start..end.min(self.lines.len())] {
             // gate[] is a machine registry declaration. Human message wording
             // cannot turn a status update into a policy check.
-            if line.trim_start().strip_prefix("//").map(str::trim_start).is_some_and(|line| line.starts_with("gate[")) {
+            if line.trim_start().strip_prefix("//").map(str::trim_start).is_some_and(|line| (line.starts_with("gate[G-") || line.starts_with("gate[H-")) && !line.starts_with("gate[G-57 ")) {
                 annotations.insert("declared_check".into(), String::new());
             }
             if let Some((_, declaration)) = line.split_once("gate-audit[")

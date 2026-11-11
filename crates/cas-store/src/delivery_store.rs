@@ -1317,14 +1317,18 @@ mod tests {
         assert_eq!(current.status, TaskStatus::Open);
         // A synced anchor from another machine mints the same deterministic
         // cycle there and here: the cycle number travels with the row.
+        let peer = Task::new("cas-synced".into(), "peer delivery".into());
+        task_store.add(&peer).unwrap();
+        let current = task_store.get(&peer.id).unwrap();
         let mut synced = current.clone();
+        synced.deliverables.delivery_cycle = 3;
         synced.deliverables.mint_or_append(&"e".repeat(40));
         synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
         task_store.update_from_sync(&synced, &current).unwrap().unwrap();
-        let synced_cycles = cycles();
-        assert_eq!(synced_cycles[1].ended, true);
-        assert_eq!((synced_cycles[2].cycle, synced_cycles[2].anchors.clone()), (3, vec!["e".repeat(40)]));
-        assert_eq!(synced_cycles[2].cycle_id, crate::delivery_cycle_id("", &task.id, 3));
+        let synced_cycles = crate::delivery_cycles(root.path(), &peer.id).unwrap();
+        assert_eq!(synced_cycles.len(), 1);
+        assert_eq!((synced_cycles[0].cycle, synced_cycles[0].anchors.clone()), (3, vec!["e".repeat(40)]));
+        assert_eq!(synced_cycles[0].cycle_id, crate::delivery_cycle_id("", &peer.id, 3));
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

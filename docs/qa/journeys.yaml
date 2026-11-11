@@ -474,7 +474,7 @@ bug_families:
     tasks: [cas-f47a]
     journeys: [HUB-J6]
   nested-shell-worker-commit-scope:
-    title: Literal shell script execution and syntax checks with arguments and redirects are admitted while nested shell and eval history writes obey worktree and branch guards
+    title: Literal script execution admits arguments and redirects while syntax checks require only noexec flags and script operands; nested shell and eval history writes obey worktree and branch guards
     tasks: [cas-4923e, cas-6837, cas-93e0]
     journeys: [FACTORY-SUPERVISE]
   regenerated-merge-candidate-bundle:

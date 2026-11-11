@@ -2993,22 +2993,26 @@ fn collect_git_write_targets(
             };
             // A literal script file is opaque, just like executing it directly.
             // Its remaining arguments are script data, not shell options.
-            // Syntax checks use that same operand without executing its body.
-            // Only strip the exact leading option: +n or other shell options
-            // must still go through the executable command-scope checks.
-            let script_args = match args {
-                [flag, rest @ ..] if matches!(flag.as_str(), "-n" | "--noexec") => match rest {
-                    [separator, rest @ ..] if separator == "--" => rest,
-                    _ => rest,
-                },
-                _ => args,
+            let literal_script = |script: &String| {
+                !script.is_empty()
+                    && !script.starts_with(['-', '+'])
+                    && path_word(script).literal == Some(true)
             };
+            // Syntax checks whitelist only noexec flags followed by literal
+            // scripts. Redirect operands are not scripts: <file +n -c payload
+            // can execute payload after disabling noexec.
+            let syntax_check = command_index == 0
+                && !lexed.tokens.iter().any(|token| matches!(token, ShellToken::Operator('<' | '>')))
+                && shell_statement_arguments(command).iter().any(|statement| {
+                    if statement != &words { return false; }
+                    let flags = statement[1..].iter()
+                        .take_while(|flag| matches!(flag.as_str(), "-n" | "--noexec"))
+                        .count();
+                    flags > 0 && statement.len() > flags + 1
+                        && statement[flags + 1..].iter().all(literal_script)
+                });
             if matches!(name, "sh" | "bash" | "zsh" | "dash" | "ksh")
-                && script_args.first().is_some_and(|script| {
-                    !script.is_empty()
-                        && !script.starts_with(['-', '+'])
-                        && path_word(script).literal == Some(true)
-                })
+                && (args.first().is_some_and(literal_script) || syntax_check)
             {
                 continue;
             }

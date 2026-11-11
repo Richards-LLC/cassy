@@ -1,3 +1,3 @@
 ### Fixed — Factory
 
-- **Shell syntax checks** — Workers can validate literal checkout scripts with `-n` or `--noexec`, including an optional `--`, without a nested shell scope refusal. Executable command strings and output paths keep their existing guards.
+- **Shell syntax checks** — Workers can validate literal checkout scripts using only leading `-n` or `--noexec` flags. Syntax checks with redirects or any other option retain the nested shell scope guard, including forms that disable noexec and execute a payload.

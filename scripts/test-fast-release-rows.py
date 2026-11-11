@@ -625,8 +625,12 @@ class FastRows(unittest.TestCase):
         self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
 
-        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
+        self.write("fixture-cas", '#!/bin/sh\nprintf "%s\\n" "$@" > "' + str(self.repo / "gate-argv") + '"\n')
+        (self.repo / "fixture-cas").chmod(0o755)
+        skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue", CAS_BIN=str(self.repo / "fixture-cas"))
         self.assertEqual(skipped.returncode, 0, skipped.stderr)
+        recorded = (self.repo / "gate-argv").read_text().splitlines()
+        self.assertEqual(recorded[:4], ["gates", "record-override", "C-07", "H-38"])
         head = command(self.repo, "git", "rev-parse", "HEAD").stdout.strip()
         log = (self.repo / ".git/cas/fast-rows/overrides.log").read_text()
         self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)

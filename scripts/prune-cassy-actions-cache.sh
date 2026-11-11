@@ -4,6 +4,15 @@
 # job lifecycle is idle. Compiler-process absence alone is not an idle proof.
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[W-65]"' EXIT
+
+
 fail() {
     printf 'error: %s\n' "$1" >&2
     exit 1

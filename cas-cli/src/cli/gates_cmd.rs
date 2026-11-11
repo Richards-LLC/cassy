@@ -17,6 +17,19 @@ pub enum GatesCommands {
     Report(ReportArgs),
     /// Record a supervisor-declared false positive of one gate code
     FalsePositive(FalsePositiveArgs),
+    /// Record an explicit override at a script boundary
+    #[command(hide = true)]
+    RecordOverride(OverrideArgs),
+}
+
+#[derive(Args)]
+pub struct OverrideArgs {
+    #[arg(required = true)]
+    pub codes: Vec<String>,
+    #[arg(long)]
+    pub reason: String,
+    #[arg(long)]
+    pub task: Option<String>,
 }
 
 #[derive(Args)]
@@ -48,6 +61,11 @@ pub fn execute(cmd: &GatesCommands, cli: &Cli, cas_root: Option<&Path>) -> anyho
         GatesCommands::FalsePositive(args) => {
             let root = cas_root.context("no Cassy store here; run `cas init`")?;
             false_positive(root, args)
+        }
+        GatesCommands::RecordOverride(args) => {
+            let root = cas_root.context("no Cassy store here; run `cas init`")?;
+            let store = crate::store::open_event_store(root)?;
+            facts::record_override_codes(store.as_ref(), &args.codes, args.task.as_deref(), &args.reason)
         }
     }
 }

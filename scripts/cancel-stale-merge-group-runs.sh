@@ -3,6 +3,15 @@
 # p95. A vanished queue entry otherwise leaves its self-hosted claim occupied.
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[W-62]"' EXIT
+
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=watchdog-policy.sh
 source "$script_dir/watchdog-policy.sh"

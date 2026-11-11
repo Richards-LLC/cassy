@@ -132,6 +132,37 @@ fn admit_branch_ci(
     Ok(false)
 }
 
+/// The worktree-merge boundary owns CI refusals: factory calls do not pass
+/// through the task-tool observer.
+fn admit_branch_ci_recorded(
+    cas_root: &Path,
+    task_id: Option<&str>,
+    state: &BranchCiState,
+    override_requested: bool,
+    reason: Option<&str>,
+) -> Result<bool, String> {
+    let result = admit_branch_ci(state, override_requested, reason);
+    if let Err(message) = &result {
+        crate::gates::facts::observe_refusal(cas_root, task_id, message);
+    }
+    result
+}
+
+fn record_ci_override(cas_root: &Path, task_id: &str, reason: &str) -> anyhow::Result<()> {
+    let store = crate::store::open_event_store(cas_root)?;
+    crate::gates::facts::record_override_codes(
+        store.as_ref(), &["G-108".to_string()], Some(task_id), reason,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn exercise_ci_gate_facts(cas_root: &Path) {
+    let red = BranchCiState::Red { sha: "fixture".to_string(), url: None };
+    assert!(admit_branch_ci_recorded(cas_root, Some("cas-ci"), &red, false, None).is_err());
+    assert_eq!(admit_branch_ci_recorded(cas_root, Some("cas-ci"), &red, true, Some("reviewed")), Ok(true));
+    record_ci_override(cas_root, "cas-ci", "reviewed").unwrap();
+}
+
 impl BranchCiState {
     /// The commit this state describes.
     fn sha(&self) -> &str {
@@ -5431,7 +5462,7 @@ impl CasCore {
         let branch_ci_state = branch_ci_lookup.state;
         // cas-fd0a: CI state alone admits the merge; the daemon's red-epic
         // integration gate (cas-6f48) is retired with the rolling sweep.
-        let admission = admit_branch_ci(&branch_ci_state, supervisor_override, reason);
+        let admission = admit_branch_ci_recorded(&cas_root, task_id, &branch_ci_state, supervisor_override, reason);
         let ci_override = match admission {
             Ok(accepted) => accepted,
             Err(message) => {
@@ -5548,6 +5579,11 @@ impl CasCore {
             task_store.append_note(task_id, &note).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: failed to log decision on task {task_id}: {error}"))),
+                data: None,
+            })?;
+            record_ci_override(&cas_root, task_id, reason.unwrap_or_default()).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(crate::gates::tag("G-108", format!("SUPERVISOR OVERRIDE REJECTED: failed to record CI gate fact: {error}"))),
                 data: None,
             })?;
             if matches!(branch_ci_state, BranchCiState::Red { .. }) {

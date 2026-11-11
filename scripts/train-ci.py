@@ -632,7 +632,12 @@ def main():
 
 if __name__ == '__main__':
     try:
-        sys.exit(main() or 0)
-    except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError, zipfile.BadZipFile) as error:
-        print(f'train CI: {error}', file=sys.stderr)
-        sys.exit(1)
+        try:
+            sys.exit(main() or 0)
+        except (ValueError, OSError, KeyError, subprocess.SubprocessError, ET.ParseError, zipfile.BadZipFile) as error:
+            print(f'train CI: {error}', file=sys.stderr)
+            sys.exit(1)
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-35]", file=sys.stderr)
+        raise

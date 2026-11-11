@@ -13,6 +13,15 @@
 
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[C-37]"' EXIT
+
+
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
@@ -2209,7 +2218,7 @@ PY_CANCEL_ROWS
     done
 }
 # A forwarded signal or shell error must not leave scheduled rows behind.
-trap 'gate_cancel_after -1' EXIT
+trap 'gate_exit "$?" "[C-37]"; gate_cancel_after -1' EXIT
 
 gate_emit() {
     cat "$sched_dir/$1.out"

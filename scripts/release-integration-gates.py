@@ -2,6 +2,7 @@
 # gate[C-38 ci]: Fast-row catalog
 """No-build row catalog shared by CI and the factory pre-push gate."""
 import argparse
+import sys
 
 FAST_ROWS = (
     "failure-log", "version-literals", "changelog-and-versions", "release-script",
@@ -21,5 +22,10 @@ def main():
     print(",".join(FAST_ROWS))
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-38]", file=sys.stderr)
+        raise

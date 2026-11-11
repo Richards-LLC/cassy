@@ -2241,7 +2241,9 @@ Park executes neither checks nor tests. Local fast-row receipts are not park
 proof because workers can write them, and park reads no fast-row exception
 file. CI runs the fast rows before merge admission; the pre-push hook provides
 early local feedback, and a reason-bearing `CAS_SKIP_FAST_ROWS` push is logged
-to `overrides.log`.
+to `overrides.log` and to typed per-code gate facts through
+`cas gates record-override C-07 H-38 --reason <reason>`. The hook refuses
+the skip if the fact cannot be recorded.
 
 Close measures a delivery's recorded `parked_branch` (local, then origin)
 before deriving branches from its current assignee. Its recorded `work_target`

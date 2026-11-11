@@ -10,6 +10,15 @@
 # token and omits the organization runner group.
 set -euo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[W-66]"' EXIT
+
+
 runner_user=cassy-actions
 runner_root=/var/lib/cassy-actions
 runner_slot="${RUNNER_SLOT:-1}"
@@ -99,7 +108,7 @@ if "$light"; then
     install -d -o "$runner_user" -g "$runner_user" -m 0750 "$runner_dir"
     tmp_dir="$(mktemp -d)"
     chmod 0755 "$tmp_dir"
-    trap 'rm -rf "$tmp_dir"' EXIT
+    trap 'gate_exit "$?" "[W-66]"; rm -rf "$tmp_dir"' EXIT
     curl --fail --location --proto '=https' --tlsv1.2 "$runner_url_archive" -o "$tmp_dir/$runner_archive"
     printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
     tar -xzf "$tmp_dir/$runner_archive" -C "$runner_dir"
@@ -146,7 +155,7 @@ fi
 
 tmp_dir="$(mktemp -d)"
 chmod 0755 "$tmp_dir"
-trap 'rm -rf "$tmp_dir"' EXIT
+trap 'gate_exit "$?" "[W-66]"; rm -rf "$tmp_dir"' EXIT
 curl --fail --location --proto '=https' --tlsv1.2 "$runner_url_archive" -o "$tmp_dir/$runner_archive"
 printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
 tar -xzf "$tmp_dir/$runner_archive" -C "$runner_dir"

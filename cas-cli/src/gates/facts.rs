@@ -95,6 +95,26 @@ pub fn record_override(store: &dyn EventStore, task_id: &str, reason: &str) -> R
     Ok(codes)
 }
 
+/// An override made at a boundary that already knows the affected checks,
+/// including Git hooks without an associated task.
+pub fn record_override_codes(
+    store: &dyn EventStore,
+    codes: &[String],
+    task_id: Option<&str>,
+    reason: &str,
+) -> Result<()> {
+    anyhow::ensure!(!codes.is_empty(), "an override requires a gate code");
+    anyhow::ensure!(!reason.trim().is_empty(), "an override requires a reason");
+    let mut registered = Vec::new();
+    for code in codes {
+        let row = find(code).ok_or_else(|| anyhow::anyhow!("{code} is not a registered gate code"))?;
+        if !registered.contains(&row.code) {
+            registered.push(row.code);
+        }
+    }
+    record(store, EventType::GateOverridden, &registered, task_id, reason)
+}
+
 /// Record a supervisor-declared false positive of a registered code.
 pub fn record_false_positive(
     store: &dyn EventStore,

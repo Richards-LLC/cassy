@@ -35,6 +35,15 @@
 # 3 no queue admission after the enqueue request; 4 non-release merge conflict.
 
 set -Eeuo pipefail
+
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[C-34]"' EXIT
+
 # prepare runs in a command substitution; keep errexit there too.
 shopt -s inherit_errexit
 # Include commands inside prepare's substitution: Git and gh can fail without

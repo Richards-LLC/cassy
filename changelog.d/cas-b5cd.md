@@ -6,3 +6,7 @@
   prints the registry measured from code, refusals end with their `[CODE]`, and
   `cas gates report --since <tag>` counts refusals, overrides and
   `cas gates false-positive` declarations per code.
+
+- **Count script and merge decisions** — Script failures emit their registered
+  codes; merge CI refusals and accepted overrides, including pre-push fast-row
+  skips, record typed per-code facts.

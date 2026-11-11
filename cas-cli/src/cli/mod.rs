@@ -10,7 +10,7 @@ pub(crate) mod claude;
 mod claude_md;
 pub(crate) mod codex;
 mod codemap_cmd;
-mod gates_cmd;
+pub(crate) mod gates_cmd;
 mod history_cmd;
 mod install_on_publish;
 mod artifact_cmd;

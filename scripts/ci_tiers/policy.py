@@ -17,7 +17,7 @@ from pathlib import Path
 try:
     import yaml
 except ImportError:
-    raise SystemExit("CI policy parser requires pyyaml==6.0.3; install with python3 -m pip install -r scripts/ci_tiers/requirements.txt")
+    raise SystemExit("CI policy parser requires pyyaml==6.0.3; install with python3 -m pip install -r scripts/ci_tiers/requirements.txt\n\n[C-39]")
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -214,4 +214,10 @@ def main():
     print(step['run']);return 0
 
 
-if __name__=='__main__': sys.exit(main())
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except BaseException as error:
+        if not isinstance(error, SystemExit) or error.code:
+            print("[C-39]", file=sys.stderr)
+        raise

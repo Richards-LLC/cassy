@@ -15,6 +15,15 @@
 #   <local ref> <local sha> <remote ref> <remote sha>
 set -uo pipefail
 
+# Every failed script exit emits its registered check codes, including early
+# argument errors and failures propagated from child commands.
+gate_exit() {
+    local status="$1"; shift
+    if (( status != 0 )); then printf '\n%s\n' "$@" >&2; fi
+}
+trap 'gate_exit "$?" "[C-07]" "[H-38]"' EXIT
+
+
 zero='0000000000000000000000000000000000000000'
 common="$(git rev-parse --path-format=absolute --git-common-dir)" || exit 1
 # Git exports GIT_DIR, GIT_INDEX_FILE and friends to hooks. The gate runs
@@ -33,6 +42,14 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
         continue
     fi
     if [[ -n "${CAS_SKIP_FAST_ROWS:-}" ]]; then
+        # Persist the same typed per-code facts that `cas gates report` reads.
+        # A skip is accepted only after recording succeeds.
+        if ! "${CAS_BIN:-cas}" gates record-override C-07 H-38 \
+            --reason "$local_sha $CAS_SKIP_FAST_ROWS"; then
+            printf 'pre-push: refused: could not record the fast-row override\n' >&2
+            status=1
+            continue
+        fi
         mkdir -p "$receipts"
         printf '%s %s %s skipped fast rows: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$local_sha" \
             "${remote_ref#refs/heads/}" "$CAS_SKIP_FAST_ROWS" >>"$receipts/overrides.log"

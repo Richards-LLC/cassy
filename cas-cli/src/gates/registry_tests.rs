@@ -19,6 +19,13 @@ fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn script_emits(row: &super::GateRow) -> bool {
+    let (path, _) = row.source.rsplit_once(':').unwrap();
+    let source = std::fs::read_to_string(crate::test_paths::crate_root().join("..").join(path)).unwrap();
+    source.lines().filter(|line| !line.trim_start().starts_with('#'))
+        .any(|line| line.contains(&format!("[{}]", row.code)))
+}
+
 /// Codes a production line emits: `gates::tag("CODE"` calls and `[CODE]` literals.
 fn emitted_codes() -> std::collections::BTreeSet<String> {
     let manifest = crate::test_paths::crate_root();
@@ -78,7 +85,11 @@ fn every_registered_refusal_site_emits_its_code() {
         .iter()
         .filter(|row| (matches!(row.family(), Family::Gate | Family::Guard) && row.source.contains(".rs:"))
             || row.source.contains(".sh:") || row.source.contains(".py:"))
-        .filter(|row| !emitted.contains(row.code) && !NON_REFUSING.contains(&row.code))
+        .filter(|row| if row.source.contains(".sh:") || row.source.contains(".py:") {
+            !script_emits(row)
+        } else {
+            !emitted.contains(row.code) && !NON_REFUSING.contains(&row.code)
+        })
         .map(|row| row.source)
         .collect();
     assert!(silent.is_empty(), "refusing checks that never emit their code: {silent:#?}");
@@ -126,5 +137,56 @@ fn refusals_overrides_and_false_positives_are_counted_per_code() {
     let counts = facts::summarize(&store, before).unwrap();
     assert_eq!(counts[code], facts::Counts { refused: 2, overridden: 1, false_positive: 1 });
     assert_eq!(counts[UNCODED].refused, 1);
+
+    // Exercise the same CI admission and accepted-override boundaries used
+    // by worktree_merge, outside the task-tool dispatcher.
+    crate::mcp::tools::core::workflow::exercise_ci_gate_facts(dir.path());
+    assert_eq!(facts::summarize(&store, before).unwrap()["G-108"],
+        facts::Counts { refused: 1, overridden: 1, false_positive: 0 });
+
+    // Replay CAS_SKIP_FAST_ROWS through the real hook. Capture only the
+    // executable boundary, then dispatch its exact argv through the real CLI
+    // parser/handler, so the test needs no separately built cas binary.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        use clap::Parser;
+
+        assert!(Command::new("git").args(["init", "-q"]).arg(dir.path()).status().unwrap().success());
+        let fake_cas = dir.path().join("fixture-cas");
+        let argv = dir.path().join("argv");
+        std::fs::write(&fake_cas, "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$FACT_ARGS\"\n").unwrap();
+        std::fs::set_permissions(&fake_cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = dir.path().join("fast-rows-pre-push.sh");
+        std::fs::write(&script, include_str!("../../../scripts/fast-rows-pre-push.sh")).unwrap();
+        for accepts_fact in [true, false] {
+            if !accepts_fact {
+                std::fs::write(&fake_cas, "#!/bin/sh\nexit 1\n").unwrap();
+            }
+            let mut hook = Command::new("bash").arg(&script).current_dir(dir.path())
+                .env("CAS_BIN", &fake_cas).env("FACT_ARGS", &argv)
+                .env("CAS_SKIP_FAST_ROWS", "fixture hotfix")
+                .stdin(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            writeln!(hook.stdin.take().unwrap(), "refs/heads/factory/fixture {} refs/heads/factory/fixture {}", "1".repeat(40), "0".repeat(40)).unwrap();
+            let result = hook.wait_with_output().unwrap();
+            assert_eq!(result.status.success(), accepts_fact, "{}", String::from_utf8_lossy(&result.stderr));
+            if accepts_fact {
+                let captured = std::fs::read(&argv).unwrap();
+                let args = std::iter::once("cas".to_string()).chain(captured.split(|byte| *byte == 0)
+                    .filter(|arg| !arg.is_empty()).map(|arg| String::from_utf8(arg.to_vec()).unwrap()));
+                let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+                let Some(crate::cli::Commands::Gates(command)) = &cli.command else { panic!("hook did not invoke gates"); };
+                crate::cli::gates_cmd::execute(command, &cli, Some(dir.path())).unwrap();
+            } else {
+                assert!(codes_in(&String::from_utf8_lossy(&result.stderr)).contains(&"H-38"));
+            }
+        }
+        let counts = facts::summarize(&store, before).unwrap();
+        for code in ["C-07", "H-38"] {
+            assert_eq!(counts[code], facts::Counts { refused: 0, overridden: 1, false_positive: 0 });
+        }
+    }
     assert!(facts::summarize(&store, Utc::now() + chrono::Duration::seconds(5)).unwrap().is_empty());
 }

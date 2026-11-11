@@ -835,7 +835,7 @@ pub(super) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn explicit_no_code_proof_tracks_and_closes_once_cas_2ecc() {
-        use crate::qa_batch::{ReleaseProofKind, ReleaseProofRef};
+        use crate::qa_batch::{ReleaseInventoryCode, ReleaseMembership, ReleaseProofKind, ReleaseProofRef};
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, root, _, owner, mut args) = fixture();
@@ -854,6 +854,9 @@ pub(super) mod tests {
             task.execution_note = Some("no-code".into());
             task.status = TaskStatus::AwaitingMerge;
             task.risk = vec![cas_types::TaskRisk::None];
+            // GH #1801: report tasks can retain incidental factory anchors
+            // already in the release. Those commits do not declare membership.
+            task.deliverables.factory_branch_anchor = Some(git(repo, &["rev-parse", "HEAD^1"]).unwrap());
             tasks.add(&task).unwrap();
         }
         let path = root.join("artifacts/cas-e3041/report.md");
@@ -940,12 +943,17 @@ pub(super) mod tests {
         let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == "cas-undeclared"));
         assert!(!inventory.exceptions.iter().any(|d| d.task_id == "cas-undeclared"));
+        assert!(inventory.deliveries.iter().any(|d| d.task_id == "cas-e3041"
+            && d.membership == ReleaseMembership::ExplicitNoCode));
+        assert!(inventory.exceptions.iter().any(|e| e.task_id == "cas-ef2b"
+            && e.code == ReleaseInventoryCode::MissingNoCodeProof));
         let mut legacy = scope.clone();
         legacy.no_code_members.clear();
         let unbound = crate::qa_batch::resolve_release_inventory(&root, repo, &legacy).unwrap();
         let held = crate::release_reconcile::reconcile_release(
             &root, &legacy, &unbound, crate::release_reconcile::ReconcileTrigger::Publish { tag },
         ).await.unwrap();
+        assert!(!held.members.contains_key("cas-undeclared"));
         assert_eq!(tasks.get("cas-e3041").unwrap().status, TaskStatus::AwaitingMerge);
         assert!(held.residuals.iter().any(|r| r.task_id == "cas-e3041"));
         let mut undeclared = scope.clone();
@@ -957,6 +965,7 @@ pub(super) mod tests {
         let first = crate::release_reconcile::reconcile_release(
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();
+        assert!(!first.members.contains_key("cas-undeclared"));
         assert!(matches!(first.members.get("cas-e3041"), Some(CassyMergeClose::Closed { .. })), "{first:?}");
         assert!(first.residuals.iter().any(|r| r.task_id == "cas-ef2b" && r.gate.contains("MissingNoCodeProof")));
         let closed = tasks.get("cas-e3041").unwrap();

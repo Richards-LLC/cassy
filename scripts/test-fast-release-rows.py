@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 import shutil
+import shlex
 import sqlite3
 import subprocess
 import tempfile
@@ -339,6 +340,38 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL journey-catalog", result.stdout)
+
+    def test_selector_failure_invokes_registry_validator_cas_4b33(self):
+        tools = self.repo / ".git" / "tools"
+        tools.mkdir()
+        selector = tools / "python3"
+        selector.write_text(f'''#!/bin/sh
+if [ "$1" = scripts/doc-fragments.py ] && [ "$2" = needs-upkeep ]; then
+    echo 'ModuleNotFoundError: No module named yaml' >&2
+    echo no
+    exit 1
+fi
+exec {shlex.quote(sys.executable)} "$@"
+''')
+        selector.chmod(0o755)
+        validator = tools / "cas"
+        validator.write_text('''#!/bin/sh
+case "$*" in
+    'qa journeys --help') echo --base ;;
+    'qa journeys --check'*) echo "$*" >> .git/validator-calls ;;
+    *) exit 1 ;;
+esac
+''')
+        validator.chmod(0o755)
+        self.write("hub-web/src/signup.ts", "updated owned surface\n")
+        self.commit()
+        result = self.fast_from(self.base, CAS_BIN=str(validator),
+                                PATH=str(tools) + os.pathsep + os.environ["PATH"])
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.repo / ".git" / "validator-calls"
+        self.assertTrue(calls.exists(), result.stdout + result.stderr)
+        self.assertEqual(calls.read_text().splitlines(),
+                         ["qa journeys --check", "qa journeys --check --base " + self.base])
 
     def test_strict_registry_requires_a_validator_with_base_cas_4b33(self):
         validator = self.repo / ".git" / "legacy-cas"

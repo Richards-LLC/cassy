@@ -1774,7 +1774,13 @@ lane_touches() {
 registry_upkeep_needed() {
     [[ -f docs/qa/journeys.yaml ]] || return 1
     [[ "$fast_rows" == true ]] || return 0
-    [[ "$(python3 scripts/doc-fragments.py needs-upkeep --base "${fast_base:-HEAD^}")" == yes ]]
+    local selection
+    if selection="$(python3 scripts/doc-fragments.py needs-upkeep --base "${fast_base:-HEAD^}")"; then
+        # Only a successful, explicit no can skip the binary validator.
+        [[ "$selection" != no ]]
+    else
+        return 0
+    fi
 }
 
 # A cas with `qa journeys --check` and `qa impact`: CAS_BIN, else the latest

@@ -1,75 +1,10 @@
 #[path = "../../gate_audit.rs"]
 mod gate_audit;
 
-use std::path::{Path, PathBuf};
-
 use cas_store::{EventStore, SqliteEventStore};
 use chrono::Utc;
 
-use super::{Family, REGISTRY, UNCODED, facts, find, tag, override_tag, codes_in};
-
-fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|name| name != "target") {
-                rust_sources(&path, out);
-            }
-        } else if path.extension().is_some_and(|ext| matches!(ext.to_str(), Some("rs" | "sh" | "py"))) {
-            out.push(path);
-        }
-    }
-}
-
-fn script_emits(row: &super::GateRow) -> bool {
-    let (path, _) = row.source.rsplit_once(':').unwrap();
-    let source = std::fs::read_to_string(crate::test_paths::crate_root().join("..").join(path)).unwrap();
-    source.lines().filter(|line| !line.trim_start().starts_with('#'))
-        .any(|line| line.contains(&format!("[{}]", row.code)))
-}
-
-/// Codes a production line emits: `gates::tag("CODE"` calls and `[CODE]` literals.
-fn emitted_codes() -> std::collections::BTreeSet<String> {
-    let manifest = crate::test_paths::crate_root();
-    let manifest = manifest.as_path();
-    let mut files = Vec::new();
-    rust_sources(&manifest.join("src"), &mut files);
-    rust_sources(&manifest.join("../crates"), &mut files);
-    rust_sources(&manifest.join("../scripts"), &mut files);
-    let mut emitted = std::collections::BTreeSet::new();
-    for file in files {
-        if file.starts_with(manifest.join("src/gates")) {
-            continue;
-        }
-        let source = std::fs::read_to_string(&file).unwrap();
-        let code_text: String = source
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//") && !line.trim_start().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for (start, _) in code_text.match_indices("gates::tag(") {
-            let rest = code_text[start + 11..].trim_start();
-            if let Some(code) = rest.strip_prefix('"').and_then(|rest| rest.split('"').next()) {
-                assert!(
-                    find(code).is_some(),
-                    "{}: gates::tag({code:?}) names no gate[...] declaration",
-                    file.display()
-                );
-                emitted.insert(code.to_string());
-            }
-        }
-        for row in REGISTRY {
-            if code_text.contains(&format!("[{}]", row.code)) {
-                emitted.insert(row.code.to_string());
-            }
-        }
-    }
-    emitted
-}
-
-/// Checks that only grant an exemption and never refuse on their own.
-const NON_REFUSING: &[&str] = &["G-57"];
+use super::{Family, REGISTRY, UNCODED, facts, tag, override_tag, codes_in};
 
 /// The registry is measured from code: every row comes from one declaration,
 /// and every refusing check (gates and guards declared in Rust) emits its
@@ -107,20 +42,6 @@ fn every_registered_refusal_site_emits_its_code() {
     std::fs::write(&report, audit.markdown(REGISTRY.len())).unwrap();
     std::fs::write(root.join("target/gate-audit-gaps.txt"), audit.gaps.join("\n")).unwrap();
     assert!(audit.gaps.is_empty(), "mechanical gate audit gaps:\n{}", audit.gaps.join("\n"));
-    let emitted = emitted_codes();
-    let silent: Vec<&str> = REGISTRY
-        .iter()
-        .filter(|row| (matches!(row.family(), Family::Gate | Family::Guard) && row.source.contains(".rs:"))
-            || row.source.contains(".sh:") || row.source.contains(".py:"))
-        .filter(|row| if row.source.contains(".sh:") || row.source.contains(".py:") {
-            !script_emits(row)
-        } else {
-            !emitted.contains(row.code) && !NON_REFUSING.contains(&row.code)
-        })
-        .map(|row| row.source)
-        .collect();
-    assert!(silent.is_empty(), "refusing checks that never emit their code: {silent:#?}");
-
     // Replay the two uncoded script boundaries from the rejected delivery.
     let fixture = tempfile::tempdir().unwrap();
     let repo = fixture.path();

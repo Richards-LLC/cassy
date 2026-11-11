@@ -518,8 +518,20 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                 Err(e) => audit.gaps.push(format!("{relative}: AST scan failed: {e}")),
             }
         } else {
-            let codes = bracket_codes(&source, "");
-            all_refused.extend(codes.clone());
+            let executable = source.lines().filter(|line| !line.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
+            let codes = bracket_codes(&executable, "");
+            let test_harness = relative.rsplit('/').next().is_some_and(|name| name.starts_with("test-") || name.starts_with("test_"));
+            if !test_harness { all_refused.extend(codes.clone()); }
+            for (index, line) in source.lines().enumerate().filter(|(_, line)| !line.trim_start().starts_with('#')) {
+                if !test_harness {
+                    for code in bracket_codes(line, "") {
+                        audit.rows.push([
+                            "direct script code emission".into(), format!("{relative}:{}", index + 1), code,
+                            "[CODE]".into(), "—".into(), "script reporter / deferred C-row".into(),
+                        ]);
+                    }
+                }
+            }
             for (index, line) in source
                 .lines()
                 .enumerate()
@@ -532,7 +544,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                         .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                         .unwrap_or(rest.len());
                     let flag = &rest[..end];
-                    let recorded = source.contains("gates record-override");
+                    let recorded = !test_harness && source.contains("gates record-override");
                     let exclusion = source
                         .lines()
                         .find_map(|line| {
@@ -564,7 +576,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
             }
             if !codes.is_empty() {
                 script_rows.push([
-                    "script result producer".into(),
+                    if test_harness { "excluded test harness" } else { "script result producer" }.into(),
                     relative.clone(),
                     codes.iter().cloned().collect::<Vec<_>>().join(", "),
                     "yes".into(),
@@ -574,7 +586,9 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
                         "—"
                     }
                     .into(),
-                    if source.contains("gates record-refusal") {
+                    if test_harness {
+                        "fixture data; does not satisfy runtime code coverage"
+                    } else if source.contains("gates record-refusal") {
                         "script: gates record-refusal"
                     } else {
                         "C-row facts deferred to cas-d777c"

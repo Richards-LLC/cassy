@@ -940,7 +940,9 @@ fn aggregate(
         }
         match &event.payload {
             QualityPayload::Turn { woken_by, notice_kind, no_op, input_tokens, output_tokens, minutes, .. } => {
-                report.turns_by_notice_kind.entry(notice_kind.clone().unwrap_or_else(|| "unknown".into())).or_default()
+                report.turns_by_notice_kind.entry(notice_kind.as_ref()
+                    .filter(|kind| !kind.bytes().all(|b| b.is_ascii_digit())).cloned()
+                    .unwrap_or_else(|| "unknown".into())).or_default()
                     .add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns.add(*no_op, *input_tokens, *output_tokens, *minutes);
                 report.turns_by_channel.entry(woken_by.as_str()).or_default()
@@ -1488,6 +1490,9 @@ mod tests {
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, false));
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (false, false));
+        let mut missing_stamp = wake.clone();
+        if let QualityPayload::Turn { notice_kind, .. } = &mut missing_stamp.payload { *notice_kind = None; }
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &missing_stamp).unwrap(), (false, false));
         // A new completed turn remains one new wake.
         wake.natural_key = "fresh-wake".into();
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &wake).unwrap(), (true, true));
@@ -1503,7 +1508,7 @@ mod tests {
             *supersedes = Some(original_id);
         }
         crate::quality_ledger::emit_checked(dir.path(), &legacy_detail).unwrap();
-        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (true, false));
+        assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
         assert_eq!(crate::quality_ledger::emit_turn_checked(dir.path(), &untyped).unwrap(), (false, false));
         events.extend(cas_store::quality_events_between(dir.path(), None, None).unwrap());
         let report = aggregate("v4.16.0".into(), true, None, None, &events);

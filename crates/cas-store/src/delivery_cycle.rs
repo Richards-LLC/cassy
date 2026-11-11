@@ -179,6 +179,39 @@ pub(crate) fn end_delivery_cycle_with_conn(
     Ok(current + 1)
 }
 
+/// The legacy cycle map of a task row: retired anchors in order, each
+/// declined anchor (request-changes) closing a cycle, then the current anchor
+/// in the open last cycle.
+fn history_cycles(deliverables: &cas_types::TaskDeliverables) -> Vec<(Vec<String>, bool)> {
+    let declined = deliverables
+        .declined_factory_branch_anchors
+        .as_ref()
+        .unwrap_or(&deliverables.historical_factory_branch_anchors);
+    let mut cycles: Vec<(Vec<String>, bool)> = vec![(Vec::new(), false)];
+    for anchor in &deliverables.historical_factory_branch_anchors {
+        let open = cycles.last_mut().expect("one cycle");
+        open.0.push(anchor.clone());
+        if declined.iter().any(|known| known.eq_ignore_ascii_case(anchor)) {
+            open.1 = true;
+            cycles.push((Vec::new(), false));
+        }
+    }
+    if let Some(anchor) = deliverables.factory_branch_anchor.as_deref().filter(|tip| !tip.trim().is_empty()) {
+        cycles.last_mut().expect("one cycle").0.push(anchor.to_string());
+    }
+    cycles
+}
+
+/// The one rule for a row's current cycle number, shared by backfill and
+/// every anchor write: the replicated counter, or for a legacy row with no
+/// counter, the open cycle of its history map.
+pub(crate) fn row_counter(deliverables: &cas_types::TaskDeliverables) -> u32 {
+    match deliverables.delivery_cycle {
+        0 => history_cycles(deliverables).len() as u32,
+        counter => counter,
+    }
+}
+
 /// One-shot backfill for open tasks anchored before cycles existed. Retired
 /// anchors fill earlier cycles in order, each declined anchor (request-changes)
 /// closing one; the current anchor lands in the open newest cycle, numbered
@@ -205,22 +238,7 @@ pub(crate) fn backfill_with_conn(conn: &Connection, default_project: Option<&str
             continue;
         };
         let project = project.as_deref().or(default_project).unwrap_or_default();
-        let declined = deliverables
-            .declined_factory_branch_anchors
-            .as_ref()
-            .unwrap_or(&deliverables.historical_factory_branch_anchors);
-        let mut cycles: Vec<(Vec<String>, bool)> = vec![(Vec::new(), false)];
-        for anchor in &deliverables.historical_factory_branch_anchors {
-            let open = cycles.last_mut().expect("one cycle");
-            open.0.push(anchor.clone());
-            if declined.iter().any(|known| known.eq_ignore_ascii_case(anchor)) {
-                open.1 = true;
-                cycles.push((Vec::new(), false));
-            }
-        }
-        if let Some(anchor) = deliverables.factory_branch_anchor.as_deref().filter(|tip| !tip.trim().is_empty()) {
-            cycles.last_mut().expect("one cycle").0.push(anchor.to_string());
-        }
+        let cycles = history_cycles(&deliverables);
         let write = AnchorWrite {
             project,
             task_id: &task_id,
@@ -231,10 +249,7 @@ pub(crate) fn backfill_with_conn(conn: &Connection, default_project: Option<&str
         };
         // A replicated nonzero counter names the open cycle; earlier cycles
         // count back from it, and any surplus history folds into cycle 1.
-        let open = match deliverables.delivery_cycle {
-            0 => cycles.len() as u32,
-            counter => counter,
-        };
+        let open = row_counter(&deliverables);
         let total = cycles.len();
         let mut numbered: Vec<(u32, Vec<String>, bool)> = Vec::new();
         for (index, (anchors, ended)) in cycles.into_iter().enumerate() {

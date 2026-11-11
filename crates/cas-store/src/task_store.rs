@@ -922,7 +922,7 @@ impl SqliteTaskStore {
                 project,
                 task_id: &task.id,
                 anchor,
-                counter: deliverables.delivery_cycle,
+                counter: crate::delivery_cycle::row_counter(deliverables),
                 start_base: deliverables.factory_branch_start.as_ref().map(|start| start.base_sha.as_str()),
                 replicated,
             },

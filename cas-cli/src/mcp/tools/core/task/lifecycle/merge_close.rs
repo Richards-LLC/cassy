@@ -346,7 +346,7 @@ impl CasCore {
         parked.status = TaskStatus::AwaitingMerge;
         if parked.deliverables.factory_branch_anchor.as_deref() != Some(lane.tip) {
             parked.deliverables.retain_factory_branch_anchor_as_history();
-            parked.deliverables.factory_branch_anchor = Some(lane.tip.to_string());
+            parked.deliverables.mint_or_append(lane.tip);
         }
         parked.deliverables.parked_branch =
             Some(lane.branch.strip_prefix("origin/").unwrap_or(lane.branch).to_string());

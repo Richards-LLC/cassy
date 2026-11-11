@@ -6713,6 +6713,8 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         repo_selector: "remote:github.com/org/delivery".to_string(),
         target_branch: "main".to_string(),
     });
+    // cas-50b2: a corrective delivery after request-changes is in cycle 2.
+    task.deliverables.delivery_cycle = 2;
     task_store.add(&task).expect("add receipt task");
     assert!(matches!(
         agent_store
@@ -7008,6 +7010,12 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         .unwrap()
         .expect("lease-authorized delivery");
     assert_eq!(stored_receipt.worker_agent_id, owner_id);
+    let now = chrono::Utc::now();
+    assert_eq!(stored_receipt.id,
+        cas_store::build_worker_completion_receipt_in_cycle(&owner_receipt, "alice", now, 2).id);
+    assert_ne!(stored_receipt.id, cas_store::build_worker_completion_receipt(&owner_receipt, "alice", now).id);
+    let cycles = cas_store::delivery_cycles(&cas_root, &task.id).unwrap();
+    assert_eq!((cycles.len(), cycles[0].cycle, cycles[0].anchors.clone()), (1, 2, vec![owner_receipt.commit_sha.clone()]));
     assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
     let events = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
     assert_eq!(events.len(), 1, "concurrent creation must emit one event");

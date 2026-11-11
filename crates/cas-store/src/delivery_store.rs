@@ -351,6 +351,18 @@ pub fn build_worker_completion_receipt(
     worker_name: &str,
     created_at: DateTime<Utc>,
 ) -> WorkerCompletionReceipt {
+    build_worker_completion_receipt_in_cycle(input, worker_name, created_at, 1)
+}
+
+/// cas-50b2: the receipt id hashes the task's delivery cycle, so two cycles
+/// parking the same commit get distinct receipts. Cycle 1 keeps the legacy id.
+pub fn build_worker_completion_receipt_in_cycle(
+    input: &WorkerCompletionReceiptInput,
+    worker_name: &str,
+    created_at: DateTime<Utc>,
+    cycle: u32,
+) -> WorkerCompletionReceipt {
+    let cycle = (cycle > 1).then(|| format!("cycle:{cycle}"));
     let mut parts = vec![
         &input.task_id,
         &input.worker_agent_id,
@@ -370,6 +382,7 @@ pub fn build_worker_completion_receipt(
     if let Some(path) = input.artifact_path.as_deref() {
         parts.push(path);
     }
+    parts.extend(cycle.as_deref());
     let hash = digest(&parts);
     WorkerCompletionReceipt {
         id: format!("wcr-{}", &hash[..24]),
@@ -1163,6 +1176,18 @@ mod tests {
         task.deliverables.delivery_pr_merged_at = Some(Utc::now());
         task.pending_worktree_merge = true;
         task_store.add(&task).unwrap();
+        // cas-50b2: creating an anchored task mints its open cycle. A delivery
+        // parked before cycles existed gets the same one cycle at store open.
+        let cycles = || crate::delivery_cycles(root.path(), &task.id).unwrap();
+        let shape = || cycles().into_iter().map(|c| (c.cycle, c.anchors, c.ended)).collect::<Vec<_>>();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
+        let forget_cycles = |id: &str| {
+            Connection::open(root.path().join("cas.db")).unwrap()
+                .execute("DELETE FROM delivery_cycles WHERE task_id = ?1", [id]).unwrap();
+        };
+        forget_cycles(&task.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], false)]);
 
         let receipt = build_worker_completion_receipt(&input(), "worker", Utc::now());
         let (delivery, dispatch) = create_worker_delivery_with_dispatch(
@@ -1225,6 +1250,7 @@ mod tests {
         assert!(reopened.deliverables.delivery_pr_merged_at.is_none());
         assert!(!reopened.pending_worktree_merge);
 
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true)]);
         assert!(reopened.notes.contains("factory/worker"));
         assert!(reopened.notes.contains("revert the public output change"));
         let sources = &reopened.deliverables.authorized_merge_sources;
@@ -1283,11 +1309,52 @@ mod tests {
         assert_eq!(retained.updated_at, parked_at);
         assert_eq!(retained.deliverables.factory_branch_anchor,
             corrective.deliverables.factory_branch_anchor);
+        // The re-park mints cycle 2; the same commit parked in cycle 2 gets a
+        // receipt id distinct from cycle 1's.
+        assert_eq!(shape(), [(1, vec!["a".repeat(40)], true), (2, vec!["c".repeat(40)], false)]);
+        assert_eq!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 1).id, receipt.id);
+        assert_ne!(build_worker_completion_receipt_in_cycle(&input(), "worker", Utc::now(), 2).id, receipt.id);
         // Opposite ordering: when park commits first, request_changes wins.
         crate::request_changes_for_parked_delivery(
             root.path(), &task.id, "supervisor-session", "Corrective delivery also needs changes",
         ).unwrap();
-        assert_eq!(task_store.get(&task.id).unwrap().status, TaskStatus::Open);
+        let current = task_store.get(&task.id).unwrap();
+        assert_eq!(current.status, TaskStatus::Open);
+        // A synced create and a synced update from another machine number the
+        // cycle from the replicated counter, so both machines get the same id;
+        // a backfill honours that counter too.
+        let mut peer = Task::new("cas-synced".into(), "peer delivery".into());
+        peer.deliverables.delivery_cycle = 3;
+        peer.deliverables.mint_or_append(&"e".repeat(40));
+        task_store.add(&peer).unwrap();
+        let peer_shape = || crate::delivery_cycles(root.path(), &peer.id).unwrap()
+            .into_iter().map(|c| (c.cycle_id, c.cycle, c.anchors)).collect::<Vec<_>>();
+        let peer_id = crate::delivery_cycle_id("", &peer.id, 3);
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40)])]);
+        let current = task_store.get(&peer.id).unwrap();
+        let mut synced = current.clone();
+        synced.deliverables.mint_or_append(&"f".repeat(40));
+        synced.updated_at = current.updated_at + chrono::Duration::seconds(1);
+        task_store.update_from_sync(&synced, &current).unwrap().unwrap();
+        assert_eq!(peer_shape(), [(peer_id.clone(), 3, vec!["e".repeat(40), "f".repeat(40)])]);
+        forget_cycles(&peer.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(peer_shape(), [(peer_id, 3, vec!["f".repeat(40)])]);
+        // A legacy row with no counter but one declined delivery [A] and a
+        // current B is in cycle 2 whether a sync creates it or a backfill
+        // finds it.
+        let mut legacy = Task::new("cas-legacy".into(), "legacy peer delivery".into());
+        legacy.deliverables.historical_factory_branch_anchors = vec!["a".repeat(40)];
+        legacy.deliverables.declined_factory_branch_anchors = Some(vec!["a".repeat(40)]);
+        legacy.deliverables.mint_or_append(&"b".repeat(40));
+        task_store.add(&legacy).unwrap();
+        let open_cycle = || crate::delivery_cycles(root.path(), &legacy.id).unwrap()
+            .into_iter().filter(|c| !c.ended).map(|c| (c.cycle, c.cycle_id, c.anchors)).collect::<Vec<_>>();
+        let expected = [(2, crate::delivery_cycle_id("", &legacy.id, 2), vec!["b".repeat(40)])];
+        assert_eq!(open_cycle(), expected, "fresh sync creation");
+        forget_cycles(&legacy.id);
+        SqliteTaskStore::open(root.path()).unwrap().init().unwrap();
+        assert_eq!(open_cycle(), expected, "backfill");
     }
 
     /// GH #55 case 1: post-merge review returns AMENDMENT REQUIRED while the

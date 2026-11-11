@@ -5959,8 +5959,19 @@ impl CasCore {
                 "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}` or its per-task branch `{task_source}`."
             )));
         }
-        let receipt =
-            cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        // cas-50b2: read outside the delivery transaction on purpose. Only
+        // request_changes and reopen move the cycle, and neither applies to
+        // an InProgress task under this worker's live lease, so the cycle
+        // read here is the one this park mints; an exact retry in the same
+        // cycle rebuilds the same receipt id.
+        let cycle = cas_store::current_delivery_cycle(
+            &self.cas_root, &task.id, task.deliverables.delivery_cycle,
+        ).map_err(|error| {
+            Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to read delivery cycle: {error}"))
+        })?;
+        let receipt = cas_store::build_worker_completion_receipt_in_cycle(
+            &input, &caller.name, chrono::Utc::now(), cycle,
+        );
         if let Some((latest_receipt, latest_transaction)) = latest_delivery.as_ref()
             && latest_receipt.id != receipt.id
             && super::proof_scope::delivery_state_locks_scope(latest_transaction.state)
@@ -6224,7 +6235,7 @@ impl CasCore {
             task.status = projected_status;
             task.pending_verification = projected_pending_verification;
             task.deliverables.pre_close_hook = Some(hook_evidence.clone());
-            task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
+            task.deliverables.mint_or_append(&input.commit_sha);
             task.deliverables.parked_branch = Some(input.source_branch.clone());
             task.updated_at = chrono::Utc::now();
             match task_store.update_if_current(task, &expected) {
@@ -7096,8 +7107,9 @@ impl CasCore {
             {
                 parking.deliverables.historical_factory_branch_anchors.push(recorded.to_string());
             }
-            parking.deliverables.factory_branch_anchor =
-                advanced.deliverables.factory_branch_anchor;
+            if let Some(tip) = advanced.deliverables.factory_branch_anchor.as_deref() {
+                parking.deliverables.mint_or_append(tip);
+            }
             parking.notes = advanced.notes;
             // Keep the original store clock for the guarded park below.
         }
@@ -7401,7 +7413,7 @@ impl CasCore {
             .as_deref()
             .unwrap_or("none")
             .to_string();
-        task.deliverables.factory_branch_anchor = Some(factory_branch_anchor.to_string());
+        task.deliverables.mint_or_append(factory_branch_anchor);
         task.updated_at = now;
         let timestamp = now.format("%Y-%m-%d %H:%M");
         let audit = format!(
@@ -30132,6 +30144,10 @@ mod merge_state_gate_tests {
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
         assert!(handoff && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
+        // cas-50b2: the reviewed correction appends B to the parked cycle.
+        let cycle = cas_store::delivery_cycles(&root, &task.id).unwrap();
+        assert_eq!(cycle.iter().map(|c| (c.cycle, c.anchors.clone(), c.ended)).collect::<Vec<_>>(),
+            [(1, vec![a.clone(), b.clone()], false)]);
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
         assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
         assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);

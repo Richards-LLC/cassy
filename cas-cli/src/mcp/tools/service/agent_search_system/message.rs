@@ -6085,7 +6085,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(!response.contains(automatic_body), "{response}");
     }
 
-    /// GH #1799: the v4.15.0 release_closeout (9,295 characters) reached the
+    /// GH #1799: a release_closeout notice (9,295 characters) reached the
     /// supervisor whole twice: in the transport's own copy, and again from the
     /// inbox_poll its wake asked for. One full-body delivery; the poll names it.
     #[tokio::test(flavor = "current_thread")]

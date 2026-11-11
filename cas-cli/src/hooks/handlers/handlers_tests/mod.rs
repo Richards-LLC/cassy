@@ -18,7 +18,6 @@ mod slack_transport;
 mod worker_denied_tools;
 mod publication_gate;
 mod stop_hook_active;
-mod supervisor_reminder;
 mod tmpfs_guardrail;
 mod unscoped_test_guard;
 

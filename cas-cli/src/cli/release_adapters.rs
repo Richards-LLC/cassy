@@ -5,7 +5,7 @@
 //! notice. Installed and backfill are recovery triggers, no-ops once complete.
 //! GitHub is read as evidence only: no CI job, poller or test rerun is added.
 use super::release_automation::{
-    ReleaseContext, git, published_tag_sha, published_version, receipt_path, release_roots,
+    ReleaseContext, ReleaseInputs, git, published_tag_sha, published_version, receipt_path, release_roots,
     tracked_context,
 };
 use crate::qa_batch::release_close::{
@@ -199,7 +199,7 @@ fn reviewed_proofs(root: &Path, repo: &Path, project: &str, final_sha: &str) -> 
 
 /// A published tag's scope: the tracked cut receipt's when present, else the
 /// train, its tracked inputs and the reviewed candidate the tag contains.
-fn tag_scope(
+pub(super) fn tag_scope(
     root: &Path,
     repo: &Path,
     context: Option<&ReleaseContext>,
@@ -226,8 +226,7 @@ fn tag_scope(
     let (reviewed_sha, proof_refs) = reviewed_proofs(root, repo, &project_id, tag_sha)?;
     let included_task_ids = context
         .and_then(|c| c.release_inputs.as_ref())
-        .and_then(|inputs| inputs["included_task_ids"].as_array())
-        .map(|ids| ids.iter().filter_map(|id| id.as_str().map(str::to_string)).collect())
+        .map(|inputs| inputs.included_task_ids.clone())
         .unwrap_or_default();
     Ok(ReleaseScope {
         project_id,
@@ -239,7 +238,8 @@ fn tag_scope(
         release_tag: Some(tag.to_string()),
         constituent_epic_ids: vec![train_id.to_string()],
         included_task_ids,
-        no_code_members: BTreeMap::new(),
+        no_code_members: context.and_then(|c| c.release_inputs.as_ref())
+            .map(|inputs| inputs.no_code_members.clone()).unwrap_or_default(),
         proof_refs,
     })
 }
@@ -316,10 +316,13 @@ pub struct PromotedArgs {
     /// Merged promotion pull request into the default branch
     #[arg(long)]
     pr: u64,
+    /// Audited explicit delivery IDs and portable no-code proof bindings
+    #[arg(long)]
+    inputs: Option<PathBuf>,
 }
 
 pub fn promoted(args: &PromotedArgs, root: &Path) -> Result<()> {
-    println!("{}", promoted_with(root, args.pr, &LocalReconciler)?);
+    println!("{}", promoted_with(root, args.pr, args.inputs.as_deref(), &LocalReconciler)?);
     Ok(())
 }
 
@@ -338,7 +341,7 @@ fn gh_pr_view(repo: &Path, slug: &str, pr: u64) -> Result<serde_json::Value> {
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn promoted_with(root: &Path, pr: u64, reconciler: &dyn Reconciler) -> Result<String> {
+fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn Reconciler) -> Result<String> {
     use crate::mcp::tools::core::task::repo_context::{integration_branch, resolve_default_branch};
     let (repo, _) = integration_branch(root).context("project checkout unavailable")?;
     let slug = crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3))
@@ -362,6 +365,12 @@ fn promoted_with(root: &Path, pr: u64, reconciler: &dyn Reconciler) -> Result<St
     if proof_refs.is_empty() {
         reviewed_sha = head_sha.to_string();
     }
+    let inputs: ReleaseInputs = inputs.map(|path| -> Result<_> {
+        let inputs: ReleaseInputs = serde_json::from_slice(&fs::read(path)?)?;
+        ensure!(inputs.checked_sha == head_sha || inputs.checked_sha == merge_sha,
+            "release input audit does not identify this promotion");
+        Ok(inputs)
+    }).transpose()?.unwrap_or_default();
     let scope = ReleaseScope {
         project_id,
         repository: slug,
@@ -371,8 +380,8 @@ fn promoted_with(root: &Path, pr: u64, reconciler: &dyn Reconciler) -> Result<St
         promotion_pr: Some(pr),
         release_tag: None,
         constituent_epic_ids: Vec::new(),
-        included_task_ids: Vec::new(),
-        no_code_members: BTreeMap::new(),
+        included_task_ids: inputs.included_task_ids,
+        no_code_members: inputs.no_code_members,
         proof_refs,
     };
     let report = reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)?;
@@ -928,7 +937,7 @@ cat '{}'
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set(crate::qa_pass::github_gate::GH_BIN_ENV, &gh);
         let reconciler = Recording { recipient: owner.id.clone(), calls: Default::default(), done: Default::default() };
-        let launch = |pr: u64| promoted_with(&root, pr, &reconciler).map(drop);
+        let launch = |pr: u64| promoted_with(&root, pr, None, &reconciler).map(drop);
         let command = ["gh", "pr", "merge", "4396", "--auto", "--merge"].join(" ");
         env.set("CAS_AGENT_ROLE", "worker");
         assert!(observe_promotion_merge_with(&root, repo, &command, &owner.id, &launch).is_none());

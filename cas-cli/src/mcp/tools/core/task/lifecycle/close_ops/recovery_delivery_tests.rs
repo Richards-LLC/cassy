@@ -552,6 +552,92 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     let _ = task_attribution::started_delivery(repo, &continued).err().unwrap();
 }
 
+/// GH #1785: the active integration must get its exact parent approval
+/// before the foreign-history gate will let it park for the first time.
+#[tokio::test]
+async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+    git(repo, &["switch", "-qc", "epic/approved", "main"]);
+    std::fs::write(repo.join("child.txt"), "integrated sibling\n").unwrap();
+    git(repo, &["add", "child.txt"]);
+    git(repo, &["commit", "-qm", "fix(cas-beef): sibling delivery"]);
+    let child = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["commit", "-qm", "Assemble approved epic", "--allow-empty"]);
+    let approved = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["switch", "-q", "main"]);
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(&f.worker_path, &["push", "-q", "origin", "main", BRANCH]);
+    git(&f.worker_path, &["merge", "-q", "--no-ff", &approved]);
+    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(),
+        branch: BRANCH.into(),
+        base_sha: f.predecessor.clone(),
+    });
+    task.notes = format!("Prose alone has no authority: merge_source={approved}");
+    tasks.update(&task).unwrap();
+    assert!(task_attribution::started_delivery(repo, &task).is_err());
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let request = |sha: &str| Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+        id: TASK.into(),
+        reason: format!("Reviewed epic import merge_source={sha}"),
+    });
+
+    // Even a supervisor environment cannot turn a registered worker into
+    // the grant authority.
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    assert!(f.core.cas_task_request_changes(request(&approved)).await.is_err());
+    assert!(tasks.get(TASK).unwrap().deliverables.authorized_merge_sources.is_empty());
+    supervisor.cas_task_request_changes(request(&child)).await.unwrap();
+    let wrong = tasks.get(TASK).unwrap();
+    assert_eq!(wrong.status, TaskStatus::InProgress);
+    assert_eq!(wrong.deliverables.factory_branch_start, task.deliverables.factory_branch_start);
+    assert_eq!(wrong.deliverables.factory_branch_anchor, task.deliverables.factory_branch_anchor);
+    assert!(task_attribution::started_delivery(repo, &wrong).is_err());
+
+    supervisor.cas_task_request_changes(request(&approved)).await.unwrap();
+    let granted = tasks.get(TASK).unwrap();
+    assert_eq!(granted.status, TaskStatus::InProgress);
+    assert_eq!(granted.assignee, task.assignee);
+    let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
+    assert_eq!(delivery.commits, vec![f.final_tip.clone()]);
+
+    // The grant does not cover a moved parent, even when its new tip contains
+    // only unnamed work beyond the approved parent.
+    git(repo, &["switch", "-qc", "epic/moved", &approved]);
+    git(repo, &["commit", "-qm", "Unapproved advancement", "--allow-empty"]);
+    git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
+    git(&f.worker_path, &["merge", "-q", "--no-ff", "epic/moved"]);
+    assert!(task_attribution::started_delivery(repo, &granted).is_err());
+    git(&f.worker_path, &["reset", "--hard", &f.final_tip]);
+
+    env.set("CAS_AGENT_ROLE", "worker");
+    let _ = close_output(&f).await;
+    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
+    git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
+    let parked = close(&f).await;
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
+    let window = resolve_task_commit_receipt_window(
+        parked.created_at,
+        &[],
+        task_commit_identity_in_repo(repo, &parked, None).unwrap(),
+    );
+    let paths = task_attribution::paths(repo, "main", &window, Some(&f.final_tip)).unwrap();
+    assert!(paths.iter().any(|path| path == "child.txt"));
+}
+
 /// GH #1558: an ordinary close after pushing a target merge must bind the
 /// merged tip, without asking the worker for an explicit commit receipt.
 #[tokio::test]

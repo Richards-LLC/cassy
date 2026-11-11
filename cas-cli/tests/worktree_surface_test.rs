@@ -4438,8 +4438,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     }
     assert!(results.iter().all(|result| result.as_ref().is_ok_and(|text| !text.contains("NOT PUSHED") && !text.contains("PUSH NOT CONFIRMED"))), "{results:#?}");
 
-    // A different push failure leaves a local-only merge. Retrying must not
-    // claim containment from that local ref while origin lacks the source.
+    // cas-53f2: a rejected push preserves the shared target for the next lane.
+    let before_failed_push = git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]);
     std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let service = make_service(root.clone());
@@ -4457,6 +4457,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
         .unwrap();
     assert!(get_text(&rejected).contains("PUSH NOT CONFIRMED"), "{}", get_text(&rejected));
     assert!(!get_text(&rejected).contains("COMMITTED"), "{}", get_text(&rejected));
+    assert_eq!(git_stdout(&repo.root, &["rev-parse", "refs/heads/epic/race"]), before_failed_push);
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();

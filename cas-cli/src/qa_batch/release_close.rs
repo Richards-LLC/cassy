@@ -597,7 +597,7 @@ pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::Publishe
             "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id, status, cloud_url, slack_permalink, created_at FROM artifacts WHERE id=?", [id], |row| {
                 Ok(cas_store::PublishedArtifact {
                     id: row.get(0)?, task_id: row.get(1)?, name: row.get(2)?, mime: row.get(3)?,
-                    size_bytes: row.get(4)?, sha256: row.get(5)?, cloud_artifact_id: row.get(6)?,
+                    size_bytes: row.get::<_, i64>(4)? as u64, sha256: row.get(5)?, cloud_artifact_id: row.get(6)?,
                     status: row.get(7)?, cloud_url: row.get(8)?, slack_permalink: row.get(9)?,
                     created_at: row.get(10)?, revocation: None,
                 })

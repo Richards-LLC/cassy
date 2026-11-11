@@ -1,5 +1,4 @@
 use super::*;
-use cas_store::TaskStore;
 use cas_types::{FactoryBranchStart, TaskStatus, WorkTarget};
 
 /// Publication of a later tree cannot turn one missing review into a train-wide hold.

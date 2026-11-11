@@ -46,7 +46,7 @@ fn queue_ejected_with_aliases(root: &Path, ejection: &QueueEjection, at: DateTim
         .unwrap_or_else(|| ejection.occurrence.clone());
     let mut event = NewQualityEvent::new(
         queue_ejection_key(ejection, &occurrence),
-        QualityPayload::CheckRun { check_id: MERGE_QUEUE_CHECK.into(), stage: CheckStage::Queue,
+        QualityPayload::CheckRun { review: None, check_id: MERGE_QUEUE_CHECK.into(), stage: CheckStage::Queue,
             outcome: CheckOutcome::Fail, sha: None, minutes: None },
     );
     event.occurred_at = at;
@@ -89,6 +89,21 @@ pub(crate) fn emit_checked(cas_root: &Path, event: &NewQualityEvent) -> cas_stor
     cas_store::record_quality_event(cas_root, &event)
 }
 
+/// Append notice detail for an old turn without counting it as another wake.
+pub(crate) fn emit_turn_checked(root: &Path, original: &NewQualityEvent) -> cas_store::Result<(bool, bool)> {
+    let mut event = original.clone();
+    event.scope = project_scope(root);
+    if cas_store::record_quality_event(root, &event)? { return Ok((true, true)) }
+    if matches!(&event.payload, QualityPayload::Turn { notice_kind: Some(_), .. })
+        && let Some(old) = cas_store::quality_event_by_id(root, &event.id())?
+        && matches!(old.payload, QualityPayload::Turn { notice_kind: None, .. }) {
+        if let QualityPayload::Turn { supersedes, .. } = &mut event.payload { *supersedes = Some(old.id); }
+        event.natural_key = format!("turn_detail|{}", event.natural_key);
+        return Ok((cas_store::record_quality_event(root, &event)?, false));
+    }
+    Ok((false, false))
+}
+
 pub(crate) fn emit(cas_root: &Path, event: &NewQualityEvent) -> bool {
     match emit_checked(cas_root, event) {
         Ok(inserted) => inserted,
@@ -122,7 +137,7 @@ pub(crate) struct Check<'a> {
 pub(crate) fn check_run(cas_root: &Path, check: Check<'_>) {
     let mut event = NewQualityEvent::new(
         check.natural_key,
-        QualityPayload::CheckRun {
+        QualityPayload::CheckRun { review: None,
             check_id: check.check_id.to_string(),
             stage: check.stage,
             outcome: check.outcome,
@@ -143,6 +158,96 @@ pub(crate) fn check_run(cas_root: &Path, check: Check<'_>) {
         && estimates::PIPELINES.contains(&check.check_id) {
         estimates::complete(cas_root, "pipeline", &format!("{}:{sha}", check.check_id), Utc::now(), None, None);
     }
+}
+
+/// The same emitter serves live verdicts and historical recovery. An immutable
+/// older row gets a companion that supersedes its metrics, never a second check.
+pub(crate) fn verification_recorded(root: &Path, verification: &cas_types::Verification) -> bool {
+    let Some(outcome) = verifier_outcome(verification.status) else { return false };
+    let cycle_id = review_cycle(root, verification);
+    let provenance = match verification.provenance {
+        cas_types::VerificationProvenance::TaskVerifier | cas_types::VerificationProvenance::PeerAttested => "independent",
+        cas_types::VerificationProvenance::SupervisorDirect => "supervisor_direct",
+        cas_types::VerificationProvenance::System => "system",
+        cas_types::VerificationProvenance::Legacy => "legacy",
+    }.to_string();
+    let mut event = NewQualityEvent::new(format!("verifier|{}", verification.id),
+        QualityPayload::CheckRun {
+            check_id: "task_verifier".into(), stage: CheckStage::Verifier, outcome,
+            sha: None, minutes: verification.duration_ms.map(|ms| ms as f64 / 60_000.0),
+            review: Some(cas_store::ReviewEvidence {
+                verification_id: verification.id.clone(), cycle_id, provenance, supersedes: None,
+            }),
+        });
+    event.scope = project_scope(root);
+    event.occurred_at = verification.created_at;
+    event.task_id = Some(verification.task_id.clone());
+    event.title = task_title(root, &verification.task_id);
+    event.actor = verification.agent_id.clone();
+    let existing = cas_store::quality_events_for_task(root, &verification.task_id).unwrap_or_default();
+    if existing.iter().any(|old| matches!(&old.payload,
+        QualityPayload::CheckRun { review: Some(review), .. } if review.verification_id == verification.id)) {
+        return false;
+    }
+    if let Some(old) = existing.iter().find(|old| old.id == event.id()) {
+        if let QualityPayload::CheckRun { review: Some(review), .. } = &mut event.payload {
+            review.supersedes = Some(old.id.clone());
+        }
+        event.natural_key = format!("verifier_review|{}", verification.id);
+    }
+    emit(root, &event)
+}
+
+fn review_cycle(root: &Path, verification: &cas_types::Verification) -> Option<String> {
+    let cycles = cas_store::delivery_cycles(root, &verification.task_id).ok()?;
+    let dispatch = verification.dispatch_id.as_deref()
+        .and_then(|id| cas_store::get_verification_dispatch(root, id).ok());
+    let mut anchors = Vec::new();
+    if let Some(dispatch) = &dispatch {
+        if let Some(repo) = &dispatch.repository {
+            anchors.extend(repo.anchor_commits.iter().cloned());
+            anchors.push(repo.head_commit.clone());
+        }
+        if let Some(receipt) = dispatch.receipt_id.as_deref()
+            .and_then(|id| cas_store::get_worker_delivery_by_receipt(root, id).ok().flatten()) {
+            anchors.push(receipt.0.commit_sha);
+        }
+    }
+    let candidates: Vec<_> = cycles.iter().filter(|cycle|
+        cycle.anchors.iter().any(|anchor| anchors.contains(anchor))).collect();
+    match candidates.as_slice() {
+        [cycle] => Some(cycle.cycle_id.clone()),
+        [] if cycles.len() == 1 => Some(cycles[0].cycle_id.clone()),
+        _ => None,
+    }
+}
+
+/// Explicitly attested external/manual work, retained in ordinary task notes.
+/// Its date and release attribution are evidence, not the backfill's run time.
+#[derive(serde::Deserialize)]
+struct AttestedIntervention {
+    occurred_at: DateTime<Utc>, intervention: InterventionKind, key: String,
+    actor: String, release: Option<String>, task_id: Option<String>, source: String,
+}
+
+fn attested_interventions(root: &Path, notes: &str, since: DateTime<Utc>) -> anyhow::Result<usize> {
+    let mut inserted = 0;
+    for line in notes.lines() {
+        let Some((_, json)) = line.split_once("LEDGER INTERVENTIONS: ") else { continue };
+        let rows: Vec<AttestedIntervention> = serde_json::from_str(json)?;
+        for row in rows.into_iter().filter(|row| row.occurred_at >= since) {
+            anyhow::ensure!(!row.source.trim().is_empty() && !row.key.trim().is_empty(), "attestation needs a source and key");
+            let mut event = NewQualityEvent::new(format!("attested|{}|{}", row.intervention.as_str(), row.key),
+                QualityPayload::Intervention { intervention: row.intervention, minutes: None });
+            event.occurred_at = row.occurred_at;
+            event.actor = Some(row.actor);
+            event.task_id = row.task_id;
+            event.release_version = row.release;
+            event.local_note = Some(row.source);
+            inserted += usize::from(emit(root, &event));
+        }
+    }
+    Ok(inserted)
 }
 
 /// `reason` is free text: it stays on this machine as `local_note`.
@@ -646,7 +751,9 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
         inserted += usize::from(queue_ejected_with_aliases(cas_root, ejection, row.created_at, keys));
     }
     let tasks = open_task_store(cas_root)?.list(None)?;
+    cas_store::backfill_delivery_cycles(cas_root, &project_scope(cas_root))?;
     for task in &tasks {
+        inserted += attested_interventions(cas_root, &task.notes, since)?;
         for line in task.notes.lines() {
             let Some(at) = note_time(line).filter(|at| *at >= since) else { continue };
             let kind = if line.contains("DELIVERY BRANCH REBOUND:") {
@@ -692,17 +799,8 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
                 },
             )
         } else {
-            let Some(outcome) = verifier_outcome(verification.status) else { continue };
-            NewQualityEvent::new(
-                format!("verifier|{}", verification.id),
-                QualityPayload::CheckRun {
-                    check_id: "task_verifier".to_string(),
-                    stage: CheckStage::Verifier,
-                    outcome,
-                    sha: None,
-                    minutes: None,
-                },
-            )
+            inserted += usize::from(verification_recorded(cas_root, verification));
+            continue;
         };
         let mut event = event;
         event.occurred_at = verification.created_at;
@@ -710,6 +808,7 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
         event.title = title;
         inserted += usize::from(emit(cas_root, &event));
     }
+    inserted += crate::ui::factory::daemon::runtime::backfill_quality_turns(cas_root, since)?;
     inserted += estimates::backfill_tasks(cas_root, since)?;
     Ok(inserted)
 }
@@ -791,6 +890,53 @@ mod tests {
         assert_eq!(verifier_outcome(Status::Rejected), Some(CheckOutcome::Fail));
         assert_eq!(verifier_outcome(Status::Error), Some(CheckOutcome::Error));
         assert_eq!(verifier_outcome(Status::Skipped), None);
+    }
+
+    #[test]
+    fn review_backfill_binds_the_reviewed_cycle_without_recounting_legacy_checks() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-rounds".into(), "Returned delivery".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        tasks.add(&task).unwrap();
+        let cycle = cas_store::delivery_cycles(&root, &task.id).unwrap()[0].cycle_id.clone();
+        let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "worker", "supervisor",
+            &cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+                peer_premerge: None, repository_root: "/fixture".into(), worktree_root: "/fixture".into(),
+                head_commit: "a".repeat(40), state_digest: "state".into(), target_branch: None,
+                anchor_commits: vec!["a".repeat(40)],
+            }), Utc::now() + Duration::minutes(10), false).unwrap();
+        // The task has already advanced; a backfill must retain cycle 1.
+        task = tasks.get(&task.id).unwrap();
+        task.deliverables.decline_factory_branch_anchor();
+        task.deliverables.delivery_cycle = 2;
+        task.deliverables.factory_branch_anchor = Some("b".repeat(40));
+        tasks.update(&task).unwrap();
+        let mut verdict = cas_types::Verification::new("ver-round".into(), task.id.clone());
+        verdict.provenance = cas_types::VerificationProvenance::TaskVerifier;
+        verdict.status = cas_types::VerificationStatus::Rejected;
+        verdict.dispatch_id = Some(dispatch.id);
+        check_run(&root, Check { natural_key: format!("verifier|{}", verdict.id), check_id: "task_verifier",
+            stage: CheckStage::Verifier, outcome: CheckOutcome::Fail, task_id: Some(&task.id),
+            sha: None, minutes: None, link: None, actor: None });
+        assert!(verification_recorded(&root, &verdict));
+        assert!(!verification_recorded(&root, &verdict));
+        let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
+        assert_eq!(events.len(), 2);
+        let QualityPayload::CheckRun { review: Some(review), .. } = &events[1].payload else { panic!("missing review evidence") };
+        assert_eq!(review.cycle_id.as_deref(), Some(cycle.as_str()));
+        assert_eq!(review.provenance, "independent");
+        assert_eq!(review.supersedes.as_deref(), Some(events[0].id.as_str()));
+        verdict.id = "ver-direct".into();
+        verdict.provenance = cas_types::VerificationProvenance::SupervisorDirect;
+        verdict.dispatch_id = None;
+        assert!(verification_recorded(&root, &verdict));
+        let events = cas_store::quality_events_for_task(&root, &task.id).unwrap();
+        let QualityPayload::CheckRun { review: Some(review), .. } = &events[2].payload else { panic!("missing direct verdict") };
+        assert_eq!(review.cycle_id, None);
+        assert_eq!(review.provenance, "supervisor_direct");
     }
 
     #[test]

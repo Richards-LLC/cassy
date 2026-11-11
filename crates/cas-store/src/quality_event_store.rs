@@ -173,6 +173,15 @@ pub enum InterventionKind {
     Respawn,
     Rebind,
     StaleAlert,
+    CommanderAction,
+    ManualClose,
+    ManualReceipt,
+    ManualProof,
+    OperatorRepair,
+    OperatorConfig,
+    McpReconnect,
+    TrainFreezeLift,
+    AutoCutPause,
 }
 
 impl InterventionKind {
@@ -185,6 +194,15 @@ impl InterventionKind {
             Self::Respawn => "respawn",
             Self::Rebind => "rebind",
             Self::StaleAlert => "stale_alert",
+            Self::CommanderAction => "commander_action",
+            Self::ManualClose => "manual_close",
+            Self::ManualReceipt => "manual_receipt",
+            Self::ManualProof => "manual_proof",
+            Self::OperatorRepair => "operator_repair",
+            Self::OperatorConfig => "operator_config",
+            Self::McpReconnect => "mcp_reconnect",
+            Self::TrainFreezeLift => "train_freeze_lift",
+            Self::AutoCutPause => "auto_cut_pause",
         }
     }
 }
@@ -242,6 +260,17 @@ pub enum FeedbackSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EstimateReference { pub id: String, pub minutes: f64 }
 
+/// Verdict identity and its recorded delivery boundary. Missing cycle evidence
+/// stays unknown; it must never be assigned to a later reopened delivery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReviewEvidence {
+    pub verification_id: String,
+    pub cycle_id: Option<String>,
+    pub provenance: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+}
+
 /// Kind-specific metrics. Strings are slugs, versions or hex; never free text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -257,6 +286,10 @@ pub enum QualityPayload {
     },
     Turn {
         woken_by: WakeChannel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice_kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
         actions: Vec<TurnAction>,
         no_op: bool,
         input_tokens: Option<u64>,
@@ -265,6 +298,8 @@ pub enum QualityPayload {
     },
     CheckRun {
         check_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<ReviewEvidence>,
         stage: CheckStage,
         outcome: CheckOutcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,14 +381,25 @@ impl QualityPayload {
                 if !is_slug(estimate_id) || !is_slug(subject) || !is_slug(reason) || !actual_minutes.is_finite() || *actual_minutes<0.0
                     || (*below_typical && !inside_range) { return Err("invalid estimate outcome".into()); }
             }
-            Self::Turn { actions, no_op, minutes, .. } => {
+            Self::Turn { actions, no_op, minutes, notice_kind, supersedes, .. } => {
+                if notice_kind.as_deref().is_some_and(|kind| !is_slug(kind))
+                    || supersedes.as_deref().is_some_and(|id| !is_slug(id)) {
+                    return Err("invalid notice kind".into());
+                }
                 if *no_op != actions.is_empty() || actions.len() > 8
                     || actions.iter().collect::<std::collections::BTreeSet<_>>().len() != actions.len()
                     || minutes.is_some_and(|n| !n.is_finite() || n < 0.0) {
                     return Err("inconsistent turn metrics".into());
                 }
             }
-            Self::CheckRun { check_id, sha, .. } => {
+            Self::CheckRun { check_id, sha, review, .. } => {
+                if let Some(review) = review
+                    && (!is_slug(&review.verification_id)
+                        || review.cycle_id.as_deref().is_some_and(|id| !is_slug(id))
+                        || review.supersedes.as_deref().is_some_and(|id| !is_slug(id))
+                        || !matches!(review.provenance.as_str(), "independent" | "supervisor_direct" | "legacy" | "system")) {
+                    return Err("invalid review evidence".into());
+                }
                 if !is_slug(check_id) {
                     return Err(format!("check_id is not a slug: {check_id}"));
                 }
@@ -735,6 +781,13 @@ fn collect(
     Ok(events)
 }
 
+/// One local identity, used to enrich immutable legacy metrics without replaying them.
+pub fn quality_event_by_id(root: &Path, id: &str) -> Result<Option<QualityEvent>> {
+    with_conn(root, |conn| Ok(collect(conn,
+        &format!("SELECT {COLUMNS} FROM quality_events WHERE project_id = '' AND id = ?1"), &[&id])?
+        .into_iter().next()))
+}
+
 /// The next batch of this machine's own events after a push cursor.
 pub fn quality_events_after(
     cas_dir: &Path,
@@ -947,7 +1000,7 @@ mod tests {
         }
         drop(guard);
         assert_eq!(quality_events_after(dir.path(), 0, 10).unwrap(), before);
-        let mut turn = NewQualityEvent::new("turn", QualityPayload::Turn {
+        let mut turn = NewQualityEvent::new("turn", QualityPayload::Turn { supersedes: None, notice_kind: None,
             woken_by: WakeChannel::Unknown, actions: vec![], no_op: true,
             input_tokens: None, output_tokens: None, minutes: Some(0.5),
         });
@@ -999,7 +1052,7 @@ mod tests {
         assert!(!wire.contains("secret"), "{wire}");
 
         let mut code = intervention("b");
-        code.payload = QualityPayload::CheckRun {
+        code.payload = QualityPayload::CheckRun { review: None,
             check_id: "fn main() { leak }".into(),
             stage: CheckStage::Lane,
             outcome: CheckOutcome::Fail,

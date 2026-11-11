@@ -1061,6 +1061,19 @@ pub(super) mod tests {
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
+        // Portable report bytes alone do not approve its delivery.
+        assert!(track_on_train(&args, &root, repo, &train).is_err());
+        let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
+            head_commit: args.commit.clone(), state_digest: String::new(), target_branch: None,
+            anchor_commits: vec![args.commit.clone()],
+        });
+        let dispatch = cas_store::create_verification_dispatch_bound(&root, "cas-e3041", "worker", &owner.id,
+            &boundary, chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
+        conn.execute("INSERT INTO verifications (id,task_id,verification_type,status,created_at,dispatch_id) VALUES ('ver-report','cas-e3041','task','approved',?1,?2)",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
         let context: ReleaseContext = serde_json::from_slice(
             &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),

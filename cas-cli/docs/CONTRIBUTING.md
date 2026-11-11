@@ -2022,6 +2022,10 @@ from its own context. Cassy adopts the task's recorded delivery on
 updates its assignment while retaining that delivery tip as the anchor. Commit
 there; the isolation guard still rejects the old owner on that branch.
 
+If reboot cleanup cleared the assignee, adoption uses the task's recorded source
+branch. A source present only in the local `origin` tracking refs is also usable;
+the transfer does not require reassigning the departed worker first.
+
 The receiver must have a clean isolated worktree in the task's repository,
 with its own HEAD able to fast-forward to the delivery or already containing
 it. A HEAD or existing receiver task branch ahead of the delivery is retained

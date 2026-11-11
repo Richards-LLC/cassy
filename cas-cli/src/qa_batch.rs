@@ -3,7 +3,7 @@ pub(crate) mod release_close;
 use crate::mcp::tools::core::task::lifecycle::close_ops::{
     TaskCommitReceiptWindow, squash_receipt_qa_anchor,
 };
-use cas_store::QaBatchReceipt;
+use cas_store::{QaBatchReceipt, TaskStore};
 use cas_types::Task;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -149,7 +149,7 @@ pub(crate) fn resolve_release_inventory(
     // Structured identities must be immutable commits, never a branch alias.
     let recorded_commit =
         |sha: &str| commit(repo, sha).filter(|resolved| resolved.eq_ignore_ascii_case(sha));
-    let store = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
+    let store = release_close::read_tasks(root)?;
     let mut tasks: BTreeMap<_, _> = store
         .list(None)
         .map_err(|e| e.to_string())?
@@ -169,7 +169,7 @@ pub(crate) fn resolve_release_inventory(
     let dependencies = store
         .list_dependencies(Some(DependencyType::ParentChild))
         .map_err(|e| e.to_string())?;
-    let receipts = cas_store::list_qa_batch_receipts(root, &project).map_err(|e| e.to_string())?;
+    let receipts = release_close::read_receipts(root, &project)?;
     let mut inventory = ReleaseInventory {
         scope: scope.clone(),
         deliveries: Vec::new(),
@@ -256,7 +256,7 @@ pub(crate) fn resolve_release_inventory(
             .or(d.merge_commit.as_ref());
         let anchor = recorded.and_then(|sha| recorded_commit(sha));
         let valid_base = |anchor: &str| base.as_deref()
-            .is_some_and(|base| ancestor(repo, base, anchor) == Some(true) && base != anchor);
+            .is_some_and(|base| ancestor(repo, base, anchor) == Some(true));
         let shipped_mapping = |anchor: &str| {
             if ancestor(repo, anchor, &scope.final_release_sha) == Some(true) {
                 Some((anchor.to_string(), ReleaseMembership::Ancestry))
@@ -308,7 +308,7 @@ pub(crate) fn resolve_release_inventory(
                             && p.sha256.len() == 64
                             && p.sha256.bytes().all(|b| b.is_ascii_hexdigit())
                             && p.size_bytes > 0
-                            && p.reviewed_sha == scope.reviewed_sha
+                            && recorded_commit(&p.reviewed_sha).is_some()
                     })
             }) else {
                 issue(ReleaseInventoryCode::MissingNoCodeProof);
@@ -858,7 +858,11 @@ pub(crate) fn prepare_receipt(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
-        if integration_state(&repo, &staging, &target) != Some(true) {
+        // A published release descends from the historical epic target. Its
+        // members are bound by anchor ancestry above, not by that ref's tip.
+        if schema != cas_store::RELEASE_VERDICT_SCHEMA
+            && integration_state(&repo, &staging, &target) != Some(true)
+        {
             return Err(format!(
                 "staging_sha is not on task {id}'s configured target {target}"
             ));

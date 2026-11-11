@@ -1,0 +1,4 @@
+title: Release completion honors approved peer source anchors when the repository head records the later landed merge, while unrelated-head approvals stay held
+tasks: [cas-d37f]
+invariants: [FACTORY-RELEASE-CLOSEOUT]
+journeys: [CLI-RELEASE]

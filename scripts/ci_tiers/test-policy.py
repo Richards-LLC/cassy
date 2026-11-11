@@ -25,6 +25,7 @@ class PolicyTests(unittest.TestCase):
             cls.files.update(entry['source'].get('files', [entry['source'].get('file')]))
         # Workflow sources the behavioural cases below read beyond the registry.
         cls.files.update(['.github/actions/setup-rust-linux/action.yml', '.github/workflows/release.yml', '.github/workflows/lane.yml', '.github/workflows/full-validation.yml', '.github/actions/run-script-suite-tests/action.yml'])
+        cls.files.update(['.github/actions/setup-linux-linker/action.yml', '.github/workflows/release-prebuild.yml'])
 
     def setUp(self):
         self.owner = tempfile.TemporaryDirectory(prefix='ci-policy-')
@@ -332,23 +333,33 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
                 if proof == 'full-gate':
                     self.assertTrue(self.gh_expr(smoke['if'], route))
 
-    def test_superseded_factory_branch_runs_cancel_and_nothing_else_groups_cas_12ab(self):
-        def valid(workflow):
+    def test_train_runs_finish_while_factory_runs_cancel_cas_43ab(self):
+        cases = [('push', 'refs/heads/factory/fixture', True, True),
+                 ('push', 'refs/heads/epic/release-train-fixture', False, True),
+                 ('push', 'refs/heads/epic/ordinary', False, False),
+                 ('push', 'refs/heads/main', False, False),
+                 ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False, False)]
+
+        def valid(workflow, routes):
+            import re
             concurrency = workflow.get('concurrency', {})
-            for event, ref, cancels in [('push', 'refs/heads/factory/fixture', True),
-                                        ('push', 'refs/heads/epic/release-train-fixture', True),
-                                        ('push', 'refs/heads/epic/ordinary', False),
-                                        ('push', 'refs/heads/main', False),
-                                        ('merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', False)]:
+            def group(context):
+                return re.sub(r'\$\{\{.*?\}\}', lambda m: str(self.gh_value(m.group(), context)),
+                              concurrency.get('group', ''))
+            for event, ref, cancels, grouped in routes:
                 values = [{'github.event_name': event, 'github.ref': ref, 'github.run_id': str(run)} for run in [1, 2]]
                 if any(self.gh_expr(concurrency.get('cancel-in-progress', 'false'), v) != cancels for v in values):
                     return False
-                groups = [self.gh_value(concurrency.get('group', ''), v) for v in values]
-                if (groups[0] == groups[1]) != cancels:
+                groups = [group(v) for v in values]
+                if (groups[0] == groups[1]) != grouped:
                     return False
+            train_groups = [group({'github.event_name': 'push', 'github.ref': ref, 'github.run_id': '1'})
+                            for ref in ['refs/heads/epic/release-train-a', 'refs/heads/epic/release-train-b']]
+            if train_groups[0] == train_groups[1]:
+                return False
             return True
         workflow = self.ci()
-        self.assertTrue(valid(workflow))
+        self.assertTrue(valid(workflow, cases))
         for mutate in (
             lambda w: w.pop('concurrency'),
             lambda w: w['concurrency'].__setitem__('cancel-in-progress', True),
@@ -357,7 +368,15 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         ):
             changed = copy.deepcopy(workflow)
             mutate(changed)
-            self.assertFalse(valid(changed))
+            self.assertFalse(valid(changed, cases))
+
+        caller = copy.deepcopy(policy.load(self.root / '.github/workflows/full-validation.yml'))
+        routes = [cases[1], cases[-1]]
+        self.assertTrue(valid(caller, routes))
+        for field, value in [('cancel-in-progress', True), ('group', '${{ github.run_id }}')]:
+            changed = copy.deepcopy(caller)
+            changed['concurrency'][field] = value
+            self.assertFalse(valid(changed, routes))
 
     @staticmethod
     def gh_value(expression, context):
@@ -789,6 +808,49 @@ shutil.copyfile(os.environ['PRODUCER_CLI'], out/'cas')
         # which cannot execute these Ubuntu workflow bodies (e.g. mapfile).
         bash = shutil.which('bash')
         return subprocess.run([bash, '-euo', 'pipefail', '-c', body], env=environment, cwd=self.root, capture_output=True, text=True)
+
+    def dependency_fixture(self):
+        commands = self.root / 'bin'; commands.mkdir()
+        scripts = {
+            'gcc': ':', 'mold': ':', 'npm': ':', 'python3': ':',
+            'sudo': '[[ "$*" == "-n true" ]] || exit 100',
+            'node': 'echo /fixture/chrome',
+            'ldd': 'echo "libfixture.so => ${LIBRARY:-/lib/libfixture.so}"',
+            'npx': 'echo "$*" >> "$CALLS"; [[ "$*" != *--with-deps* ]]',
+        }
+        for name, body in scripts.items():
+            command = commands / name
+            command.write_text('#!/bin/bash\n' + body + '\n'); command.chmod(0o755)
+        calls = self.root / 'calls'; calls.touch()
+        return {'PATH': f'{commands}:/usr/bin:/bin', 'CALLS': str(calls),
+                'SHARD': '1', 'GITHUB_WORKSPACE': str(self.root)}
+
+    def test_installed_linkers_skip_unavailable_ubuntu_mirrors(self):
+        values = self.dependency_fixture()
+        setup = policy.load(self.root / '.github/actions/setup-rust-linux/action.yml')
+        prebuild = policy.load(self.root / '.github/workflows/release-prebuild.yml')
+        linker = setup['runs']['steps'][0]
+        release_linker = next(s for s in prebuild['jobs']['build']['steps']
+                              if s.get('uses') == linker.get('uses'))
+        self.assertEqual(release_linker['uses'], linker['uses'])
+        action = policy.load(self.root / linker['uses'] / 'action.yml')
+        result = self.run_body(action['runs']['steps'][0]['run'], values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_browser_setup_installs_system_packages_only_for_missing_libraries(self):
+        values = self.dependency_fixture()
+        jobs = self.ci()['jobs']
+        bodies = [next(s['run'] for s in jobs['fast-validation-web']['steps']
+                       if s.get('env', {}).get('VISUAL_QA_ARTIFACT_DIR')),
+                  next(s['run'] for s in jobs['fast-validation-journeys']['steps']
+                       if s.get('working-directory') == 'hub-web')]
+        for body, missing in itertools.product(bodies, (False, True)):
+            with self.subTest(missing=missing, body=body[:25]):
+                calls = Path(values['CALLS']); calls.write_text('')
+                result = self.run_body(body, {**values, 'LIBRARY': 'not found' if missing else '/lib/libfixture.so'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+                self.assertEqual(['playwright', 'install-deps', 'chromium'] in argv, missing)
 
     def rustup_fixture(self, state):
         fixture = self.root / state

@@ -163,12 +163,7 @@ jobs:
 
       - name: Install Linux linker
         if: steps.compile.outputs.needed == 'true'
-        run: |
-          sudo apt-get update
-          # Keep this aligned with .cargo/config.toml's gcc + mold toolchain.
-          sudo apt-get install -y binutils file gcc mold
-          gcc --version
-          mold --version
+        uses: ./.github/actions/setup-linux-linker
 
       - name: Setup sccache
         if: steps.compile.outputs.needed == 'true'

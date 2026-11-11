@@ -3506,8 +3506,8 @@ impl FactoryApp {
 
         let cas_dir = self.cas_dir().to_path_buf();
 
-        // Mark agent as shutdown in Cassy first; this must succeed so supervisor sees errors
-        // instead of silently leaving stale idle agents in director panels.
+        // Resolve the exact old identities before teardown; the replacement
+        // must never be included in their retirement.
         let matching_agents =
             worker_registry_rows_for_shutdown(&agents, name, self.factory_session.as_deref());
         let agent = matching_agents.first().copied().ok_or_else(|| {
@@ -3564,15 +3564,6 @@ impl FactoryApp {
         let has_open_tasks =
             worker_has_open_tasks(&cas_dir, name) || worker_has_open_tasks(&cas_dir, &agent_id);
 
-        // Retire every same-name row in this factory session. Older builds
-        // allowed nested headless Claude calls to register child session IDs
-        // under the parent worker name; shutting down only `.find()` left the
-        // remaining rows fresh/Active after the pane and worktree were gone.
-        if let Some(detail) = retire_worker_identities(&cas_dir, agent_store.as_ref(), name, &matching_agents) {
-            tracing::warn!(worker = name, "{detail}");
-            self.set_error(detail);
-        }
-
         // Kill the worker's PTY process tree and remove from mux (cas-8c5a).
         // kill_worker signals the entire process group (SIGKILL when force=true,
         // SIGTERM when false), ensuring the full node→codex tree is terminated,
@@ -3603,6 +3594,15 @@ impl FactoryApp {
         }
         if let Some(pgid) = process_group {
             self.untrack_worker_process_group_if_gone(pgid).await;
+        }
+
+        // cas-625c: release leases after teardown. An in-flight task start
+        // can still claim while the old process is handling SIGTERM. Retiring
+        // before the kill leaves that later lease blocking its replacement.
+        // Retire every captured same-name row, including nested sessions.
+        if let Some(detail) = retire_worker_identities(&cas_dir, agent_store.as_ref(), name, &matching_agents) {
+            tracing::warn!(worker = name, "{detail}");
+            self.set_error(detail);
         }
 
         // Reclaim safe terminal/parked output for shutdown AND replacement.
@@ -8078,6 +8078,93 @@ mod tests {
             assert_eq!(task.assignee.as_deref(), Some("wise-raven"), "{id} keeps its assignee");
             assert_eq!(task.status, status, "{id} keeps its status");
         }
+    }
+
+    /// Replay a start that finishes while recycle is stopping the old pane.
+    /// Releasing its lease before SIGTERM lets that in-flight call reclaim it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recycle_releases_late_start_lease_before_replacement_starts_cas_625c() {
+        use crate::mcp::{CasCore, tools::IdRequest};
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir(&project).unwrap();
+        env.set_current_dir(&project);
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        let agents = open_agent_store(&root).unwrap();
+        let old = cas_types::Agent::new_with_role(
+            "old-session".into(), "recycled-worker".into(), cas_types::AgentRole::Worker,
+        );
+        agents.register(&old).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let task = task_with("cas-625c", Some(&old.name), TaskStatus::Open);
+        tasks.add(&task).unwrap();
+        let core = |id: &str| {
+            let core = CasCore::with_daemon(root.clone(), None, None);
+            core.set_agent_id_for_testing(id.into());
+            core
+        };
+        let old_core = core(&old.id);
+        let start = || Parameters(IdRequest { id: task.id.clone() });
+        old_core.cas_task_start(start()).await.unwrap();
+
+        // The PTY acknowledges that SIGTERM was delivered, then waits for the
+        // in-flight MCP call to finish before it exits. No timing-based race.
+        let socket = root.join("stop.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let pty = cas_mux::Pty::spawn(&old.name, cas_mux::PtyConfig {
+            command: "python3".into(),
+            args: vec!["-c".into(), r#"
+import signal, socket, sys
+def connect():
+    stream = socket.socket(socket.AF_UNIX)
+    stream.connect(sys.argv[1])
+    return stream
+def stop(*_):
+    with connect() as stream:
+        stream.recv(1)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+connect().close()
+while True:
+    signal.pause()
+"#.into(), socket.display().to_string()],
+            cwd: Some(project), env: vec![], env_remove: vec![], rows: 24, cols: 80,
+        }).unwrap();
+        let mut app = FactoryApp::for_test_at(root.clone());
+        app.adopt_worker_pane_for_test(cas_mux::Pane::with_pty(
+            &old.name, cas_mux::PaneKind::Worker, pty, 24, 80, cas_mux::SupervisorCli::Codex,
+        ).unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+            .await.unwrap().unwrap();
+        let late_start = async {
+            let (stream, _) = listener.accept().await.unwrap();
+            let result = old_core.cas_task_start(start()).await;
+            stream.writable().await.unwrap();
+            stream.try_write(&[1]).unwrap();
+            result.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let (stopped, ()) = tokio::join!(
+                app.shutdown_worker_for_recycle(&old.name), late_start,
+            );
+            stopped.unwrap();
+        }).await.unwrap();
+        app.join_worker_worktree_cleanups();
+
+        let replacement = cas_types::Agent::new_with_role(
+            "new-session".into(), old.name.clone(), cas_types::AgentRole::Worker,
+        );
+        agents.register(&replacement).unwrap();
+        core(&replacement.id).cas_task_start(start()).await
+            .expect("the replacement must start without a manual lease release");
+        assert_eq!(agents.get_lease(&task.id).unwrap().unwrap().agent_id, replacement.id);
+        let resumed = tasks.get(&task.id).unwrap();
+        assert_eq!(resumed.status, TaskStatus::InProgress);
+        assert_eq!(resumed.assignee.as_deref(), Some(old.name.as_str()));
     }
 
     #[test]

@@ -76,6 +76,13 @@ owned by release review, its exact-anchor coverage also satisfies deferred
 batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
 that old wait; live or newer dispatches and rejected verdicts retain authority.
 
+For a release verdict, `staging_sha` may name the published release commit
+after historical epic targets were merged. Every listed delivery anchor must
+be an ancestor of that exact reviewed SHA; the release commit need not be on
+each historical epic ref. One receipt can therefore cover multiple epics while
+retaining the published SHA and immutable member anchors. Ordinary QA receipts
+still require the reviewed SHA on every member's configured target.
+
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same
 implementation lineage: a QA reviewer, a verifier, or a worker on this or

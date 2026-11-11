@@ -8058,6 +8058,14 @@ impl FactoryDaemon {
     /// (cas-786a6: the reads and stamps run in that job, not here).
     fn forward_operator_replies(&mut self, replies: Vec<OperatorReplyRead>) {
         if self.ws_clients.is_empty() {
+            for reply in replies {
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), reply.queued.id, "operator",
+                    super::prompt_queue_jobs::QueueStamp::OperatorReplyDeferred {
+                        retry_at: chrono::Utc::now() + chrono::Duration::seconds(1),
+                    },
+                );
+            }
             return;
         }
         for OperatorReplyRead {
@@ -14225,6 +14233,15 @@ mod tests {
         )
         .unwrap()
         .remove(0);
+        // Selection may finish after its Commander client disconnects.
+        let disconnected = daemon.ws_clients.remove(&0).unwrap();
+        daemon.forward_operator_replies(vec![reply.clone()]);
+        daemon.queue_jobs.apply_completions();
+        let returned = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(returned.stage, cas_store::DeliveryStage::Gated);
+        assert!(returned.retry.next_attempt_at.is_some());
+        assert_eq!(returned.retry.delivery_attempts, 0);
+        daemon.ws_clients.insert(0, disconnected);
         let output = Arc::new(Mutex::new(Vec::new()));
         let sink = output.clone();
         let subscriber = tracing_subscriber::fmt()

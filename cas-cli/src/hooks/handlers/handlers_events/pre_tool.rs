@@ -13020,6 +13020,44 @@ mod worker_commit_guard_tests {
         assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
+    #[test]
+    fn shell_syntax_checks_preserve_worker_scope_cas_93e0() {
+        let mut env = TestEnvGuard::temp_home();
+        let repo = make_git_repo();
+        let linked = tempfile::tempdir().unwrap();
+        add_linked_worktree(repo.path(), linked.path(), "factory/syntax-worker");
+        let repo_path = repo.path().display().to_string();
+        let linked_path = linked.path().display().to_string();
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "syntax-worker");
+        env.set("CAS_CLONE_PATH", &linked_path);
+
+        for (command, denied) in [
+            ("bash -n scripts/release.sh scripts/fast-rows-pre-push.sh".into(), false),
+            ("bash --noexec scripts/release.sh".into(), false),
+            ("sh -n scripts/release.sh".into(), false),
+            ("bash -l -n 'scripts/release check.sh'".into(), false),
+            ("bash -n -- scripts/release.sh".into(), false),
+            ("bash --noexec -- scripts/release.sh".into(), false),
+            ("bash -n scripts/release.sh > syntax.log 2>&1".into(), false),
+            ("bash -n scripts/release.sh > /tmp/cas-93e0.log 2>&1".into(), true),
+            (format!("bash -n scripts/release.sh; git -C '{repo_path}' commit -m probe"), true),
+            (format!("bash -n +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash +n -c 'cd \"{repo_path}\"; git commit -m probe'"), true),
+            (format!("bash -c 'cd \"{repo_path}\"; git commit -m probe' -n"), true),
+        ] {
+            let input = hook_git_write_input(&linked_path, &command);
+            let output = handle_pre_tool_use(&input, None).expect("pre-tool hook");
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(
+                value["hookSpecificOutput"]["permissionDecision"] == "deny",
+                denied,
+                "{command}: {value}",
+            );
+        }
+    }
+
     // ── Integration: handle_pre_tool_use for Bash git commit ─────────────
 
     fn add_linked_worktree(repo: &std::path::Path, worktree: &std::path::Path, branch: &str) {

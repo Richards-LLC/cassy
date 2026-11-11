@@ -81,6 +81,8 @@ pub(crate) enum QueueStamp {
         reason: cas_store::PendingReason,
         detail: Option<String>,
     },
+    /// Commander disappeared between selecting the reply and forwarding it.
+    OperatorReplyDeferred { retry_at: chrono::DateTime<chrono::Utc> },
     /// Terminal: dropped (cas-4272).
     Dropped { detail: Option<String> },
     /// Terminal: superseded by a newer premise (cas-4272).
@@ -153,6 +155,7 @@ impl QueueStamp {
             Self::DirectedWake { .. } => "directed_wake",
             Self::WakeAttempt { .. } => "wake_attempt",
             Self::Retry { .. } => "retry",
+            Self::OperatorReplyDeferred { .. } => "operator_reply_deferred",
             Self::Dropped { .. } => "dropped",
             Self::Superseded { .. } => "superseded",
             Self::Suppressed { .. } => "suppressed",
@@ -189,6 +192,7 @@ impl QueueStamp {
             Self::Retry { reason, detail } => queue
                 .record_retry(row, *reason, detail.as_deref())
                 .map(drop),
+            Self::OperatorReplyDeferred { retry_at } => queue.defer_operator_reply(row, *retry_at),
             Self::Dropped { detail } => queue.mark_dropped(row, detail.as_deref()),
             Self::Superseded { detail } => queue.mark_superseded(row, detail),
             Self::Suppressed { detail } => queue.mark_suppressed(row, detail.as_deref()),

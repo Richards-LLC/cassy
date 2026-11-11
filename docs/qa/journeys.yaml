@@ -589,6 +589,9 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J5-SELECTED-REPLY-RECOVERY:
+    statement: Losing a Commander client after reply selection saves a retry without spending a transport attempt; reconnect can deliver it, while an unreceived zero-attempt selection expires after fifteen minutes with one sender notice. Never-selected offline replies and device receipts remain intact.
+    check: Run selected_operator_without_clients_expires_once_cas_1962 for explicit and mirrored replies across selector loss, durable return, reconnect and no selection; run cas_7bcb_operator_reply_backoff_caps_and_resets for the client-loss race and WebSocket delivery.
   HUB-WORKER-TIMELINE-HEADER:
     statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.
     check: Verify committed dist/app.js reads the card's stateLabel and omits the legacy Activity button. Run work-picture.test.ts for active, executing, blocked, parked and offline data and both HUB-J25 worker timeline parts. Inspect J03 for the flat name opener and restored focus, including the phone overflow route. In batch QA compare card, timeline and Team state words and inspect long-title wrapping.

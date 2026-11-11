@@ -106,6 +106,31 @@ trait ReleaseEffects {
     }
 }
 
+fn retire_unproven_members(receipt: &mut ReleaseReconcileReceipt, inventory: &ReleaseInventory) {
+    // Older discovery treated unshipped work as declared membership. Retire
+    // only those unproven holds when the current inventory excludes them.
+    // A saved close intent pins a real delivery cycle and is never discarded.
+    let current_members: std::collections::BTreeSet<_> = inventory.deliveries.iter()
+        .map(|delivery| delivery.task_id.as_str())
+        .chain(inventory.exceptions.iter().map(|exception| exception.task_id.as_str()))
+        .chain(inventory.scope.included_task_ids.iter().map(String::as_str))
+        .chain(inventory.scope.no_code_members.keys().map(String::as_str))
+        .collect();
+    let discarded: std::collections::BTreeSet<_> = receipt.exceptions.iter()
+        .filter(|exception| matches!(exception.code,
+            crate::qa_batch::ReleaseInventoryCode::MissingAnchor
+            | crate::qa_batch::ReleaseInventoryCode::MissingMapping
+            | crate::qa_batch::ReleaseInventoryCode::MissingNoCodeProof))
+        .filter(|exception| !current_members.contains(exception.task_id.as_str())
+            && !receipt.close_intents.contains_key(&exception.task_id)
+            && matches!(receipt.members.get(&exception.task_id), Some(CassyMergeClose::Held(_))))
+        .map(|exception| exception.task_id.clone())
+        .collect();
+    receipt.members.retain(|id, _| !discarded.contains(id));
+    receipt.sync_pending.retain(|id| !discarded.contains(id));
+    receipt.residuals.retain(|residual| !discarded.contains(&residual.task_id));
+}
+
 async fn resume(
     root: &Path,
     scope: &ReleaseScope,
@@ -183,6 +208,7 @@ async fn resume(
         save(&receipt)?;
         return Ok(receipt);
     }
+    retire_unproven_members(&mut receipt, inventory);
     receipt.scope = scope.clone();
     receipt.exceptions = inventory.exceptions.clone();
     let successful = |outcome: &CassyMergeClose| {
@@ -694,13 +720,24 @@ mod tests {
             release_id: scope.release_id.clone(),
             final_release_sha: scope.final_release_sha.clone(),
         };
-        let checkpoint = ReleaseOperation::open(temp.path(), key)
+        let mut checkpoint = ReleaseOperation::open(temp.path(), key.clone())
             .unwrap()
             .load()
             .unwrap()
             .unwrap();
         assert!(checkpoint["members"].get("cas-a").is_some());
         assert!(checkpoint["members"].get("cas-b").is_none());
+        // GH #1790: older inventory discovery persisted these unrelated holds.
+        for id in ["cas-unshipped", "cas-unstarted", "cas-undeclared-report"] {
+            checkpoint["members"][id] = serde_json::to_value(
+                CassyMergeClose::Held("RELEASE_MEMBER_HELD".into())).unwrap();
+        }
+        checkpoint["exceptions"] = serde_json::json!([
+            {"task_id": "cas-unshipped", "code": "missing_mapping"},
+            {"task_id": "cas-unstarted", "code": "missing_anchor"},
+            {"task_id": "cas-undeclared-report", "code": "missing_no_code_proof"}
+        ]);
+        ReleaseOperation::open(temp.path(), key).unwrap().save(&checkpoint).unwrap();
         assert!(
             completed_operation(
                 temp.path(),

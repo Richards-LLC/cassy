@@ -3940,6 +3940,7 @@ impl CasService {
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
         let mut shown_redeliveries: Vec<i64> = Vec::new();
+        let mut sent_in_full: Vec<i64> = Vec::new();
         let mut rendered_named: Vec<i64> = Vec::new();
         // cas-098d (GH #904): older transport deliveries are claimed and named,
         // not replayed.
@@ -4162,6 +4163,30 @@ impl CasService {
                     ));
                     continue;
                 }
+                // GH #1799: a body too long for any hook went whole in the
+                // transport's own copy (`claude_teams_inbox_text`), which shows
+                // at the recipient's next turn boundary. A poll right after the
+                // wake names it instead of paying for the body twice.
+                InboxRedelivery::MarkRedelivery
+                    if !cas_store::fits_hook_surface(&message.prompt)
+                        && message.processed_at.is_some_and(|at| {
+                            (now - at).num_seconds() <= INBOX_REPLAY_AFTER_SECS
+                        }) =>
+                {
+                    sent_in_full.push(message.id);
+                    body.push_str(&format!(
+                        "**[{}] From: {} — sent in full (not repeated here)**\nSummary: {}\n\
+                         Its full text was handed to you as its own message at {}; it shows at \
+                         your next turn boundary. If it hasn't arrived after {} minutes, \
+                         inbox_poll notification_id={} shows it.\n\n",
+                        message.id,
+                        message.source,
+                        message.summary.as_deref().unwrap_or("(no summary)"),
+                        message.processed_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
+                        INBOX_REPLAY_AFTER_SECS / 60,
+                        message.id,
+                    ));
+                }
                 InboxRedelivery::MarkRedelivery => {
                     redelivered += 1;
                     // cas-6ccb: shown again in full here; no third showing.
@@ -4194,7 +4219,7 @@ impl CasService {
                 }
             }
             rendered += 1;
-            if named.contains(&message.id) {
+            if named.contains(&message.id) && !sent_in_full.contains(&message.id) {
                 rendered_named.push(message.id);
             }
         }
@@ -4210,6 +4235,9 @@ impl CasService {
             }))
             .chain(shown_redeliveries.iter().map(|id| {
                 (*id, "shown again by inbox_poll as an earlier delivery".to_string())
+            }))
+            .chain(sent_in_full.iter().map(|id| {
+                (*id, "named by inbox_poll; the transport carried the full body".to_string())
             }))
             // A named read explicitly requested this full body. Do not inject
             // the batch-poll recovery repeat; this settles rendering only,
@@ -6055,6 +6083,46 @@ mod cas_89e1_post_merge_message_type_tests {
         );
         assert!(response.contains(full_body), "{response}");
         assert!(!response.contains(automatic_body), "{response}");
+    }
+
+    /// GH #1799: the v4.15.0 release_closeout (9,295 characters) reached the
+    /// supervisor whole twice: in the transport's own copy, and again from the
+    /// inbox_poll its wake asked for. One full-body delivery; the poll names it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_over_length_notice_reaches_the_supervisor_in_full_once() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SESSION", "factory-a");
+        let temp = tempfile::tempdir().expect("temporary Cassy root");
+        let cas_root = temp.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).expect("Cassy root");
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let mut supervisor = Agent::new("supervisor-id".into(), "supervisor".into());
+        supervisor.role = AgentRole::Supervisor;
+        supervisor.factory_session = Some("factory-a".into());
+        core.open_agent_store().expect("agent store").register(&supervisor).expect("register");
+        core.set_agent_id_for_testing(supervisor.id.clone());
+
+        let queue = crate::store::open_prompt_queue_store(&cas_root).expect("prompt queue");
+        let closeout = format!("<cas-supervisor-notice kind=\"release_closeout\">\n{}", "- cas-0288: residual\n".repeat(450));
+        assert!(!cas_store::fits_hook_surface(&closeout));
+        let id = queue
+            .enqueue_with_session("supervisor-notice:102539", "supervisor", &closeout, "factory-a")
+            .expect("enqueue closeout");
+        // The daemon hands it over: the transport's copy carries the whole body.
+        let transport = crate::ui::factory::daemon::runtime::delivery::claude_teams_inbox_text(
+            &closeout, &closeout, "director", id);
+        assert!(transport.contains(&closeout));
+        queue.mark_transport_delivered(id).expect("transport delivered");
+
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let poll = || serde_json::from_value(serde_json::json!({"action": "inbox_poll", "notification_id": id})).unwrap();
+        let response = response_text(service.inbox_poll(poll()).await.expect("named read"));
+        assert!(response.contains(&id.to_string()), "{response}");
+        assert!(!response.contains("- cas-0288: residual"), "the poll names the row, not a second body: {response}");
     }
 
     #[tokio::test(flavor = "current_thread")]

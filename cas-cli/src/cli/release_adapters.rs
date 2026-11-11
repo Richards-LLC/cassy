@@ -754,6 +754,10 @@ mod tests {
                 "closed": 1, "already_closed": 1, "held": 1, "not_eligible": 1,
                 "residual": 2, "complete": false,
             })),
+            ("complete", BTreeMap::new(), 0, serde_json::json!({
+                "closed": 0, "already_closed": 0, "held": 0, "not_eligible": 0,
+                "residual": 0, "complete": true,
+            })),
         ] {
             let scope = scope(release);
             let mut receipt = reconciler.receipt(
@@ -764,7 +768,7 @@ mod tests {
                 task_id: format!("cas-{i:04x}"), gate: "QA_MISSING".into(),
                 owner: owner.id.clone(), next_action: "record proof".into(),
             }).collect();
-            receipt.complete = false;
+            receipt.complete = expected["complete"].as_bool().unwrap();
             for _ in 0..2 { send_notice(&root, &scope, &receipt).unwrap(); }
             let key = format!("supervisor-notice:release_closeout:{}", receipt.notice_intent.unwrap().key);
             let row = crate::store::open_supervisor_queue_store(&root).unwrap()
@@ -772,7 +776,7 @@ mod tests {
             let payload: serde_json::Value = serde_json::from_str(&row.payload).unwrap();
             assert_eq!(payload["context"]["closeout_counts"], expected);
         }
-        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 4);
+        assert_eq!(crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap().len(), 5);
     }
 
     /// The review ledger scaffold publishes both blocks for its scope, and #2's

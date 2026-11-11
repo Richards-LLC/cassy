@@ -1,0 +1,4 @@
+title: A foreign Slack claim owner stays visible in the refusal even without a local registration
+tasks: [cas-b584]
+invariants: [FACTORY-MANAGED-MENTION-CLAIMS]
+journeys: [FACTORY-SUPERVISE]

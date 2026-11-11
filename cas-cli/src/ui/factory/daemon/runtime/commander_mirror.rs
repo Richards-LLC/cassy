@@ -1050,6 +1050,7 @@ pub(super) fn scan_supervisor_replies(
                 options: Vec::new(),
                 attachments: Vec::new(),
                 reply_to_session: None,
+                task_id: None,
             };
             let Ok(payload) = serde_json::to_string(&payload) else {
                 continue;
@@ -1999,6 +2000,7 @@ mod tests {
             options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
+            task_id: None,
         })
         .unwrap();
         assert!(

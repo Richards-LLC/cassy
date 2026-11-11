@@ -7,6 +7,50 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [4.16.0] - 2026-11-11
+
+### Fixed — Release cuts
+
+- **Preview closeout before enqueue** — Release cuts evaluate the candidate's per-member close decisions before pushing. A nonempty cut with no closable members refuses; cut receipts name every missing review and record candidate build time. `cas release preview --scope` replays a historical release without changing its store.
+
+### Fixed — Factory workers
+
+- **Shared-file ownership after task rollover** — Suppress collision warnings for the same worker across queued tasks and for retired or landed local claims. Active peer warnings retain the owning task and branch, without changing Cloud claim authority.
+
+### Fixed — Commander
+
+- **Recover replies after a disconnect** — Replies selected just as Commander disconnects return to the queue with a saved retry time. Selected replies without a device receipt expire after fifteen minutes and notify their sender once, including automatic supervisor mirrors.
+
+### Fixed — Factory merges
+
+- **Pre-merge verifier response** — Was: merging a parked delivery could wait for verifier account probes and startup work until the tool timed out with an unknown outcome. Now: the merge returns its held dispatch after claiming one verifier, while startup continues in the background. Startup failures retain the existing claim recovery and owner notice.
+
+### Fixed — Factory
+
+- **Resume after worker recycle** — Recycling releases the old session's task leases after stopping its process, so a task start finishing during shutdown cannot block the replacement worker.
+- **Shell script calls** — Workers can run `bash` or `sh` with a literal script path, arguments and log redirects without a false nested-shell refusal. Existing command-string Git scope checks remain enforced.
+- **Long notices reach the supervisor once** — A notice too long for the hook block, such as a release closeout, already goes whole in the transport's own teammate copy. The `inbox_poll` its wake asks for repeated the whole body, so every closeout cost about 9 KB of context twice. Within five minutes of that handoff, the poll now names the message and says the full text is on its way. After that it still shows the body, in case the copy never arrived.
+- **One verdict for the published release** — Release batch receipts accept the reviewed release SHA for deliveries from multiple historical epic targets, retaining the published SHA and checking every member's delivery ancestry. Ordinary QA receipts keep their target containment check.
+- **Recover unassigned worker branches after reboot** — Branch-adopting task transfers use the recorded source branch when cleanup cleared its assignee, including a source available only through origin's tracking ref.
+
+### Fixed — Release completion
+
+- **Close shipped members independently** — Release completion consumes each member's recorded approval and published ancestry with one guarded close write. Missing reviews remain individual residuals, reports bind to their own approval head, equal base/anchor deliveries remain valid, and already closed tasks stay counted correctly. The same evaluator supports a preview without task, receipt or artifact-cache writes.
+- **Honor peer-approved source anchors** — A recorded approval remains valid when its repository head identifies the landed merge and its bound delivery anchors name the reviewed source. Unrelated-head approvals remain held, and preview retains its read-only behavior.
+
+### Fixed — Factory assignments
+
+- **File defects to a supervisor** — Creating or updating a task assigned to a registered supervisor no longer applies worker branch freshness checks to the supervisor's checkout. Stale worker assignments remain guarded.
+
+### Fixed — Release closeout
+
+- **Reconcile with the installed release** — The installer verifies the new binary before running closeout. Failed older publications keep their own receipts and retry after newer installations, with bounded per-tick work and successful replay deduplication.
+- **Replay stale closeout operations once** — Release receipts record the reconciling binary version. Older binaries refuse close effects, and an installed binary at or above the release tag replays unstamped or older-binary outcomes once while preserving delivery identity.
+
+### Fixed — Release automation
+
+- **Exhausted installation notices** — Stop retrying a post-release notice after ten attempts, preserve its failed receipt and send one failure record to the release's owning supervisor. Reporting retries reuse that record without repeating release reconciliation.
+
 ## [4.15.0] - 2026-11-11
 
 ### Fixed — Factory

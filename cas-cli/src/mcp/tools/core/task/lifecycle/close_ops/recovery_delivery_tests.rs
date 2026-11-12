@@ -639,6 +639,11 @@ async fn first_park_import_grant_uses_syncing_store_cas_a7b5() {
     git(repo, &["add", "child.txt"]);
     git(repo, &["commit", "-qm", "fix(cas-beef): sibling delivery"]);
     let child = git(repo, &["rev-parse", "HEAD"]);
+    // cas-8144 adopts the granted child and its ancestors. Keep real foreign
+    // work after that child so the partial grant still cannot own this import.
+    std::fs::write(repo.join("second-child.txt"), "another integrated sibling\n").unwrap();
+    git(repo, &["add", "second-child.txt"]);
+    git(repo, &["commit", "-qm", "fix(cas-cafe): second sibling delivery"]);
     git(repo, &["commit", "-qm", "Assemble approved epic", "--allow-empty"]);
     let approved = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["switch", "-q", "main"]);
@@ -699,10 +704,10 @@ async fn first_park_import_grant_uses_syncing_store_cas_a7b5() {
     let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
     assert_eq!(delivery.commits, vec![f.final_tip.clone()]);
 
-    // The grant does not cover a moved parent, even when its new tip contains
-    // only unnamed work beyond the approved parent.
+    // cas-8144 permits unnamed descendants of an approved import. A moved
+    // parent that adds another task's work must still require its own grant.
     git(repo, &["switch", "-qc", "epic/moved", &approved]);
-    git(repo, &["commit", "-qm", "Unapproved advancement", "--allow-empty"]);
+    git(repo, &["commit", "-qm", "fix(cas-dead): unapproved advancement", "--allow-empty"]);
     git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
     git(&f.worker_path, &["merge", "-q", "--no-ff", "epic/moved"]);
     assert!(task_attribution::started_delivery(repo, &granted).is_err());

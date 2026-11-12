@@ -119,9 +119,12 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
     Ok(None)
 }
 
+// gate[C-36 release]: Auto-cut of green release trains (daemon)
 /// One poll for a train whose exact tip `tip` is green. `queue_busy` is true
 /// while any merge-queue run is in flight.
+// gate-audit[queue_busy]: input Measured merge-queue state prevents release; never an override.
 pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
+    // gate[G-122 release-verdict]: Auto-cut preconditions (setup, owner, fragments, queue, cadence, notes draft)
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
     }
@@ -162,13 +165,13 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             train,
             ReleaseNoticePhase::CutReady,
             &format!("auto-cut-notes:{tip}"),
-            &format!(
+            &crate::gates::tag("G-122", format!(
                 "Release train {lane} ({}) is green at {tip} with {count} changelog fragments and is frozen for its \
                  auto-cut. Write the release-notes draft at {} by {deadline} (docs/release-notes/RUBRIC.md; \
                  `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists, and never writes or posts notes.",
                 train.id,
                 draft.display()
-            ),
+            )),
         )?;
         return Ok(Outcome::Handled);
     }

@@ -2406,6 +2406,7 @@ fn verify_death(pid: u32) -> bool {
 /// refused (fingerprint mismatch / no fingerprint) or that demonstrably
 /// didn't take never resets the task lease out from under a still-running
 /// worker.
+// gate-audit[fingerprint_override]: selector Derived G-143 acceptance from the explicit force request; final producer tags that exception.
 pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -> Result<()> {
     let cas_root =
         cas_root.ok_or_else(|| anyhow!("--cas-root required or run from a Cassy project"))?;
@@ -2466,6 +2467,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                 } else {
                     kill_verdict(pid, w.pid_starttime, force)
                 };
+                let fingerprint_override=force && !scan_confirmed && matches!(kill_verdict(pid,w.pid_starttime,false), KillVerdict::RefuseFingerprintMismatch|KillVerdict::RefuseNoFingerprint);
                 let death_after_attempt = match &verdict {
                     KillVerdict::Go => {
                         // cas-a91b: convert to the actual process GROUP
@@ -2480,6 +2482,7 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         let group_pid = resolve_group_leader_pid(pid).unwrap_or(pid);
                         match send_sigkill(group_pid) {
                             Ok(()) => {
+                                if fingerprint_override {summary.push(crate::gates::override_tag("G-143",""));}
                                 summary.push(format!(
                                     "SIGKILL delivered to process group {group_pid}"
                                 ));
@@ -2499,12 +2502,14 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
                         true
                     }
                     KillVerdict::RefuseFingerprintMismatch => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: starttime fingerprint mismatch (PID recycled). Pass --force to override."
                         ));
                         false
                     }
                     KillVerdict::RefuseNoFingerprint => {
+                        summary.push(crate::gates::refusal_tag("G-143",""));
                         summary.push(format!(
                             "pid {pid} SKIPPED: no starttime fingerprint recorded (legacy agent). Pass --force to override."
                         ));
@@ -2551,6 +2556,8 @@ pub(crate) fn execute_kill(cas_root: Option<&Path>, worker: &str, force: bool) -
         ));
     }
 
+    let response=summary.join("\n");
+    crate::gates::facts::observe_cli_output(cas_root,&response);
     println!("kill-worker `{}` completed:", w.name);
     for line in summary {
         println!("  - {line}");
@@ -2574,6 +2581,10 @@ pub(crate) enum KillVerdict {
     RefuseNoFingerprint,
 }
 
+// gate[G-143 kill]: Worker PID fingerprint safety
+// gate-audit[force]: bypass G-143 CLI producer tags accepted PID-fingerprint overrides.
+// gate-audit[accepted_by]: execute_kill
+// gate-audit[forward]: G-143 Pure PID-fingerprint verdict; execute_kill emits the refusal code.
 fn kill_verdict(pid: u32, expected_starttime: Option<u64>, force: bool) -> KillVerdict {
     if !crate::mcp::daemon::pid_alive(pid) {
         return KillVerdict::AlreadyDead;

@@ -440,6 +440,7 @@ fn final_json_object(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json:
     found
 }
 
+// gate[N-16 notice]: Automatic verifier could not start
 pub(super) fn attention(
     core: &CasCore,
     dispatch: &VerificationDispatch,
@@ -859,9 +860,9 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             }
             if status == "target_move" {
                 // GH #1837: the approved review is about to finish against an
-                // old target. This adjacent edit changes the full-context patch,
-                // so merge retry must open a fresh review instead of carrying
-                // the old verdict through the mechanical rebind shortcut.
+                // old target. This adjacent edit preserves the delivery's own
+                // patch, so main's approval rebind carries the reviewed result
+                // to a fresh candidate without claiming another verifier ran.
                 super::super::tests::commit_file(repo, "README.md",
                     "new heading\n\nbase\n\nfooter\n", "target moved during review");
             }
@@ -914,10 +915,17 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 let verdict = cas_store::get_verification_for_dispatch(&root, &rebound.id).unwrap().unwrap();
                 assert_eq!(verdict.dispatch_id.as_deref(), Some(rebound.id.as_str()));
                 assert_eq!(verdict.status, VerificationStatus::Approved);
-                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::TaskVerifier);
-                assert_eq!(verdict.agent_id, rebound.verifier_agent_id);
+                assert_eq!(verdict.provenance, cas_types::VerificationProvenance::System);
+                assert_eq!(verdict.agent_id.as_deref(), Some(owner.id.as_str()));
+                assert_eq!(verdict.issuer_agent_id.as_deref(), Some(owner.id.as_str()));
+                assert_eq!(rebound.receipt().unwrap(), claimed.receipt().unwrap());
+                assert_eq!(super::super::own_patch_id(repo, &source, &next_candidate.target_sha),
+                    super::super::own_patch_id(repo, &source, &candidate.target_sha));
+                assert_eq!(next_candidate.tree,
+                    super::super::tests::run(repo, &["rev-parse", "epic/train^{tree}"]));
+                assert!(rebound.verifier_agent_id.is_none());
                 assert_ne!(verdict.agent_id, claimed.verifier_agent_id);
-                assert!(owns(&root, &rebound));
+                assert!(!owns(&root, &rebound));
                 eprintln!("TARGET_MOVE prior={} rebound={} verifier={:?} verdict={}",
                     dispatch.id, rebound.id, verdict.agent_id, verdict.id);
             }

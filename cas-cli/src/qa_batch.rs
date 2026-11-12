@@ -33,6 +33,21 @@ pub(crate) struct ReleaseScope {
     pub proof_refs: Vec<ReleaseProofRef>,
 }
 
+impl ReleaseScope {
+    // gate-audit[evidence_only]: selector Binds report proof metadata; proof validation and acceptance remain with the consumers.
+    pub(crate) fn bind_reports(&mut self, root: &Path) -> Result<(), String> {
+        let tasks = release_close::read_tasks(root)?;
+        self.no_code_members.clear();
+        for id in &self.included_task_ids {
+            let Ok(task) = tasks.get(id) else { continue; };
+            if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
+                self.no_code_members.insert(id.clone(), no_code_proofs(root, self, &task)?);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReleaseProofKind {
@@ -49,6 +64,23 @@ pub(crate) struct ReleaseProofRef {
     pub size_bytes: u64,
     pub reviewed_sha: String,
     pub receipt_id: Option<String>,
+}
+
+/// G-32 already records the report reference at park. Freeze its registered
+/// bytes for the release member instead of asking the caller to type them again.
+pub(crate) fn no_code_proofs(root: &Path, scope: &ReleaseScope, task: &Task) -> Result<Vec<ReleaseProofRef>, String> {
+    let reference = task.external_ref.as_deref().ok_or_else(|| format!("RELEASE_NO_CODE_PROOF_MISSING: {}", task.id))?;
+    let reference = reference.trim();
+    let reference = reference.strip_prefix("artifact:").unwrap_or(reference);
+    let artifact = release_close::read_artifact(root, reference)
+        .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {}: {e}", task.id))?;
+    let proofs = vec![ReleaseProofRef {
+        kind: ReleaseProofKind::Report, artifact_id: artifact.id,
+        sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+        reviewed_sha: scope.reviewed_sha.clone(), receipt_id: None,
+    }];
+    crate::release_reconcile::validate_no_code_proofs(root, scope, &task.id, &proofs)?;
+    Ok(proofs)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -105,6 +137,7 @@ pub(crate) struct ReleaseInventoryException {
 /// discovery, commit-subject parsing, proof approval or lifecycle writes.
 /// Epic descendants and live recorded deliveries are discovery candidates.
 /// Only declared tasks or proven shipped work create closeout obligations.
+// gate-audit[evidence_only]: selector Filters delivery inventory by measured terminal outcome; no acceptance bypass.
 pub(crate) fn resolve_release_inventory(
     root: &Path,
     repo: &Path,
@@ -129,7 +162,15 @@ pub(crate) fn resolve_release_inventory(
                     .to_path_buf(),
             )
             .canonical_repo_key()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+            .or_else(|_| {
+                // A replay store may be copied outside Git. Its original
+                // repository is still the caller's cwd, as in release preview.
+                let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                crate::worktree::GitOperations::new(cwd)
+                    .canonical_repo_key()
+                    .map_err(|e| e.to_string())
+            })?
     {
         return Err("release repository does not match project scope".into());
     }
@@ -643,6 +684,7 @@ pub(crate) fn validate_ledger(
 
 /// The operator's recorded override for this task, if any (cas-26ac). Only
 /// the operator-written file counts; task notes never do.
+// gate-audit[forward]: Stored operator approval is returned to receipt admission (G-116); coverage lookups replay evidence and do not mint an override.
 pub(crate) fn author_override(root: &Path, task: &Task) -> Option<String> {
     crate::qa_author_override::for_task(root, &task.id)
 }
@@ -782,6 +824,9 @@ fn report_names(report: &str, task: &str) -> bool {
         .any(|word| word == task)
 }
 
+// gate-audit[author_override]: bypass G-116 Accepts a new receipt from a lineage author under stored operator approval.
+// gate-audit[release_author_waiver]: bypass G-116 Accepts a new release verdict under its exact-head QA-author waiver.
+// gate-audit[accepted_by]: verification_batch_receipt
 pub(crate) fn prepare_receipt(
     root: &Path,
     recorder: &cas_types::Agent,
@@ -792,12 +837,6 @@ pub(crate) fn prepare_receipt(
     ledger: &Path,
     schema: u32,
 ) -> Result<QaBatchReceipt, String> {
-    if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("staging_sha must be a full 40-hex commit SHA".into());
-    }
-    if task_ids.is_empty() || task_ids.len() > 500 {
-        return Err("task_ids must contain 1 to 500 PASS task IDs".into());
-    }
     let author = author.trim();
     if author.is_empty() {
         return Err("ledger_author (agent id or name of whoever walked the ledger) is required".into());
@@ -808,6 +847,25 @@ pub(crate) fn prepare_receipt(
     // Declared coverage is authoritative for both QA and release receipts.
     // Historical ledgers keep their existing whole-ID and row checks.
     let mut coverage = crate::qa_ledger::coverage(&body);
+    let (derived_head, derived_ids);
+    let (task_ids, staging) = if schema == cas_store::RELEASE_VERDICT_SCHEMA
+        && (task_ids.is_empty() || staging.is_empty()) {
+        derived_ids = coverage.covers.clone().ok_or("release ledger needs covers: member IDs")?;
+        let ids = derived_ids.as_slice();
+        let mut builds = body.lines().filter_map(|line| line.strip_prefix("build: "));
+        derived_head = builds.next().ok_or("release ledger needs build: reviewed commit")?.trim().to_string();
+        if builds.next().is_some() || (!task_ids.is_empty() && task_ids.iter().collect::<std::collections::BTreeSet<_>>() != ids.iter().collect())
+            || (!staging.is_empty() && staging != derived_head) {
+            return Err("release receipt inputs differ from the published ledger".into());
+        }
+        (ids, derived_head.as_str())
+    } else { (task_ids, staging) };
+    if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("staging_sha must be a full 40-hex commit SHA".into());
+    }
+    if task_ids.is_empty() || task_ids.len() > 500 {
+        return Err("task_ids must contain 1 to 500 PASS task IDs".into());
+    }
     if coverage.covers.is_some() {
         coverage.require_coverage(task_ids);
         if !coverage.ok { return Err(coverage.refusal()); }
@@ -882,15 +940,6 @@ pub(crate) fn prepare_receipt(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
             ));
         }
-        // A published release descends from the historical epic target. Its
-        // members are bound by anchor ancestry above, not by that ref's tip.
-        if schema != cas_store::RELEASE_VERDICT_SCHEMA
-            && integration_state(&repo, &staging, &target) != Some(true)
-        {
-            return Err(format!(
-                "staging_sha is not on task {id}'s configured target {target}"
-            ));
-        }
         heads.insert(id.clone(), anchor);
     }
     Ok(QaBatchReceipt {
@@ -916,16 +965,17 @@ pub(crate) fn prepare_receipt(
 /// Prepare a receipt whose explicit verdict kind is a published tag. The tag
 /// must contain each named delivery's tree effect; no QA ledger or ledger
 /// author is invented for this evidence.
+// gate[G-117 release-verdict]: Release tag verdict carries each delivery's tree effect
 pub(crate) fn prepare_release_tag_receipt(
     root: &Path,
     task_ids: &[String],
     tag: &str,
 ) -> Result<QaBatchReceipt, String> {
     if task_ids.is_empty() || task_ids.len() > 500 {
-        return Err("release tag verdict needs 1 to 500 task IDs".into());
+        return Err(crate::gates::tag("G-117", "release tag verdict needs 1 to 500 task IDs"));
     }
     if tag.is_empty() || tag.starts_with('-') {
-        return Err("release tag is invalid".into());
+        return Err(crate::gates::tag("G-117", "release tag is invalid"));
     }
     let project = crate::cloud::resolve_canonical_id(root).ok_or("project identity unavailable")?;
     let tasks = crate::store::open_task_store(root).map_err(|e| e.to_string())?;
@@ -934,19 +984,19 @@ pub(crate) fn prepare_release_tag_receipt(
     for id in task_ids {
         let task = tasks.get(id).map_err(|e| format!("task {id}: {e}"))?;
         if !crate::mcp::tools::core::task::task_owned_by_project(&task, root, Some(&project)) {
-            return Err(format!("task {id} belongs to another project or has no project binding"));
+            return Err(crate::gates::tag("G-117", format!("task {id} belongs to another project or has no project binding")));
         }
         let (repo, target) = task_context(root, &task)?;
         let candidate = commit(&repo, &format!("refs/tags/{tag}"))
-            .ok_or_else(|| format!("published release tag {tag} is unavailable in {}", repo.display()))?;
+            .ok_or_else(|| crate::gates::tag("G-117", format!("published release tag {tag} is unavailable in {}", repo.display())))?;
         if tag_sha.as_ref().is_some_and(|prior| prior != &candidate) {
-            return Err(format!("release tag {tag} resolves differently across task repositories"));
+            return Err(crate::gates::tag("G-117", format!("release tag {tag} resolves differently across task repositories")));
         }
         tag_sha.get_or_insert(candidate.clone());
         let anchor = resolved_delivery_anchor(&repo, &task, &target)
-            .ok_or_else(|| format!("task {id} has no resolvable delivery anchor"))?;
+            .ok_or_else(|| crate::gates::tag("G-117", format!("task {id} has no resolvable delivery anchor")))?;
         if !release_tag_ships_delivery(&repo, &anchor, &candidate, &task.id) {
-            return Err(format!("release tag {tag} does not contain task {id}'s delivery tree effect"));
+            return Err(crate::gates::tag("G-117", format!("release tag {tag} does not contain task {id}'s delivery tree effect")));
         }
         heads.insert(id.clone(), anchor);
     }
@@ -1017,8 +1067,7 @@ pub(crate) fn release_supersedes_stale_dispatch(
         .map_err(|e| e.to_string())? else { return Ok(None) };
     if !matches!(dispatch.state, TimedOut | Pending | Claimed)
         || (dispatch.state != TimedOut && dispatch.deadline_at > chrono::Utc::now())
-        || dispatch.receipt_id.is_some()
-        || dispatch.delivery_transaction_id.is_some()
+        || matches!(dispatch.receipt()?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || task.deliverables.factory_branch_start.is_none()
         || task.deliverables.factory_branch_anchor.is_none()
     {
@@ -1092,6 +1141,8 @@ pub(crate) fn awaits_release_verdict(root: &Path, task: &Task) -> bool {
 }
 
 /// A receipt never covers a new task tip, an unrelated project/target, or changed ledger bytes.
+// gate-audit[author_override]: selector Read-only validation of issued QA evidence; the accepting batch-receipt producer records G-116, not coverage replays.
+// gate-audit[release_author_waiver]: selector Read-only replay of release-bound evidence; verification_batch_receipt records G-116 when issuing evidence under that waiver.
 fn covering_receipt(
     root: &Path,
     task: &Task,
@@ -1185,6 +1236,7 @@ fn covering_receipt(
     Ok(None)
 }
 
+// gate-audit[author_override]: selector Read-only evidence lookup replays operator authorization; no new approval or delivery accepted.
 pub(crate) fn covering_pass(
     root: &Path,
     task: &Task,
@@ -1229,6 +1281,8 @@ pub(crate) fn debt_refusal(task: &str) -> String {
 
 /// Final transition guard, independent of QA mode, classification, merge
 /// outcome and whether the earlier optional evidence gate was reached.
+// gate[G-83 close-after-merge as-of]: Deferred batch QA debt (waiting for batch receipt)
+// gate-audit[forward]: G-83 Deferred-evidence verdict; final close emits its code.
 pub(crate) fn ensure_deferred_close(
     root: &Path,
     task: &Task,

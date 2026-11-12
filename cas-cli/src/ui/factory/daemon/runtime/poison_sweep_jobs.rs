@@ -148,6 +148,7 @@ pub(crate) fn read_pointers(
             vec![]
         })
 }
+// gate[W-30 watchdog]: Teams pointer body fallback
 pub(crate) fn claim_pointer(work: &PointerWork) -> Result<bool, String> {
     if !work.live.load(Ordering::Acquire) {
         return Ok(false);
@@ -265,6 +266,7 @@ pub(crate) fn read_bounces(
             BounceCandidate { row, notice, consumed }
         }).collect()
 }
+// gate[W-31 watchdog]: Sender delivery-stalled bounce
 pub(crate) fn write_bounce(
     context: &AttentionInputs,
     candidate: BounceCandidate,
@@ -311,6 +313,7 @@ pub(crate) fn write_bounce(
 /// moment its sender does. A sender bounce is written once per recipient
 /// episode (until the recipient next reads), and the operator turn is keyed by
 /// that bounce, so each episode pages the operator exactly once.
+// gate[W-69 watchdog]: Unread-message operator alert
 pub(crate) fn page_operator_for_stalled_message(
     queue: &dyn cas_store::PromptQueueStore,
     session: &str,

@@ -428,6 +428,7 @@ fn str_field(node: &Value, field: &str) -> Option<String> {
 /// it. Callers that must not fail on absent GitHub data (the daemon, and
 /// `cas history docs` running offline) treat it as a boundary rather than an
 /// error — see [`is_boundary`].
+// gate-audit[force]: selector Refreshes history data rather than reusing its cache; no factory policy waiver.
 pub fn run_pass(
     cas_root: &Path,
     repo_root: &Path,

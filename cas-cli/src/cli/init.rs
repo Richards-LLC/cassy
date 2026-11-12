@@ -424,6 +424,7 @@ impl WizardConfig {
 // Entry point
 // ============================================================================
 
+// gate-audit[allow_non_project]: selector Chooses global setup outside a project; no factory request or permission is waived.
 pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
 
@@ -497,6 +498,7 @@ pub fn execute(args: &InitArgs, cli: &Cli) -> anyhow::Result<()> {
 // JSON mode (non-interactive)
 // ============================================================================
 
+// gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
 fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
@@ -610,6 +612,7 @@ fn execute_json(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
 // Defaults mode (--yes flag)
 // ============================================================================
 
+// gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
 fn execute_defaults(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 
@@ -672,6 +675,7 @@ fn integration_flags_from(args: &InitArgs) -> super::integrate::integrations::In
 // Interactive wizard (streamlined)
 // ============================================================================
 
+// gate-audit[force]: selector Confirms replacing an existing local initialization; security policy is unchanged.
 fn run_wizard(cwd: &Path, args: &InitArgs) -> anyhow::Result<()> {
     let cas_dir_path = cwd.join(".cas");
 

@@ -472,7 +472,7 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
 #[test]
 fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
     let mut unpublished = Vec::new();
-    for entry in ["update", "create"] {
+    for entry in ["update", "create", "start"] {
         with_fixture(|_repo, origin, root, base| {
             let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
             let agents = core.open_agent_store().unwrap();
@@ -483,7 +483,11 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
             agents.register(&supervisor).unwrap();
             core.set_agent_id_for_testing(supervisor.id);
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            if entry == "update" {
+            let worker = cas_types::Agent::new_with_role(
+                "spawned-worker-id".into(), "spawned-worker".into(), cas_types::AgentRole::Worker,
+            );
+            agents.register(&worker).unwrap();
+            if entry != "create" {
                 let tasks = crate::store::open_task_store(root).unwrap();
                 tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
                 tasks
@@ -493,13 +497,22 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                         cas_types::DependencyType::ParentChild,
                     ))
                     .unwrap();
-                let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
-                    serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
-                )
-                .unwrap();
-                runtime
-                    .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
+                if entry == "update" {
+                    let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
+                        serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
+                    )
                     .unwrap();
+                    runtime
+                        .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
+                        .unwrap();
+                } else {
+                    core.set_agent_id_for_testing(worker.id);
+                    runtime
+                        .block_on(core.cas_task_start(rmcp::handler::server::wrapper::Parameters(
+                            crate::mcp::tools::IdRequest { id: "cas-child".into() },
+                        )))
+                        .unwrap();
+                }
             } else {
                 let request: crate::mcp::tools::TaskCreateRequest = serde_json::from_value(
                     serde_json::json!({

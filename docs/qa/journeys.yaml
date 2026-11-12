@@ -459,6 +459,10 @@ bug_families:
     tasks: [cas-84ea, cas-e06a]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-COMMIT-DIRECTORY]
+  first-child-epic-publication:
+    title: Assigning or starting the first child publishes a local epic lane even when workers were spawned without a task; unowned lanes and explicit unrelated targets remain untouched
+    tasks: [cas-2c0b]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   published-release-staffing-gap:
     title: Staffing an epic behind the latest recorded published release warns with its tag and commit count without refusing work; current epics and unpublished tags stay quiet
     tasks: [cas-a3c3]

@@ -502,7 +502,7 @@ pub(crate) fn epic_branch_readiness(cas_root: &Path, epic: &cas_types::Task) -> 
     match git.ensure_epic_published(branch, base, epic.deliverables.epic_branch_origin.as_ref()) {
         Ok(readiness) => readiness.notice.map(|receipt| format!("\n{receipt}")),
         Err(error) => Some(format!(
-            "\nEPIC BRANCH UNVERIFIED: {error}\nFocus recorded; branch readiness requires attention."
+            "\nEPIC BRANCH UNVERIFIED: {error}\nBranch readiness requires attention."
         )),
     }
 }

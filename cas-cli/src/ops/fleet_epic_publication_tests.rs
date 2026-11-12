@@ -270,7 +270,7 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
             .split("EPIC BRANCH UNVERIFIED: ")
             .nth(1)
             .unwrap()
-            .split("\nFocus recorded;")
+            .split("\nBranch readiness requires attention.")
             .next()
             .unwrap();
         assert_eq!(
@@ -476,7 +476,7 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
 #[test]
 fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
     let mut unpublished = Vec::new();
-    for entry in ["update", "create", "start"] {
+    for entry in ["update", "create", "start", "unowned", "pinned"] {
         let role = if entry == "start" { "worker" } else { "supervisor" };
         with_fixture_as(role, |_repo, origin, root, base| {
             let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
@@ -494,7 +494,20 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
             core.set_agent_id_for_testing(if entry == "start" { worker.id } else { supervisor.id });
             if entry != "create" {
                 let tasks = crate::store::open_task_store(root).unwrap();
-                tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
+                if entry == "unowned" {
+                    let mut epic = tasks.get("cas-unpublished").unwrap();
+                    epic.deliverables.epic_branch_origin = None;
+                    tasks.update(&epic).unwrap();
+                }
+                let mut child = cas_types::Task::new("cas-child".into(), "Child".into());
+                if entry == "pinned" {
+                    child.deliverables.work_target_pinned = true;
+                    child.deliverables.work_target = Some(cas_types::WorkTarget {
+                        repo_selector: "project:publication-test".into(),
+                        target_branch: "main".into(),
+                    });
+                }
+                tasks.add(&child).unwrap();
                 tasks
                     .add_dependency(&cas_types::Dependency::new(
                         "cas-child".into(),
@@ -502,7 +515,7 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                         cas_types::DependencyType::ParentChild,
                     ))
                     .unwrap();
-                if entry == "update" {
+                if entry != "start" {
                     let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
                         serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
                     )
@@ -532,7 +545,9 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                     .unwrap();
             }
             let remote = git(origin, &["for-each-ref", "--format=%(objectname)", "refs/heads/epic/unpublished"]);
-            if remote != base {
+            if entry == "unowned" || entry == "pinned" {
+                assert!(remote.is_empty(), "assignment must preserve unowned or unrelated lanes");
+            } else if remote != base {
                 unpublished.push(entry);
             }
         });

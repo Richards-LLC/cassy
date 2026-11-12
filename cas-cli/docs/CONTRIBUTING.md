@@ -103,6 +103,15 @@ whose completion hook never fires. Expiry drops the phase without claiming
 completion or reviving a tool that preceded it. Later native evidence, including
 a real completion boundary, remains visible normally.
 
+## First child assignment publishes its epic lane
+
+Task create with an assignee, task update assigning a child and a successful
+worker task start all check the parent epic's branch readiness. This includes
+workers spawned without `task_id` and assigned afterwards. The check reuses
+focus/spawn publication guards: recorded originating host, expected-absent push,
+existing remote preservation and explicit child repository/branch targets.
+Publication failures are visible in the successful task receipt for recovery.
+
 ## Staffing behind a published release
 
 Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when

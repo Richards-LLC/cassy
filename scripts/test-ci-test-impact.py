@@ -370,7 +370,8 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertIn("--partition count:1/1", ring_run)
         self.select("scripts/release.sh")
         self.assertEqual(phase("plan").returncode, 0)
-        self.assertIn("scoped=false", outputs.read_text().splitlines())
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual(values["scoped"], "false", "a workspace plan stays with the train suite")
 
 
 if __name__ == "__main__":

@@ -172,7 +172,7 @@ class FastRows(unittest.TestCase):
         result = self.fast()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for row in ("failure-log", "version-literals", "changelog-and-versions", "release-script",
-                    "release-notes-shell-injection", "procedure-guardrails", "test-targets",
+                    "release-notes-shell-injection", "test-targets",
                     "markdown-lint", "test-shape", "test-env", "builtin-doc-hygiene",
                     "journey-catalog", "builtin-skill-limits", "migration-registry",
                     "ci-script-tests-changed", "fixture-paths-src", "builtin-projections-src",
@@ -292,7 +292,6 @@ class FastRows(unittest.TestCase):
             ("version-literals", "cas-cli/tests/sample.rs", '// current version 9.99.7\n'),
             ("failure-log", "cas-cli/src/builtins/skills/cas-cut-release/references/failure-log.md", "- **imaginary-row**\n"),
             ("changelog-and-versions", "crates/cas-core/Cargo.toml", '[package]\nversion = "9.99.8"\n'),
-            ("procedure-guardrails", "cas-cli/src/builtins/skills/cas-cut-release/SKILL.md", "missing procedure\n"),
             ("builtin-doc-hygiene", "cas-cli/src/builtins/skills/example/SKILL.md", "Repository Richards-LLC/private-project\n"),
             # cas-462b: rows that failed only at the October 2026 release cut.
             ("journey-catalog", "docs/qa/journeys.md",

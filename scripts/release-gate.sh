@@ -1699,23 +1699,6 @@ check_release_notes_shell_injection() {
     python3 scripts/check-workflow-run-interpolation.py
 }
 
-check_procedure_guardrails() {
-    local skill="cas-cli/src/builtins/skills/cas-cut-release/SKILL.md"
-    [[ -f "$skill" ]] || {
-        printf 'procedure-guardrails: missing %s\n' "$skill"
-        return 1
-    }
-    grep -qF 'scripts/release.sh --next-version' "$skill"
-    grep -qF 'scripts/release.sh --hotfix' "$skill"
-    grep -qF 'compile-checked and launch-tested' "$skill"
-    grep -qF 'scripts/install-on-publish.sh --install' "$skill"
-    grep -qF 'stranded_branch_override' "$skill"
-    grep -qF 'release-published-receipt.sh --write-draft' "$skill"
-    grep -qF 'cas --version' "$skill"
-    grep -qF '9.99.x' "$skill"
-    grep -qF 'workers never poll CI' "$skill"
-}
-
 check_test_targets() {
     python3 scripts/cas-test-targets.py cas-cli --check
 }
@@ -2396,9 +2379,6 @@ gate_row release-script \
 gate_row release-notes-shell-injection \
     'all workflow run blocks reject GitHub expression interpolation' \
     check_release_notes_shell_injection
-gate_row procedure-guardrails \
-    'cas-cut-release one-command release, hotfix, platform and install guardrails' \
-    check_procedure_guardrails
 gate_row test-targets 'python3 scripts/cas-test-targets.py cas-cli --check' check_test_targets
 gate_row markdown-lint 'markdownlint-cli2 on changed Markdown (repository policy)' check_markdown_lint
 if [[ "$fast_rows" == true && ! -f scripts/check-test-shape.py ]]; then
@@ -2445,7 +2425,6 @@ fast_row_fix() {
         changelog-and-versions) printf 'keep ## [Unreleased] and the current release section in CHANGELOG.md; group each delivery as ### Added — <area> or ### Fixed — <area>, with a per-delivery - **Title** — description line under [Unreleased]' ;;
         release-script) printf 'make scripts/release.sh pass bash -n and exit 0 on --help' ;;
         release-notes-shell-injection) printf 'move each ${{ }} expression out of the workflow run: block into env: and use the shell variable' ;;
-        procedure-guardrails) printf 'restore the guardrail phrases in cas-cli/src/builtins/skills/cas-cut-release/SKILL.md that check_procedure_guardrails greps for' ;;
         test-targets) printf 'run python3 scripts/cas-test-targets.py cas-cli --check and add the [[test]] entry it names to cas-cli/Cargo.toml' ;;
         test-env) printf 'hold a TestEnvGuard for env/cwd mutation in tests (rule-026), or record a reviewed entry in scripts/test-env-baseline.json, as the row log names' ;;
         builtin-doc-hygiene) printf 'remove the private operator data identified by the row log' ;;

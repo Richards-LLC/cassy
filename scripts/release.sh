@@ -225,7 +225,15 @@ set_versions() {
 # The draft this release commits: --notes, our side of a draft path the base
 # also added, or the one draft this branch adds. Checked before any edit.
 draft_source() {
-    local version="$1" drafts=()
+    local version="$1" prepared drafts=()
+    if [[ -n "$notes_file" && ! -f "$notes_file" ]]; then
+        prepared="$(git log -1 --format=%H --grep="^release: v${version//./[.]}$" "$remote/$base..HEAD")"
+        if [[ -n "$prepared" && -n "$(git diff --no-renames --name-only --diff-filter=D "$prepared^" "$prepared" -- "$notes_file")" ]]; then
+            mapfile -t drafts < <(git diff --no-renames --name-only --diff-filter=A "$prepared^" "$prepared" -- "docs/release-notes/*-v$version-slack.md")
+            ((${#drafts[@]} != 1)) || notes_file="${drafts[0]}"
+        fi
+        [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
+    fi
     if [[ -n "$notes_file" ]]; then
         printf '%s\n' "$notes_file"
     elif [[ -n "$our_conflict_draft" ]]; then
@@ -265,7 +273,7 @@ place_draft() {
 
 # Steps 1-3 plus the commit. Prints the version prepared.
 prepare() {
-    local base_version version current prepared_commit drafts=() prepared_drafts=()
+    local base_version version current prepared_commit
     fetch_base
     sync_with_base
     base_version="$(version_at "$remote/$base")"
@@ -273,18 +281,6 @@ prepare() {
     version="$(next_version "$base_version")"
     current="$(version_at HEAD)"
     prepared_commit="$(git log -1 --format=%H --grep="^release: v${version//./[.]}$" "$remote/$base..HEAD")"
-    if [[ -n "$notes_file" && ! -f "$notes_file" ]]; then
-        # Only accept a vanished --notes path if this release actually removed
-        # it. An unrelated typo must still fail instead of selecting any draft.
-        if [[ -n "$prepared_commit" && -n "$(git diff --no-renames --name-only --diff-filter=D "$prepared_commit^" "$prepared_commit" -- "$notes_file")" ]]; then
-            mapfile -t drafts < <(git diff --no-renames --name-only --diff-filter=A "$prepared_commit^" "$prepared_commit" -- "docs/release-notes/*-v$version-slack.md")
-            if ((${#drafts[@]} == 1)); then
-                say "--notes $notes_file was renamed to ${drafts[0]}"
-                notes_file="${drafts[0]}"
-            fi
-        fi
-        [[ -f "$notes_file" ]] || die "--notes file not found: $notes_file"
-    fi
     if [[ -n "$prepared_commit" && "$current" == "$version" ]] && grep -q "^## \[$version\] - " CHANGELOG.md \
         && [[ -f "$(draft_path "$version")" || -n "$(git ls-files "docs/release-notes/*-v$version-slack.md")" ]]; then
         say "v$version is already prepared on $branch"

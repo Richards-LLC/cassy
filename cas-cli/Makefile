@@ -212,6 +212,9 @@ test-scoped-selftest:
 # migration-snapshot suite went stale for five days (cas-66ee). Keep this list
 # exhaustive — if you add a scripts/test-*.sh, wire it into a lane here.
 test-ci-tiers:
+	cd .. && bash scripts/test-cassy-actions-runner-registration.sh
+	cd .. && bash scripts/test-prune-cassy-actions-cache.sh
+	cd .. && bash scripts/test-cassy-actions-cache-job-lock.sh
 	cd .. && python3 scripts/test-model-boundary.py
 	cd .. && node --test scripts/test-walk-kit.mjs
 	cd .. && bash scripts/test-cas-image-generate.sh

@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-11'
+updated: '2026-11-12'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -1422,6 +1422,10 @@ invariants:
     statement: Publication imports the published tag into each open train in one merge or names one repair; a successor waits for publication and starts at its tag. Retargeting unfinished work also replaces its parent atomically.
     check: Run publication_syncs_all_trains_or_names_one_repair_cas_4845, successor_waits_for_publication_and_uses_tag_cas_4845, staffing_refuses_behind_latest_published_release_cas_4845, dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6 and retarget_parent_and_receipt_commit_or_roll_back_together_cas_4845; inspect conflict replay deduplication, staffing refusal and receipt-failure rollback. Run scripts/test-release.sh for the cut path after deleting cut-time sync.
     bug: {task: cas-4845}
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -3482,3 +3486,14 @@ journeys:
     basis: New controls; no production traffic attribution yet.
   spec: hub-web/e2e/journeys/supervisor-commands.journey.ts
   catalog_gaps: Browser outcomes use a protocol double; Rust security tests and disposable Claude/Codex runs prove native mappings and observations.
+
+- id: OPS-LIGHT-RUNNERS
+  name: Provision six soundwave light runner lanes
+  status: live
+  kind: cli
+  entry: {url: 'cli:ops/install-light-lanes-5-8.sh', trigger: Operator adds light runner capacity}
+  steps: [Authenticate operator once, Register and start slots 5-8 with repository tokens, Refresh all-slot prune idle guard, Report slots 3-8 online and busy]
+  owners: [ops/install-light-lanes-5-8.sh, 'ops/systemd/cassy-actions-runner*.service', ops/systemd/cassy-actions-cache-prune.service, scripts/install-cassy-actions-runner.sh, scripts/prune-cassy-actions-cache.sh, scripts/test-cassy-actions-runner-registration.sh, scripts/test-prune-cassy-actions-cache.sh, scripts/test-cassy-actions-cache-job-lock.sh]
+  invariants: [CI-LIGHT-RUNNER-CAPACITY]
+  spec: scripts/test-cassy-actions-runner-registration.sh
+  traffic: {share_pct: null, basis: Operator-only provisioning; no invocation telemetry.}

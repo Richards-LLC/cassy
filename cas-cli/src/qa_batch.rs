@@ -92,8 +92,8 @@ pub(crate) struct ReleaseInventory {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReleaseDelivery {
     pub task_id: String,
-    /// Conservative task snapshot token. ANY intervening task mutation means
-    /// the consumer must re-evaluate; this is not a lease generation number.
+    /// The member's delivery cycle (`delivery_generation`). A new cycle is a
+    /// new delivery; an anchor change inside a cycle is checked at close.
     pub generation: String,
     pub anchor: Option<String>,
     pub base_sha: Option<String>,
@@ -281,11 +281,14 @@ pub(crate) fn resolve_release_inventory(
         let d = &t.deliverables;
         let base = d.factory_branch_start.as_ref()
             .and_then(|start| recorded_commit(&start.base_sha));
-        let recorded = d.factory_branch_anchor.as_ref()
-            .or(d.green_merge_commit.as_ref())
-            .or(d.delivery_pr_merge_commit.as_ref())
-            .or(d.merge_commit.as_ref());
-        let anchor = recorded.and_then(|sha| recorded_commit(sha));
+        // One delivery identity; a PR-merged task whose branch is gone is
+        // still a member through its recorded merge commit.
+        let anchor = resolved_delivery_anchor(repo, t, &scope.final_release_sha).or_else(|| {
+            (d.factory_branch_anchor.is_none() && d.historical_factory_branch_anchors.is_empty())
+                .then(|| [&d.green_merge_commit, &d.delivery_pr_merge_commit, &d.merge_commit]
+                    .into_iter().flatten().find_map(|sha| recorded_commit(sha)))
+                .flatten()
+        });
         let valid_base = |anchor: &str| base.as_deref()
             .is_some_and(|base| ancestor(repo, base, anchor) == Some(true));
         let shipped_mapping = |anchor: &str| {
@@ -375,7 +378,7 @@ pub(crate) fn resolve_release_inventory(
         };
         inventory.deliveries.push(ReleaseDelivery {
             task_id: id,
-            generation: t.updated_at.to_rfc3339(),
+            generation: delivery_generation(t),
             anchor,
             base_sha: base,
             shipped_commit,
@@ -494,6 +497,11 @@ fn merged_branch_anchor(repo: &Path, task: &Task, target: &str) -> Option<String
         }
     }
     None
+}
+
+/// A release member's generation: its delivery cycle (design rev 3.1 §2.5).
+pub(crate) fn delivery_generation(task: &Task) -> String {
+    format!("cycle:{}", task.deliverables.delivery_cycle)
 }
 
 /// The delivery identity every receipt consumer shares: the recorded anchor, or,

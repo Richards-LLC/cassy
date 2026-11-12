@@ -1351,7 +1351,7 @@ pub(super) mod tests {
         assert_eq!(shipped.membership, Membership::SquashTree);
         assert_eq!(
             shipped.generation,
-            store.get(&code.id).unwrap().updated_at.to_rfc3339()
+            crate::qa_batch::delivery_generation(&store.get(&code.id).unwrap())
         );
         assert_eq!(shipped.proof_refs.len(), 2);
         assert!(

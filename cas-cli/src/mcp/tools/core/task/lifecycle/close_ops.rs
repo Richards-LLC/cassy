@@ -9311,10 +9311,14 @@ impl CasCore {
                         // gate[G-54 close-after-merge as-of]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
                         fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(crate::gates::tag("G-54", message))),
                         fast_lane_gate::ReceiptGate::Failed(message) => {
-                            let recovery = self.return_merged_delivery_for_source_fix(
-                                &task, &evidence_repo, &resolved_parent_branch, &message,
-                            );
-                            gate_refusals.push(crate::gates::tag("G-54", format!("{message}{recovery}")));
+                            // A failed receipt/revert requires a new source delivery;
+                            // ordinary post-merge upkeep remains supervisor-owned.
+                            let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
+                            let recovery = super::merge_close::return_merged_delivery_for_source_fix(
+                                &self.cas_root, &actor, &task, &evidence_repo,
+                                &resolved_parent_branch, &message,
+                            ).unwrap_or_else(|error| format!("Cassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id));
+                            gate_refusals.push(crate::gates::tag("G-54", format!("{message}\n\n{recovery}")));
                             return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                         }
                     }
@@ -31292,7 +31296,7 @@ esac
     /// own delivery is on its target no longer holds the close, and the
     /// timed-out verifier dispatch passes only when the reason names it.
     #[tokio::test]
-    async fn shipped_override_close_passes_shipped_blocker_and_named_timeout_cas_4b22() {
+    async fn shipped_override_close_passes_batch_pending_blocker_and_named_timeout_cas_5bbe() {
         use crate::mcp::CasService;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
@@ -31354,12 +31358,21 @@ esac
         blocker.status = TaskStatus::AwaitingMerge;
         blocker.deliverables.factory_branch_anchor = Some(blocker_anchor);
         blocker.deliverables.work_target = Some(target.clone());
+        // Replay the administrative post-merge return and evidence-only restart.
+        let accepted = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        cas_store::record_observed_delivery_merge(&cas_dir, &blocker.id, "factory/idle-heron-4b22",
+            "main", &accepted, &receipt, actor).unwrap();
+        cas_store::defer_qa_batch_evidence(&cas_dir, &blocker.id, &accepted).unwrap();
+        blocker.status = TaskStatus::Blocked;
         store.add(&blocker).unwrap();
+        assert_eq!(crate::qa_batch::shipped_anchor(&cas_dir, &blocker), Some(accepted.clone()));
+        blocker.deliverables.decline_factory_branch_anchor();
+        store.update(&blocker).unwrap();
         // Merged, closed and reopened for rework: only history names the old tip.
         let mut reopened = worker_task("idle-heron-4b22");
         reopened.id = "cas-4b22-reopened".into();
         reopened.status = TaskStatus::Open;
-        reopened.deliverables.historical_factory_branch_anchors = vec![blocker.deliverables.factory_branch_anchor.clone().unwrap()];
+        reopened.deliverables.historical_factory_branch_anchors = vec![accepted.clone()];
         reopened.deliverables.work_target = blocker.deliverables.work_target.clone();
         store.add(&reopened).unwrap();
         let mut task = worker_task("brisk-otter-4b22");
@@ -31410,7 +31423,7 @@ esac
         store.remove_dependency(&task.id, &reopened.id).unwrap();
 
         // Another task's commit on origin/main is not this task's shipped receipt.
-        let foreign = blocker.deliverables.factory_branch_anchor.clone().unwrap();
+        let foreign = accepted.clone();
         let (refused, text) = close(named.clone(), &foreign).await;
         assert!(refused && text.contains("VERIFICATION TIMED OUT"), "{text}");
 

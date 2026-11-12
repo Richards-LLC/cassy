@@ -190,7 +190,7 @@ fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
 }
 
 #[test]
-fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
+fn qa_candidate_build_from_checkout_without_script_uses_revision_cas_31c95() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     assert!(std::process::Command::new("git")
@@ -291,23 +291,12 @@ fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
 
     // No compiler runs: exercise the real wrapper with a builder boundary
     // that publishes the same manifest as the Python builder, plus Git chatter.
-    let build = |json: bool| {
-        let mut command = cas_cmd(root);
-        command.current_dir(root)
-            .env("CAS_AGENT_ROLE", "supervisor")
-            .args(["qa", "candidate", "build", "--task", "cas-0227"]);
-        if json {
-            command.arg("--json");
-        }
-        command.output().unwrap()
-    };
-    let missing_builder = build(true);
-    assert!(!missing_builder.status.success());
     let script = root.join("scripts/qa-candidate-build.py");
     std::fs::create_dir_all(script.parent().unwrap()).unwrap();
     std::fs::write(&script, r#"
 import argparse, json
 from pathlib import Path
+from fixture_helper import VERSION
 parser = argparse.ArgumentParser()
 parser.add_argument('--repo')
 parser.add_argument('--rev')
@@ -315,22 +304,42 @@ parser.add_argument('--candidate-dir')
 args = parser.parse_args()
 destination = Path(args.candidate_dir)
 destination.mkdir(parents=True, exist_ok=True)
-receipt = dict(revision=args.rev, version='cas 9.99.7', sha256='fixture-hash')
+receipt = dict(revision=args.rev, version=VERSION, sha256='fixture-hash')
 (destination / 'RECEIPT.json').write_text(json.dumps(receipt))
 print('HEAD is now at fixture')
 print(json.dumps(dict(receipt, candidate_dir=str(destination))))
 "#).unwrap();
+    std::fs::write(root.join("scripts/fixture_helper.py"), "VERSION = 'cas 9.99.7'\n").unwrap();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["add", "scripts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "candidate builder"]);
+    let revision = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "--detach", plan["revision"].as_str().unwrap()]);
+    assert!(!script.exists(), "the caller's checkout predates the builder");
+    let build = |json: bool| {
+        let mut command = cas_cmd(root);
+        command.current_dir(root)
+            .env("CAS_AGENT_ROLE", "supervisor")
+            .args(["qa", "candidate", "build", "--task", "cas-0227", "--rev", &revision]);
+        if json { command.arg("--json"); }
+        command.output().unwrap()
+    };
     let built = build(true);
     assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
     let receipt: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
-    assert_eq!(receipt["revision"], plan["revision"]);
+    assert_eq!(receipt["revision"], revision);
+    assert_eq!(receipt["version"], "cas 9.99.7");
     assert_eq!(receipt["candidate_dir"], plan["candidate_dir"]);
     assert_eq!(receipt["receipt_file"], plan["receipt_file"]);
     assert!(!String::from_utf8_lossy(&built.stderr).contains("[ERROR]"));
     let human = build(false);
     assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
 
-    let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
+    assert!(!script.exists(), "building never updates the caller's checkout");
 }
 
 #[test]

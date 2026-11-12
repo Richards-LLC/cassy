@@ -84,8 +84,9 @@ registration semantics.
 Use the daemon-owned candidate verifier or a separately registered reviewer
 with a sealed handoff for the exact dispatch. A native child that observes its
 parent's identity returns that evidence without recording a verdict, including
-`status=error`. A registered supervisor may perform its own review and record
-the verdict directly; its provenance remains `supervisor_direct`.
+`status=error`. A registered supervisor may record a verdict directly, with
+`supervisor_direct` provenance, only on mechanical evidence (counts, receipts,
+logs, CI results).
 
 ## Commander message and terminal permissions
 
@@ -4556,6 +4557,26 @@ valid. Exact CLI flag values passed in literal `try_parse_from` / `parse_from`
 argument arrays can be asserted on their immutable parsed fields, including
 let-else command routing. Unrelated fields, generated values and substring or
 inequality prose checks retain the ordinary rejection rules.
+
+For recorded Python CLI calls, compare argument vectors rather than command
+sentences. The lint recognizes literal string lists compared directly with
+`shlex.split(calls.read_text())` using equality (either operand order), or list
+membership/absence in `[shlex.split(line) for line in calls.read_text().splitlines()]`.
+The actual operand may also be a local name whose nearest preceding assignment
+in the same function uses either projection. Prefer reading once per phase:
+
+```python
+argv = [shlex.split(line) for line in calls.read_text().splitlines()]
+self.assertIn(["config", "get", "qa.registry.enforce"], argv)
+```
+
+Each later assignment starts a new binding: it must itself use a recorded argv
+projection. Intervening loop bindings or other writes, use before assignment
+and bindings in another function receive no exemption.
+Record shell-quoted arguments so spaces inside an
+argument survive parsing. Quoted caller text remains data in these vectors.
+Raw `read_text()` command substrings, rendered output and ordinary whitespace
+splitting receive no exemption; `pin:` comments still cannot waive prose pins.
 
 Workers run `npm test`, `npm run typecheck` in `hub-web`, and
 `scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys

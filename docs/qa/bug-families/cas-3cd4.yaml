@@ -1,0 +1,4 @@
+title: Supervisor commands, operator messages and startup submit recovery use live input while the local pane is scrolled into history
+tasks: [cas-3cd4]
+invariants: [HUB-J27-NATIVE-IDLE-COMMANDS, HUB-J13-STARTUP-TURN]
+journeys: [HUB-J27, HUB-J4, HUB-J13]

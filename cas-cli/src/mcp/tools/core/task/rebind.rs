@@ -1,5 +1,101 @@
 //! Supervisor approval of an existing replacement delivery lane. Git is read-only.
 
+#[cfg(test)]
+mod ledger_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::hash::{Hash, Hasher};
+
+    #[test]
+    fn live_rebind_and_retained_aliases_count_once_after_backfill() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("rebind-ledger");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut task = cas_types::Task::new("cas-c921".into(), "Rebind ledger fixture".into());
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: cas_types::WorkTarget {
+                repo_selector: "project:fixture".into(), target_branch: "main".into(),
+            },
+            assignee: "worker".into(), branch: "factory/worker".into(), base_sha: "a".repeat(40),
+        });
+        tasks.add(&task).unwrap();
+        let since = Utc::now() - ChronoDuration::days(1);
+        let count = || {
+            let report = crate::cli::ledger::quality_reports(&root, 0).unwrap();
+            report["releases"][0]["interventions"]["rebind"].as_u64().unwrap()
+        };
+        let rows = || cas_store::quality_events_for_task(&root, &task.id).unwrap().into_iter()
+            .filter(|event| matches!(event.payload, cas_store::QualityPayload::Intervention {
+                intervention: cas_store::InterventionKind::Rebind, ..
+            })).collect::<Vec<_>>();
+        let mut historical = Vec::new();
+        for (index, tip) in ["b", "c"].into_iter().enumerate() {
+            let expected = tasks.get(&task.id).unwrap();
+            let mut rebound = expected.clone();
+            rebound.deliverables.factory_branch_start.as_mut().unwrap().branch = format!("factory/worker-{index}");
+            BranchRebindAudit {
+                actor: "supervisor".into(), reason: "approved replacement".into(),
+                previous_tip: None, tip: tip.repeat(40), target_tip: "a".repeat(40),
+            }.persist(&root, tasks.as_ref(), &expected, &mut rebound).unwrap();
+            assert_eq!(count(), index as u64 + 1);
+
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(rows().len(), index * 2 + 1);
+                assert_eq!(count(), index as u64 + 1);
+            }
+
+            // Replay an immutable alias produced by the released backfill writer.
+            let line = rebound.notes.lines().last().unwrap();
+            let mut digest = std::collections::hash_map::DefaultHasher::new();
+            line.hash(&mut digest);
+            let mut alias = cas_store::NewQualityEvent::new(
+                format!("backfill|rebind|{}|{:016x}", task.id, digest.finish()),
+                cas_store::QualityPayload::Intervention {
+                    intervention: cas_store::InterventionKind::Rebind, minutes: None,
+                },
+            );
+            alias.task_id = Some(task.id.clone());
+            // Retained audit notes have minute precision, unlike the live row.
+            alias.occurred_at = chrono::DateTime::from_timestamp(rebound.updated_at.timestamp() / 60 * 60, 0).unwrap();
+            assert!(crate::quality_ledger::emit(&root, &alias));
+            historical = rows();
+            assert_eq!(count(), index as u64 + 1);
+        }
+        for _ in 0..2 {
+            crate::quality_ledger::backfill(&root, since).unwrap();
+            assert_eq!(rows(), historical);
+            assert_eq!(count(), 2);
+        }
+
+        // Recovery also recognizes a legacy-only identity, or creates the live
+        // identity when only the audit survived. Repeated identical notes are
+        // the same fact, while each task remains a separate intervention.
+        let retained = tasks.get(&task.id).unwrap();
+        let line = retained.notes.lines().last().unwrap();
+        for (index, legacy) in [true, false].into_iter().enumerate() {
+            let mut recovered = cas_types::Task::new(format!("cas-history-{index}"), "Retained rebind".into());
+            recovered.notes = format!("{line}\n{line}");
+            tasks.add(&recovered).unwrap();
+            if legacy {
+                let mut digest = std::collections::hash_map::DefaultHasher::new();
+                line.hash(&mut digest);
+                crate::quality_ledger::intervention(&root, cas_store::InterventionKind::Rebind,
+                    format!("backfill|rebind|{}|{:016x}", recovered.id, digest.finish()),
+                    Some(&recovered.id), None, None);
+            }
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(cas_store::quality_events_for_task(&root, &recovered.id).unwrap().len(), 1);
+                assert_eq!(count(), 3 + index as u64);
+            }
+        }
+    }
+}
+
 use std::path::Path;
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -113,7 +209,7 @@ impl BranchRebindAudit {
         crate::quality_ledger::intervention(
             cas_root,
             cas_store::InterventionKind::Rebind,
-            format!("rebind|{}|{branch}|{}", rebound.id, self.tip),
+            crate::quality_ledger::rebind_key(&rebound.id, &branch, &self.tip),
             Some(&rebound.id),
             Some(&self.actor),
             Some(&self.reason),

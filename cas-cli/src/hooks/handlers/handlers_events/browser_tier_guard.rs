@@ -25,6 +25,21 @@ const VALUE_OPTIONS: &[&str] = &[
     "--tsconfig",
 ];
 
+/// Boolean options compatible with collection-only runs. Interactive --ui is
+/// intentionally excluded: it launches a server even when --list is present.
+const BOOLEAN_OPTIONS: &[&str] = &[
+    "--fail-on-flaky-tests",
+    "--forbid-only",
+    "--fully-parallel",
+    "--headed",
+    "--ignore-snapshots",
+    "--last-failed",
+    "--no-deps",
+    "--pass-with-no-tests",
+    "--quiet",
+    "-x",
+];
+
 /// Playwright options whose value is optional (`--shuffle[=seed]`). A numeric
 /// next word is the value, never a file filter (GH #1876); anything else is
 /// left for spec selection, so `--shuffle tests/a.spec.ts` still names a spec.
@@ -32,7 +47,9 @@ const OPTIONAL_VALUE_OPTIONS: &[&str] = &["--shuffle"];
 
 fn optional_value_width(arg: &str, next: Option<&String>) -> Option<usize> {
     OPTIONAL_VALUE_OPTIONS.contains(&arg).then(|| {
-        1 + usize::from(next.is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit())))
+        1 + usize::from(
+            next.is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit())),
+        )
     })
 }
 
@@ -47,14 +64,17 @@ fn collection_only(args: &[String]) -> bool {
         let arg = args[i].as_str();
         if arg == "--list" {
             list = true;
+        } else if BOOLEAN_OPTIONS.contains(&arg) {
+            // No value to consume; the next token may still be --list.
         } else if VALUE_OPTIONS.contains(&arg) {
             i += 1;
         } else if let Some(width) = optional_value_width(arg, args.get(i + 1)) {
             i += width - 1;
         } else if arg.starts_with('-')
-            && !arg
-                .split_once('=')
-                .is_some_and(|(name, _)| name.starts_with("--") && VALUE_OPTIONS.contains(&name))
+            && !arg.split_once('=').is_some_and(|(name, _)| {
+                name.starts_with("--")
+                    && (VALUE_OPTIONS.contains(&name) || OPTIONAL_VALUE_OPTIONS.contains(&name))
+            })
         {
             return false;
         }
@@ -191,7 +211,9 @@ fn unfiltered(command: &str, depth: usize, culprit: &mut Option<String>) -> bool
             .position(|w| matches!(w.rsplit('/').next(), Some("bash" | "sh" | "zsh")))
         {
             if words.get(i + 1).is_some_and(|w| w == "-c" || w == "-lc")
-                && words.get(i + 2).is_some_and(|w| unfiltered(w, depth + 1, culprit))
+                && words
+                    .get(i + 2)
+                    .is_some_and(|w| unfiltered(w, depth + 1, culprit))
             {
                 return true;
             }
@@ -285,7 +307,11 @@ mod tests {
     #[test]
     fn a_refused_run_reports_the_token_it_could_not_read() {
         let mut culprit = None;
-        assert!(super::unfiltered("npx playwright test qa/a.spec.ts widen", 0, &mut culprit));
+        assert!(super::unfiltered(
+            "npx playwright test qa/a.spec.ts widen",
+            0,
+            &mut culprit
+        ));
         assert_eq!(culprit.as_deref(), Some("widen"));
     }
 }

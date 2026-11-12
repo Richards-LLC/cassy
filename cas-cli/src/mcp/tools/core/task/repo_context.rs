@@ -240,8 +240,8 @@ pub(crate) fn canonical_selector(selector: &str) -> String {
 /// Every selector a checkout legitimately answers to, most authoritative first.
 ///
 /// cas-1a1c (GH #151). [`selector_for_repo`] returns a single selector on a
-/// priority order — a `[project] canonical_id` pin wins and the git remote is
-/// never consulted. That is correct for *stamping* a new work target, but wrong
+/// priority order — a `[project] canonical_id` pin wins over a remote identity.
+/// That is correct for *stamping* a new work target, but wrong
 /// for *matching* an existing one: `declare_work_target` records whichever
 /// selector was authoritative at creation time, so pinning a canonical_id
 /// afterwards left every previously-created task holding the `remote:` form
@@ -276,11 +276,11 @@ pub(crate) fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
 
 fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
     repo_identities(repo_root).into_iter().next().ok_or_else(|| {
-            format!(
-                "repository {} has neither [project].canonical_id nor a normalizable origin URL",
-                repo_root.display()
-            )
-        })
+        format!(
+            "repository {} has neither [project].canonical_id nor a normalizable origin URL",
+            repo_root.display()
+        )
+    })
 }
 
 /// Resolve a path supplied to the host-local binding CLI. Bindings require a

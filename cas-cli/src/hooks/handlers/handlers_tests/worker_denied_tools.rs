@@ -280,6 +280,10 @@ PY"#;
 #[test]
 fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
     let (_env, _config_home) = role_env("worker");
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let store = home.join(".config/neonctl");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("credentials.json"), r#"{"token":"fixture-only"}"#).unwrap();
     // From a project dir, as a worker runs it; the fixture's config home is
     // itself a store parent.
     let project = tempfile::tempdir().unwrap();
@@ -304,11 +308,13 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         "rg -uuu -e --files -e . ~/.config",
         "rg -uuu --regexp=--files -e . ~/.config",
         "rg -uuu -- --files ~/.config",
+        "cd ~/.config && rg fixture-only",
         // The same audit, for recursion and payload flags that were matched
         // by presence (each allowed by v4.20).
         "tar czf x.tgz --exclude --no-recursion ~/.config",
         "grep -d recurse token ~/.config",
         "cd ~/.config && zip -R x.zip '*.json'",
+        "bash -oc pipefail 'cat ~/.config/neonctl/credentials.json'",
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);

@@ -42,6 +42,9 @@ class StubState:
         # GH #908: how the hub answers the file post ("ok", "http_413",
         # or "file_too_large").
         self.file_mode = "ok"
+        self.pdf_message_id = "file-message"
+        self.pdf_message_permalink = PDF_MESSAGE_PERMALINK
+        self.pdf_file_permalink = "https://example.test/files/report.pdf"
         self.html_ref = "main"
 
 
@@ -202,7 +205,7 @@ def handler_for(state: StubState):
                     assert base64.b64decode(uploads[0]["content"]) == state.pdf
                     file_receipt = {
                         "file_id": "F-report",
-                        "permalink": "https://example.test/files/report.pdf",
+                        "permalink": state.pdf_file_permalink,
                     }
                     if state.include_download_url:
                         file_receipt["download_url"] = (
@@ -213,11 +216,11 @@ def handler_for(state: StubState):
                         "schema_version": 1,
                         "kind": "file",
                         "message": {
-                            "message_id": "file-message",
+                            "message_id": state.pdf_message_id,
                             "thread_id": USER_THREAD,
                             # Violet's single-file path reuses the file URL;
                             # files[] resolves the uploaded message separately.
-                            "permalink": PDF_MESSAGE_PERMALINK if batch else file_receipt["permalink"],
+                            "permalink": state.pdf_message_permalink if batch else file_receipt["permalink"],
                         },
                     }
                     if state.include_file_block:
@@ -822,6 +825,30 @@ def main() -> int:
         assert state.download_requests == ["/download/report.pdf"]
         methods = [request.get("method") for request in state.requests]
         assert methods == ["initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call"]
+
+        # Violet #109: the upload succeeded but no shared-message URL exists.
+        state.pdf_message_permalink = None
+        result, fields = run_adapter(server, state, pdf)
+        assert result.returncode == 0 and fields is not None, result.stderr
+        assert fields["PDF_MESSAGE_ID"] == "file-message"
+        assert fields["PDF_MESSAGE_PERMALINK"] == "unavailable"
+        assert fields["PDF_FILE_PERMALINK"] == "https://example.test/files/report.pdf"
+        assert fields["HTML_FILE_ID"] == "html-message"
+        assert fields["PDF_REMOTE_SHA256"] == fields["PDF_SHA256"]
+        state.pdf_message_permalink = PDF_MESSAGE_PERMALINK
+        for attribute, invalid in (
+            ("pdf_message_permalink", "http://example.test/message"),
+            ("pdf_message_id", None),
+            ("pdf_file_permalink", None),
+            ("pdf_file_permalink", PDF_MESSAGE_PERMALINK),
+        ):
+            original = getattr(state, attribute)
+            setattr(state, attribute, invalid)
+            result, fields = run_adapter(server, state, pdf)
+            assert result.returncode != 0 and fields is None, (attribute, invalid, result)
+            assert state.download_requests == []
+            setattr(state, attribute, original)
+        print("Release receipt contract: null message link accepted; invalid identities and links refused")
 
         scenarios = {
             "truncated": pdf[:-17],

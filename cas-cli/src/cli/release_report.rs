@@ -289,22 +289,6 @@ impl ReleaseEvidence {
             });
     }
 
-    fn request_timing(&self) -> String {
-        match (
-            self.request_to_published_seconds,
-            self.request_source.as_deref(),
-        ) {
-            (Some(seconds), Some("cut-start")) => {
-                format!(
-                    "{} — from the first cut; no request time recorded",
-                    format_duration(seconds)
-                )
-            }
-            (Some(seconds), _) => format_duration(seconds),
-            (None, _) => "unavailable".to_string(),
-        }
-    }
-
     fn blocker_summary(&self) -> String {
         let Some(count) = self.blocker_count else {
             return "unavailable".to_string();
@@ -337,39 +321,6 @@ impl ReleaseEvidence {
             .collect::<Vec<_>>()
             .join("; ");
         format!("{count} — {} blocked: {each}", format_duration(total))
-    }
-
-    fn publication_timing(&self) -> String {
-        let Some(seconds) = self.publication_latency_seconds else {
-            return "unavailable".to_string();
-        };
-        let timing = format_duration(seconds);
-        match self.publication_budget_seconds {
-            Some(budget) => format!(
-                "{timing} — {} ({} budget)",
-                if seconds <= budget {
-                    "within budget"
-                } else {
-                    "over budget"
-                },
-                format_duration(budget)
-            ),
-            None => format!("{timing} — budget unavailable"),
-        }
-    }
-
-    fn publication_endpoint(&self) -> Option<(&'static str, &'static str)> {
-        match self.publication_start_kind.as_deref() {
-            Some("main-landed") => Some((
-                "Main to published",
-                "Release PR merge time to publication when merge-queue green evidence is unavailable; measured budget result",
-            )),
-            Some("gate-green") => None,
-            _ => Some((
-                "Tag to published",
-                "First tag workflow to publication; measured budget result",
-            )),
-        }
     }
 
     fn has_reportable_publication_timing(&self) -> bool {
@@ -3308,7 +3259,6 @@ mod tests {
             "PUBLISH_START_KIND=main-landed\nPUBLISH_LATENCY_SECONDS=616\nBUDGET_SECONDS=600\nWITHIN_BUDGET=false\n",
         ));
         assert_eq!(evidence.publication_start_kind.as_deref(), Some("main-landed"));
-        assert!(evidence.publication_endpoint().is_some());
     }
 
     /// cas-0dd1: with `[factory] artifacts_root` configured, the release
@@ -3354,7 +3304,6 @@ mod tests {
         assert_eq!(green.green_to_published_seconds, Some(626));
         assert_eq!(green.main_to_published_seconds, Some(616));
         assert!(green.has_reportable_publication_timing());
-        assert!(green.publication_endpoint().is_none());
         assert_eq!(green.publication_latency_seconds, Some(626));
 
         let fallback_root = tempfile::tempdir().unwrap();

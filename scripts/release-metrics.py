@@ -236,7 +236,9 @@ def release_clock(run_dir: Path | None, payload: dict) -> list[tuple[str, str]]:
         return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z") if value is not None else UNAVAILABLE
 
     merge = epoch(payload.get("context", {}).get("last_delivery_merged_at"))
-    cut = epoch_file(run_dir / "cut.start.epoch") if run_dir else None
+    cut = epoch(payload.get("context", {}).get("release_inputs", {}).get("cut_started_at"))
+    if cut is None:
+        cut = epoch_file(run_dir / "cut.start.epoch") if run_dir else None
     pr = epoch(payload.get("pr", {}).get("created_at"))
     main = epoch(payload.get("pr", {}).get("merged_at"))
     published = epoch(payload.get("published_at"))

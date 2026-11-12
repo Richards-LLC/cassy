@@ -1492,12 +1492,24 @@ pub(super) mod tests {
         let merged_at = cas_store::observed_delivery_merges_into(
             &root, train.branch.as_deref().unwrap(),
         ).unwrap()[0].created_at.to_rfc3339();
+        cas_store::record_observed_delivery_merge(
+            &root, "cas-absent", "factory/absent", train.branch.as_deref().unwrap(),
+            &sha, &"f".repeat(40), &owner.id,
+        ).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
         let receipt: serde_json::Value = serde_json::from_slice(
             &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
         ).unwrap();
         assert_eq!(receipt["last_delivery_merged_at"], merged_at);
+        cas_store::record_observed_delivery_merge(
+            &root, "cas-later", "factory/later", train.branch.as_deref().unwrap(),
+            &sha, &sha, &owner.id,
+        ).unwrap();
         track_on_train(&args, &root, repo, &train).unwrap();
+        let retried: serde_json::Value = serde_json::from_slice(
+            &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(retried["last_delivery_merged_at"], merged_at);
         let reminders = open_reminder_store(&root).unwrap();
         let pending = reminders.list_all_pending().unwrap();
         assert_eq!(pending.len(), 2);

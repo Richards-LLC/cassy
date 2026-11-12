@@ -42,6 +42,11 @@ printf '{"last_delivery_merged_at":"2026-11-12T14:20:00Z"}\n' >"$FAKE_CONTEXT"
 out="$(run)"
 expect LAST_MERGE_TO_MAIN_SECONDS 1800
 expect FULL_CLOCK_WITHIN_BUDGET true
+# Admitted plan timestamp travels through the existing release inputs, without a run file.
+printf '{"last_delivery_merged_at":"2026-11-12T14:20:00Z","release_inputs":{"cut_started_at":"2026-11-12T14:20:00Z"}}\n' >"$FAKE_CONTEXT"
+rm "$tmp/run/cut.start.epoch"
+out="$(run)"
+expect FULL_CLOCK_WITHIN_BUDGET true
 # A missing host or missing train merge never claims the full clock met budget.
 sed -i '/host=prowl/d' "$FAKE_BODY"
 out="$(run)"

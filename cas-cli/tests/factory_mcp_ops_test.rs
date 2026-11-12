@@ -13026,7 +13026,7 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         assert_eq!(published.split_whitespace().next(), Some(start.base_sha.as_str()));
         git_stdout(&worker_path, &["fetch", "-q", "origin", &format!("+{record}:{record}")]);
         let plan = std::process::Command::new("python3")
-            .arg(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/ci-test-impact.py"))
+            .arg(cas::test_paths::workspace_root().join("scripts/ci-test-impact.py"))
             .args(["lane", "--phase", "plan", "--base-sha", "HEAD", "--recorded-base-ref", &record])
             .arg("--history")
             .arg(home.path().join("no-history.json"))

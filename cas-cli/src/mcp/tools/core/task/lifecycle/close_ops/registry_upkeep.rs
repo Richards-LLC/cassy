@@ -462,34 +462,6 @@ fn changed<T: serde::Serialize>(current: &T, before: Option<&T>) -> bool {
         serde_yaml::to_value(current).ok() != serde_yaml::to_value(before).ok()
     })
 }
-/// GH #1863: a family naming this task whose only change is to keys outside
-/// the schema; the refusal names them instead of asking for what was done.
-fn unsupported_case_changes(registry: &Registry, before: &RegistryBaseline, id: &str) -> String {
-    let lines: Vec<_> = registry
-        .bug_families
-        .iter()
-        .filter(|(_, family)| family.tasks.iter().any(|task| task == id))
-        .filter_map(|(key, family)| {
-            let prior = before.registry.as_ref()?.bug_families.get(key)?;
-            let keys: Vec<_> = family
-                .extra
-                .iter()
-                .filter(|(field, value)| prior.extra.get(*field) != Some(*value))
-                .chain(prior.extra.iter().filter(|(field, _)| !family.extra.contains_key(*field)))
-                .map(|(field, _)| field.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            (!keys.is_empty()).then(|| format!(
-                "\nbug_families.{key} changed only unsupported field(s) {}; a case is compared on {}. Move that content into one of those fields.",
-                keys.join(", "),
-                crate::qa_registry::BUG_FAMILY_FIELDS.join(", "),
-            ))
-        })
-        .collect();
-    lines.concat()
-}
-
 fn has_changed_case(registry: &Registry, before: &RegistryBaseline, id: &str) -> bool {
     registry.bug_families.iter().any(|(key, family)| {
         let family = family.case();
@@ -801,8 +773,7 @@ fn inspect(
         && !live.is_empty()
         && !(registry_touched && has_changed_case(&registry, &before, &task.id))
     {
-        let unsupported = unsupported_case_changes(&registry, &before, &task.id);
-        findings.push(Finding::missing_case(format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.{unsupported}", task.id, live.join(", "), task.id)));
+        findings.push(Finding::missing_case(format!("Task {} is a bug and touches live journeys {}. Add or extend a bug family in a sibling bug-families/<slug>.yaml file (or the inline bug_families map) whose tasks lists {} (with the invariant that would have caught it), or an invariant with bug.task naming this task. The case must change in this delivery.", task.id, live.join(", "), task.id)));
     }
     Ok((findings, warnings))
 }

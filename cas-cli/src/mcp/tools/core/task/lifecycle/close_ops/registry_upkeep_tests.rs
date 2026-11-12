@@ -613,25 +613,27 @@ fn registry_upkeep_bug_requires_changed_case_for_task() {
 }
 
 /// GH #1863: extending an existing inline family's statement is its case;
-/// a change only to an unsupported key is still refused.
+/// an unsupported family field is refused by the registry schema.
 #[test]
-fn registry_upkeep_statement_extension_is_a_case_but_unsupported_keys_are_not_cas_f63f() {
-    let family = |statement: &str, note: &str| format!(
-        "{YAML}bug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n    note: {note}\n    tasks: [cas-1234]\n    invariants: [INV]\n    journeys: [signup]\n"
+fn registry_upkeep_statement_extension_is_a_case_but_unsupported_fields_are_refused_cas_f63f() {
+    let family = |statement: &str, extra: &str| format!(
+        "{YAML}bug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n{extra}    tasks: [cas-1234]\n    invariants: [INV]\n    journeys: [signup]\n"
     );
-    for (registry, accepted) in [
-        (family("Manual sync never duplicates a paid invoice, including linked PENDING webhook evidence", "kept"), true),
-        (family("Manual sync never duplicates a paid invoice", "changed"), false),
+    let base = "Manual sync never duplicates a paid invoice";
+    for (registry, refusal) in [
+        (family(&format!("{base}, including linked PENDING webhook evidence"), ""), None),
+        (family(base, "    note: changed\n"), Some("unsupported_bug_family_field")),
     ] {
-        let mut f = Fixture::new(&family("Manual sync never duplicates a paid invoice", "kept"));
+        let mut f = Fixture::new(&family(base, ""));
         f.task.task_type = TaskType::Bug;
         f.task.updated_at = f.store.update(&f.task).unwrap();
         write(f.repo.path(), "src/pages/signup.ts", "fixed");
         write(f.repo.path(), crate::qa_registry::DEFAULT_PATH, &registry);
         let head = commit(f.repo.path());
-        match f.run(&head) {
-            Ok(_) => assert!(accepted, "an unsupported-key change is not a case"),
-            Err(error) => assert!(!accepted, "a statement extension is a case: {error}"),
+        match (f.run(&head), refusal) {
+            (Ok(_), None) => {}
+            (Err(error), Some(code)) => assert!(error.contains(code), "{error}"),
+            (result, expected) => panic!("expected refusal {expected:?}, got {result:?}"),
         }
     }
 }

@@ -345,7 +345,6 @@ pub(crate) mod test_support {
         let ambient_build_guard =
             crate::test_env_guard::AmbientEnvRestore::set("CAS_FACTORY_BUILD_GUARD", "inherit");
         let provider_keys = [
-            "VIKTOR_API_KEY",
             "NEON_API_KEY",
             "VERCEL_TOKEN",
             "OPENAI_API_KEY",
@@ -364,9 +363,9 @@ pub(crate) mod test_support {
                     "ambient provider credential {key} leaked"
                 );
             }
-            guard.set("VIKTOR_API_KEY", "explicit-fixture");
+            guard.set("NEON_API_KEY", "explicit-fixture");
             assert_eq!(
-                std::env::var("VIKTOR_API_KEY").as_deref(),
+                std::env::var("NEON_API_KEY").as_deref(),
                 Ok("explicit-fixture")
             );
         }

@@ -198,8 +198,6 @@ fn message_provenance_at(
     }
     let origin = if message.source.eq_ignore_ascii_case("supervisor") {
         "supervisor-authored"
-    } else if message.source.eq_ignore_ascii_case("viktor") {
-        "viktor"
     } else if message.source.eq_ignore_ascii_case("director")
         && message
             .summary
@@ -433,39 +431,9 @@ fn record_worker_ready_contract(
 }
 
 #[cfg(test)]
-mod viktor_provenance_tests {
+mod provenance_tests {
     use super::queued_message_provenance_at;
     use cas_store::{NotificationPriority, QueuedPrompt};
-
-    #[test]
-    fn viktor_queue_rows_keep_the_standard_provenance_envelope() {
-        let row = QueuedPrompt {
-            reference_only: false,
-            id: 73,
-            source: "viktor".to_string(),
-            target: "worker-1".to_string(),
-            prompt: "reply".to_string(),
-            created_at: chrono::DateTime::parse_from_rfc3339("2026-08-18T20:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-            processed_at: None,
-            factory_session: Some("factory-1".to_string()),
-            summary: Some("Viktor reply".to_string()),
-            priority: NotificationPriority::High,
-            acked_at: None,
-            urgent: false,
-            origin: None,
-            operator: None,
-            recipient_device_id: None,
-            kind: None,
-            attachments: Vec::new(),
-        };
-
-        let observed_at = chrono::DateTime::parse_from_rfc3339("2026-08-18T20:06:00Z")
-            .unwrap()
-            .with_timezone(&chrono::Utc);
-        assert!(queued_message_provenance_at(&row, observed_at).starts_with("[cas #73 viktor 360s first]"));
-    }
 
     #[test]
     fn provenance_marks_only_rows_past_the_operational_freshness_window() {
@@ -525,7 +493,7 @@ mod viktor_provenance_tests {
     /// not its enqueue time or an inferred elapsed number of turns.
     #[test]
     fn delayed_messages_and_wakes_show_the_host_clock_cas_06eb() {
-        const TEST: &str = "mcp::tools::service::agent_search_system::message::viktor_provenance_tests::delayed_messages_and_wakes_show_the_host_clock_cas_06eb";
+        const TEST: &str = "mcp::tools::service::agent_search_system::message::provenance_tests::delayed_messages_and_wakes_show_the_host_clock_cas_06eb";
         const CHILD: &str = "CAS_CLOCK_TEST_CHILD";
         let Ok(zone) = std::env::var(CHILD) else {
             for zone in ["America/New_York", "UTC"] {
@@ -557,7 +525,13 @@ mod viktor_provenance_tests {
             let now = chrono::DateTime::parse_from_rfc3339(instant).unwrap().with_timezone(&chrono::Utc);
             let mut row = commander_row(Some(cas_store::QueueOrigin::PairedDevice { device_id: "dev".into() }));
             row.created_at = now - chrono::Duration::minutes(5);
-            for source in ["commander:Daniel@iphone-15", "supervisor", "director", "reminder", "viktor", "peer"] {
+            for source in [
+                "commander:Daniel@iphone-15",
+                "supervisor",
+                "director",
+                "reminder",
+                "peer",
+            ] {
                 row.source = source.into();
                 let rendered = queued_message_provenance_at(&row, now);
                 assert!(rendered.contains("300s first]"), "identity/age/delivery lost: {rendered}");

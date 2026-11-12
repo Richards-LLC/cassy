@@ -824,6 +824,15 @@ pub(crate) fn prepare_receipt(
         if !report.ok {
             return Err(format!("ledger fails `cas qa ledger check`:\n{}", report.refusal()));
         }
+        // A structurally valid ledger can still record failures (GH #1713);
+        // those are evidence, never a PASS receipt.
+        let failed: Vec<_> = report.rows.iter()
+            .filter(|row| row.verdict == crate::qa_ledger::Verdict::Fail)
+            .map(|row| format!("{} (line {}, defect {})", row.id, row.line, row.defect_task))
+            .collect();
+        if !failed.is_empty() {
+            return Err(format!("ledger records FAIL cells, so it cannot back a PASS receipt: {}", failed.join(", ")));
+        }
     }
     if schema == cas_store::RELEASE_VERDICT_SCHEMA {
         if let Some(id) = task_ids.iter().find(|id| !report_names(&body, id)) {
@@ -1309,5 +1318,11 @@ mod tests {
         // A ledger the command accepts is not refused by the ledger gate (later gates may still apply).
         let later = receipt(&valid).err().unwrap_or_default();
         assert!(!later.contains(&expected.refusal()), "{later}");
+        // GH #1713: a structurally valid ledger with a FAIL cell never backs a PASS receipt.
+        let failing = format!("schema: 2\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M07 | walk | shown | missing | FAIL | fixture | capture.txt | cas-defect |\n", crate::qa_ledger::HEADER);
+        std::fs::write(&ledger, &failing).unwrap();
+        assert!(crate::cli::qa_ledger::check(&ledger, Some(&owner)).ok);
+        let refused = receipt(&failing).unwrap_err();
+        assert!(refused.contains("M07") && refused != later, "{refused}");
     }
 }

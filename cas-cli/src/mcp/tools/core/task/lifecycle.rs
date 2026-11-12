@@ -312,6 +312,7 @@ fn reconcile_reused_factory_branch(
     expected_branch: &str,
     target_branch: &str,
     task_identity: Option<&close_ops::TaskCommitIdentity>,
+    recorded_start_branch: Option<&str>,
     parked_task_for_tip: impl Fn(&str) -> Option<String>,
 ) -> Result<ReusedFactoryBranchStart, String> {
     if crate::factory_isolation::branch_at(worktree_path).as_deref() != Some(expected_branch) {
@@ -325,6 +326,18 @@ fn reconcile_reused_factory_branch(
     let factory_tip = git.ref_sha(expected_branch).map_err(|error| {
         format!("Cannot inspect reused factory branch {expected_branch}: {error}")
     })?;
+
+    // GH #1843: before its first commit, an accepted same-task start is
+    // the provenance for dirty work. Identity validation already checked the
+    // task's assignee, target and graph; also require this exact source branch.
+    // Keep its original boundary even if the target advanced during review.
+    // The base remains a boundary, never an owned delivery commit.
+    if recorded_start_branch == Some(expected_branch)
+        && task_identity.and_then(|identity| identity.start_base.as_deref())
+            == Some(factory_tip.as_str())
+    {
+        return Ok(ReusedFactoryBranchStart::Unchanged);
+    }
 
     // cas-09cf: a matching target alone does not prove this is a resume.
     // Recorded anchors, or named work already on the target before first
@@ -581,7 +594,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["merge", "--no-ff", "factory/test-worker", "-m", "merge prior delivery"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("merged prior delivery can be reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Reset);
@@ -605,7 +618,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("unrelated prior delivery is reported, not reset");
         let ReusedFactoryBranchStart::Occupied { commit } = result else {
             panic!("unrelated prior delivery must occupy the lane: {result:?}");
@@ -623,7 +636,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "-b", "factory/test-worker"]);
         let before = git(repo.path(), &["rev-parse", "HEAD"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect("matching base needs no reset");
 
         assert_eq!(result, ReusedFactoryBranchStart::Unchanged);
@@ -642,7 +655,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["checkout", "factory/test-worker"]);
         std::fs::write(repo.path().join("base"), "modified\n").expect("tracked change");
 
-        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |_| None)
+        let error = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |_| None)
             .expect_err("tracked changes must block reset");
 
     }
@@ -663,7 +676,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -700,7 +713,7 @@ mod reused_factory_branch_tests {
         git(repo.path(), &["commit", "-m", "target work"]);
         git(repo.path(), &["checkout", "factory/test-worker"]);
 
-        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, |tip| {
+        let result = reconcile_reused_factory_branch(repo.path(), "test-worker", "factory/test-worker", "main", None, None, |tip| {
             (tip == parked_tip).then(|| "cas-park".to_string())
         })
         .expect("a parked tip moves instead of refusing");
@@ -780,20 +793,25 @@ fn shared_epic_note(epic_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -
     hold.shared_epic_note(epic_id, &crate::mcp::tools::core::guidance::caller_prefix())
 }
 
-fn no_code_external_ref_guidance(task: &Task) -> &'static str {
-    if task.execution_note.as_deref() == Some("no-code") {
-        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
-    } else {
-        ""
+fn no_code_external_ref_guidance(task: &Task) -> String {
+    if task.execution_note.as_deref() != Some("no-code") {
+        return String::new();
     }
+    let [title, schema] = crate::qa_ledger::DECLARATION_MARKERS;
+    format!(
+        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references.\n\
+         QA ledger: a `LEDGER.md` in the task artifacts must pass `cas qa ledger check` only when it declares the canonical QA matrix with a `{title}` title, a `{schema}` header or the matrix header row; any other report is not parsed as QA evidence."
+    )
 }
 
 /// Task start carries the no-code close requirement, or for any other task
 /// the one-line test principle (cas-5a52).
 fn start_guidance(task: &Task) -> String {
-    match no_code_external_ref_guidance(task) {
-        "" => format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE),
-        no_code => no_code.to_string(),
+    let no_code = no_code_external_ref_guidance(task);
+    if no_code.is_empty() {
+        format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE)
+    } else {
+        no_code
     }
 }
 
@@ -2893,6 +2911,7 @@ impl CasCore {
                             &worker_branch,
                             &target_branch,
                             Some(&identity),
+                            task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()),
                             |tip| {
                                 crate::mcp::tools::parked_delivery_at_tip(
                                     task_store.as_ref(),

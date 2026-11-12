@@ -297,13 +297,16 @@ impl SqliteAgentStore {
             // Keep only routing identity in the retirement event: SessionEnd
             // deletes the registry row, but peer mail may still name this ID.
             let identity: Option<serde_json::Value> = tx.query_row(
-                "SELECT name, role, machine_id, factory_session, registered_at FROM agents WHERE id = ?",
+                "SELECT name, role, machine_id, factory_session, registered_at, cc_session_id FROM agents WHERE id = ?",
                 params![id], |row| Ok(serde_json::json!({
                     "name": row.get::<_, String>(0)?,
                     "role": row.get::<_, String>(1)?,
                     "machine_id": row.get::<_, Option<String>>(2)?,
                     "factory_session": row.get::<_, Option<String>>(3)?,
                     "registered_at": row.get::<_, String>(4)?,
+                    // The harness session the row had been rebound to, so a
+                    // reconnecting MCP can resume it (GH #1829).
+                    "cc_session_id": row.get::<_, Option<String>>(5)?,
                 })),
             ).optional()?;
 

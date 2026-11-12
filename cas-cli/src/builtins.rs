@@ -522,14 +522,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
-        path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
         content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
@@ -1277,14 +1269,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
     },
     BuiltinFile {
-        path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
-    },
-    BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
         content: include_str!("builtins/skills/cas-html-reports/SKILL.md"),
     },
@@ -2022,14 +2006,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/mcp-integration/references/diagnosis.md",
         content: include_str!("builtins/skills/mcp-integration/references/diagnosis.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-viktor/SKILL.md",
-        content: include_str!("builtins/skills/cas-viktor/SKILL.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-viktor/references/gateway.md",
-        content: include_str!("builtins/skills/cas-viktor/references/gateway.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/SKILL.md",
@@ -4271,6 +4247,13 @@ fn tracked_builtin_paths(project_root: &Path, entries: &[String]) -> Vec<String>
 /// slice. Builtin skill paths look like `skills/<dir>/SKILL.md` (or a nested
 /// `references/...`); we extract `<dir>` so the prune below can recognize the
 /// dirs Cassy just wrote and never remove them.
+/// Whether `name` is a skill directory the builtin writer owns. A database
+/// skill that maps to one never writes it: the builtin wins (GH #1777), so
+/// `cas update` and `cas doctor` judge the same file against the same body.
+pub fn is_builtin_skill_dir_name(name: &str) -> bool {
+    builtin_skill_dir_names(BUILTIN_SKILLS).contains(name)
+}
+
 fn builtin_skill_dir_names(skills: &[BuiltinFile]) -> HashSet<String> {
     skills
         .iter()

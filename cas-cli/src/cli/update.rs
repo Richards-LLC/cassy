@@ -3568,6 +3568,14 @@ fn sync_claude_files_into(
             fmt.success("Database rules up to date")?;
         }
 
+        for name in &skill_report.shadowed_names {
+            fmt.write_raw("  ")?;
+            fmt.warning(&format!(
+                "Database skill '{name}' not synced: a built-in skill owns that directory. \
+                 Archive the database skill to silence this."
+            ))?;
+        }
+
         // Report database skill sync
         if skill_report.synced > 0 || skill_report.removed > 0 {
             fmt.write_raw("  ")?;

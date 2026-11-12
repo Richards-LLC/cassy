@@ -495,6 +495,57 @@ fn probe_codex_home_auth(home: &Path, now_ms: u64, deadline: Deadline) -> Capabi
     }
 }
 
+/// Can Codex start its shell-execution host (GH #1870)?
+///
+/// Codex runs `functions.exec` in a `codex-code-mode-host` process shipped
+/// beside the `codex` binary. In the incident macOS held that launch before
+/// the binary ran (the process sat in `_dyld_start`), so every exec call
+/// failed with "timed out negotiating with the code-mode host" while model
+/// turns and MCP tools still worked. A healthy host exits at once on a closed
+/// stdin. Only one that cannot within the bound is `Unavailable`; no host
+/// beside `codex` or too little budget left gives no verdict. The probe reads
+/// no account, so its verdict never reads as a login failure.
+pub(crate) fn probe_codex_exec_host(deadline: Deadline) -> CapabilityEvidence {
+    let now_ms = cas_factory::CapabilitySnapshot::now_ms();
+    // Homebrew links only `codex` onto PATH; the host sits beside its target.
+    let beside = |codex: &Path| {
+        Some(codex.parent()?.join("codex-code-mode-host")).filter(|host| host.is_file())
+    };
+    let host = std::env::var_os("PATH")
+        .and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join("codex"))
+                .find(|codex| codex.is_file())
+        })
+        .and_then(|codex| beside(&codex).or_else(|| beside(&codex.canonicalize().ok()?)));
+    let Some(host) = host else {
+        return unknown(now_ms, "no Codex code-mode host beside codex on PATH", "None.");
+    };
+    if deadline.remaining() < AUTH_PROBE_TIMEOUT {
+        return unknown(now_ms, "Codex code-mode host probe had no budget left", "Retry the spawn.");
+    }
+    match run_command(&mut Command::new(&host), deadline, AUTH_PROBE_TIMEOUT) {
+        Ok(_) => available(now_ms, "Codex code-mode host starts"),
+        Err(BoundedCommandError::TimedOut) => unavailable(
+            now_ms,
+            format!(
+                "the Codex code-mode host {} did not start within {}s, so every shell command \
+                 would time out negotiating with it; the account login is not the cause",
+                host.display(),
+                AUTH_PROBE_TIMEOUT.as_secs()
+            ),
+            format!(
+                "Reinstall Codex so the host binary is rewritten (Homebrew: `brew reinstall --cask codex`), \
+                 check that `{} </dev/null` exits at once, then re-issue the spawn.",
+                host.display()
+            ),
+        ),
+        Err(BoundedCommandError::Io) => {
+            unknown(now_ms, "Codex code-mode host could not be launched", "None.")
+        }
+    }
+}
+
 fn classify_codex_auth(
     success: bool,
     stdout: &str,

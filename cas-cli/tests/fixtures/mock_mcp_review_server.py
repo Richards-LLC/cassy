@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal stdio MCP fixture for the receipted Viktor gateway integration test."""
+"""Minimal stdio MCP fixture for the receipted delegation gateway integration test."""
 
 import json
 import sys
@@ -27,7 +27,7 @@ def main():
                         "protocolVersion", "2024-11-05"
                     ),
                     "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "mock-viktor", "version": "0.0.1"},
+                    "serverInfo": {"name": "mock-review", "version": "0.0.1"},
                 },
             )
         elif method == "tools/list":
@@ -36,7 +36,7 @@ def main():
                 {
                     "tools": [
                         {
-                            "name": "ask_viktor",
+                            "name": "start_review",
                             "description": "Fixture run starter",
                             "inputSchema": {"type": "object"},
                         },

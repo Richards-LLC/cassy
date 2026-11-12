@@ -113,6 +113,30 @@ move Git refs. Publication comes from the target repository's Release ledger;
 a tag alone is not publication evidence. Missing receipts or unavailable refs
 produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
 
+## Explicit peer merge holds
+
+A peer question is advisory unless the sender deliberately gives it merge-hold scope.
+For `coordination action=message target=<peer> kind=ask`, put this structured line first in
+`message`, followed by the review request:
+
+```text
+CAS_MERGE_HOLD {"task_id":"cas-example","pr":4249}
+Please review the delivery before it merges.
+```
+
+Either `task_id` or a positive integer `pr` is sufficient; both may be present. Task IDs and
+PR numbers match exactly. The first content line is the only hold declaration: ordinary body
+mentions, quoted examples, work orders and statements such as “Not yours: cas-example” never
+create a hold. Legacy prose-only review asks also remain advisory. Invalid JSON, unknown keys
+or an empty scope grant no hold authority. `task_id` on an unrelated coordination operation
+is not a declaration on the peer ask; use the explicit message header above.
+
+The hold applies to the sender's `worktree_merge`, protected PR arming and raw `gh pr merge`.
+If a raw PR merge cannot resolve its PR number, a valid explicit hold still fails closed;
+an unscoped question does not block it. Existing linked or unambiguous typed peer answers
+clear scoped asks. Ambiguous answers remain visible with their reply ID for linking; a
+`PEER ASK OVERRIDE <ask-id>: <reason>` task note permits an audited override as before.
+
 ## Worker contracts across machines
 
 `coordination action=message target=<worker>@<machine>` can carry an advisory
@@ -2966,11 +2990,11 @@ The hook also accepts this complete fixed profile before a named nextest command
 (use an existing, literal absolute path without shell expansion):
 
 ```bash
-env -u VIKTOR_API_KEY -u VIKTOR_KEY -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
+env -u NEON_API_KEY -u NEON_TOKEN -u VERCEL_TOKEN -u VERCEL_API_TOKEN XDG_CONFIG_HOME=/absolute/private-config cargo nextest run -p cas --lib -E 'test(module::name)' > target/worker-tests.log 2>&1 &
 ```
 
 The hook carries this as runner metadata, including detached execution. The
-runner removes those six credentials and sets XDG only on the final Cargo/test
+runner removes those four credentials and sets XDG only on the final Cargo/test
 child, after Cassy credential bootstrap and normal builder admission. Parent
 identity, private targets, memory limits and clean-tip receipts remain in force.
 Other environment wrappers, partial profiles, identity/build overrides and shell
@@ -4079,18 +4103,6 @@ installed file, and the history ledger records both renders.
 and commit the regenerated JSON. Skipping it means the version you just replaced is not recognized as Cassy content downstream, so installs that still hold it will keep it forever instead of upgrading (cas-0c0a).
 
 Lanes never hand-merge the ledger (cas-fb11). `.gitattributes` marks it `merge=cas-generated`, so a merge keeps the target's copy without a conflict, and `scripts/regenerate-generated-artifacts.sh <pre-merge-head> <merged-head>` reruns the generator on the merged history and commits the result. Cassy's merge runs that script. After a manual `git merge`, run it yourself; run `python3 scripts/cas-merge-drivers.py install` once per clone first. The committed ledger then equals a fresh generator run, which the release gate's `builtin-projections` row checks. `scripts/test-regenerate-generated-artifacts.py` merges two lanes that both add builtin history.
-
-### Viktor distribution
-
-The managed Viktor surface has three coupled user-facing pieces: its Claude/Codex/Grok builtin
-skill mirrors, `cas viktor` credential-safe provisioning output, and the proxy's configured
-allowlist. Keep the skill body compact and put operational detail in its reference. The mirrors
-must retain identical meaning after their mechanical tool-prefix substitutions; run the builtin
-flavor-drift test. Never add a credential literal to source, fixtures, docs, or artifacts. The
-only supported user entry is `cas viktor key`; it prompts, validates, then saves the
-key in machine-scoped state, while `cas serve` still holds only the `VIKTOR_API_KEY` reference.
-For a new CLI or proxy-facing behavior, add a clean-project `cas init`/command assertion and a
-direct registry test so the source cannot exist without reaching all three downstream harnesses.
 
 ## Releasing
 

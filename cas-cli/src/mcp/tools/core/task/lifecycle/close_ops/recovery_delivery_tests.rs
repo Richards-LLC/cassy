@@ -2012,7 +2012,10 @@ fn evolved_recovery_fixture(env: &mut TestEnvGuard) -> (Recovery, String) {
         .release_lease(TASK, "recovery-session").unwrap();
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();
-    task.deliverables.factory_branch_anchor = Some("f".repeat(40));
+    task.deliverables.factory_branch_anchor = None;
+    // Recover the source delivery: the later sync merge changed only epic.txt,
+    // so that merge's own diff cannot reproduce the missing footer content.
+    f.final_tip = f.predecessor.clone();
     task.deliverables.historical_factory_branch_anchors.push(f.final_tip.clone());
     tasks.update(&task).unwrap();
     let supervisor = CasCore::with_daemon(cas_dir, None, None);
@@ -2039,7 +2042,8 @@ async fn recover_delivery_accepts_reviewed_evolution_cas_372b() {
     assert_eq!(recovered.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
     assert_eq!(recovered.status, before.status);
     assert_eq!(recovered.assignee, before.assignee);
-    assert!(recovered.deliverables.historical_factory_branch_anchors.contains(&"f".repeat(40)));
+    assert_eq!(recovered.deliverables.historical_factory_branch_anchors,
+        before.deliverables.historical_factory_branch_anchors);
     let audit: serde_json::Value = serde_json::from_str(
         recovered.notes.lines().last().unwrap().split_once("DELIVERY IDENTITY RECOVERED: ").unwrap().1,
     ).unwrap();

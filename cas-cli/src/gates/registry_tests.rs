@@ -60,6 +60,27 @@ fn audited_retirements_match_the_measured_registry() {
         baseline.len(), removed.len(), unrelated_removed, unrelated_added, REGISTRY.len());
 }
 
+#[test]
+fn test_shape_gate_codes_match_generated_registry() {
+    let root = crate::test_paths::crate_root().join("..");
+    let script = root.join("scripts/check-test-shape.py");
+    if !script.is_file() {
+        eprintln!("SKIP test-shape registry parity: source checkout unavailable in this test archive");
+        return;
+    }
+    let output = std::process::Command::new("python3")
+        .arg(script)
+        .arg("--print-gate-codes")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let codes = String::from_utf8(output.stdout).unwrap();
+    let actual = codes.lines().collect::<std::collections::BTreeSet<_>>();
+    let expected = REGISTRY.iter().map(|row| row.code).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+}
+
 /// The registry is measured from code: every row comes from one declaration,
 /// and every refusing check (gates and guards declared in Rust) emits its
 /// code, so its refusals are recorded under that code and not as uncoded.

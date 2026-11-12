@@ -104,7 +104,70 @@ fn with_cleanup_progress<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use std::time::Duration;
+
+    #[test]
+    fn gc_cli_reclaims_expired_artifacts_host_wide_cas_d740() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let now = chrono::Utc::now();
+        let mut roots = Vec::new();
+        let mut expired = Vec::new();
+        let mut kept = Vec::new();
+        for name in ["one", "two"] {
+            let project = env.home().join(name);
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {name:?}\n")).unwrap();
+            crate::store::known_repos::register_repo_strict(&project).unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            let artifacts = crate::config::project_factory_artifacts_root(
+                &root, &crate::config::resolved_factory_artifacts_root(None));
+            for (suffix, age) in [("old", 30), ("fresh", 1), ("cited", 30), ("release", 30)] {
+                let id = format!("cas-{name}-{suffix}");
+                let mut task = cas_types::Task::new(id.clone(), id.clone());
+                task.status = cas_types::TaskStatus::Closed;
+                task.closed_at = Some(now - chrono::Duration::days(age));
+                task.updated_at = task.closed_at.unwrap();
+                tasks.add(&task).unwrap();
+                let path = artifacts.join(&id);
+                std::fs::create_dir_all(&path).unwrap();
+                std::fs::write(path.join("proof.txt"), b"fixture proof").unwrap();
+                if suffix == "old" { expired.push(path); } else { kept.push(path); }
+                if matches!(suffix, "cited" | "release") {
+                    cas_store::SqliteArtifactStore::open(&root).unwrap().record_local(&cas_store::NewArtifact {
+                        id: format!("art-{name}-{suffix}"), task_id: id, name: "proof.txt".into(),
+                        mime: "text/plain".into(), size_bytes: 13, sha256: "a".repeat(64),
+                    }).unwrap();
+                }
+            }
+            let mut release = cas_store::NewQualityEvent::new(format!("release-{name}"), cas_store::QualityPayload::Release {
+                commit_to_main_minutes: None, main_to_published_minutes: None, ejections: 0, rescues: 0,
+            });
+            release.local_note = Some(format!("art-{name}-release"));
+            cas_store::record_quality_event(&root, &release).unwrap();
+            roots.push(root);
+        }
+        // A live task in one project cites another project's published alias.
+        let mut live = cas_types::Task::new("cas-live".into(), "Keep published proof".into());
+        live.notes = "art-one-cited art-two-cited".into();
+        crate::store::open_task_store_local(&roots[1]).unwrap().add(&live).unwrap();
+        env.set_current_dir(roots[0].parent().unwrap());
+        env.set("CAS_ROOT", &roots[0]);
+        let run = |extra: &[&str]| {
+            let mut args = vec!["cas", "--json", "factory", "gc", "cleanup"];
+            args.extend_from_slice(extra);
+            let cli = crate::cli::Cli::try_parse_from(args).unwrap();
+            let Some(crate::cli::Commands::Factory(factory)) = &cli.command else { unreachable!() };
+            let Some(super::super::FactoryCommands::Gc { command }) = &factory.command else { unreachable!() };
+            execute(command, &cli, Some(&roots[0])).unwrap();
+        };
+        run(&[]);
+        assert!(expired.iter().all(|path| path.join("proof.txt").exists()));
+        eprintln!("baseline: reclaimed_bytes=0; expired fixture artifacts remain");
+        run(&["--artifacts", "--force", "--no-dry-run"]);
+        assert!(expired.iter().all(|path| !path.exists()));
+        assert!(kept.iter().all(|path| path.join("proof.txt").exists()));
+    }
 
     #[test]
     fn cleanup_progress_runs_during_blocking_work_and_is_silent_when_disabled() {

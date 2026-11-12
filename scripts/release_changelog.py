@@ -204,7 +204,7 @@ def section(text, version):
     return '\n'.join(tidy(body)) + '\n'
 
 
-def verify_deliveries(base_ref, notes=None):
+def verify_deliveries(base_ref, notes=None, tip="HEAD"):
     """Require a non-red delivery in Git history for each explicit task claim."""
     def git(*args):
         result = subprocess.run(['git', *args], capture_output=True, text=True)
@@ -213,14 +213,14 @@ def verify_deliveries(base_ref, notes=None):
         return result.stdout.strip()
 
     owner = re.compile(r'\((cas-[0-9a-f]+)(,? red)?\)$')
-    paths = [str(path) for path in fragment_paths('CHANGELOG.md')]
-    for commit in git('log', f'{base_ref}..HEAD', '--no-merges', '--format=%H',
+    paths = git('ls-tree', '-r', '--name-only', tip, '--', 'changelog.d/').splitlines()
+    for commit in git('log', f'{base_ref}..{tip}', '--no-merges', '--format=%H',
                       '--grep=^release: v[0-9]').splitlines():
         paths += git('diff', '--name-only', '--diff-filter=D', f'{commit}^',
                      commit, '--', 'changelog.d/').splitlines()
     tasks = {Path(path).stem for path in paths
              if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name)}
-    tasks.update(match[1] for subject in git('log', f'{base_ref}..HEAD', '--no-merges',
+    tasks.update(match[1] for subject in git('log', f'{base_ref}..{tip}', '--no-merges',
                                             '--format=%s').splitlines()
                  if (match := owner.search(subject)))
     deliveries, red = {}, set()
@@ -231,7 +231,7 @@ def verify_deliveries(base_ref, notes=None):
                 red.add(commit)
             else:
                 deliveries.setdefault(match[1], []).append(commit)
-    contained = set(git('rev-list', 'HEAD').splitlines())
+    contained = set(git('rev-list', tip).splitlines())
     missing = []
     for task in sorted(tasks):
         # Older deliveries identify themselves by adding their own fragment.
@@ -240,7 +240,7 @@ def verify_deliveries(base_ref, notes=None):
         commits = [commit for commit in commits if commit not in red]
         if contained.intersection(commits):
             continue
-        if any(f'- {commit}' in git('cherry', 'HEAD', commit).splitlines() for commit in commits):
+        if any(f'- {commit}' in git('cherry', tip, commit).splitlines() for commit in commits):
             continue
         missing.append(f'{task}: missing fix commit: {", ".join(commits) or "no non-red delivery found"}')
     if missing:
@@ -279,22 +279,19 @@ def verify_deliveries(base_ref, notes=None):
         resolved = git('rev-parse', '--symbolic-full-name', '--verify', ref)
         if not resolved.startswith(('refs/heads/', 'refs/remotes/')):
             raise ChangelogError(f'constituent epic must be a branch ref: {ref}')
-        if resolved.startswith('refs/remotes/'):
-            _, _, remote, name = resolved.split('/', 3)
-            git('fetch', '--quiet', '--no-tags', remote, f'+refs/heads/{name}:{resolved}')
         epic_history.setdefault(branch(resolved), set()).update(git('rev-list', resolved).splitlines())
     try:
         # Main may already have published this candidate under a newer queue
         # merge. Inventory the candidate's own interval, not main's later tag.
-        floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', 'HEAD')
-        if git('rev-parse', f'{floor}^{{commit}}') == git('rev-parse', 'HEAD'):
-            floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', 'HEAD^')
+        floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', tip)
+        if git('rev-parse', f'{floor}^{{commit}}') == git('rev-parse', tip):
+            floor = git('describe', '--tags', '--match', 'v[0-9]*', '--abbrev=0', f'{tip}^')
     except ChangelogError:
         floor = base_ref  # Legacy/local fixture without release tags.
     previous = set(git('rev-list', floor).splitlines())
-    included = {match[1] for subject in git('log', f'{floor}..HEAD', '--no-merges', '--format=%s').splitlines()
+    included = {match[1] for subject in git('log', f'{floor}..{tip}', '--no-merges', '--format=%s').splitlines()
                 if (match := owner.search(subject)) and not match[2]}
-    included.update(Path(path).stem for path in git('log', f'{floor}..HEAD', '--format=',
+    included.update(Path(path).stem for path in git('log', f'{floor}..{tip}', '--format=',
         '--diff-filter=A', '--name-only', '--', 'changelog.d/').splitlines()
         if re.fullmatch(r'cas-[0-9a-f]+\.md', Path(path).name))
     included.update(no_code_members)
@@ -327,14 +324,14 @@ def verify_deliveries(base_ref, notes=None):
         paths = (git('diff', '--name-only', start, anchor) if start else
                  git('diff-tree', '--root', '-m', '--no-commit-id', '--name-only', '-r', anchor)).splitlines()
         code = any(not path.endswith('.md') and not path.startswith(('docs/', 'changelog.d/', '.cas/')) for path in paths)
-        if code and anchor not in contained and f'- {anchor}' in git('cherry', 'HEAD', anchor).splitlines():
+        if code and anchor not in contained and f'- {anchor}' in git('cherry', tip, anchor).splitlines():
             included.add(task)
             continue
         if code and task not in deferred:
             missing.append(f'{task}: late delivery {anchor} on declared epic {target}; merge it or add a reasoned deferred_tasks entry')
     if missing:
         raise ChangelogError('release omits declared constituent deliveries:\n' + '\n'.join(sorted(missing)))
-    return {'checked_sha': git('rev-parse', 'HEAD'), 'inventory_base': git('rev-parse', floor),
+    return {'checked_sha': git('rev-parse', tip), 'inventory_base': git('rev-parse', floor),
             'epic_refs': refs, 'deferred_tasks': deferred, 'included_task_ids': sorted(included), 'no_code_members': no_code_members}
 
 
@@ -354,9 +351,10 @@ def main(argv):
             parser = argparse.ArgumentParser()
             parser.add_argument('base_ref')
             parser.add_argument('--notes')
+            parser.add_argument('--tip', default='HEAD')
             parser.add_argument('--report', type=Path)
             args = parser.parse_args(argv[1:])
-            report = verify_deliveries(args.base_ref, args.notes)
+            report = verify_deliveries(args.base_ref, args.notes, args.tip)
             if args.report:
                 args.report.parent.mkdir(parents=True, exist_ok=True)
                 temporary = args.report.with_suffix('.tmp')

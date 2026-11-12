@@ -12,6 +12,10 @@ use std::{
     process::Command,
 };
 
+#[path = "release_automation/cut.rs"]
+mod cut;
+pub use cut::{PlanArgs, plan};
+
 #[derive(Debug, Args)]
 pub struct ContextArgs {
     #[arg(long, conflicts_with = "version")]
@@ -28,29 +32,15 @@ pub struct InventoryArgs {
 
 #[derive(Debug, Args)]
 pub struct PreviewArgs {
-    /// Replay an exact portable scope, including a historical published release
-    #[arg(long, conflicts_with_all = ["commit", "version", "inputs", "train"])]
-    scope: Option<PathBuf>,
-    #[arg(long, required_unless_present = "scope")]
-    commit: Option<String>,
-    #[arg(long, required_unless_present = "scope")]
-    version: Option<String>,
+    /// Replay an exact portable scope; use release plan for a new cut.
     #[arg(long)]
-    inputs: Option<PathBuf>,
-    #[arg(long)]
-    train: Option<String>,
+    scope: PathBuf,
 }
 
 /// No store, receipt, ledger-cache or notification writes.
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {
     let repo = PathBuf::from(git(&std::env::current_dir()?, &["rev-parse", "--show-toplevel"])?);
-    let scope = if let Some(path) = &args.scope {
-        serde_json::from_slice(&fs::read(path)?)?
-    } else {
-        cut_scope(root, &repo, args.commit.as_deref().context("commit required")?,
-            args.version.as_deref().context("version required")?, args.train.as_deref(), args.inputs.as_deref())?
-    };
-    let preview = preview_scope(root, &repo, scope)?;
+    let preview = preview_scope(root, &repo, serde_json::from_slice(&fs::read(&args.scope)?)?)?;
     println!("{}", serde_json::to_string(&preview)?);
     Ok(())
 }
@@ -66,8 +56,6 @@ pub(super) struct ReleasePreview {
     by_reason: BTreeMap<String, usize>,
     review_missing: Vec<String>,
     members_by_id: BTreeMap<String, crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose>,
-    #[serde(default)]
-    candidate_build_seconds: u64,
 }
 
 impl ReleasePreview {
@@ -76,7 +64,7 @@ impl ReleasePreview {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut value = Self { scope, members: members_by_id.len(), would_close: 0,
             would_hold: 0, already_closed: 0, not_eligible: 0, by_reason: BTreeMap::new(),
-            review_missing: vec![], members_by_id, candidate_build_seconds: 0 };
+            review_missing: vec![], members_by_id };
         for (id, outcome) in &value.members_by_id {
             let reason = match outcome {
                 CassyMergeClose::Closed { .. } => { value.would_close += 1; "WOULD_CLOSE" }
@@ -94,9 +82,18 @@ impl ReleasePreview {
         value
     }
 
+    fn cut_blockers(&self) -> BTreeMap<String, String> {
+        let mut blockers = BTreeMap::new();
+        let missing: Vec<_> = self.review_missing.iter().filter(|id| self.scope.included_task_ids.contains(id)).collect();
+        if !missing.is_empty() { blockers.insert("REVIEW_MISSING".into(), format!("Record release review for {missing:?}")); }
+        if !(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0)) {
+            blockers.insert("NO_ELIGIBLE_MEMBERS".into(), format!("Resolve held/ineligible members: {:?}", self.by_reason));
+        }
+        blockers
+    }
+
     fn allow_cut(&self) -> Result<()> {
-        ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
-            "release cut refused: {} members, zero would-close; inspect by_reason and review_missing in the preview", self.members);
+        ensure!(self.cut_blockers().is_empty(), "RELEASE_PLAN_BLOCKED: {:?}", self.cut_blockers());
         Ok(())
     }
 }
@@ -105,6 +102,16 @@ fn preview_scope(root: &Path, repo: &Path, scope: ReleaseScope) -> Result<Releas
     let inventory = crate::qa_batch::resolve_release_inventory(root, repo, &scope).map_err(anyhow::Error::msg)?;
     let members = crate::release_reconcile::preview_release(root, repo, &inventory).map_err(anyhow::Error::msg)?;
     Ok(ReleasePreview::from_members(scope, members))
+}
+
+fn validate_scope_inputs(root: &Path, scope: &ReleaseScope) -> Result<()> {
+    let tasks = open_task_store(root)?;
+    let reports: std::collections::BTreeSet<_> = scope.included_task_ids.iter().chain(scope.no_code_members.keys())
+        .filter(|id| tasks.get(id).is_ok_and(|task| crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some()) || scope.no_code_members.contains_key(*id)).collect();
+    let errors: Vec<_> = reports.into_iter().filter_map(|id| crate::release_reconcile::validate_no_code_proofs(
+        root, scope, id, scope.no_code_members.get(id).map(Vec::as_slice).unwrap_or_default()).err()).collect();
+    ensure!(errors.is_empty(), "{}", errors.join("; "));
+    Ok(())
 }
 
 fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Option<&str>, inputs: Option<&Path>) -> Result<ReleaseScope> {
@@ -150,9 +157,6 @@ pub struct TrackArgs {
     /// Audited constituent refs, deferrals and included delivery IDs
     #[arg(long)]
     inputs: Option<PathBuf>,
-    /// Candidate-binary preview at this exact release commit
-    #[arg(long)]
-    preview: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
 pub struct InstalledArgs {
@@ -274,7 +278,7 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         )?,
         "release checkout belongs to another repository"
     );
-    let branch = git(&caller, &["branch", "--show-current"])?;
+    let branch = std::env::var("CAS_RELEASE_CUT_BRANCH").unwrap_or(git(&caller, &["branch", "--show-current"])?);
     let explicit = release_train::active_trains(store.as_ref(), &integration)
         .into_iter()
         .find(|train| train.effective_epic_branch() == Some(branch.as_str()));
@@ -357,7 +361,7 @@ fn track_on_train(
     let canonical_repo = operations.canonical_repo_key()?;
     let _target_lock = crate::worktree::target_lock::lock_delivery_target(root, &canonical_repo, &expected.branch)?;
     ensure!(
-        git(&repo, &["branch", "--show-current"])? == expected.branch,
+        std::env::var("CAS_RELEASE_CUT_BRANCH").unwrap_or(git(&repo, &["branch", "--show-current"])?) == expected.branch,
         "release must be cut on the train branch"
     );
     ensure!(
@@ -414,36 +418,9 @@ fn track_on_train(
             Some(git(&repo, &["show", "-s", "--format=%ct", &args.first_child])?.parse()?);
         expected.first_child_commit = Some(args.first_child.clone());
     }
-    // Refuse missing or mismatched explicit report bindings before freezing the
-    // lane. Old code-only audits do not need report preflight.
-    if let Some(inputs) = &expected.release_inputs {
-        let tasks = open_task_store(root)?;
-        let reports: std::collections::BTreeSet<_> = inputs.included_task_ids.iter()
-            .chain(inputs.no_code_members.keys())
-            .filter(|id| tasks.get(id).is_ok_and(|t|
-                crate::qa_pass::is_no_code(&t) || t.deliverables.evidence_only.is_some()))
-            .cloned().chain(inputs.no_code_members.keys().cloned()).collect();
-        if !reports.is_empty() {
-            let mut scope = super::release_adapters::tag_scope(
-                root, repo, Some(&expected), &train.id, &format!("v{}", args.version), &args.commit,
-            )?;
-            scope.release_tag = None; // The cut has not published a tag yet.
-            for id in reports {
-                crate::release_reconcile::validate_no_code_proofs(root, &scope, &id,
-                    inputs.no_code_members.get(&id).map(Vec::as_slice).unwrap_or_default())
-                    .map_err(anyhow::Error::msg)?;
-            }
-        }
-    }
     let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
-    let preview = if let Some(path) = &args.preview {
-        let value: ReleasePreview = serde_json::from_slice(&fs::read(path)?)?;
-        ensure!(serde_json::to_value(&value.scope)? == serde_json::to_value(&scope)?, "cut preview scope differs from release inputs");
-        // Counts and residuals are derived from the candidate's member decisions.
-        let mut rebuilt = ReleasePreview::from_members(scope.clone(), value.members_by_id);
-        rebuilt.candidate_build_seconds = value.candidate_build_seconds;
-        rebuilt
-    } else { preview_scope(root, repo, scope.clone())? };
+    validate_scope_inputs(root, &scope)?;
+    let preview = preview_scope(root, repo, scope.clone())?;
     preview.allow_cut()?;
     expected.close_preview = Some(preview);
     // This is the cut boundary, before push/enqueue and independent of
@@ -921,7 +898,7 @@ pub(super) mod tests {
         train.labels.push("release-train".into());
         train.branch = Some("epic/train-cas-a001".into());
         train.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:fixture".into(),
+            repo_selector: "project:release-fixture".into(),
             target_branch: "main".into(),
         });
         let mut owner = Agent::new_with_role(
@@ -954,7 +931,6 @@ pub(super) mod tests {
             first_child: sha.clone(),
             version: "9.99.2".into(),
             inputs: None,
-            preview: None,
         };
         (temp, root, train, owner, args)
     }
@@ -994,9 +970,6 @@ pub(super) mod tests {
         let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
         assert_eq!(restored.close_preview.as_ref().unwrap().review_missing, ["cas-0001"]);
         assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
-        let candidate_preview = root.join("candidate-preview.json");
-        fs::write(&candidate_preview, serde_json::to_vec(restored.close_preview.as_ref().unwrap()).unwrap()).unwrap();
-        args.preview = Some(candidate_preview);
         track_on_train(&args, &root, temp.path(), &train).unwrap();
         let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
         assert_eq!(cut.close_preview.unwrap().review_missing, ["cas-0001"]);

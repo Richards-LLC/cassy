@@ -1,17 +1,10 @@
-//! Auto-cut (cas-e060): Cassy cuts a green release train itself.
-//!
-//! The daemon's cut-notice poll calls [`attempt`] for each uncut train whose
-//! exact tip holds a green train-suite receipt. When the tip carries
-//! changelog fragments, no merge-queue run is in flight, the operator has not
-//! paused auto-cut in Commander and the cadence allows it, Cassy freezes the
-//! train (cas-2f4d) and runs the repository's own `scripts/release.sh` with
-//! the supervisor's notes draft. That script already arms the landing and
-//! publication reminders, and publication sends the post-release notice
-//! that has the supervisor post the approved notes. Cassy never writes or posts
-//! notes: without a draft it waits, and wakes the supervisor once per tip.
+//! One cut per train input snapshot. The same leased owner serves manual
+//! and automatic entry; corrected notes or repaired task inputs re-arm it.
+//! The queue is the only full proof. Cassy never writes or posts notes.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use sha2::{Digest, Sha256};
 
 use anyhow::{Context, Result, ensure};
 use chrono::{DateTime, Duration, Utc};
@@ -125,7 +118,25 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
     if let Some(reason) = declined_setup(root, train) {
         return Ok(Outcome::Declined(reason));
     }
-    let started = format!("{STARTED_LABEL}{tip}");
+    let draft = notes_draft(root, &train.id)?;
+    let tasks = crate::store::open_task_store(root)?.list(None)?;
+    let inputs: Vec<_> = tasks.iter().filter(|task| task.id != train.id && task.deliverables.work_target.as_ref().is_some_and(|target| target.target_branch == lane))
+        .map(|task| (&task.id, &task.status, &task.deliverables)).collect();
+    let project = crate::cloud::resolve_canonical_id(root).unwrap_or_default();
+    let receipts = cas_store::list_qa_batch_receipts(root, &project)?;
+    let key = format!("{:x}", Sha256::digest([std::fs::read(&draft).unwrap_or_default(), serde_json::to_vec(&(inputs, receipts))?].concat()));
+    let started = format!("{STARTED_LABEL}{tip}:{key}");
+    if train.labels.iter().any(|label| label.starts_with(&format!("{STARTED_LABEL}{tip}:"))) {
+        let log = draft.with_file_name("auto-cut.log");
+        let exit = std::fs::read_to_string(&log).ok().and_then(|text| text.lines().rev().find_map(|line| line.strip_prefix("RELEASE_EXIT=").and_then(|code| code.parse::<i32>().ok())));
+        let blocked = std::fs::read(draft.with_file_name("cut-plan.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|plan| plan["blockers"].as_object().is_some_and(|blockers| !blockers.is_empty()));
+        if exit.is_none() || exit == Some(0) || !blocked {
+            report_failure(root, train, lane, tip)?;
+            return Ok(Outcome::Handled);
+        }
+    }
     if train.labels.contains(&started) {
         report_failure(root, train, lane, tip)?;
         return Ok(Outcome::Handled);
@@ -154,7 +165,6 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             Some(format!("auto-cut: green train suite at {tip}, {count} changelog fragments").as_str()),
         )?;
     }
-    let draft = notes_draft(root, &train.id)?;
     if !draft.is_file() {
         let deadline = crate::cli::release_report::eastern_time(now + Duration::minutes(NOTES_DEADLINE_MINUTES));
         release_action(
@@ -173,13 +183,18 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
         return Ok(Outcome::Handled);
     }
     let log = train_dir(root, &train.id)?.join("auto-cut.log");
-    start_release(root, &repo, lane, &draft, &log, &train.id)?;
     let store = crate::store::open_task_store(root)?;
-    let mut task = store.get(&train.id)?;
+    let expected = store.get(&train.id)?;
+    let mut task = expected.clone();
     task.labels.retain(|label| !label.starts_with(STARTED_LABEL));
     task.labels.push(started);
     task.updated_at = Utc::now();
-    store.update(&task)?;
+    store.update_if_current(&task, &expected)?;
+    if let Err(error) = start_release(root, &repo, lane, tip, &draft, &log, &train.id) {
+        task.labels.retain(|label| !label.starts_with(STARTED_LABEL));
+        store.update(&task)?;
+        return Err(error);
+    }
     store.append_note(
         &train.id,
         &format!("AUTO-CUT: started scripts/release.sh --notes {} at {tip}; log {}", draft.display(), log.display()),
@@ -187,37 +202,18 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
     Ok(Outcome::Handled)
 }
 
-/// Check out the lane in a dedicated worktree and run `scripts/release.sh`
-/// detached; the worktree is removed when the script exits.
-fn start_release(root: &Path, repo: &Path, lane: &str, draft: &Path, log: &Path, train_id: &str) -> Result<()> {
-    let checkout = train_dir(root, train_id)?.join("cut-checkout");
-    std::fs::create_dir_all(checkout.parent().context("checkout parent")?)?;
-    if checkout.exists() {
-        let _ = git(repo, &["worktree", "remove", "--force", &checkout.to_string_lossy()]);
-        let _ = std::fs::remove_dir_all(&checkout);
-    }
-    let _ = git(repo, &["worktree", "prune"]);
-    git(repo, &["worktree", "add", "--quiet", &checkout.to_string_lossy(), lane])?;
-    let release = r#"cd "$1" || exit 1
-scripts/release.sh --notes "$2"; rc=$?
-printf '\nRELEASE_EXIT=%s\n' "$rc"
-cd / && git -C "$3" worktree remove --force "$1"
-exit "$rc""#;
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(r#"log=$1; shift; nohup bash -c "$CAS_AUTO_CUT_SCRIPT" auto-cut "$@" >"$log" 2>&1 </dev/null &"#)
-        .arg("sh")
-        .arg(log)
-        .arg(&checkout)
-        .arg(draft)
-        .arg(repo)
-        .env("CAS_AUTO_CUT_SCRIPT", release)
-        .env("CAS_ROOT", root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    ensure!(status.success(), "could not start scripts/release.sh");
+/// Both automatic and manual cuts enter the same leased, detached owner.
+fn start_release(root: &Path, repo: &Path, lane: &str, tip: &str, draft: &Path, log: &Path, train_id: &str) -> Result<()> {
+    let owner = train_dir(root, train_id)?.join("cut-owner.py");
+    std::fs::write(&owner, git(repo, &["show", &format!("{tip}:scripts/release-cut.py")])?)?;
+    let stdout = std::fs::File::create(log)?;
+    let mut command = Command::new("nohup");
+    command.arg("python3").arg(owner).arg("--repo").arg(repo).arg("--branch").arg(lane)
+        .arg("--tip").arg(tip).args(["--", "--notes"]).arg(draft)
+        .env("CAS_ROOT", root).env("CAS_RELEASE_EXPECT_TRAIN", "1")
+        .stdin(Stdio::null()).stderr(stdout.try_clone()?).stdout(stdout);
+    #[cfg(unix)] { use std::os::unix::process::CommandExt; command.process_group(0); }
+    command.spawn()?;
     Ok(())
 }
 
@@ -228,23 +224,16 @@ fn report_failure(root: &Path, train: &Task, lane: &str, tip: &str) -> Result<()
     let Some(code) = text.lines().rev().find_map(|line| line.strip_prefix("RELEASE_EXIT=")) else {
         return Ok(());
     };
-    if code.trim() == "0" {
+    if matches!(code.trim(), "0" | "71") {
         return Ok(());
     }
-    release_action(
-        root,
-        train,
-        ReleaseNoticePhase::CutReady,
-        &format!("auto-cut-failed:{tip}"),
-        &format!(
-            "Auto-cut of {lane} ({}) at {tip} failed: scripts/release.sh exited {}. Complete log: {}. \
-             The train stays frozen. Repair it, then on {lane} run `scripts/release.sh --notes {}`.",
-            train.id,
-            code.trim(),
-            log.display(),
-            notes_draft(root, &train.id)?.display()
-        ),
-    )?;
+    let plan = notes_draft(root, &train.id)?.with_file_name("cut-plan.json");
+    let blockers = std::fs::read(plan).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|plan| serde_json::from_value::<std::collections::BTreeMap<String, String>>(plan["blockers"].clone()).ok())
+        .filter(|blockers| !blockers.is_empty()).unwrap_or_else(|| std::collections::BTreeMap::from([("CUT_EXECUTION".into(), format!("Inspect {} (exit {})", log.display(), code.trim()))]));
+    release_freeze::record_cut_blockers(root, &train.id, tip, &blockers)?;
+    release_action(root, train, ReleaseNoticePhase::CutReady, &format!("auto-cut-failed:{tip}:{}", text.len()),
+        &format!("Auto-cut {lane} at {tip} is held: {blockers:?}. Name the release-cut-blocker label on its release-repair task. Notes changes retry automatically; the train remains frozen. Log: {}", log.display()))?;
     Ok(())
 }
 

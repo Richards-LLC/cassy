@@ -1,7 +1,6 @@
 use super::*;
 use crate::store::{open_agent_store, open_supervisor_queue_store, open_task_store};
 use crate::test_support::TestEnvGuard;
-use crate::train_guardrails::notify_train_cuts;
 use cas_types::{Agent, AgentRole, TaskStatus, TaskType};
 use std::collections::BTreeSet;
 
@@ -30,14 +29,6 @@ fn train_task(id: &str, labels: &[String]) -> Task {
     train
 }
 
-/// The receipt `train_ci::observe` writes for the lane's current tip.
-fn receipt(repo: &Path, root: &Path, outcome: &str) {
-    let dir = crate::train_ci::directory(root, "cas-tr").unwrap();
-    std::fs::create_dir_all(&dir).unwrap();
-    let state = serde_json::json!({"branch": LANE, "head": run(repo, &["rev-parse", LANE]), "outcome": outcome});
-    std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
-}
-
 /// The Nov 6 design: a green exact tip with fragments is cut by Cassy, inside
 /// the cadence, never while red, paused or queued, and never without the
 /// supervisor's notes, which it waits for with one wake.
@@ -51,6 +42,8 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     std::fs::write(repo.join(".gitignore"), ".cas/\nrelease-ran\n").unwrap();
     commit(repo, ".gitignore");
     commit(repo, "scripts/release.sh");
+    std::fs::write(repo.join("scripts/release-cut.py"), include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/release-cut.py"))).unwrap();
+    commit(repo, "scripts/release-cut.py");
     std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CAS_ROOT/../release-ran\"\n").unwrap();
     run(repo, &["update-index", "--chmod=+x", "scripts/release.sh"]);
     std::fs::set_permissions(repo.join("scripts/release.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -66,20 +59,15 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     store.add(&train_task("cas-tr", &[])).unwrap();
     let now = Utc::now();
     let none = BTreeSet::new();
-    let poll = |queued: &BTreeSet<String>| notify_train_cuts(&root, queued, now).unwrap();
+    let poll = |queued: &BTreeSet<String>| attempt(&root, &store.get("cas-tr").unwrap(), LANE, &run(repo, &["rev-parse", LANE]), !queued.is_empty(), now).unwrap();
     let frozen = || release_freeze::freeze_of(&open_task_store(&root).unwrap().get("cas-tr").unwrap()).is_some();
     let wakes = || open_supervisor_queue_store(&root).unwrap().peek("sup-id", 10).unwrap();
 
-    receipt(repo, &root, "PASS");
     poll(&none);
     assert!(!frozen(), "green, but no changelog fragments");
     run(repo, &["checkout", "-q", LANE]);
     commit(repo, "changelog.d/cas-x.md");
     run(repo, &["checkout", "-q", "main"]);
-    receipt(repo, &root, "FAIL");
-    poll(&none);
-    assert!(!frozen(), "a red tip never cuts");
-    receipt(repo, &root, "PASS");
     set_paused(&root, "cas-tr", "operator", true).unwrap();
     poll(&none);
     assert!(!frozen(), "paused in Commander");

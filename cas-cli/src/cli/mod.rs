@@ -472,6 +472,8 @@ pub enum Commands {
 pub enum ReleaseCommands {
     /// Resolve the canonical train, or read a previous cut receipt
     Context(release_automation::ContextArgs),
+    /// List every known cut blocker before preparation or build
+    Plan(release_automation::PlanArgs),
     /// Arm durable release landing and publication reminders
     Track(release_automation::TrackArgs),
     /// Resolve shipped deliveries and portable proof references at an exact SHA
@@ -723,6 +725,9 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
     validate_process_startup(&cli)?;
     if let Some(Commands::Release(ReleaseCommands::Preview(args))) = &cli.command {
         return release_automation::preview(args, &find_cas_root()?);
+    }
+    if let Some(Commands::Release(ReleaseCommands::Plan(args))) = &cli.command {
+        return release_automation::plan(args, &find_cas_root()?);
     }
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
@@ -1046,6 +1051,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Context(args)) => release_automation::context(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Inventory(args)) => release_automation::inventory(args, require_cas_root(cas_root)?),
+        Commands::Release(ReleaseCommands::Plan(args)) => release_automation::plan(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Preview(args)) => release_automation::preview(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Track(args)) => release_automation::track(args, require_cas_root(cas_root)?),
         Commands::Release(ReleaseCommands::Published(args)) => release_adapters::published(args, cas_root),

@@ -48,8 +48,7 @@ mod server;
 pub(crate) use server::memory::configure_allocator as configure_serve_allocator;
 pub mod socket;
 pub mod tools;
-pub(crate) use server::AgentIdentitySource;
-#[cfg(feature = "mcp-proxy")]
+
 pub use server::CasCore;
 pub(crate) use server::AgentIdentitySource;
 pub use server::run_server;

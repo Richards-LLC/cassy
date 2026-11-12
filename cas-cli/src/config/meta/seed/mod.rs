@@ -11,6 +11,7 @@ mod issues;
 mod llm;
 mod memory;
 mod notifications;
+mod peers;
 mod qa;
 mod qa_capture;
 mod release;

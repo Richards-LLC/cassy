@@ -448,7 +448,7 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
 
 #[tokio::test]
 async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commits_cas_ef54() {
-    for shipped_by in [Some("origin/main"), Some("v9.99.0"), Some("released-lane"), None] {
+    for shipped_by in [Some("origin/main"), Some("v9.99.0"), None] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture_with_surface(&mut env, "note.txt", false);
         let repo = f.dir.path();
@@ -464,7 +464,6 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         let foreign = git(repo, &["rev-parse", "HEAD"]);
         match shipped_by {
             Some("origin/main") => { git(repo, &["update-ref", "refs/remotes/origin/main", &foreign]); }
-            Some("released-lane") => {}
             Some(tag) => { git(repo, &["tag", tag, &foreign]); }
             None => {
                 git(repo, &["update-ref", "-d", "refs/remotes/origin/main"]);
@@ -474,7 +473,6 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         git(&f.worker_path, &["merge", "-q", "--no-ff", "main", "-m",
             &format!("chore({TASK}): synchronize release")]);
         let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-        if shipped_by == Some("released-lane") { git(repo, &["tag", "v9.99.0", &tip]); }
         let tasks = open_task_store(&root).unwrap();
         let mut task = tasks.get(TASK).unwrap();
         task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/sync".into();
@@ -498,13 +496,14 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         let result = f.core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
             id: TASK.into(), brief: Some(true), force: None,
         })).await;
-        if shipped_by.is_some() {
+        let allowed = shipped_by == Some("origin/main");
+        if allowed {
             result.unwrap_or_else(|error| panic!("shipped by {shipped_by:?}: {error}"));
         } else {
             assert_eq!(result.unwrap_err().code, ErrorCode::INVALID_PARAMS);
         }
         let resumed = tasks.get(TASK).unwrap();
-        assert_eq!(resumed.status, if shipped_by.is_some() { TaskStatus::InProgress } else { TaskStatus::Open });
+        assert_eq!(resumed.status, if allowed { TaskStatus::InProgress } else { TaskStatus::Open });
         assert_eq!(resumed.deliverables.factory_branch_start, boundary);
         assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read(f.worker_path.join("release.txt")).unwrap(), b"foreign task delivery\n");

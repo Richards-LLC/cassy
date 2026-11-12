@@ -248,15 +248,6 @@ pub(super) fn tag_scope(
     tag: &str,
     tag_sha: &str,
 ) -> Result<ReleaseScope> {
-    if let Some(scope) = context.and_then(|c| c.release_scope.as_ref()) {
-        ensure!(
-            scope.final_release_sha == tag_sha && scope.release_id == tag,
-            "tracked release scope names {} at {}, not {tag} at {tag_sha}",
-            scope.release_id,
-            scope.final_release_sha
-        );
-        return Ok(scope.clone());
-    }
     let project_id = crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?;
     let repository = match context {
         Some(context) => context.repository.clone(),

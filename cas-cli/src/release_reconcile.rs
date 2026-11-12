@@ -141,6 +141,37 @@ fn retire_unproven_members(receipt: &mut ReleaseReconcileReceipt, inventory: &Re
     receipt.residuals.retain(|residual| !discarded.contains(&residual.task_id));
 }
 
+fn new_receipt(key: ReleaseOperationKey, scope: &ReleaseScope) -> ReleaseReconcileReceipt {
+    let now = chrono::Utc::now().to_rfc3339();
+    ReleaseReconcileReceipt {
+        key, scope: scope.clone(), preview: None, reconciler_version: None, reconciler_stale: false,
+        triggers: vec![], members: BTreeMap::new(), close_intents: BTreeMap::new(),
+        issue_outcomes: vec![], parents: BTreeMap::new(), exceptions: vec![],
+        started_at: now.clone(), updated_at: now, complete: false,
+        sync_pending: vec![], residuals: vec![], notice_intent: None,
+    }
+}
+
+fn same_identity(receipt: &ReleaseReconcileReceipt, scope: &ReleaseScope) -> Result<()> {
+    // Review evidence and commit names can change without changing shipped content.
+    let immutable = |scope: &ReleaseScope| {
+        let mut scope = scope.clone();
+        scope.proof_refs.clear();
+        scope.reviewed_sha.clear();
+        scope.final_release_sha = receipt.key.final_release_sha.clone();
+        scope.release_tag = None;
+        scope.included_task_ids.extend(scope.no_code_members.keys().cloned());
+        scope.included_task_ids.sort();
+        scope.included_task_ids.dedup();
+        scope.no_code_members.clear();
+        serde_json::to_value(scope).map_err(|e| e.to_string())
+    };
+    if immutable(&receipt.scope)? != immutable(scope)? {
+        return Err(crate::gates::tag("G-128", "RELEASE_IDENTITY_CHANGED"));
+    }
+    Ok(())
+}
+
 async fn resume(
     root: &Path,
     scope: &ReleaseScope,
@@ -169,45 +200,11 @@ async fn resume(
     .await
     .map_err(|e| format!("RELEASE_OPERATION_LOCK_FAILED: {e}"))?
     .map_err(|e| e.to_string())?;
-    let now = chrono::Utc::now().to_rfc3339();
     let mut receipt: ReleaseReconcileReceipt = match operation.load().map_err(|e| e.to_string())? {
         Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
-        None => ReleaseReconcileReceipt {
-            key,
-            reconciler_version: None,
-            reconciler_stale: false,
-            scope: scope.clone(),
-            preview: None,
-            triggers: vec![],
-            members: BTreeMap::new(),
-            close_intents: BTreeMap::new(),
-            issue_outcomes: vec![],
-            parents: BTreeMap::new(),
-            exceptions: vec![],
-            started_at: now.clone(),
-            updated_at: now,
-            complete: false,
-            sync_pending: vec![],
-            residuals: vec![],
-            notice_intent: None,
-        },
+        None => new_receipt(key, scope),
     };
-    // Proof and the reviewed commit may change without changing shipped content.
-    let immutable = |scope: &ReleaseScope| {
-        let mut scope = scope.clone();
-        scope.proof_refs.clear();
-        scope.reviewed_sha.clear();
-        scope.final_release_sha = receipt.key.final_release_sha.clone();
-        scope.release_tag = None;
-        scope.included_task_ids.extend(scope.no_code_members.keys().cloned());
-        scope.included_task_ids.sort();
-        scope.included_task_ids.dedup();
-        scope.no_code_members.clear();
-        serde_json::to_value(scope).map_err(|e| e.to_string())
-    };
-    if immutable(&receipt.scope)? != immutable(scope)? {
-        return Err(crate::gates::tag("G-128", "RELEASE_IDENTITY_CHANGED"));
-    }
+    same_identity(&receipt, scope)?;
     receipt.scope = scope.clone();
     if !receipt.triggers.contains(&trigger) {
         receipt.triggers.push(trigger);
@@ -439,14 +436,13 @@ pub(crate) fn record_preview(root: &Path, repo: &Path, scope: &ReleaseScope, pre
         final_release_sha: final_tree(repo, &scope.final_release_sha)?,
     };
     let operation = ReleaseOperation::open(root, key.clone()).map_err(|e| e.to_string())?;
-    let mut saved = operation.load().map_err(|e| e.to_string())?.unwrap_or_else(|| serde_json::json!({
-        "key": key, "scope": scope, "triggers": [], "members": {}, "close_intents": {},
-        "issue_outcomes": [], "parents": {}, "exceptions": [],
-        "started_at": chrono::Utc::now().to_rfc3339(), "updated_at": chrono::Utc::now().to_rfc3339(),
-        "complete": false, "sync_pending": [], "residuals": [], "notice_intent": null,
-    }));
-    saved["preview"] = preview;
-    operation.save(&saved).map_err(|e| e.to_string())
+    let mut saved = match operation.load().map_err(|e| e.to_string())? {
+        Some(saved) => serde_json::from_value(saved).map_err(|e| e.to_string())?,
+        None => new_receipt(key, scope),
+    };
+    same_identity(&saved, scope)?;
+    saved.preview = Some(preview);
+    operation.save(&serde_json::to_value(saved).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
 }
 
 /// The sole authoritative completed-operation lookup. Partial/held operations

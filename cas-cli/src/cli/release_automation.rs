@@ -194,8 +194,6 @@ pub(super) struct ReleaseContext {
     publish_reminder: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) release_inputs: Option<ReleaseInputs>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) release_scope: Option<ReleaseScope>,
 }
 
 fn version_ok(version: &str) -> bool {
@@ -303,7 +301,6 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         landing_reminder: None,
         publish_reminder: None,
         release_inputs: None,
-        release_scope: None,
     })
 }
 
@@ -396,6 +393,7 @@ fn track_on_train(
     let scope = &preview.scope;
     ensure!(scope.final_release_sha == args.commit && scope.release_id == format!("v{}", args.version)
         && scope.project_id == crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?
+        && scope.repository == expected.repository && scope.release_tag.is_none() && scope.promotion_pr.is_none()
         && scope.constituent_epic_ids == [train.id.clone()],
         crate::gates::tag("G-121", "cut preview does not identify this train, release and commit"));
     if let Some(inputs) = &expected.release_inputs {
@@ -926,6 +924,11 @@ pub(super) mod tests {
         (temp, root, train, owner, args)
     }
 
+    fn track(args: &TrackArgs, root: &Path) -> Result<()> {
+        let (repo, train) = open_train(root)?;
+        track_on_train(args, root, &repo, &train)
+    }
+
     fn track_on_train(args: &TrackArgs, root: &Path, repo: &Path, train: &cas_types::Task) -> Result<()> {
         let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
         super::track_on_train(args, root, repo, train, preview_scope(root, repo, scope)?)
@@ -955,13 +958,17 @@ pub(super) mod tests {
             final_release_sha: tree,
         };
         let saved = cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap();
-        assert_eq!(saved["preview"], serde_json::to_value(preview).unwrap());
+        assert_eq!(saved["preview"], serde_json::to_value(&preview).unwrap());
         assert_eq!(saved["members"], serde_json::json!({})); // A dry run never commits a close.
         assert!(crate::release_reconcile::completed_operation(&root, &key).unwrap().is_none());
+        let mut changed = preview.scope.clone();
+        changed.included_task_ids.push("cas-unshipped".into());
+        assert!(crate::release_reconcile::record_preview(&root, temp.path(), &changed,
+            serde_json::to_value(&preview).unwrap()).unwrap_err().contains("RELEASE_IDENTITY_CHANGED"));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn explicit_no_code_proof_tracks_and_closes_once_cas_2ecc() {
+    async fn derived_no_code_proof_tracks_and_closes_once_cas_2ecc() {
         use crate::qa_batch::{ReleaseProofKind, ReleaseProofRef};
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1065,13 +1072,12 @@ pub(super) mod tests {
         ).unwrap();
         let tag = format!("v{}", args.version);
         git(repo, &["tag", &tag]).unwrap();
-        let mut scope = super::super::release_adapters::tag_scope(
+        let scope = super::super::release_adapters::tag_scope(
             &root, repo, Some(&context), &train.id, &tag, &args.commit,
         ).unwrap();
         assert_eq!(scope.no_code_members.get("cas-e3041"), Some(&vec![proof.clone()]));
         // A legacy publication may already contain an explicitly included,
         // unbound report. It remains a residual and cannot borrow external_ref.
-        scope.included_task_ids.push("cas-ef2b".into());
         let inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();
         assert!(!inventory.deliveries.iter().any(|d| d.task_id == "cas-undeclared"));
         assert!(!inventory.exceptions.iter().any(|d| d.task_id == "cas-undeclared"));
@@ -1105,7 +1111,6 @@ pub(super) mod tests {
             &root, &scope, &inventory, crate::release_reconcile::ReconcileTrigger::Backfill,
         ).await.unwrap();
         assert!(matches!(first.members.get("cas-e3041"), Some(CassyMergeClose::Closed { .. })), "{first:?}");
-        assert!(first.residuals.iter().any(|r| r.task_id == "cas-ef2b" && r.gate.contains("MissingNoCodeProof")));
         let closed = tasks.get("cas-e3041").unwrap();
         assert_eq!(closed.status, TaskStatus::Closed);
         let replay_inventory = crate::qa_batch::resolve_release_inventory(&root, repo, &scope).unwrap();

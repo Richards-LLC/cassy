@@ -298,7 +298,7 @@ def verify_deliveries(base_ref, notes=None):
     rows = []
     try:
         with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
-            rows = db.execute('SELECT id, task_type, deliverables, execution_note FROM tasks').fetchall()
+            rows = db.execute('SELECT id, task_type, deliverables, execution_note, status FROM tasks').fetchall()
             members = set(inputs.get('included_task_ids', []))
             pending = [context['train_id']] if context.get('train_id') else []
             while pending:
@@ -307,13 +307,14 @@ def verify_deliveries(base_ref, notes=None):
                     "SELECT from_id FROM dependencies WHERE to_id=? AND dep_type='parent-child'", (parent,))}
                 pending.extend(children - members)
                 members.update(children)
-            included.update(task for task, _, _, method in rows if method == 'no-code'
+            included.update(task for task, _, _, method, state in rows if method == 'no-code'
+                            and (state == 'awaiting_merge' or task in inputs.get('included_task_ids', []))
                             and task in members and task not in deferred)
     except sqlite3.Error as error:
         if refs:
             raise ChangelogError(f'cannot audit declared epics without the project task store ({root}): {error}') from error
     missing = []
-    for task, kind, raw, _ in rows:
+    for task, kind, raw, _, _ in rows:
         data = json.loads(raw or '{}')
         if isinstance(data, str):
             data = json.loads(data)

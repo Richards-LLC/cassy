@@ -36,6 +36,10 @@ cgroup_root="$fixture_root/cgroup"
 proc_root="$fixture_root/proc"
 mkdir -p "$cache_root" "$state_root" "$fixture_root/volume" \
     "$cgroup_root/slot1" "$cgroup_root/slot2" "$proc_root/101" "$proc_root/102"
+for slot in {3..8}; do
+    mkdir -p "$cgroup_root/slot$slot"
+    : >"$cgroup_root/slot$slot/cgroup.procs"
+done
 printf '101\n' >"$cgroup_root/slot1/cgroup.procs"
 printf '102\n' >"$cgroup_root/slot2/cgroup.procs"
 printf 'Runner.Listener\n' >"$proc_root/101/comm"
@@ -54,7 +58,9 @@ completed_hook="$fixture_root/cache-job-completed.sh"
 cat >"$fixture_root/systemctl" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-    *cassy-actions-runner-2.service*) printf '/slot2\n' ;;
+    *cassy-actions-runner-[2-8].service*)
+        unit="${!#}"; slot="${unit#cassy-actions-runner-}"
+        printf '/slot%s\n' "${slot%.service}" ;;
     *cassy-actions-runner.service*) printf '/slot1\n' ;;
     *) exit 2 ;;
 esac

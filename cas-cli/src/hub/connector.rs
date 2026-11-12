@@ -253,18 +253,12 @@ impl DaemonConnector {
     }
 }
 
-async fn run_upstream(
-    session: &str,
-    port: u16,
-    mux: &SessionMultiplexer,
-    events: &MachineEventBus,
-    mut controls: mpsc::Receiver<ClientMessage>,
-) -> Result<()> {
+type UpstreamSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn connect_upstream(session: &str, port: u16, hub_root: Option<&std::path::Path>) -> Result<UpstreamSocket> {
     // cas-ca22: present the daemon's relay token, so this connection alone
     // may carry the operator_verified attribution the hub sets.
-    let token = crate::hub::HubRuntimePaths::default_for_user()
-        .ok()
-        .and_then(|paths| crate::ui::factory::relay_token::read(paths.root(), session));
+    let token = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
     if token.is_none() {
         tracing::warn!(
             session,
@@ -277,9 +271,21 @@ async fn run_upstream(
         max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
         ..WebSocketConfig::default()
     };
-    let (mut socket, _) = connect_async_with_config(request, Some(config), false)
+    let (socket, _) = connect_async_with_config(request, Some(config), false)
         .await
         .with_context(|| format!("connect to daemon for session '{session}'"))?;
+    Ok(socket)
+}
+
+async fn run_upstream(
+    session: &str,
+    port: u16,
+    mux: &SessionMultiplexer,
+    events: &MachineEventBus,
+    mut controls: mpsc::Receiver<ClientMessage>,
+) -> Result<()> {
+    let paths = crate::hub::HubRuntimePaths::default_for_user().ok();
+    let mut socket = connect_upstream(session, port, paths.as_ref().map(|paths| paths.root())).await?;
     let mut supervisor_pane_id: Option<String> = None;
     let mut pre_supervisor_bytes = 0usize;
     let mut supervisor_ready = false;
@@ -450,6 +456,43 @@ async fn run_upstream(
 mod tests {
     use super::*;
     use crate::ui::factory::{PaneInfo, PaneKind, SessionState};
+
+    /// Reexec can rotate the daemon token after the hub reads it but before
+    /// the inherited listener accepts the handshake (cas-ef33).
+    #[tokio::test]
+    async fn relay_rotation_during_connect_retries_without_losing_operator_trust_cas_ef33() {
+        use crate::ui::factory::relay_token;
+        use tokio_tungstenite::tungstenite::Error;
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().join("hub");
+        let old = relay_token::mint(&root, "rotation").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = async {
+            let (tcp, _) = listener.accept().await.unwrap();
+            // TCP acceptance proves the hub already read the previous token.
+            let current = relay_token::mint(&root, "rotation").unwrap();
+            assert_ne!(old, current);
+            let stale = relay_token::accept(tcp, Some(&current)).await;
+            assert!(matches!(stale, Err(Error::Http(ref response)) if response.status() == 401));
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (mut socket, trusted) = relay_token::accept(tcp, Some(&current)).await.unwrap();
+            assert!(trusted);
+            let frame = socket.next().await.unwrap().unwrap();
+            assert!(matches!(serde_json::from_slice::<ClientMessage>(&frame.into_data()).unwrap(), ClientMessage::Ping));
+            // Tokenless local viewers still connect without gaining trust.
+            let (tcp, _) = listener.accept().await.unwrap();
+            let (_, trusted) = relay_token::accept(tcp, Some(&current)).await.unwrap();
+            assert!(!trusted);
+        };
+        let client = async {
+            let mut socket = connect_upstream("rotation", port, Some(&root)).await.unwrap();
+            socket.send(Message::Binary(serde_json::to_vec(&ClientMessage::Ping).unwrap())).await.unwrap();
+            let request = relay_token::upstream_request(port, None).unwrap();
+            tokio_tungstenite::connect_async(request).await.unwrap();
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(server, client); }).await.unwrap();
+    }
 
     /// cas-a0e2: an upstream that ends drops its sender, and every send
     /// failure is the retryable [`UpstreamUnavailable`], never a refusal.

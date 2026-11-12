@@ -20,14 +20,16 @@ class CutOwnerTest(unittest.TestCase):
                     '-c', 'user.email=fixture@example.test', *args], text=True).strip()
             git('init', '-q', '-b', 'train')
             (repo / 'scripts').mkdir()
+            (repo / 'draft.md').write_text('notes\n')
             (repo / 'scripts/release.sh').write_text('''printf 'READY\\n'
 read -r finish
+git rm --quiet -- "$2" || exit
 python3 -c 'import json,os,subprocess; json.dump([subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),subprocess.run(["git","symbolic-ref","--quiet","HEAD"]).returncode,os.environ["CAS_RELEASE_CUT_BRANCH"]],open(os.environ["CUT_CAPTURE"],"w"))'
 ''')
             git('add', '.')
             git('commit', '-qm', 'cut fixture')
             tip = git('rev-parse', 'HEAD')
-            command = [sys.executable, str(OWNER), '--repo', str(repo), '--branch', 'train', '--tip', tip, '--']
+            command = [sys.executable, str(OWNER), '--repo', str(repo), '--branch', 'train', '--tip', tip, '--', '--notes', str(repo / 'draft.md')]
             capture = repo / 'result.json'
             first = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, env=dict(os.environ, CUT_CAPTURE=str(capture)))

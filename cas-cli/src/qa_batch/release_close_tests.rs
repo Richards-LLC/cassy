@@ -86,6 +86,7 @@ fn published_train_closes_members_independently_cas_734b() {
     bound.peer_premerge = Some(cas_types::PeerPremergeAttestation {
         message_id: "peer-message".into(), sender_machine_id: "peer".into(), sender_session: "peer-session".into(),
         receipt: cas_types::PeerPremergeReceipt {
+            registry_version: None,
             status: cas_types::VerificationStatus::Approved, project_id: "close-fixture".into(),
             supervisor_id: "supervisor".into(), task_id: "cas-approved".into(),
             source_branch: "factory/cas-approved".into(), source_sha: anchor.clone(), target_branch: "main".into(),
@@ -98,6 +99,17 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("UPDATE verification_dispatches SET state='resolved', repository_proof=?1 WHERE id=?2",
         rusqlite::params![serde_json::to_string(&bound).unwrap(), dispatch.id]).unwrap();
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    let cycle = cas_store::delivery_cycles(&root, "cas-approved").unwrap().pop().unwrap();
+    conn.execute("UPDATE verification_dispatches SET receipt_id=?1 WHERE id=?2",
+        rusqlite::params![cycle.cycle_id, dispatch.id]).unwrap();
+    let stamp = serde_json::json!({"cycle_id": cycle.cycle_id, "approved_anchor": anchor,
+        "registry_version": crate::gates::registry_version_in_force(),
+        "dispatch_id": dispatch.id, "verdict_id": "ver-approved"});
+    conn.execute("INSERT INTO events(event_type,entity_type,entity_id,summary,metadata) VALUES ('verification_added','verification','ver-approved','approval',?1)",
+        [stamp.to_string()]).unwrap();
+    // A newer task dispatch must not hide an approval of this delivery cycle.
+    cas_store::create_verification_dispatch_bound(&root, "cas-approved", "worker", "supervisor",
+        &cas_types::VerificationProofBoundary::task(), chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
     // cas-0d3f: a local premerge verdict binds a synthetic commit, with the
     // delivery's source and reviewed tree in its immutable candidate manifest.
     let tree = git(&["rev-parse", &format!("{anchor}^{{tree}}")]);

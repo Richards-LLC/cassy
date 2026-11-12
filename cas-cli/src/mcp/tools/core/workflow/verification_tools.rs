@@ -654,6 +654,8 @@ impl CasCore {
                     data: None,
                 },
             )?;
+        let proof_receipt = proof_dispatch.receipt()
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         // cas-5c33: the boundary that matters is the delivered commit
         // identity. A branch that moved on to the next task keeps the verdict
         // valid while every delivered commit is still reachable; the moved
@@ -807,7 +809,7 @@ impl CasCore {
                         self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
-                        && proof_dispatch.delivery_transaction_id.is_none()
+                        && proof_receipt.transaction().is_none()
                     {
                         if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                             outcome
@@ -1047,8 +1049,8 @@ impl CasCore {
                     verification.status,
                     VerificationStatus::Approved | VerificationStatus::Skipped
                 );
-                let delivery_transitioned = if let Some(delivery_transaction_id) =
-                    dispatch.delivery_transaction_id.as_deref()
+                let delivery_transitioned = if let Some((_, delivery_transaction_id)) =
+                    dispatch.receipt().map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.transaction()
                     && cas_store::transition_worker_delivery_verification_with_conn(
                         &tx,
                         delivery_transaction_id,
@@ -1107,6 +1109,12 @@ impl CasCore {
                 }
             }
 
+            let event = super::premerge_verification::cycle::event(&tx, &self.cas_root, &task,
+                &dispatch, &verification).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?
+                .with_session(&caller_id);
+            cas_store::record_event_with_conn(&tx, &event)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?;
+
             tx.commit().map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to commit verification transaction: {e}")),
@@ -1123,44 +1131,6 @@ impl CasCore {
                 "verification_reclaim_targets",
             );
             crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
-        }
-
-        // Emit VerificationAdded event for task lifecycle tracking
-        if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
-            use cas_store::EventStore;
-            use cas_types::{Event, EventEntityType, EventType};
-            let status_str = match verification.status {
-                VerificationStatus::Approved => "approved",
-                VerificationStatus::Rejected => "rejected",
-                VerificationStatus::SupervisorCall => "supervisor_call",
-                VerificationStatus::Pending => "pending",
-                VerificationStatus::Error => "error",
-                VerificationStatus::Skipped => "skipped",
-            };
-            let event = Event::new(
-                EventType::VerificationAdded,
-                EventEntityType::Verification,
-                &id,
-                format!(
-                    "Verification {}: {} - {}",
-                    status_str, req.task_id, verification.summary
-                ),
-            )
-            .with_metadata(serde_json::json!({
-                "task_id": req.task_id,
-                "status": status_str,
-                "verification_type": verification.verification_type.to_string(),
-                "provenance": verification.provenance.to_string(),
-                "capability_id": verification.capability_id,
-                "dispatch_id": verification.dispatch_id,
-            }));
-            // Add session ID if available for linking to the verifying agent
-            let event = if let Some(Some(agent_id)) = self.agent_id.get() {
-                event.with_session(agent_id)
-            } else {
-                event
-            };
-            let _ = event_store.record(&event);
         }
 
         let status_emoji = verification_status_emoji(verification.status);
@@ -1190,7 +1160,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && proof_receipt.transaction().is_none()
         {
             if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                 outcome
@@ -1230,7 +1200,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && proof_receipt.transaction().is_none()
         {
             self.return_rejected_merged_delivery(&req.task_id, &verification)
         } else {
@@ -1620,7 +1590,10 @@ mod lifecycle_friction_tests {
             &task.id,
             "implementer",
             "review-supervisor",
-            &VerificationProofBoundary::task(),
+            &VerificationProofBoundary {
+                receipt_id: Some(cas_store::delivery_cycles(&root, &task.id).unwrap().pop().unwrap().cycle_id),
+                ..VerificationProofBoundary::task()
+            },
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -1695,6 +1668,14 @@ mod lifecycle_friction_tests {
             .unwrap()
             .unwrap();
         assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        let conn = rusqlite::Connection::open(core.cas_root.join("cas.db")).unwrap();
+        let stamp = super::super::premerge_verification::cycle::stamp(&conn, &recorded.id).unwrap().unwrap();
+        assert_eq!(stamp.registry_version, Some(crate::gates::registry_version_in_force()));
+        assert_eq!(stamp.cycle_id, dispatch.receipt_id.clone().unwrap());
+        assert_eq!(stamp.approved_anchor, task.deliverables.factory_branch_anchor.clone().unwrap());
+        assert_eq!(stamp.dispatch_id, dispatch.id);
+        assert_eq!(stamp.verdict_id, recorded.id);
+
         let text = |result: CallToolResult| {
             result
                 .content

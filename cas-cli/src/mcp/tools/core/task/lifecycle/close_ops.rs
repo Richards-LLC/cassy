@@ -122,8 +122,7 @@ fn request_close_verification_dispatch(
         // An existing cycle keeps its requester, owner and proof immutable.
         // Matching proof may still acquire this assignee's close declaration.
         let matching_proof = dispatch.owner_agent_id == owner_id
-            && dispatch.receipt_id == boundary.receipt_id
-            && dispatch.delivery_transaction_id == boundary.delivery_transaction_id
+            && dispatch.receipt().map_err(cas_store::StoreError::Parse)? == boundary.receipt().map_err(cas_store::StoreError::Parse)?
             && dispatch.repository == boundary.repository;
         if let Some((reason, expected_assignee)) = no_delivery_intent.filter(|_| matching_proof) {
             let (encoded, assignee): (String, Option<String>) = tx.query_row(
@@ -162,6 +161,7 @@ mod verification_dispatch_tests {
     /// read. Exercise that same production dispatcher deterministically.
     #[test]
     fn concurrent_supervisor_dispatch_returns_pending_to_worker_cas_3792() {
+        for cycle_bound in [false,true] {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
@@ -170,7 +170,7 @@ mod verification_dispatch_tests {
         let mut task = Task::new("cas-racing-close".into(), "No delivery".into());
         task.assignee = Some("worker".into());
         tasks.add(&task).unwrap();
-        let boundary = cas_types::VerificationProofBoundary::task();
+        let boundary = cas_types::VerificationProofBoundary { receipt_id: cycle_bound.then(|| "dc-close".to_string()), ..cas_types::VerificationProofBoundary::task() };
         let original = cas_store::create_verification_dispatch_bound(
             &root,
             "cas-racing-close",
@@ -195,7 +195,7 @@ mod verification_dispatch_tests {
             }
             let before = cas_store::get_verification_dispatch(&root, &original.id).unwrap();
             let different_boundary = cas_types::VerificationProofBoundary::delivery(
-                "receipt-for-other-proof".into(),
+                "wcr-other-proof".into(),
                 "transaction-for-other-proof".into(),
             );
             for (requester, owner, requested) in [
@@ -239,6 +239,7 @@ mod verification_dispatch_tests {
                     before
                 );
             }
+        }
         }
     }
 }
@@ -6163,7 +6164,7 @@ impl CasCore {
         } else {
             cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .filter(|dispatch| dispatch.receipt().is_ok_and(|boundary| boundary.transaction().is_some_and(|(id,_)| id==receipt.id)))
                 .and_then(|dispatch| dispatch.repository)
         };
         let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
@@ -6304,7 +6305,7 @@ impl CasCore {
         if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
             let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .filter(|dispatch| dispatch.receipt().is_ok_and(|boundary| boundary.transaction().is_some_and(|(id,_)| id==receipt.id)))
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Exact receipt verification dispatch is unavailable"))?;
             self.emit_premerge_review_handoff(task, &dispatch)?;
         }
@@ -10644,8 +10645,7 @@ impl CasCore {
                                 // especially when a genuinely different proof
                                 // boundary won the race. Its owner/verifier can
                                 // still finish the original verdict unchanged.
-                                let conflict = if dispatch.receipt_id != proof_boundary.receipt_id
-                                    || dispatch.delivery_transaction_id != proof_boundary.delivery_transaction_id
+                                let conflict = if dispatch.receipt().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))? != proof_boundary.receipt().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?
                                     || dispatch.repository != proof_boundary.repository
                                 {
                                     "This close requested a different proof boundary. The active dispatch was neither reused nor replaced."

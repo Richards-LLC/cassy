@@ -5106,11 +5106,14 @@ impl CasCore {
             let branch_tip = manager.git().resolve_commit(&worktree.branch);
             let bound = match cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))? {
-                Some(dispatch) => super::premerge_verification::candidate_for_dispatch(&cas_root, &dispatch)
+                Some(dispatch) => {
+                    let transaction = dispatch.receipt().map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.transaction().is_some();
+                    super::premerge_verification::candidate_for_dispatch(&cas_root, &dispatch)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?
-                    .is_some_and(|candidate| dispatch.delivery_transaction_id.is_some()
+                    .is_some_and(|candidate| transaction
                         || task.deliverables.factory_branch_anchor.as_deref() == Some(candidate.source_sha.as_str())
-                        || branch_tip.as_deref() == Some(candidate.source_sha.as_str())),
+                        || branch_tip.as_deref() == Some(candidate.source_sha.as_str()))
+                },
                 None => false,
             };
             let remote = format!("origin/{}", worktree.parent_branch);

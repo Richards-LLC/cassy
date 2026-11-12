@@ -87,7 +87,13 @@ impl Approval {
         if context_digest(root, &task)? != self.candidate.context_digest {
             return Err("published approval context changed before peer attestation".into());
         }
+        let connection = crate::qa_batch::release_close::read_connection(root)?;
+        let registry_version = super::cycle::stamp(&connection, &verdict.id)?
+            .and_then(|stamp| stamp.registry_version)
+            .map(serde_json::to_value).transpose().map_err(|e| e.to_string())?;
+        drop(connection);
         let receipt = PeerPremergeReceipt {
+            registry_version,
             project_id: canonical_id.clone(),
             supervisor_id: sender.into(),
             task_id: task.id.clone(),
@@ -391,7 +397,7 @@ fn import_receipt(
     let dispatch = VerificationDispatch {
         id: receipt.dispatch_id.clone(),
         task_id: task.id.clone(),
-        receipt_id: None,
+        receipt_id: super::cycle::boundary(root, &task, proof.clone()).map_err(ReceiptFailure::retry)?.receipt_id,
         delivery_transaction_id: None,
         repository: Some(proof),
         requester_agent_id: receipt.supervisor_id.clone(),
@@ -412,7 +418,10 @@ fn import_receipt(
     verdict.agent_id = Some(receipt.supervisor_id);
     verdict.created_at = at;
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
-    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
+    let connection = crate::qa_batch::release_close::read_connection(root).map_err(ReceiptFailure::retry)?;
+    let approval_event = super::cycle::event(&connection, root, &task, &dispatch, &verdict).map_err(ReceiptFailure::retry)?;
+    drop(connection);
+    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict, &approval_event).map_err(
         |error| {
             // Ownership conflicts are permanent. A store Parse here can be
             // its updated_at compare losing a race;
@@ -527,6 +536,7 @@ mod tests {
             });
             tasks.add(&task).unwrap();
             let receipt = |task: &Task, sha: &str, target: &str, cycle: &str| PeerPremergeReceipt {
+                registry_version: Some(serde_json::json!(["G-104"])),
                 status: VerificationStatus::Approved, project_id: PROJECT.into(),
                 supervisor_id: "source-supervisor".into(), task_id: task.id.clone(),
                 source_branch: "factory/peer".into(), source_sha: sha.into(), target_branch: "main".into(),
@@ -547,6 +557,12 @@ mod tests {
             let old_message = message(&old, 2);
             assert!(matches!(ingest_peer_receipt(&root, &recipient, &old_message).unwrap(), PeerReceiptIngested::Imported));
             let old_dispatch = cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().unwrap();
+            let connection = crate::qa_batch::release_close::read_connection(&root).unwrap();
+            let original_stamp = super::super::cycle::stamp(&connection, &old.verdict_id).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(original_stamp.registry_version).unwrap(), old.registry_version.clone().unwrap());
+            assert_eq!(original_stamp.approved_anchor, old.source_sha);
+            drop(connection);
+
             assert!(verify_peer_promotion(&root, &task, &old_dispatch, &old.verdict_id).unwrap());
 
             std::fs::write(source.join("delivery"), "repaired\n").unwrap();

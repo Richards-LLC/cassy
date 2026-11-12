@@ -1274,7 +1274,7 @@ enum FleetOperation {
     },
     /// Freeze a release train for its release (cas-2f4d).
     FreezeTrain { epic_id: String },
-    /// The operator's lift of a train freeze; no supervisor action lifts it.
+    /// The operator's one-tap lift of a train cut and freeze.
     LiftTrainFreeze { epic_id: String },
     /// The operator's pause or resume of a train's auto-cut (cas-e060).
     SetAutoCutPaused { epic_id: String, paused: bool },

@@ -5,6 +5,7 @@
 //! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
 //! lift, not on anyone here: it is reported once per freeze, never chased.
+//! Dependency-blocked tasks and held workers likewise have no local next step.
 //! A current gate-refused close is reported with its code and remedy instead
 //! of starting an operator-page clock, unless the gate explicitly needs the operator.
 
@@ -48,8 +49,19 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     }
     tasks.retain(|task| task.assignee.as_ref()
         .is_some_and(|who| agents.iter().any(|agent| &agent.name == who || &agent.id == who)));
+    let held_workers = if crate::ui::factory::session::metadata_path(session).exists() {
+        crate::ui::factory::worker_holds_from_session_metadata_named(session)?
+    } else {
+        HashSet::new()
+    };
+    let held_assignees: HashSet<_> = agents.iter().filter(|agent| agent.role == AgentRole::Worker
+        && held_workers.contains(&agent.name)).flat_map(|agent| [&agent.name, &agent.id]).collect();
+    let mut dependency_held = HashSet::new();
     let mut refusals = CloseHeld::new();
     for task in &tasks {
+        if task.status == TaskStatus::Blocked && !store.get_blockers(&task.id).ok()?.is_empty() {
+            dependency_held.insert(task.id.clone());
+        }
         // An unreadable receipt is uncertainty, never proof of a stall.
         if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
             refusals.insert(task.id.clone(), refusal);
@@ -66,6 +78,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let mut freeze_held = FreezeHeld::new();
     let mut close_held = CloseHeld::new();
     tasks.retain(|task| {
+        // Like a frozen-train park, these intentional waits have no local
+        // next step. Removing them also resets any previous stall episode.
+        if dependency_held.contains(&task.id)
+            || task.assignee.as_ref().is_some_and(|who| held_assignees.contains(who))
+        {
+            return false;
+        }
         // Applies to every close path and status, including finished epics.
         // Only explicit machine metadata can make a gate an operator action.
         if let Some(refusal) = refusals.get(&task.id)

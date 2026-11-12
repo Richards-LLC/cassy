@@ -599,11 +599,15 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
-      // Use the keyboard entry directly; Ctrl/Cmd+K also belongs to list search.
+      // Desktop's shortcut starts in list search; phone's starts in the composer.
+      // Locator.press focuses the visible field before sending the single chord.
       const palette = page.locator("#command-palette");
-      await page.getByRole("button", { name: "Appearance & commands", exact: true }).press("Enter");
+      const shortcutTarget = width === 1280
+        ? page.getByRole("searchbox", { name: "Search conversations", exact: true })
+        : page.getByRole("textbox", { name: "Your message", exact: true });
+      await shortcutTarget.press("ControlOrMeta+k");
       // Proof control: reproduce focus lost during a shell rebuild between chords.
-      await page.getByRole("searchbox", { name: "Search conversations", exact: true }).evaluate(input => (input as HTMLInputElement).blur());
+      if (width === 1280) await page.getByRole("searchbox", { name: "Search conversations", exact: true }).evaluate(input => (input as HTMLInputElement).blur());
       await expect(palette).toBeVisible();
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });

@@ -76,12 +76,13 @@ owned by release review, its exact-anchor coverage also satisfies deferred
 batch debt. It does not replace Tier 2 probes or a dedicated review. A verdict recorded after an expired dispatch supersedes
 that old wait; live or newer dispatches and rejected verdicts retain authority.
 
-For a release verdict, `staging_sha` may name the published release commit
-after historical epic targets were merged. Every listed delivery anchor must
-be an ancestor of that exact reviewed SHA; the release commit need not be on
-each historical epic ref. One receipt can therefore cover multiple epics while
-retaining the published SHA and immutable member anchors. Ordinary QA receipts
-still require the reviewed SHA on every member's configured target.
+For a release verdict, omit `task_ids` and `staging_sha`: Cassy derives them
+from the published ledger's `covers:` and `build:` headers. Scaffolding with
+`--release-scope` fills those headers from the release inventory and reviewed
+commit. Existing callers may still supply the fields. Every delivery anchor
+must be an ancestor of the reviewed commit. Receipts retain that commit and
+the resolved member anchors; they do not require the commit on each member's
+historical target branch.
 
 Name who walked the ledger in `ledger_author` (agent id or name). For every
 listed tier 1 or tier 2 task, that author must be outside the same

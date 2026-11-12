@@ -159,12 +159,12 @@ class CompletionTests(unittest.TestCase):
         store = f.root / "task-store"
         store.mkdir()
         with sqlite3.connect(store / "cas.db") as db:
-            db.execute("CREATE TABLE tasks (id TEXT, task_type TEXT, deliverables TEXT)")
+            db.execute("CREATE TABLE tasks (id TEXT, task_type TEXT, deliverables TEXT, execution_note TEXT)")
             for task, anchor, branch in [("cas-a111", first, "epic/included"),
                     ("cas-a222", late, "epic/included"),
                     ("cas-a333", unrelated, "epic/unrelated"),
                     ("cas-a444", main_late, "main")]:
-                db.execute("INSERT INTO tasks VALUES (?, 'task', ?)", (task, json.dumps({
+                db.execute("INSERT INTO tasks VALUES (?, 'task', ?, NULL)", (task, json.dumps({
                     "work_target": {"target_branch": branch},
                     "factory_branch_anchor": anchor,
                     "factory_branch_start": {"base_sha": base},
@@ -189,16 +189,15 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(json.loads(report.read_text())["included_task_ids"], ["cas-a111", "cas-a444"])
         f.git("merge", "--no-ff", "epic/included", "-m", "include late delivery")
         inputs["deferred_tasks"] = {}
-        proof = {"kind": "report", "artifact_id": "art-report", "sha256": "a" * 64,
-                 "size_bytes": 42, "reviewed_sha": first, "receipt_id": None}
-        inputs["no_code_members"] = {"cas-e3041": [proof]}
+        inputs["included_task_ids"] = ["cas-e3041"]
+        with sqlite3.connect(store / "cas.db") as db:
+            db.execute("INSERT INTO tasks VALUES ('cas-e3041', 'task', '{}', 'no-code')")
         draft = f.root / "draft.md"
-        draft.write_text("<!-- CAS_RELEASE_INPUTS\n" + json.dumps(inputs) + "\n-->\n")
-        inputs = {}
+        draft.write_text("<!-- CAS_RELEASE_INPUTS\n" + json.dumps({"epic_refs": inputs["epic_refs"]}) + "\n-->\n")
         included = audit("--notes", str(draft), "--report", str(report))
         self.assertEqual(included.returncode, 0, included.stderr)
         self.assertEqual(json.loads(included.stdout.split("=", 1)[1]), ["cas-a111", "cas-a222", "cas-a444", "cas-e3041"])
-        self.assertEqual(json.loads(report.read_text())["no_code_members"], {"cas-e3041": [proof]})
+        self.assertNotIn("no_code_members", json.loads(report.read_text()))
 
     def test_complete_contains_both_session_changes_and_clean_installed_build(self):
         result = self.f.gate()

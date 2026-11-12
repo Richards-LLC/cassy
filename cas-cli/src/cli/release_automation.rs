@@ -1,5 +1,5 @@
 //! Release script adapters. Train selection and notice delivery stay in core.
-use crate::qa_batch::{ReleaseInventory, ReleaseProofRef, ReleaseScope};
+use crate::qa_batch::ReleaseScope;
 use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
@@ -116,7 +116,14 @@ fn cut_scope(root: &Path, repo: &Path, commit: &str, version: &str, train: Optio
     if let Some(path) = inputs {
         let audit = read_cut_inputs(path, repo, commit)?;
         scope.included_task_ids = audit.included_task_ids;
-        scope.no_code_members = audit.no_code_members;
+    }
+    let tasks = open_task_store(root)?;
+    for id in &scope.included_task_ids {
+        let task = tasks.get(id)?;
+        if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
+            let proofs = crate::qa_batch::no_code_proofs(root, &scope, &task).map_err(anyhow::Error::msg)?;
+            scope.no_code_members.insert(id.clone(), proofs);
+        }
     }
     Ok(scope)
 }
@@ -150,9 +157,6 @@ pub struct TrackArgs {
     /// Audited constituent refs, deferrals and included delivery IDs
     #[arg(long)]
     inputs: Option<PathBuf>,
-    /// Candidate-binary preview at this exact release commit
-    #[arg(long)]
-    preview: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
 pub struct InstalledArgs {
@@ -178,8 +182,6 @@ pub(super) struct ReleaseInputs {
     pub(super) checked_sha: String,
     #[serde(default)]
     pub(super) included_task_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(super) no_code_members: BTreeMap<String, Vec<ReleaseProofRef>>,
     #[serde(flatten)]
     metadata: BTreeMap<String, serde_json::Value>,
 }
@@ -200,10 +202,6 @@ pub(super) struct ReleaseContext {
     pub(super) release_inputs: Option<ReleaseInputs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) release_scope: Option<ReleaseScope>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    release_inventory: Option<ReleaseInventory>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    close_preview: Option<ReleasePreview>,
 }
 
 fn version_ok(version: &str) -> bool {
@@ -312,8 +310,6 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         publish_reminder: None,
         release_inputs: None,
         release_scope: None,
-        release_inventory: None,
-        close_preview: None,
     })
 }
 
@@ -338,7 +334,8 @@ pub fn context(args: &ContextArgs, root: &Path) -> Result<()> {
 
 pub fn track(args: &TrackArgs, root: &Path) -> Result<()> {
     let (repo, train) = open_train(root)?;
-    track_on_train(args, root, &repo, &train)
+    let preview = serde_json::from_reader(std::io::stdin().lock())?;
+    track_on_train(args, root, &repo, &train, Some(preview))
 }
 // gate[G-121 release-verdict]: Release track checks (train branch, full SHA, train tip, version owner, input audit)
 fn track_on_train(
@@ -346,6 +343,7 @@ fn track_on_train(
     root: &Path,
     repo: &Path,
     train: &cas_types::Task,
+    preview: Option<ReleasePreview>,
 ) -> Result<()> {
     let mut expected = new_context(repo, train)?;
     let operations = crate::worktree::GitOperations::new(repo.to_path_buf());
@@ -401,38 +399,29 @@ fn track_on_train(
             Some(git(&repo, &["show", "-s", "--format=%ct", &args.first_child])?.parse()?);
         expected.first_child_commit = Some(args.first_child.clone());
     }
-    // Refuse missing or mismatched explicit report bindings before freezing the
-    // lane. Old code-only audits do not need report preflight.
+    let preview = match preview {
+        Some(value) => value,
+        None => preview_scope(root, repo, cut_scope(root, repo, &args.commit, &args.version,
+            Some(&train.id), args.inputs.as_deref())?)?,
+    };
+    let scope = &preview.scope;
+    ensure!(scope.final_release_sha == args.commit && scope.release_id == format!("v{}", args.version)
+        && scope.project_id == crate::cloud::resolve_canonical_id(root).context("project identity unavailable")?
+        && scope.constituent_epic_ids == [train.id.clone()],
+        crate::gates::tag("G-121", "cut preview does not identify this train, release and commit"));
     if let Some(inputs) = &expected.release_inputs {
-        let tasks = open_task_store(root)?;
-        let reports: std::collections::BTreeSet<_> = inputs.included_task_ids.iter()
-            .chain(inputs.no_code_members.keys())
-            .filter(|id| tasks.get(id).is_ok_and(|t|
-                crate::qa_pass::is_no_code(&t) || t.deliverables.evidence_only.is_some()))
-            .cloned().chain(inputs.no_code_members.keys().cloned()).collect();
-        if !reports.is_empty() {
-            let mut scope = super::release_adapters::tag_scope(
-                root, repo, Some(&expected), &train.id, &format!("v{}", args.version), &args.commit,
-            )?;
-            scope.release_tag = None; // The cut has not published a tag yet.
-            for id in reports {
-                crate::release_reconcile::validate_no_code_proofs(root, &scope, &id,
-                    inputs.no_code_members.get(&id).map(Vec::as_slice).unwrap_or_default())
-                    .map_err(anyhow::Error::msg)?;
-            }
-        }
+        ensure!(scope.included_task_ids == inputs.included_task_ids,
+            crate::gates::tag("G-121", "cut preview membership differs from the audited inputs"));
     }
-    let scope = cut_scope(root, repo, &args.commit, &args.version, Some(&train.id), args.inputs.as_deref())?;
-    let preview = if let Some(path) = &args.preview {
-        let value: ReleasePreview = serde_json::from_slice(&fs::read(path)?)?;
-        ensure!(serde_json::to_value(&value.scope)? == serde_json::to_value(&scope)?, "cut preview scope differs from release inputs");
-        // Counts and residuals are derived from the candidate's member decisions.
-        let mut rebuilt = ReleasePreview::from_members(scope.clone(), value.members_by_id);
-        rebuilt.candidate_build_seconds = value.candidate_build_seconds;
-        rebuilt
-    } else { preview_scope(root, repo, scope.clone())? };
-    preview.allow_cut()?;
-    expected.close_preview = Some(preview);
+    for (id, proofs) in &scope.no_code_members {
+        crate::release_reconcile::validate_no_code_proofs(root, scope, id, proofs)
+            .map_err(anyhow::Error::msg)?;
+    }
+    let mut rebuilt = ReleasePreview::from_members(scope.clone(), preview.members_by_id.clone());
+    rebuilt.candidate_build_seconds = preview.candidate_build_seconds;
+    rebuilt.allow_cut()?;
+    crate::release_reconcile::record_preview(root, repo, scope, serde_json::to_value(&rebuilt)?)
+        .map_err(anyhow::Error::msg)?;
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
@@ -944,7 +933,6 @@ pub(super) mod tests {
             first_child: sha.clone(),
             version: "9.99.2".into(),
             inputs: None,
-            preview: None,
         };
         (temp, root, train, owner, args)
     }
@@ -952,10 +940,8 @@ pub(super) mod tests {
     #[test]
     fn release_inventory_contract_roundtrip() {
         use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-        let (temp, root, train, _, mut args) = fixture();
-        let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
+        let (temp, root, train, _, args) = fixture();
         let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
-        value["release_scope"] = scope.clone();
         assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
         let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
@@ -968,20 +954,16 @@ pub(super) mod tests {
         assert!(preview.allow_cut().is_ok());
         assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
         assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
-        value["close_preview"] = serde_json::to_value(preview).unwrap();
-        let restored: ReleaseContext = serde_json::from_value(value).unwrap();
-        let receipt = temp.path().join("cut.json");
-        save(&receipt, &restored).unwrap();
-        let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(restored.close_preview.as_ref().unwrap().review_missing, ["cas-0001"]);
-        assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
-        let candidate_preview = root.join("candidate-preview.json");
-        fs::write(&candidate_preview, serde_json::to_vec(restored.close_preview.as_ref().unwrap()).unwrap()).unwrap();
-        args.preview = Some(candidate_preview);
-        track_on_train(&args, &root, temp.path(), &train).unwrap();
-        let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
-        assert_eq!(cut.close_preview.unwrap().review_missing, ["cas-0001"]);
-        assert!(cut.release_scope.is_none()); // Queue landing may have a different final SHA.
+        track_on_train(&args, &root, temp.path(), &train, Some(preview.clone())).unwrap();
+        let tree = crate::release_reconcile::final_tree(temp.path(), &args.commit).unwrap();
+        let key = cas_store::release_reconcile_store::ReleaseOperationKey {
+            project_id: "release-fixture".into(), release_id: format!("v{}", args.version),
+            final_release_sha: tree,
+        };
+        let saved = cas_store::release_reconcile_store::load_release_operation(&root, &key).unwrap().unwrap();
+        assert_eq!(saved["preview"], serde_json::to_value(preview).unwrap());
+        assert_eq!(saved["members"], serde_json::json!({})); // A dry run never commits a close.
+        assert!(crate::release_reconcile::completed_operation(&root, &key).unwrap().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1024,59 +1006,54 @@ pub(super) mod tests {
         }
         let proof = ReleaseProofRef {
             kind: ReleaseProofKind::Report, artifact_id: artifact.id.clone(),
-            sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+            sha256: artifact.sha256.clone(), size_bytes: artifact.size_bytes,
             reviewed_sha: args.commit.clone(), receipt_id: None,
         };
         let inputs = root.join("input-audit.json");
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
             "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
-            "no_code_members": {"cas-e3041": [proof]},
         })).unwrap()).unwrap();
         args.inputs = Some(inputs.clone());
         let train = tasks.get("cas-a001").unwrap();
         // A local publication is not portable proof until Cloud commits it.
         assert_eq!(artifact.status, "local");
         assert!(artifact.cloud_artifact_id.is_none());
-        assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
+        assert!(track_on_train(&args, &root, repo, &train, None).unwrap_err().to_string()
             .starts_with("RELEASE_NO_CODE_PROOF_BINDING"));
         assert!(!receipt_path(&root, &args.version).unwrap().exists());
         assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
             &tasks.get(&train.id).unwrap()));
         artifacts.mark_uploaded(&artifact.id, "cloud-report").unwrap();
         artifacts.mark_committed(&artifact.id, None).unwrap();
-        let mut hash = proof.clone(); hash.sha256 = "0".repeat(64);
-        let mut size = proof.clone(); size.size_bytes += 1;
-        let mut missing = proof.clone(); missing.artifact_id = "art-absent".into();
-        for (id, proofs) in [
-            ("cas-e3041", vec![]), ("cas-e3041", vec![hash]),
-            ("cas-e3041", vec![size]),
-            ("cas-e3041", vec![missing]), ("cas-ef2b", vec![proof.clone()]),
-        ] {
+        for (id, reference) in [("cas-e3041", None), ("cas-e3041", Some("art-absent")),
+            ("cas-ef2b", Some(artifact.id.as_str()))] {
+            let mut member = tasks.get(id).unwrap();
+            member.external_ref = reference.map(str::to_string);
+            tasks.update(&member).unwrap();
             fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
                 "checked_sha": args.commit, "included_task_ids": [id],
-                "no_code_members": {id: proofs},
             })).unwrap()).unwrap();
-            assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
-                .starts_with("RELEASE_NO_CODE_PROOF"));
+            assert!(track_on_train(&args, &root, repo, &train, None).is_err());
             assert!(!receipt_path(&root, &args.version).unwrap().exists());
-            assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
-                &tasks.get(&train.id).unwrap()));
+            assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(&tasks.get(&train.id).unwrap()));
         }
+        let mut member = tasks.get("cas-e3041").unwrap();
+        member.external_ref = Some(artifact.id.clone());
+        tasks.update(&member).unwrap();
         fs::write(&inputs, serde_json::to_vec(&serde_json::json!({
             "checked_sha": args.commit, "included_task_ids": ["cas-e3041"],
-            "no_code_members": {"cas-e3041": [proof]},
         })).unwrap()).unwrap();
         let mut foreign = tasks.get("cas-e3041").unwrap();
         foreign.origin_project = Some("other-project".into());
         tasks.update(&foreign).unwrap();
-        assert!(track_on_train(&args, &root, repo, &train).unwrap_err().to_string()
+        assert!(track_on_train(&args, &root, repo, &train, None).unwrap_err().to_string()
             .starts_with("RELEASE_NO_CODE_PROOF_BINDING"));
         assert!(!crate::mcp::tools::core::task::release_train::is_cut_train(
             &tasks.get(&train.id).unwrap()));
         foreign.origin_project = Some("release-fixture".into());
         tasks.update(&foreign).unwrap();
         // Portable report bytes alone do not approve its delivery.
-        assert!(track_on_train(&args, &root, repo, &train).is_err());
+        assert!(track_on_train(&args, &root, repo, &train, None).is_err());
         let boundary = cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
             peer_premerge: None, repository_root: repo.display().to_string(), worktree_root: repo.display().to_string(),
             head_commit: args.commit.clone(), state_digest: String::new(), target_branch: None,
@@ -1088,7 +1065,7 @@ pub(super) mod tests {
         conn.execute("UPDATE verification_dispatches SET state='resolved' WHERE id=?", [&dispatch.id]).unwrap();
         conn.execute("INSERT INTO verifications (id,task_id,verification_type,status,created_at,dispatch_id) VALUES ('ver-report','cas-e3041','task','approved',?1,?2)",
             rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
-        track_on_train(&args, &root, repo, &train).unwrap();
+        track_on_train(&args, &root, repo, &train, None).unwrap();
         let context: ReleaseContext = serde_json::from_slice(
             &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
         ).unwrap();
@@ -1466,8 +1443,8 @@ pub(super) mod tests {
         let audit_path = root.join("input-audit.json");
         fs::write(&audit_path, serde_json::to_vec(&audit).unwrap()).unwrap();
         args.inputs = Some(audit_path);
-        track_on_train(&args, &root, repo, &train).unwrap();
-        track_on_train(&args, &root, repo, &train).unwrap();
+        track_on_train(&args, &root, repo, &train, None).unwrap();
+        track_on_train(&args, &root, repo, &train, None).unwrap();
         let reminders = open_reminder_store(&root).unwrap();
         let pending = reminders.list_all_pending().unwrap();
         assert_eq!(pending.len(), 2);
@@ -1477,7 +1454,7 @@ pub(super) mod tests {
             assert_eq!(reminder.owner_id, owner.id);
             reminders.mark_fired(reminder.id, None).unwrap();
         }
-        track_on_train(&args, &root, repo, &train).unwrap();
+        track_on_train(&args, &root, repo, &train, None).unwrap();
         assert!(reminders.list_all_pending().unwrap().is_empty());
         let recorded: ReleaseContext =
             serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap())
@@ -1546,7 +1523,7 @@ pub(super) mod tests {
         crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, mut train, owner, mut tracking) = fixture();
         tracking.version = "0.1.0".into();
-        track_on_train(&tracking, &root, temp.path(), &train).unwrap();
+        track_on_train(&tracking, &root, temp.path(), &train, None).unwrap();
         // The receipt retains ownership after the release train has rolled over.
         train.status = TaskStatus::Closed;
         train.epic_verification_owner = None;
@@ -1629,7 +1606,7 @@ pub(super) mod tests {
                     "CREATE TRIGGER deny_reminder BEFORE INSERT ON reminders BEGIN SELECT RAISE(ABORT, 'fixture reminder unavailable'); END;"
                 ).unwrap();
             }
-            track_on_train(&args, &root, temp.path(), &train).unwrap();
+            track_on_train(&args, &root, temp.path(), &train, None).unwrap();
             let pending = open_reminder_store(&root)
                 .unwrap()
                 .list_all_pending()
@@ -1642,11 +1619,11 @@ pub(super) mod tests {
     #[test]
     fn release_version_rebump_cancels_both_old_watches() {
         let (temp, root, train, owner, mut args) = fixture();
-        track_on_train(&args, &root, temp.path(), &train).unwrap();
+        track_on_train(&args, &root, temp.path(), &train, None).unwrap();
         let reminders = open_reminder_store(&root).unwrap();
         let old = reminders.list_all_pending().unwrap();
         args.version = "9.99.3".into();
-        track_on_train(&args, &root, temp.path(), &train).unwrap();
+        track_on_train(&args, &root, temp.path(), &train, None).unwrap();
         let pending = reminders.list_all_pending().unwrap();
         assert_eq!(pending.len(), 2);
         assert!(

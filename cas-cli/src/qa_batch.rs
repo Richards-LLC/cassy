@@ -51,6 +51,21 @@ pub(crate) struct ReleaseProofRef {
     pub receipt_id: Option<String>,
 }
 
+/// G-32 already records the report reference at park. Freeze its registered
+/// bytes for the release member instead of asking the caller to type them again.
+pub(crate) fn no_code_proofs(root: &Path, scope: &ReleaseScope, task: &Task) -> Result<Vec<ReleaseProofRef>, String> {
+    let reference = task.external_ref.as_deref().ok_or_else(|| format!("RELEASE_NO_CODE_PROOF_MISSING: {}", task.id))?;
+    let artifact = release_close::read_artifact(root, reference)
+        .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {}: {e}", task.id))?;
+    let proofs = vec![ReleaseProofRef {
+        kind: ReleaseProofKind::Report, artifact_id: artifact.id,
+        sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+        reviewed_sha: scope.reviewed_sha.clone(), receipt_id: None,
+    }];
+    crate::release_reconcile::validate_no_code_proofs(root, scope, &task.id, &proofs)?;
+    Ok(proofs)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReleaseInventory {
     pub scope: ReleaseScope,
@@ -797,12 +812,6 @@ pub(crate) fn prepare_receipt(
     ledger: &Path,
     schema: u32,
 ) -> Result<QaBatchReceipt, String> {
-    if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("staging_sha must be a full 40-hex commit SHA".into());
-    }
-    if task_ids.is_empty() || task_ids.len() > 500 {
-        return Err("task_ids must contain 1 to 500 PASS task IDs".into());
-    }
     let author = author.trim();
     if author.is_empty() {
         return Err("ledger_author (agent id or name of whoever walked the ledger) is required".into());
@@ -813,6 +822,25 @@ pub(crate) fn prepare_receipt(
     // Declared coverage is authoritative for both QA and release receipts.
     // Historical ledgers keep their existing whole-ID and row checks.
     let mut coverage = crate::qa_ledger::coverage(&body);
+    let (derived_head, derived_ids);
+    let (task_ids, staging) = if schema == cas_store::RELEASE_VERDICT_SCHEMA
+        && (task_ids.is_empty() || staging.is_empty()) {
+        derived_ids = coverage.covers.clone().ok_or("release ledger needs covers: member IDs")?;
+        let ids = derived_ids.as_slice();
+        let mut builds = body.lines().filter_map(|line| line.strip_prefix("build: "));
+        derived_head = builds.next().ok_or("release ledger needs build: reviewed commit")?.trim().to_string();
+        if builds.next().is_some() || (!task_ids.is_empty() && task_ids.iter().collect::<std::collections::BTreeSet<_>>() != ids.iter().collect())
+            || (!staging.is_empty() && staging != derived_head) {
+            return Err("release receipt inputs differ from the published ledger".into());
+        }
+        (ids, derived_head.as_str())
+    } else { (task_ids, staging) };
+    if staging.len() != 40 || !staging.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("staging_sha must be a full 40-hex commit SHA".into());
+    }
+    if task_ids.is_empty() || task_ids.len() > 500 {
+        return Err("task_ids must contain 1 to 500 PASS task IDs".into());
+    }
     if coverage.covers.is_some() {
         coverage.require_coverage(task_ids);
         if !coverage.ok { return Err(coverage.refusal()); }
@@ -876,15 +904,6 @@ pub(crate) fn prepare_receipt(
         if ancestor(&repo, &anchor, &staging) != Some(true) {
             return Err(format!(
                 "task {id} delivery anchor is not an ancestor of staging_sha"
-            ));
-        }
-        // A published release descends from the historical epic target. Its
-        // members are bound by anchor ancestry above, not by that ref's tip.
-        if schema != cas_store::RELEASE_VERDICT_SCHEMA
-            && integration_state(&repo, &staging, &target) != Some(true)
-        {
-            return Err(format!(
-                "staging_sha is not on task {id}'s configured target {target}"
             ));
         }
         heads.insert(id.clone(), anchor);

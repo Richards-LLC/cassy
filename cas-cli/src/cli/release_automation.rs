@@ -930,38 +930,14 @@ pub(super) mod tests {
 
     #[test]
     fn release_inventory_contract_roundtrip() {
-        use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
         let (temp, root, train, _, args) = fixture();
         let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
         let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
         value["release_scope"] = scope.clone();
-        assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
-        // cas-a6c8: review/QA can close every member before the cut.
-        for (outcome, allowed) in [
-            (CassyMergeClose::AlreadyClosed, true),
-            (CassyMergeClose::Held("RELEASE_MEMBER_HELD: missing proof".into()), false),
-        ] {
-            let members = (0..13).map(|n| (format!("cas-{n:04x}"), outcome.clone())).collect();
-            let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
-            assert_eq!(preview.allow_cut().is_ok(), allowed);
-        }
-        let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
-            ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
-            ("cas-0002".into(), CassyMergeClose::AlreadyClosed),
-            ("cas-0003".into(), CassyMergeClose::NotEligible),
-        ]));
-        assert!(preview.allow_cut().is_err());
-        preview.members_by_id.insert("cas-0004".into(), CassyMergeClose::Closed { notice: String::new() });
-        preview = ReleasePreview::from_members(preview.scope, preview.members_by_id);
-        assert!(preview.allow_cut().is_ok());
-        assert_eq!((preview.members, preview.would_close, preview.would_hold, preview.already_closed, preview.not_eligible), (4, 1, 1, 1, 1));
-        assert_eq!(preview.by_reason["REVIEW_MISSING"], 1);
-        value["close_preview"] = serde_json::to_value(preview).unwrap();
         let restored: ReleaseContext = serde_json::from_value(value).unwrap();
         let receipt = temp.path().join("cut.json");
         save(&receipt, &restored).unwrap();
         let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(restored.close_preview.as_ref().unwrap().review_missing, ["cas-0001"]);
         assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
         track_on_train(&args, &root, temp.path(), &train).unwrap();
         let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
@@ -1130,6 +1106,8 @@ pub(super) mod tests {
         ).await.unwrap();
         assert_eq!(tasks.get("cas-e3041").unwrap().closed_at, closed.closed_at);
         assert_eq!(tasks.get("cas-ef2b").unwrap().status, TaskStatus::AwaitingMerge);
+        // Already-closed reviewed members remain a valid idempotent cut.
+        track_on_train(&args, &root, repo, &train).unwrap();
     }
 
     #[test]

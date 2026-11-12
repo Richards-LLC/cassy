@@ -3159,8 +3159,7 @@ impl CasService {
         );
         let force_build_guard = req.force.unwrap_or(false);
         // Route only a single task, never silently split an ordered worker queue.
-        // Run even after admission recovers: an earlier routed request must
-        // replay its existing ask rather than queue a second local worker.
+        // Accepted asks retain ownership; unsent asks yield to recovered local capacity.
         if req.task_ids.is_none()
             && let Some(task_id) = req.task_id.as_deref()
         {
@@ -3191,6 +3190,14 @@ impl CasService {
                 ErrorCode::INVALID_REQUEST,
                 build_guard.refusal_message(),
             ));
+        }
+        let live_workers = crate::factory_build_routing::live_worker_count(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+        if live_workers.saturating_add(slots) > factory_config.max_workers && !force_build_guard {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
+                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested",
+                factory_config.max_workers,
+            )));
         }
         let build_guard_notice = build_guard.receipt_notice(force_build_guard);
         let throttle_notice =

@@ -5771,6 +5771,9 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
             }
             tasks.add(&task).unwrap();
         }
+        let mut invalid_proof = row("cas-a836-invalid-proof", TaskStatus::InProgress);
+        invalid_proof.pending_verification = true;
+        tasks.add(&invalid_proof).unwrap();
         (dir, root)
     };
     let (_reviewer_dir, reviewer) = machine(true);
@@ -5817,6 +5820,23 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         let queued = queue.pending_for_team("review-team", 20, 5).unwrap();
         assert!(queued.iter().any(|item| item.entity_id == id), "verdict not queued: {id}");
     }
+    // A rejected stale proof takes an early return before the verdict
+    // transaction. Its direct pending-flag clear must also reach the owner.
+    let missing = reviewer.join("unavailable-proof-root").to_string_lossy().into_owned();
+    let invalid_dispatch = cas_store::create_verification_dispatch_bound(
+        &reviewer, "cas-a836-invalid-proof", "owner-worker", "peer-supervisor",
+        &cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            peer_premerge: None, repository_root: missing.clone(), worktree_root: missing,
+            head_commit: "d".repeat(40), state_digest: "e".repeat(64),
+            target_branch: None, anchor_commits: Vec::new(),
+        }), chrono::Utc::now() + chrono::Duration::minutes(10), false,
+    ).unwrap();
+    assert!(core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+        "task_id": "cas-a836-invalid-proof", "dispatch_id": invalid_dispatch.id,
+        "status": "approved", "summary": "Proof is no longer available",
+    })).unwrap())).await.is_err());
+    assert_eq!(cas_store::get_verification_dispatch(&reviewer, &invalid_dispatch.id).unwrap().state,
+        cas_types::VerificationDispatchState::Invalidated);
     core.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
         id: parked.id.clone(),
         reason: "Verifier rejected the delivery; add the missing guard.".into(),
@@ -5871,4 +5891,7 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         assert!(!received.pending_verification, "{id}");
         assert_eq!(received.assignee.as_deref(), Some("owner-worker"));
     }
+    let invalidated = tasks.get("cas-a836-invalid-proof").unwrap();
+    assert_eq!(invalidated.status, TaskStatus::InProgress);
+    assert!(!invalidated.pending_verification);
 }

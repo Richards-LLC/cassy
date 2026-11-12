@@ -569,6 +569,78 @@ struct CheckRow {
     fail: u32,
     flaky: u32,
     error: u32,
+    /// Sum of observed durations; rows without one count in `untimed`, never as zero.
+    minutes: f64,
+    timed: u32,
+    untimed: u32,
+}
+
+impl CheckRow {
+    fn add(&mut self, outcome: CheckOutcome, minutes: Option<f64>) {
+        match outcome {
+            CheckOutcome::Pass => self.pass += 1,
+            CheckOutcome::Fail => self.fail += 1,
+            CheckOutcome::Flaky => self.flaky += 1,
+            CheckOutcome::Error => self.error += 1,
+        }
+        self.minutes += minutes.unwrap_or(0.0);
+        self.timed += u32::from(minutes.is_some());
+        self.untimed += u32::from(minutes.is_none());
+    }
+}
+
+/// What a check row measures. Only `result` rows are workflow, job or review
+/// outcomes; the rest must never enter a failure rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CheckCohort {
+    Result,
+    /// `worktree_merge` admission of a lane into its target, not a CI run.
+    MergeAdmission,
+    /// A queue ejection relayed without its failed run.
+    QueueNotice,
+    /// Success-only timing samples recorded for estimates.
+    DurationSample,
+}
+
+fn check_cohort(check_id: &str, outcome: CheckOutcome, minutes: Option<f64>, link: Option<&str>) -> CheckCohort {
+    use crate::quality_ledger::{MERGE_GATE_CHECK, MERGE_QUEUE_CHECK};
+    match check_id {
+        MERGE_GATE_CHECK => CheckCohort::MergeAdmission,
+        MERGE_QUEUE_CHECK if outcome == CheckOutcome::Fail && link.is_none() => CheckCohort::QueueNotice,
+        // Relay outcomes carry no duration; timed queue rows are pass-only run samples.
+        MERGE_QUEUE_CHECK if minutes.is_some() => CheckCohort::DurationSample,
+        "release_total" | "release_publish" | "train_tip_suite" => CheckCohort::DurationSample,
+        id if id.starts_with("task_duration:") => CheckCohort::DurationSample,
+        _ => CheckCohort::Result,
+    }
+}
+
+/// One project's rows for one check in one cohort.
+#[derive(Debug, Serialize)]
+struct CheckCohortRow {
+    project: String,
+    cohort: CheckCohort,
+    stage: String,
+    check_id: String,
+    #[serde(flatten)]
+    row: CheckRow,
+}
+
+/// A run-linked result row, kept with its own run identity.
+#[derive(Debug, Serialize)]
+struct CheckRunRow {
+    check_id: String,
+    stage: String,
+    outcome: CheckOutcome,
+    run_id: Option<u64>,
+    /// Workflow and job, when the emitter recorded them.
+    title: Option<String>,
+    link: String,
+    task: Option<String>,
+    sha: Option<String>,
+    minutes: Option<f64>,
+    at: DateTime<Utc>,
 }
 
 /// Sums of measured usage, with explicit counts for missing measurements.
@@ -678,7 +750,14 @@ struct LedgerReport {
     speed: SpeedRow,
     complexity: ComplexityRow,
     escapes: Vec<EscapeRow>,
+    /// This project's workflow, job and review results per stage, inside the
+    /// report window. Merge admissions, queue notices, duration samples and
+    /// other projects' rows are only in `check_cohorts`.
     checks: BTreeMap<String, CheckRow>,
+    check_cohorts: Vec<CheckCohortRow>,
+    /// This project's run-linked results; a failed queue run counts once in
+    /// `checks` however many deliveries it ejected.
+    check_runs: Vec<CheckRunRow>,
     features: BTreeMap<String, FeatureRow>,
     excluded_unscoped_measurements: usize,
     friction: Vec<FrictionRow>,
@@ -922,6 +1001,8 @@ fn aggregate(
         },
         escapes: Vec::new(),
         checks: BTreeMap::new(),
+        check_cohorts: Vec::new(),
+        check_runs: Vec::new(),
         features: BTreeMap::new(),
         excluded_unscoped_measurements: 0,
         friction: Vec::new(),
@@ -933,6 +1014,8 @@ fn aggregate(
         QualityPayload::Turn { supersedes, .. } => supersedes.as_deref().map(|id| (e.project_id.as_str(), id)),
         _ => None,
     }).collect();
+    let mut cohorts = BTreeMap::<(String, CheckCohort, String, String), CheckRow>::new();
+    let mut failed_queue_runs = std::collections::BTreeSet::new();
     for event in events {
         if superseded.contains(&(event.project_id.as_str(), event.id.as_str())) { continue }
         let project = project_name(event);
@@ -960,18 +1043,27 @@ fn aggregate(
                 report.interventions_total += 1;
                 *report.interventions.entry(intervention.as_str()).or_default() += 1;
             }
-            QualityPayload::CheckRun { stage, outcome, .. } => {
+            QualityPayload::CheckRun { check_id, stage, outcome, sha, minutes, .. } => {
                 let stage = serde_json::to_value(stage)
                     .ok()
                     .and_then(|value| value.as_str().map(str::to_string))
                     .unwrap_or_default();
-                let row = report.checks.entry(stage).or_default();
-                match outcome {
-                    CheckOutcome::Pass => row.pass += 1,
-                    CheckOutcome::Fail => row.fail += 1,
-                    CheckOutcome::Flaky => row.flaky += 1,
-                    CheckOutcome::Error => row.error += 1,
+                let cohort = check_cohort(check_id, *outcome, *minutes, event.link.as_deref());
+                cohorts.entry((project.clone(), cohort, stage.clone(), check_id.clone()))
+                    .or_default().add(*outcome, *minutes);
+                if cohort != CheckCohort::Result || !event.project_id.is_empty() { continue }
+                // One failed merge-group run ejects every delivery in its group.
+                if let Some(link) = &event.link {
+                    let ejection = check_id == crate::quality_ledger::MERGE_QUEUE_CHECK && *outcome == CheckOutcome::Fail;
+                    if ejection && !failed_queue_runs.insert(link.clone()) { continue }
+                    report.check_runs.push(CheckRunRow {
+                        check_id: check_id.clone(), stage: stage.clone(), outcome: *outcome,
+                        run_id: link.rsplit_once("/runs/").and_then(|(_, run)| run.split('/').next()?.parse().ok()),
+                        title: event.title.clone(), link: link.clone(), task: event.task_id.clone(),
+                        sha: sha.clone(), minutes: *minutes, at: event.occurred_at,
+                    });
                 }
+                report.checks.entry(stage).or_default().add(*outcome, *minutes);
             }
             QualityPayload::Escape { found_in, missed_stage } => report.escapes.push(EscapeRow {
                 project,
@@ -1017,6 +1109,9 @@ fn aggregate(
             }
         }
     }
+    report.check_cohorts = cohorts.into_iter()
+        .map(|((project, cohort, stage, check_id), row)| CheckCohortRow { project, cohort, stage, check_id, row })
+        .collect();
     // Recovered facts can arrive after an immutable release snapshot. Keep
     // snapshot counts as a floor when older relay history has been pruned.
     let observed_ejections = events.iter().filter(|event| event.project_id.is_empty()
@@ -1257,12 +1352,25 @@ fn render(report: &LedgerReport) -> String {
         );
     }
 
-    let _ = writeln!(out, "\nChecks (pass/fail/flaky/could not run)");
+    let counts = |row: &CheckRow| {
+        let timing = if row.timed > 0 { format!(", {:.0} min over {} timed", row.minutes, row.timed) } else { String::new() };
+        format!("{}/{}/{}/{}{timing}, {} untimed", row.pass, row.fail, row.flaky, row.error, row.untimed)
+    };
+    let _ = writeln!(out, "\nCheck results for this project, {window} (pass/fail/flaky/could not run)");
     if report.checks.is_empty() {
         let _ = writeln!(out, "  none recorded");
     }
     for (stage, row) in &report.checks {
-        let _ = writeln!(out, "  {stage:<10}{}/{}/{}/{}", row.pass, row.fail, row.flaky, row.error);
+        let _ = writeln!(out, "  {stage:<10}{}", counts(row));
+    }
+    for run in &report.check_runs {
+        let _ = writeln!(out, "    {} {:?} run {} {}", run.check_id, run.outcome,
+            run.run_id.map_or_else(|| run.link.clone(), |id| id.to_string()), run.title.as_deref().unwrap_or("workflow not recorded"));
+    }
+    let _ = writeln!(out, "\nCheck events by project and cohort (not run rates)");
+    for row in &report.check_cohorts {
+        let cohort = serde_json::to_value(row.cohort).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        let _ = writeln!(out, "  {} {cohort} {} {}: {}", row.project, row.stage, row.check_id, counts(&row.row));
     }
 
     let estimates=&report.estimates;
@@ -1459,6 +1567,46 @@ mod tests {
         let cas_root = repo.join(".cas");
         std::fs::create_dir_all(&cas_root).unwrap();
         cas_root
+    }
+
+    /// v4.0.0 (cas-6114): lane read merge admissions, a downstream project's
+    /// admission and duration samples; queue counted a run once per ejected
+    /// delivery plus unlinked notices.
+    #[test]
+    fn check_rates_count_only_this_projects_runs() {
+        let run = "https://github.com/o/r/actions/runs/41855101589";
+        let row = |project: &str, check: &str, stage: &str, outcome: &str, link: Option<&str>, minutes: Option<f64>| QualityEvent {
+            seq: 0, id: format!("{project}{check}{outcome}{link:?}{minutes:?}"), occurred_at: Utc::now(), task_id: Some("cas-1".into()),
+            release_version: None, actor: None, title: None, link: link.map(str::to_string), local_note: None, from_cloud: false,
+            project_id: project.into(),
+            payload: serde_json::from_value(serde_json::json!({"kind": "check_run", "check_id": check, "stage": stage,
+                "outcome": outcome, "minutes": minutes})).unwrap(),
+        };
+        let mut events = vec![
+            row("", "worktree_merge", "lane", "pass", None, None),
+            row("", "worktree_merge", "lane", "fail", None, None),
+            row("gabber-studio", "worktree_merge", "lane", "fail", None, None),
+            row("", "task_duration:bug", "lane", "pass", None, Some(30.0)),
+            row("", "train_full_gate", "lane", "fail", Some("https://github.com/o/r/actions/runs/7"), Some(12.0)),
+            row("", "merge_queue", "queue", "fail", Some(run), None),
+            row("", "merge_queue", "queue", "fail", None, None),
+            row("", "merge_queue", "queue", "pass", None, None),
+        ];
+        let mut second_ejection = row("", "merge_queue", "queue", "fail", Some(run), None);
+        second_ejection.id = "other-delivery".into();
+        events.push(second_ejection);
+        let json = serde_json::to_value(aggregate("v4.0.0".into(), true, None, None, &events)).unwrap();
+        let rates = |stage: &str| (json["checks"][stage]["pass"].clone(), json["checks"][stage]["fail"].clone(), json["checks"][stage]["untimed"].clone());
+        assert_eq!(rates("lane"), (0.into(), 1.into(), 0.into()));
+        assert_eq!(rates("queue"), (1.into(), 1.into(), 2.into()));
+        assert_eq!(json["check_runs"].as_array().map(|runs| runs.iter().map(|r| r["run_id"].clone()).collect::<Vec<_>>()),
+            Some(vec![7.into(), 41855101589u64.into()]));
+        let cohort = |project: &str, cohort: &str, check: &str| json["check_cohorts"].as_array().unwrap().iter()
+            .find(|r| r["project"] == project && r["cohort"] == cohort && r["check_id"] == check).map(|r| (r["pass"].clone(), r["fail"].clone()));
+        assert_eq!(cohort("this project", "merge_admission", "worktree_merge"), Some((1.into(), 1.into())));
+        assert_eq!(cohort("gabber-studio", "merge_admission", "worktree_merge"), Some((0.into(), 1.into())));
+        assert_eq!(cohort("this project", "queue_notice", "merge_queue"), Some((0.into(), 1.into())));
+        assert_eq!(cohort("this project", "duration_sample", "task_duration:bug"), Some((1.into(), 0.into())));
     }
 
     #[test]

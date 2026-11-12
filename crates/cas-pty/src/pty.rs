@@ -796,28 +796,14 @@ pub fn expand_codex_home(config_dir: &str) -> String {
     )
 }
 
-/// Pin the worker process and its Codex MCP children to the host home.
-///
-/// Codex forwards the allowlisted `HOME` and Playwright profile variables to
-/// stdio MCP servers. An inherited Linux-style value can therefore make a
-/// macOS worker resolve a profile under a nonexistent `/home/...` directory.
-/// `dirs::home_dir` is the factory's platform-aware home resolver, so the
-/// explicit worker values keep nested MCP processes on the same host home as
-/// the factory daemon.
+/// Keep worker HOME on this host, including nested Codex stdio MCP servers.
+/// Browser profiles belong to isolated clients, not to the worker process.
 fn push_host_home_env(env: &mut Vec<(String, String)>, role: &str) {
     if role != "worker" {
         return;
     }
     if let Some(home) = dirs::home_dir() {
-        let home = home.to_string_lossy().into_owned();
-        env.push(("HOME".to_string(), home.clone()));
-        env.push((
-            "PLAYWRIGHT_MCP_USER_DATA_DIR".to_string(),
-            std::path::Path::new(&home)
-                .join(".playwright-mcp-profile")
-                .to_string_lossy()
-                .into_owned(),
-        ));
+        env.push(("HOME".to_string(), home.to_string_lossy().into_owned()));
     }
 }
 

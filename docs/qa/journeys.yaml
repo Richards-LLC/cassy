@@ -1391,6 +1391,9 @@ invariants:
     statement: A publication reconciles after installing and verifying its release binary; pending older publications retain their receipts and retry after newer installations with bounded work and successful replay deduplication.
     check: Run scripts/test-install-on-publish.sh. Observe install then matching version check then publication. Start with a failed older publication whose installed notice succeeds, publish a newer release, and require the newer install and verification before both publication retries. A failed install retains the receipt and performs no publication reconciliation; another tick does not repeat successful publication work.
     bug: {task: cas-bca3}
+  FACTORY-ISOLATED-PLAYWRIGHT:
+    statement: Locked headless MCP clients use isolated contexts and optional explicit storage state; worker HOME remains host-valid without a shared profile, and bundled MCP sidecars do not hide real Playwright test activity.
+    check: Run worker_home_is_an_existing_host_home, factory_pane_configs_codex_worker_home_is_existing_host_home and known_mcp_sidecars_do_not_count_as_worker_background_jobs. Launch both repository registrations concurrently and verify separate cookie contexts, explicit state loading and the lockfile server version.
   FACTORY-CONTEXT-CLEAR-SKIP:
     statement: An over-cap wake ledger total with latest-call occupancy below the context threshold leaves one quiet explanation for the supervisor. The occupancy threshold still controls checkpoint and clear.
     check: Replay cached_wake_replay_uses_latest_call_and_reported_window through the turn scanner. Verify one passive notice on a fresh ledger event, no duplicate on replay, no reset from repeated cache reads, and a handoff when latest-call occupancy crosses the reported-window threshold.
@@ -1484,7 +1487,7 @@ journeys:
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
   owners: [cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
-  invariants: [FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
+  invariants: [FACTORY-ISOLATED-PLAYWRIGHT, FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT

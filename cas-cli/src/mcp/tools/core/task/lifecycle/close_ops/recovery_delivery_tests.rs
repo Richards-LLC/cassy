@@ -448,7 +448,7 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
 
 #[tokio::test]
 async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commits_cas_ef54() {
-    for shipped_by in [Some("origin/main"), Some("v4.18.0"), Some("released-lane"), None] {
+    for shipped_by in [Some("origin/main"), Some("v9.99.0"), Some("released-lane"), None] {
         let mut env = TestEnvGuard::temp_home();
         let f = fixture_with_surface(&mut env, "note.txt", false);
         let repo = f.dir.path();
@@ -474,7 +474,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         git(&f.worker_path, &["merge", "-q", "--no-ff", "main", "-m",
             &format!("chore({TASK}): synchronize release")]);
         let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-        if shipped_by == Some("released-lane") { git(repo, &["tag", "v4.18.0", &tip]); }
+        if shipped_by == Some("released-lane") { git(repo, &["tag", "v9.99.0", &tip]); }
         let tasks = open_task_store(&root).unwrap();
         let mut task = tasks.get(TASK).unwrap();
         task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/sync".into();

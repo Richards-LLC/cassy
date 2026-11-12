@@ -1569,8 +1569,9 @@ pub fn qa_task_description(
          For hub-web/src or hub-web/dist changes, cover every source-impact-selected journey \
          at {head}; never substitute a hand-picked subset. No journey receipt is recorded; the \
          merge queue runs the full journey suite. Workers run touched unit/type checks; batch QA owns affected journeys at --workers=4; the supervisor owns the one full suite \
-         per epic assembly, and the merge queue runs it. Preserve any failing run and rerun only \
-         its failing spec at --workers=1 to distinguish a flake. Then \
+         per epic assembly, and the merge queue runs it. Preserve any failing run; a named-spec \
+         --workers=1 rerun is only a labelled control. Classify flakes using cas-playwright-debug's \
+         measured procedure, recording failures/executions, seed, workers and failure signature. Then \
          walk the adjacent paths (empty, loading, error, long content, phone 390px, dark, \
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \

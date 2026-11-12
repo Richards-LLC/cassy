@@ -38,7 +38,7 @@ Each recipe is a starting grep or tool, not a verdict. Hand-check 10 flagged row
 
 - **Duplicate:** map assertion to assertion within the same module, then across layers (integration tests against unit tests, end-to-end tests against component tests). Quote both sides. A file imported by another test is not deleted.
 - **Self-contained test:** a test file that imports nothing from the project and checks its own data (for example raw SQL on its own schema).
-- **Flaky:** a test that failed then passed on retry in the CI retry data.
+- **Flake candidate:** retry outcomes suggest investigation, not a diagnosis; classify with [cas-playwright-debug's measured procedure](../../cas-playwright-debug/SKILL.md#measure-a-flake).
 
 ## Screenshot and e2e
 

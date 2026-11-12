@@ -45,7 +45,7 @@ Remove implementation/style pins; preserve behavior assertions and named accessi
 ## Two lists, not one score
 
 - **Value list** (cut or merge): highest-confidence flag first.
-- **Cost list** (speed): `runtime x runs + flake_rate x rerun_cost`, divided by unique coverage; a test with no unique coverage ranks as pure cost. Flake rate and unique coverage are measured inputs: flake from CI retry data, unique coverage from assertion-to-assertion mapping in the same module. Line-coverage diffing only where the project already produces reports.
+- **Cost list** (speed): `runtime x runs + flake_rate x rerun_cost`, divided by unique coverage; no unique coverage ranks as pure cost. Measure flake rate with [cas-playwright-debug](../cas-playwright-debug/SKILL.md#measure-a-flake); CI retry outcomes are observations, not a diagnosis. Map unique coverage assertion-to-assertion in the same module; use existing line-coverage reports only.
 - **Runner levers:** measured thread use, worker count, shard imbalance. One A/B run proves a change.
 
 ## Hard limits

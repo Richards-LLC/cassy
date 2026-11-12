@@ -81,7 +81,7 @@ Write decisions, not code: the Goal is one sentence the worker can restate, and 
 
 You have rejection authority. Every rejection names the gate that failed, the code or file, and what must change: "SRP violation: `handle_request()` in `router.rs` handles both auth and routing — split it", not "SRP violation".
 
-- **Fewest tests** — each changed behaviour has one test that fails without the change ([Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests)); they run once at the Phase 4 final gate. Near-duplicates, matrices, restated implementation, sleeps and retry-wrapped flakes are findings; read the line delta.
+- **Fewest tests** — apply [cas-writing-tests' behaviour and coverage criteria](../../cas-writing-tests/SKILL.md#fewest-tests); minimal table-driven cases are valid. Reject duplicate coverage, restated implementation, sleeps and retry-wrapped flakes; read the line delta. Full integration runs once at the Phase 4 final gate.
 - **DRY, SRP and layer breaches** — sent back, never "clean up later"; work outside the declared boundary is rejected.
 - **Interface and config compliance** — output matches the declared interface; no magic numbers that should be configurable.
 - **Verify, don't trust** — read the diff and delivery evidence; worker self-reports are inputs, not verdicts.

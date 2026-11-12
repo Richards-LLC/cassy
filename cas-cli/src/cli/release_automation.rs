@@ -30,12 +30,7 @@ pub struct InventoryArgs {
     scope: PathBuf,
 }
 
-#[derive(Debug, Args)]
-pub struct PreviewArgs {
-    /// Replay an exact portable scope; use release plan for a new cut.
-    #[arg(long)]
-    scope: PathBuf,
-}
+pub type PreviewArgs = InventoryArgs;
 
 /// No store, receipt, ledger-cache or notification writes.
 pub fn preview(args: &PreviewArgs, root: &Path) -> Result<()> {

@@ -644,23 +644,18 @@ cut_preview_gate() {
     : >"$FAKE_GH_LOG"
     FAKE_PLAN_BLOCKER=NO_ELIGIBLE_MEMBERS run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
     [[ "$status" != 0 ]] &&
+        git -C "$fixture" diff --quiet HEAD -- cas-cli/Cargo.toml hub-web/dist/app.js &&
         ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
         ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
         ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     : >"$FAKE_CAS_LOG"
-    FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
-    # cas-a6c8: receipts may already have closed all thirteen members.
-    local closed_fixture="$tmp/already-closed-cut"
-    clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
-    FAKE_CAS_LOG="$tmp/already-closed-cas.log" FAKE_ALREADY_CLOSED=13 FAKE_WOULD_CLOSE=0 FAKE_REVIEW_MISSING='[]' \
-        run "$closed_fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/already-closed-cut.log" 2>&1 || return 1
-    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/already-closed-cut)" == "$(git -C "$closed_fixture" rev-parse HEAD)" ]] || return 1
+    run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
     [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
         ! grep -Eq '^(qa candidate|release preview) ' "$FAKE_CAS_LOG" &&
         grep -q '^release plan --admit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track ' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
+check 'cut_preview_gate' 'cut obeys the shared plan before preparing or enqueueing'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

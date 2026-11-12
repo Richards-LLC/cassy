@@ -48,7 +48,7 @@ pub(super) fn evaluate(args: &PlanArgs, root: &Path, repo: &Path) -> CutPlan {
     let mut blockers = BTreeMap::new();
     let tip = capture(&mut blockers, "IDENTITY", git(repo, &["rev-parse", "--verify", &format!("{tip}^{{commit}}")])).unwrap_or(tip);
     let train = args.train.as_deref().and_then(|id| capture(&mut blockers, "IDENTITY",
-        open_task_store(root).and_then(|store| store.get(id)).map_err(Into::into)));
+        open_task_store(root).and_then(|store| Ok(store.get(id)?)).map_err(Into::into)));
     if let Some(train) = &train {
         capture(&mut blockers, "IDENTITY", (|| {
             ensure!(crate::mcp::tools::core::task::release_train::is_release_train(train) && !train.is_terminal(), "expected an open release train");

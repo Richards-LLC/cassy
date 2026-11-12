@@ -395,8 +395,8 @@ plan_cut() {
     "$train_tracking" && train_args=(--train "$(jq -r .train_id <<<"$context")")
     plan="$("$cas_bin" release plan --admit --commit "$(git rev-parse HEAD)" --version "$planned" \
         --base "$remote/$base" --notes "$source" "${train_args[@]}")" || die "RELEASE_PLAN_BLOCKED: $plan; nothing built or pushed"
+    mkdir -p "$(dirname "$release_input_report")"
     jq '.inputs' <<<"$plan" >"$release_input_report"
-    release_candidate="$cas_bin"
 }
 
 if "$print_only"; then
@@ -458,7 +458,7 @@ done
 # Persist context and arm reminders before push: publication may follow quickly,
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
-    if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
+    if ! tracking="$("$cas_bin" release track --commit "$(git rev-parse HEAD)" --version "$version" \
         --inputs "$release_input_report" --first-child "$first_child" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"

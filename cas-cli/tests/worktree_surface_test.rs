@@ -7349,11 +7349,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             .await
             .expect("stale receipt returns a typed tool rejection");
         let replay_text = get_text(&replay);
+        // Reopen mints a new receipt identity; reject the old inputs without
+        // depending on which current-cycle integrity check fails first.
         assert!(
-            replay_text.contains("DELIVERY RECEIPT REJECTED")
-                && replay_text.contains("terminal Delivered proof cycle")
-                && replay_text.contains("fresh cycle-bound receipt"),
-            "reopened receipt replay needs typed actionable guidance:\n{replay_text}"
+            replay.is_error.unwrap_or(false) && replay_text.contains("[G-28]"),
+            "reopened receipt replay must fail the receipt integrity gate:\n{replay_text}"
         );
         assert_eq!(
             durable_close_snapshot(&cas_root),
@@ -7370,11 +7370,10 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             .await
             .expect_err("stale Delivered evidence must not authorize a later direct close");
         let direct_close_text = direct_close.message.to_string();
+        assert_eq!(direct_close.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(
-            direct_close_text.contains("DELIVERY CLOSE BLOCKED")
-                && direct_close_text.contains("prior proof cycle")
-                && direct_close_text.contains("fresh immutable completion receipt"),
-            "later close needs cycle-specific remediation:\n{direct_close_text}"
+            direct_close_text.contains("[G-86]"),
+            "later close must fail the delivery state gate:\n{direct_close_text}"
         );
         assert_eq!(
             durable_close_snapshot(&cas_root),

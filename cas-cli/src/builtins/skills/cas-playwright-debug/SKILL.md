@@ -11,18 +11,29 @@ Work from evidence in this order: the retained trace, then an interactive
 repro, then the fix, then flake proof. Do not edit a test before step 1 names
 the failing action.
 
-Check the version first with `npx playwright --version`. The trace CLI and
-`--debug=cli` need 1.59+, but `npx playwright cli attach` (the stepping in
-section 2) ships only from 1.62; `retryStrategy` needs 1.62+, and test locks and
-`locator.visible()` need 1.63+. On an older version, use
-`npx playwright show-trace <trace.zip>` and recommend upgrading.
+Check `node --version` and `npx playwright --version` first:
+
+| Feature or runtime | Playwright required |
+| --- | --- |
+| Trace CLI and `--debug=cli` | 1.59+ |
+| `npx playwright cli attach` (§2), `retryStrategy` | 1.62+ |
+| Test locks, `locator.visible()` | 1.63+ |
+| Node 26, including trace recording | **1.65+** |
+
+On older Playwright, use `npx playwright show-trace <trace.zip>` and upgrade.
+If assertions pass but teardown times out, rerun the named test with `--trace off`,
+then on Node 22 before blaming the product.
 
 For coding-agent browser work, default to `npx playwright cli`: snapshots live
 in files and element refs keep tool output small. Use Playwright MCP for a long
 exploratory walk that needs its persistent session. Neither replaces the named
 test run or the project's evidence bundle. See the [official CLI guide](https://playwright.dev/docs/getting-started-cli).
 
-## Playwright 1.64 recording and agents
+## Playwright 1.64–1.65 recording and upgrades
+
+- `test.skip/fixme/fail/slow` add a description-only form in 1.65; boolean/conditional forms remain supported, including conditional skip/slow. Class fields follow `useDefineForClassFields`: page-object fields initialized from `this.page` can throw; initialize them in the constructor instead.
+- Cookie matching follows RFC 6265; `APIRequestContext` params append to the existing query; actions wait for non-inert elements. Node 20 is no longer tested.
+- Since 1.64, device `screen` is forwarded and elements inside hidden iframes are hidden.
 
 - Videos use VP9 automatically. `use.video`, `recordVideo` and
   `page.screencast.start()` accept `fps`; keep QA at **10 fps** until a measured

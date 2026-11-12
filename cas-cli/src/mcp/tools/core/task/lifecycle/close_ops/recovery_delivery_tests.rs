@@ -1995,7 +1995,7 @@ async fn cas_5dc0_merged_redelivery_cannot_create_a_postmerge_dispatch() {
 // cas-372b: retire an integrated delivery's original content through an
 // intentional descendant, then recover its missing identity via supervisor MCP.
 fn evolved_recovery_fixture(env: &mut TestEnvGuard) -> (Recovery, String) {
-    let f = fixture(env);
+    let mut f = fixture(env);
     let repo = f.dir.path();
     git(repo, &["merge", "-q", "--ff-only", &f.final_tip]);
     std::fs::write(repo.join("footer.css"), ".footer { display: grid; }\n").unwrap();
@@ -2011,7 +2011,9 @@ fn evolved_recovery_fixture(env: &mut TestEnvGuard) -> (Recovery, String) {
     task.deliverables.factory_branch_anchor = Some("f".repeat(40));
     task.deliverables.historical_factory_branch_anchors.push(f.final_tip.clone());
     tasks.update(&task).unwrap();
-    f.core.set_agent_id_for_testing("supervisor-session".into());
+    let supervisor = CasCore::with_daemon(cas_dir, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    f.core = supervisor;
     (f, replacement)
 }
 

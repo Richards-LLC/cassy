@@ -644,9 +644,12 @@ test('a step that cannot run fails the state and skips the rest', async () => {
   assert.ok(result.findings.some((finding) => finding.type === 'journey-step-failed' && /click #nope/.test(finding.reason)));
 });
 
-test('journey steps reject fixed sleeps and ambiguous actions fail without clicking', async () => {
+test('journey steps reject fixed sleeps', async () => {
   const { loadJourney } = await import('./visual-qa.mjs');
   await assert.rejects(loadJourney({ states: [{ name: 'sleep', steps: [{ wait: 10 }] }] }));
+});
+
+test('ambiguous journey actions fail without clicking', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'visual-qa-strict-step-'));
   const page = join(dir, 'ambiguous.html');
   await writeFile(page, '<!doctype html><html lang="en"><title>Fixture</title><main><button>One</button><button>Two</button></main></html>');

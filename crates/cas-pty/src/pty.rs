@@ -7431,6 +7431,13 @@ echo SMOKE_DONE
     /// hazard.
 
     #[test]
+    fn worker_role_skills_include_test_authors() {
+        for skill in ["cas-writing-tests", "cas-playwright-tests"] {
+            assert!(WORKER_ROLE_SKILLS.contains(&skill));
+        }
+    }
+
+    #[test]
     fn test_launch_shapes_use_harness_correct_tool_prefix() {
         let claude_calls = ["mcp__cas__task", "mcp__cas__coordination"];
         let codex_calls = ["mcp__cs__task", "mcp__cs__coordination"];

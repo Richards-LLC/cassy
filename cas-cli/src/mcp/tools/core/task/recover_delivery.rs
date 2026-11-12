@@ -15,6 +15,7 @@ impl CasCore {
         id: &str,
         receipt: &str,
         reason: &str,
+        supervisor_override: bool,
     ) -> Result<CallToolResult, McpError> {
         let reject = |reason: String| {
             Self::error(
@@ -92,8 +93,28 @@ impl CasCore {
         let history = agents
             .get_lease_history(id, None)
             .map_err(|error| reject(error.to_string()))?;
-        let window =
+        let mut window =
             close_ops::resolve_task_commit_receipt_window(expected.created_at, &history, identity);
+        // Recovery may credit deliberately evolved content only through an
+        // explicit live-supervisor review. The shared receipt validator checks
+        // target reachability and every dropped path's final state below.
+        if supervisor_override && let Some(review) = reason.strip_prefix("reviewed-drop:") {
+            let (commits, _) = review.split_once(" -- ").ok_or_else(|| {
+                reject("reviewed-drop requires descendant commit receipts and a review reason".into())
+            })?;
+            for named in commits.split(',') {
+                let descendant = close_ops::resolve_task_commit_receipt_sha(&repo, named.trim())
+                    .map_err(reject)?;
+                if descendant == head
+                    || crate::qa_batch::ancestor(&repo, &head, &descendant) != Some(true)
+                {
+                    return Err(reject(format!(
+                        "reviewed recovery commit `{descendant}` must descend from delivery `{head}`"
+                    )));
+                }
+            }
+            window.supervisor_override_reason = Some(reason.to_owned());
+        }
         let proof = close_ops::validate_task_commit_receipt(&repo, &head, &target, &window)
             .map_err(reject)?;
         if target_before != target_refs() {

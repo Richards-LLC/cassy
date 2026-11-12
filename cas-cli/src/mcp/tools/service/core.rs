@@ -852,7 +852,7 @@ impl CasService {
         let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for recover_delivery"))?;
         let core = self.inner.clone();
         super::mutation_receipt::run_on_blocking_pool(async move {
-            core.recover_task_delivery(&id, &receipt, &reason)
+            core.recover_task_delivery(&id, &receipt, &reason, req.supervisor_override.unwrap_or(false))
         }).await.unwrap_or_else(|error| Err(Self::error(
             ErrorCode::INTERNAL_ERROR, format!("Delivery recovery failed: {error}"))))
     }

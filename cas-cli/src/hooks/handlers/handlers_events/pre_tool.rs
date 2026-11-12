@@ -2323,7 +2323,7 @@ pub(crate) fn is_worker_commit_allowed_branch(branch: &str) -> bool {
     !matches!(b, "main" | "master" | "staging" | "")
 }
 
-/// Return true if `cmd` looks like a history-changing Git invocation.
+/// Return true if `cmd` needs Git scope checks: history writes or owned-checkout navigation.
 ///
 /// Matches common forms:
 /// - `git commit -m "msg"`
@@ -2752,11 +2752,19 @@ pub(crate) fn get_branch_at_cwd(cwd: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
+enum GitHeadAction {
+    NewBranch,
+    Navigate { reference: Option<String>, guess: bool },
+    RefRewrite,
+    Guarded,
+}
+
+#[derive(Debug, Clone)]
 struct GitCommandTarget {
     cwd: std::path::PathBuf,
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
-    is_detached_checkout: bool,
+    head_action: GitHeadAction,
     unresolved_directory: bool,
     uncertain_scope: bool,
 }
@@ -2772,7 +2780,7 @@ impl GitCommandTarget {
             cwd,
             git_dir: None,
             work_tree: None,
-            is_detached_checkout: false,
+            head_action: GitHeadAction::Guarded,
             unresolved_directory: false,
             uncertain_scope: false,
         }
@@ -2795,6 +2803,77 @@ fn resolve_git_option_path(base: &std::path::Path, value: &str) -> std::path::Pa
     }
 }
 
+/// Checkout mixes HEAD navigation with path restoration. Switch cannot
+/// restore paths, but its force-create forms can rewrite an existing ref.
+fn git_head_action(operation: &str, args: &[String]) -> GitHeadAction {
+    let mut words = args.iter().peekable();
+    let mut references = Vec::new();
+    let (mut creates, mut detach, mut track, mut guess) = (false, false, false, true);
+    while let Some(word) = words.next() {
+        match word.as_str() {
+            "--" => {
+                if operation == "checkout" && words.peek().is_some() { return GitHeadAction::Guarded; }
+                references.extend(words.cloned());
+                break;
+            }
+            "--orphan" | "--create" if word == "--orphan" || operation == "switch" => {
+                if words.next().is_none() { return GitHeadAction::Guarded; }
+                creates = true;
+            }
+            "--force-create" if operation == "switch" => return GitHeadAction::RefRewrite,
+            "--detach" => detach = true,
+            "--no-detach" => detach = false,
+            "--track" => track = true,
+            "--no-track" => track = false,
+            "--guess" => guess = true,
+            "--no-guess" => guess = false,
+            "--conflict" => { if words.next().is_none() { return GitHeadAction::Guarded; } }
+            "--quiet" | "--no-quiet" | "--progress" | "--no-progress" | "--force" | "--no-force"
+            | "--merge" | "--no-merge" | "--discard-changes" | "--no-discard-changes"
+            | "--recurse-submodules" | "--no-recurse-submodules" | "--overwrite-ignore"
+            | "--no-overwrite-ignore" | "--ignore-other-worktrees" | "--no-ignore-other-worktrees"
+            | "--overlay" | "--no-overlay" | "--no-patch" => {}
+            _ if word.starts_with("--orphan=") || (operation == "switch" && word.starts_with("--create=")) => creates = true,
+            _ if operation == "switch" && word.starts_with("--force-create=") => return GitHeadAction::RefRewrite,
+            _ if word.starts_with("--track=") => track = true,
+            _ if word.starts_with("--conflict=") || word.starts_with("--recurse-submodules=") => {}
+            "-" => references.push(word.clone()),
+            _ if word.starts_with('-') && !word.starts_with("--") => {
+                let mut flags = word[1..].chars().peekable();
+                while let Some(flag) = flags.next() {
+                    match flag {
+                        'b' if operation == "checkout" => {
+                            if flags.peek().is_none() && words.next().is_none() { return GitHeadAction::Guarded; }
+                            creates = true;
+                            break;
+                        }
+                        'c' if operation == "switch" => {
+                            if flags.peek().is_none() && words.next().is_none() { return GitHeadAction::Guarded; }
+                            creates = true;
+                            break;
+                        }
+                        'B' if operation == "checkout" => return GitHeadAction::RefRewrite,
+                        'C' if operation == "switch" => return GitHeadAction::RefRewrite,
+                        'd' => detach = true,
+                        't' => track = true,
+                        'q' | 'f' | 'm' | 'l' => {}
+                        _ => return GitHeadAction::Guarded,
+                    }
+                }
+            }
+            _ if word.starts_with('-') => return GitHeadAction::Guarded,
+            _ => references.push(word.clone()),
+        }
+    }
+    if references.len() > 1 { return GitHeadAction::Guarded; }
+    if creates || track { return GitHeadAction::NewBranch; }
+    if detach { return GitHeadAction::Navigate { reference: None, guess: false }; }
+    match references.pop() {
+        Some(reference) => GitHeadAction::Navigate { reference: Some(reference), guess },
+        None => GitHeadAction::Guarded,
+    }
+}
+
 fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     // Only the subcommand can change history, never a global option's value
     // or a read command's operand (e.g. `git log --grep commit`).
@@ -2804,16 +2883,8 @@ fn git_history_write_operation(git_words: &[String]) -> Option<usize> {
     let is_write = match operation {
         "commit" | "merge" | "push" | "rebase" | "cherry-pick" => true,
         "reset" => args.iter().any(|arg| arg == "--hard" || arg == "-H"),
-        "checkout" => {
-            // Creating a replay branch navigates existing history, just like
-            // clone or switch; it does not commit to the target repository.
-            // Keep branch resets (-B) and path restores behind the guard.
-            let creates_branch = args
-                .iter()
-                .take_while(|arg| arg.as_str() != "--")
-                .any(|arg| arg.starts_with("-b"));
-            !creates_branch && args.iter().any(|arg| !arg.starts_with('-'))
-        }
+        "checkout" => !args.is_empty() && !matches!(git_head_action(operation, args), GitHeadAction::NewBranch),
+        "switch" => matches!(git_head_action(operation, args), GitHeadAction::RefRewrite),
         "add" => args.iter().any(|arg| arg == "-A" || arg == "--all"),
         _ => false,
     };
@@ -3096,11 +3167,9 @@ fn collect_git_write_targets(
         let mut target = default_target.clone();
         target.unresolved_directory = shell_cwd.is_none();
         target.cwd = shell_cwd.clone().unwrap_or_else(|| default_target.cwd.clone());
-        target.is_detached_checkout = git_words[write_index] == "checkout"
-            && git_words[write_index + 1..]
-                .iter()
-                .take_while(|word| word.as_str() != "--")
-                .any(|word| word == "--detach");
+        target.head_action = if matches!(git_words[write_index].as_str(), "checkout" | "switch") {
+            git_head_action(&git_words[write_index], &git_words[write_index + 1..])
+        } else { GitHeadAction::Guarded };
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -3249,6 +3318,32 @@ fn worker_git_scope_violation_for_command_with_worktree(
         })
 }
 
+fn git_target_is_head_navigation(target: &GitCommandTarget) -> bool {
+    let GitHeadAction::Navigate { reference, guess } = &target.head_action else { return false; };
+    let Some(reference) = reference else {
+        return git_command_at_target(target).args(["rev-parse", "--git-dir"])
+            .output().is_ok_and(|output| output.status.success());
+    };
+    let reference = if reference == "-" { "@{-1}" } else { reference.as_str() };
+    let is_commit = |name: &str| git_command_at_target(target)
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options", &format!("{name}^{{commit}}")])
+        .output().is_ok_and(|output| output.status.success());
+    if is_commit(reference) { return true; }
+    // Git can create a tracking branch when a unique remote owns this name.
+    // A real path stays guarded when no local ref disambiguates it.
+    if !guess || target.cwd.join(reference).exists() { return false; }
+    let Ok(output) = git_command_at_target(target).args(["for-each-ref", "--format=%(refname)", "refs/remotes/"]).output() else { return false; };
+    if !output.status.success() { return false; }
+    let names = String::from_utf8_lossy(&output.stdout);
+    let suffix = format!("/{reference}");
+    let candidates: Vec<_> = names.lines().filter(|name| name.ends_with(&suffix)).collect();
+    if candidates.len() == 1 { return is_commit(candidates[0]); }
+    let Ok(remote) = git_command_at_target(target).args(["config", "--get", "checkout.defaultRemote"]).output() else { return false; };
+    if !remote.status.success() { return false; }
+    let preferred = format!("refs/remotes/{}/{reference}", String::from_utf8_lossy(&remote.stdout).trim());
+    candidates.iter().any(|candidate| *candidate == preferred) && is_commit(&preferred)
+}
+
 /// Check whether a factory worker's history-changing Git operation
 /// should be denied.
 ///
@@ -3332,10 +3427,10 @@ fn check_worker_git_commit_scope_at_target(
         }
     }
 
-    // Checking out a commit during a bisect changes only the worker's own
-    // checkout. Keep the worktree containment check above, but do not apply
-    // the branch rule reserved for commits and other history mutations.
-    if is_isolated && target.is_detached_checkout {
+    // Navigation never creates a commit. Keep the effective-directory and
+    // worktree containment checks above, then distinguish checkout refs from
+    // ambiguous path operands using this command's actual Git identity.
+    if git_target_is_head_navigation(target) {
         return None;
     }
 
@@ -7981,7 +8076,7 @@ fn log_factory_git_scope_rejection(
     let operation_index = operation_tokens.iter().position(|word| {
         matches!(
             *word,
-            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "add"
+            "commit" | "merge" | "push" | "rebase" | "reset" | "checkout" | "switch" | "add"
         )
     });
     let operation = operation_index
@@ -12660,76 +12755,118 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600() {
+        let mut env = TestEnvGuard::temp_home();
         let repo = make_git_repo();
         let path = repo.path().to_string_lossy().to_string();
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git")
+            .args(args).current_dir(repo.path()).output().unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
         let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
-        let detach = std::process::Command::new("git")
-            .args(["checkout", "--detach", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(detach.status.success(), "{detach:?}");
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_CLONE_PATH", Some(&path)),
-            ("CAS_AGENT_NAME", Some("bisect-worker")),
-        ]);
+        assert!(git(&["branch", "factory/bisect-worker"]).status.success());
+        assert!(git(&["remote", "add", "origin", "."]).status.success());
+        assert!(git(&["remote", "add", "other", "."]).status.success());
+        assert!(git(&["config", "checkout.defaultRemote", "origin"]).status.success());
+        assert!(git(&["update-ref", "refs/remotes/origin/guessable", &sha]).status.success());
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_CLONE_PATH", &path);
+        env.set("CAS_AGENT_NAME", "bisect-worker");
 
-        let classify = hook_git_write_input(
-            &path,
-            &format!("git bisect good\ngit checkout --detach {sha}"),
-        );
-        let output = handle_pre_tool_use(&classify, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_ne!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "bisect classification and detached checkout must remain usable: {value}"
-        );
-
-        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
-        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
-        );
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
-        let commit = hook_git_write_input(&path, "git commit -m forbidden");
-        let output = handle_pre_tool_use(&commit, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
+        // One row per HEAD-moving form (and per ref-rewrite/path control).
+        // Execute allowed rows against Git too: these navigate the existing
+        // commit graph, rather than merely looking like navigation to us.
+        let cases: &[(&[&str], bool)] = &[
+            (&["checkout", "factory/bisect-worker"], true),
+            (&["checkout", "-"], true),
+            (&["checkout", "@{-1}"], true),
+            (&["checkout", "TIP"], true),
+            (&["checkout", "TIP", "--"], true),
+            (&["checkout", "--detach", "TIP"], true),
+            (&["checkout", "-d", "TIP"], true),
+            (&["checkout", "--detach"], true),
+            (&["checkout", "-qd", "TIP"], true),
+            (&["checkout", "-b", "NEW", "TIP"], true),
+            (&["checkout", "-bNEW", "TIP"], true),
+            (&["checkout", "-qbNEW", "TIP"], true),
+            (&["checkout", "--orphan", "NEW", "TIP"], true),
+            (&["checkout", "--orphan=NEW", "TIP"], true),
+            (&["checkout", "--track", "-b", "NEW", "main"], true),
+            (&["checkout", "-t", "-bNEW", "main"], true),
+            (&["checkout", "--conflict", "merge", "factory/bisect-worker"], true),
+            (&["checkout", "guessable"], true),
+            (&["checkout", "--guess", "NEW"], true),
+            (&["checkout", "-t", "origin/NEW"], true),
+            (&["checkout", "--track=direct", "origin/NEW"], true),
+            (&["-C", "REPO", "checkout", "factory/bisect-worker"], true),
+            (&["--git-dir=REPO/.git", "--work-tree=REPO", "checkout", "factory/bisect-worker"], true),
+            (&["switch", "factory/bisect-worker"], true),
+            (&["switch", "-"], true),
+            (&["switch", "@{-1}"], true),
+            (&["switch", "-c", "NEW", "TIP"], true),
+            (&["switch", "-cNEW", "TIP"], true),
+            (&["switch", "-qcNEW", "TIP"], true),
+            (&["switch", "--create", "NEW", "TIP"], true),
+            (&["switch", "--create=NEW", "TIP"], true),
+            (&["switch", "--detach", "TIP"], true),
+            (&["switch", "-d", "TIP"], true),
+            (&["switch", "--detach"], true),
+            (&["switch", "--orphan", "NEW"], true),
+            (&["switch", "--orphan=NEW"], true),
+            (&["switch", "--guess", "NEW"], true),
+            (&["switch", "--track", "-c", "NEW", "main"], true),
+            (&["checkout", "-B", "main", "TIP"], false),
+            (&["checkout", "-Bmain", "TIP"], false),
+            (&["checkout", "-qBmain", "TIP"], false),
+            (&["switch", "-C", "main", "TIP"], false),
+            (&["switch", "-Cmain", "TIP"], false),
+            (&["switch", "-qCmain", "TIP"], false),
+            (&["switch", "--force-create", "main", "TIP"], false),
+            (&["switch", "--force-create=main", "TIP"], false),
+            (&["checkout", "f.txt"], false),
+            (&["checkout", "--", "f.txt"], false),
+            (&["checkout", "TIP", "f.txt"], false),
+            (&["checkout", "TIP", "--", "--detach"], false),
+            (&["checkout", "--patch", "TIP"], false),
+            (&["checkout", "--pathspec-from-file=paths"], false),
+            (&["checkout", "--pathspec-from-file", "paths"], false),
+            (&["checkout", "--ours", "f.txt"], false),
+            (&["checkout", "--theirs", "f.txt"], false),
+            (&["checkout", "--detach", "--no-detach", "f.txt"], false),
+            (&["checkout", "--no-guess", "NEW"], false),
+            (&["commit", "-m", "forbidden"], false),
+            (&["merge", "main"], false),
+            (&["reset", "--hard", "TIP"], false),
+        ];
+        for (index, (words, allow)) in cases.iter().enumerate() {
+            assert!(git(&["switch", "factory/bisect-worker"]).status.success());
+            assert!(git(&["checkout", "--detach", &sha]).status.success());
+            let new_branch = format!("factory/navigation-{index}");
+            for remote in ["origin", "other"] {
+                assert!(git(&["update-ref", &format!("refs/remotes/{remote}/{new_branch}"), &sha]).status.success());
+            }
+            let args: Vec<_> = words.iter().map(|word| word.replace("TIP", &sha)
+                .replace("NEW", &new_branch).replace("REPO", &path)).collect();
+            let refs: Vec<_> = args.iter().map(String::as_str).collect();
+            let [command] = crate::worktree::GitOperations::git_remedies([refs.as_slice()]).unwrap();
+            let output = handle_pre_tool_use(&hook_git_write_input(&path, &command), None).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(value["hookSpecificOutput"]["permissionDecision"] != "deny", *allow,
+                "{command}: {value}");
+            if *allow {
+                let result = std::process::Command::new("git").args(&args).current_dir(repo.path()).output().unwrap();
+                assert!(result.status.success(), "{command}: {result:?}");
+                // Orphan HEAD has no commit; every other transition keeps
+                // this exact existing tip, and none adds a graph node.
+                if !args.iter().any(|arg| arg.starts_with("--orphan")) {
+                    assert_eq!(String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout).trim(), sha);
+                }
+            }
+            assert_eq!(String::from_utf8_lossy(&git(&["rev-list", "--all", "--count"]).stdout).trim(), "1");
+        }
         let outside = tempfile::tempdir().unwrap();
-        let outside_checkout = hook_git_write_input(
-            &path,
-            &format!(
-                "git -C '{}' checkout --detach {sha}",
-                outside.path().display()
-            ),
-        );
-        let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
+        let input = hook_git_write_input(&path, &format!("git -C '{}' checkout --detach {sha}", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("outside your assigned worktree"));
     }
 
     #[test]

@@ -27,11 +27,11 @@ Each recipe is a starting grep or tool, not a verdict. Hand-check 10 flagged row
 | pattern | recipe | precision |
 |---|---|---|
 | unreferenced module | `npx fallow dead-code` (compare `--production` against default); confirm with a same-file reference check | 5/7 on hub-web |
-| CSS or source-text assertion | `expect(` on a variable read from a CSS, `main.ts` or HTML file; exclude `querySelector` and other DOM queries | 8/10 with the DOM exclusion, 5/16 without |
+| CSS or source-text assertion | `expect(` on a variable read from a CSS, `main.ts` or HTML file; exclude DOM queries and documented accessibility-property contracts; inspect whether the assertion proves an effective outcome | 8/10 with the DOM exclusion, 5/16 without |
 | real timers | `setTimeout`, `sleep`, a `waitFor` with a large timeout and no fake-timer setup | measure by file time |
 | dynamic import in a test body | `await import(` inside `it(` or `test(` | check each: some are mock isolation |
 | unbounded lazy regex | `.*?` or `[\s\S]*?` with no length bound in an assertion over a large string | check each |
-| token-name contract | assertions that a CSS variable name exists | style pinning: same ruling |
+| token-name contract | assertions that a CSS variable name exists | candidate implementation pin; distinguish a named accessibility contract |
 | subset claimed as full suite | a delivery note says "full suite" but the command had a path or `-t` filter, or the count differs from the runner's total | per-delivery check candidate |
 
 ## Any language
@@ -43,3 +43,23 @@ Each recipe is a starting grep or tool, not a verdict. Hand-check 10 flagged row
 ## Screenshot and e2e
 
 Flag an e2e test that takes screenshots or dumps the DOM and has no `expect` of its own (reference audit: 1/3). End-to-end tests that finish before the critical path ends do not shorten the run; say so in the ledger.
+
+## Browser smells and silent green
+
+Treat every match below as a review candidate; sample 10 and retain the precision floor from the skill. A matcher name alone is not a defect.
+
+| Candidate detector | Confirmed defect | Replacement / evidence |
+| --- | --- | --- |
+| CSS/Quasar class locators | Styling structure is the primary identity | Inspect role/label/test id; retain intentional machine selector contracts |
+| .first() | It suppresses strictness rather than testing specified order | Narrow a semantic container and prove the promised outcome |
+| networkidle | It substitutes connection silence for user readiness | Web-first state assertion or the required response plus UI outcome |
+| waitForTimeout | A sleep substitutes for completion | Event/barrier; controlled clock only for time logic |
+| .catch(() => undefined) | It swallows a required action/assertion failure | Propagate the error; preserve intentional context-close cleanup separately |
+
+The five confirmed patterns above are banned authoring fixes. Also inspect isVisible() branching, soft returns, copy/word-list assertions and retries used to mask failures. toHaveText on fixture data and accessible-name locator inputs remain valid.
+
+Trace each required test command to an enabled CI job and uploaded full report. Flag missing-secret conditions that skip every test step, zero globally executed required tests, unexplained skips and disabled required lanes; an alternate real lane can satisfy coverage. Empty individual shards and declared optional lanes are not silent green.
+
+For a measured flake hunt, use a named selection with --repeat-each and --shuffle <seed>, plus the failures console reporter. Keep full structured reports and original failure evidence. Report failures/executions and seed/worker count; never infer a cause from a single rerun.
+
+Faith review pairs each title with its final assertion and independent expected value. Record title, assertion location, meaningful red control and the exact missing promise. Read-only audits report gaps; they never weaken assertions or auto-run the healer. A separately authorized scratch diagnosis may accept reviewed locator/wait fixes only, never assertion changes.

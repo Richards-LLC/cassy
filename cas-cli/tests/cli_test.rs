@@ -106,6 +106,175 @@ fn release_preview_does_not_initialize_tracing_on_success_or_failure() {
     assert!(!store.join("logs").exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn release_plan_and_leased_cut_replay_incidents_cas_80df() {
+    use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
+    use std::{fs, path::Path, process::Command as Process};
+    let capture = cas::test_paths::workspace_root().join("target/cas-80df-real-entry.json");
+    let mut env = super::test_env_guard::TestEnvGuard::temp_home();
+    let temp = TempDir::new().unwrap();
+    let repo = temp.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = Process::new("git").args(args).current_dir(repo).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().into()
+    }
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "Fixture"]);
+    git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+    fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+    fs::write(repo.join("CHANGELOG.md"), "# Changelog\n\n## [Unreleased]\n\n## [9.99.0] - 2026-01-01\n\n- Base release.\n").unwrap();
+    fs::create_dir_all(repo.join("hub-web/dist")).unwrap();
+    fs::write(repo.join("hub-web/dist/app.js"), "base\n").unwrap();
+    let mut lock = String::from("version = 4\n");
+    for (name, directory) in [("cas", "cas-cli"), ("cas-types", "crates/cas-types"), ("cas-search", "crates/cas-search"), ("cas-store", "crates/cas-store"), ("cas-core", "crates/cas-core"), ("cas-mcp", "crates/cas-mcp")] {
+        fs::create_dir_all(repo.join(directory)).unwrap();
+        fs::write(repo.join(directory).join("Cargo.toml"), format!("[package]\nname = {name:?}\nversion = \"9.99.0\"\n")).unwrap();
+        lock.push_str(&format!("\n[[package]]\nname = {name:?}\nversion = \"9.99.0\"\n"));
+    }
+    fs::write(repo.join("Cargo.lock"), lock).unwrap();
+    fs::create_dir(repo.join("scripts")).unwrap();
+    for script in ["release.sh", "release-cut.py", "release_changelog.py", "release-train-announce.py"] {
+        fs::copy(cas::test_paths::workspace_root().join("scripts").join(script), repo.join("scripts").join(script)).unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "base"]);
+    let remote = temp.path().join("origin.git");
+    git(&repo, &["clone", "--bare", "-q", ".", remote.to_str().unwrap()]);
+    git(&repo, &["remote", "add", "origin", "https://github.com/example/cut.git"]);
+    git(&repo, &["config", &format!("url.{}.insteadOf", remote.display()), "https://github.com/example/cut.git"]);
+    git(&repo, &["fetch", "-q", "origin"]);
+    const LANE: &str = "epic/release-train-entry-cas-a001";
+    git(&repo, &["checkout", "-qb", LANE]);
+    fs::create_dir(repo.join("changelog.d")).unwrap();
+    fs::write(repo.join("changelog.d/cas-aaaa.md"), "### Fixed — Releases\n\n- **Entry** — A reviewed change.\n").unwrap();
+    fs::write(repo.join("work.txt"), "reviewed change\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-qm", "fix: reviewed change (cas-aaaa)"]);
+    let anchor = git(&repo, &["rev-parse", "HEAD"]);
+    let root = cas::store::init_cas_dir(&repo).unwrap();
+    fs::write(root.join("config.toml"), "[project]\ncanonical_id='cut-entry'\n[factory]\nepic_base_branch='main'\n[verification]\nenabled=false\n").unwrap();
+    env.set("CAS_ROOT", &root);
+    let tasks = cas::store::open_task_store(&root).unwrap();
+    let mut train = Task::new("cas-a001".into(), "Release train".into());
+    train.task_type = TaskType::Epic;
+    train.labels.push("release-train".into());
+    train.branch = Some(LANE.into());
+    train.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cut-entry".into(), target_branch: "main".into() });
+    tasks.add(&train).unwrap();
+    let mut member = Task::new("cas-aaaa".into(), "Reviewed change".into());
+    member.origin_project = Some("cut-entry".into());
+    member.status = TaskStatus::Closed;
+    member.closed_at = Some(chrono::Utc::now());
+    member.deliverables.factory_branch_anchor = Some(anchor);
+    member.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cut-entry".into(), target_branch: LANE.into() });
+    tasks.add(&member).unwrap();
+    tasks.add_dependency(&Dependency::new(member.id.clone(), train.id.clone(), DependencyType::ParentChild)).unwrap();
+    git(&repo, &["checkout", "-q", "main"]);
+    let held = temp.path().join("held");
+    git(&repo, &["worktree", "add", "-q", held.to_str().unwrap(), LANE]);
+    let bin = temp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let gh = bin.join("gh");
+    cas::test_paths::warm_stub(&gh, r##"#!/bin/sh
+case "$1 $2" in
+ 'api graphql') case "$*" in *maximumEntriesToMerge*) echo '{"maximumEntriesToMerge":1,"mergingStrategy":"ALLGREEN"}' ;; *) echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}' ;; esac ;;
+ 'repo view') echo example/cut ;;
+ 'pr list') echo 77 ;;
+ 'pr edit'|'pr merge') ;;
+ *) exit 2 ;;
+esac
+"##);
+    // The build tool is an external fixture; the CAS binary and release owner are real.
+    cas::test_paths::warm_stub(&bin.join("npm"), "#!/bin/sh\nif [ \"$1\" = run ]; then\n if git symbolic-ref --quiet HEAD; then exit 73; fi\n pwd >> \"$CUT_BUILD_MARKER\"\n mkdir -p dist\n printf 'built\\n' > dist/app.js\nfi\n");
+    env.set("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap());
+    env.set("CAS_GH_BIN", &gh);
+    env.set("GH_BIN", &gh);
+    let binary = cas::test_paths::binary("cas", Some(env!("CARGO_BIN_EXE_cas").into()));
+    env.set("CAS_BIN", &binary);
+    env.set("CAS_SKIP_FACTORY_TOOLING", "1");
+    env.set("RELEASE_DATE", "2026-01-02");
+    let marker = temp.path().join("builds");
+    env.set("CUT_BUILD_MARKER", &marker);
+    let notes = temp.path().join("notes.md");
+    fs::write(&notes, "invalid draft\n").unwrap();
+    // A stale, lenient linter in the caller must not replace the pinned train linter.
+    fs::write(repo.join("scripts/release-train-announce.py"), "raise SystemExit(0)\n").unwrap();
+    let mut evidence = Vec::new();
+    let plan = || {
+        let out = Process::new(&binary).current_dir(&repo).args(["release", "plan", "--train", "cas-a001", "--commit", LANE, "--version", "9.99.1", "--notes"]).arg(&notes).output().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|error| panic!("plan JSON: {error}; {out:?}"));
+        (out.status.success(), value)
+    };
+    let cut = |dry: bool| {
+        let mut command = Process::new("bash");
+        command.current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes);
+        if dry { command.arg("--dry-run"); }
+        command.output().unwrap()
+    };
+    let (ok, bad_lint) = plan();
+    assert!(!ok && bad_lint["blockers"].get("NOTES_LINT").is_some(), "{bad_lint}");
+    assert!(!cut(false).status.success());
+    assert!(!marker.exists());
+    evidence.push(serde_json::json!({"phase":"pinned-linter-refusal", "plan":bad_lint, "builds":0}));
+    let valid_notes = "```text\n*Live on production — User — Cassy v{{VERSION}}*\nWas: release notes were harder to use. → Now: this release is easier to use.\n```\n\n```text\n• *Clearer flow* — The release is easier to follow.\n```\n\n```text\n*Live on production — Dev — Cassy v{{VERSION}}*\nWas: release prep lacked one check. → Now: release prep runs it before the PR.\n```\n\n```text\n• *Release check* — The release cut validates the draft before publishing.\n```\n";
+    fs::write(&notes, valid_notes).unwrap();
+    let (ok, closed) = plan();
+    assert!(ok, "{closed}");
+    assert_eq!(closed["preview"]["would_close"], 0);
+    assert_eq!(closed["preview"]["already_closed"], 1);
+    assert!(!marker.exists());
+    let prepared = cut(true);
+    assert!(prepared.status.success(), "{prepared:?}");
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+    evidence.push(serde_json::json!({"phase":"already-closed-proceeds", "plan":closed, "cut_exit":prepared.status.code()}));
+    fs::remove_file(&marker).unwrap();
+    fs::write(held.join("changelog.d/cas-bbbb.md"), "### Fixed — Reports\n\n- **Report** — Recorded findings.\n").unwrap();
+    git(&held, &["add", "changelog.d"]);
+    git(&held, &["commit", "-qm", "docs: report (cas-bbbb)"]);
+    let mut report = Task::new("cas-bbbb".into(), "Report".into());
+    report.origin_project = Some("cut-entry".into());
+    report.status = TaskStatus::Closed;
+    report.closed_at = Some(chrono::Utc::now());
+    report.execution_note = Some("no-code".into());
+    tasks.add(&report).unwrap();
+    let (ok, unbound) = plan();
+    assert!(!ok && unbound["blockers"].get("NO_CODE_PROOF").is_some(), "{unbound}");
+    assert!(!cut(false).status.success());
+    assert!(!marker.exists());
+    evidence.push(serde_json::json!({"phase":"undeclared-report-refusal", "plan":unbound, "builds":0}));
+    let artifact_path = root.join("artifacts/cas-bbbb/report.md");
+    fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
+    fs::write(&artifact_path, "# Report\nRecorded findings.\n").unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    let artifact = cas::artifacts::publish(&cas::artifacts::PublishContext { store: &artifacts, roots: cas::artifacts::paths::PublishRoots::new(&root, &root.join("artifacts"), "cas-bbbb"), task_id: report.id.clone(), cloud: None }, &artifact_path).unwrap().artifact;
+    // Committed provider rows are fixture data; this test never contacts Cloud.
+    artifacts.mark_uploaded(&artifact.id, "fixture-cloud-report").unwrap();
+    artifacts.mark_committed(&artifact.id, None).unwrap();
+    let proof = serde_json::json!({"kind":"report", "artifact_id":artifact.id, "sha256":artifact.sha256, "size_bytes":artifact.size_bytes, "reviewed_sha":git(&held, &["rev-parse", "HEAD"])});
+    fs::write(&notes, format!("{valid_notes}\n<!-- CAS_RELEASE_INPUTS {} -->\n", serde_json::json!({"no_code_members":{"cas-bbbb":[proof]}}))).unwrap();
+    let (ok, fixed) = plan();
+    assert!(ok, "{fixed}");
+    assert_eq!(fixed["preview"]["would_close"], 0);
+    assert_eq!(fixed["preview"]["already_closed"], 2);
+    assert!(!marker.exists());
+    let held_tip = git(&held, &["rev-parse", "HEAD"]);
+    let released = cut(false);
+    assert!(released.status.success(), "{released:?}");
+    assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
+    assert_eq!(git(&held, &["rev-parse", "HEAD"]), held_tip);
+    assert_eq!(git(&held, &["branch", "--show-current"]), LANE);
+    assert_eq!(git(&repo, &["show", &format!("origin/{LANE}:cas-cli/Cargo.toml")]).lines().find(|line| line.starts_with("version =")), Some("version = \"9.99.1\""));
+    assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 2);
+    let tracked: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v9.99.1.json")).unwrap()).unwrap();
+    assert_eq!(tracked["close_preview"]["already_closed"], 2);
+    evidence.push(serde_json::json!({"phase":"bound-report-held-branch-cut", "plan":fixed, "cut_exit":released.status.code(), "builds":1, "receipt":tracked}));
+    fs::create_dir_all(capture.parent().unwrap()).unwrap();
+    fs::write(capture, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+}
+
 #[test]
 fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
     let temp = TempDir::new().unwrap();

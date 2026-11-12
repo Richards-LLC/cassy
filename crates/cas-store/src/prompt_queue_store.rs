@@ -1987,9 +1987,10 @@ impl SqlitePromptQueueStore {
                 // news. Keep the persisted body and delivery receipts intact.
                 if (prompt.source.starts_with("lifecycle:")
                     || prompt.source.starts_with("lifecycle-wake:"))
-                    && cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some()
+                    && let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt)
                 {
-                    let age_secs = (now - prompt.created_at).num_seconds().max(0);
+                    // A reconciled occurrence may predate its newly created queue row.
+                    let age_secs = (now - envelope.occurrence.min(prompt.created_at)).num_seconds().max(0);
                     if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
                         let cause = holding.as_deref().map(|detail| {

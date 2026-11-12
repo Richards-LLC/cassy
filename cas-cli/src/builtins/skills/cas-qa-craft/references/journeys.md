@@ -70,19 +70,7 @@ reviewer challenges a reason that does not hold.
 
 ## Run them and keep the evidence
 
-<!-- cas-src:begin -->
-Workers run the project's journey suite, for example
-`scripts/journey-eval.sh <artifacts_root>/<project-key>/<task-id>`. It resolves
-the task target, selects affected journeys itself and runs four workers.
-`--affected <base>` sets an explicit base. The producer owns the native ID
-filter, including supplemental specs and parts. No selected IDs writes an
-explicit empty receipt without launching a browser. Independent QA first
-<!-- cas-src:else -->
-Workers run the project's journey suite, selecting the journeys the diff
-affects with the command its CLAUDE.md or AGENTS.md names. Independent QA first
-<!-- cas-src:end -->
-consumes matching worker receipts under [independent-pass.md](independent-pass.md).
-Factory workers and QA cannot use `--full` or an unfiltered Playwright run.
+Release batch QA runs the affected journeys through the project's established runner. In cas-src use `scripts/journey-eval.sh <task-artifact-dir>`; its source selection and native ID filter remain authoritative. Consume matching receipts before missing checks. Workers may iterate a named failing spec while preserving the original failure, and run touched unit/type checks. Factory workers and QA cannot use --full or unfiltered Playwright.
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 

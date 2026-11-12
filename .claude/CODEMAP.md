@@ -137,7 +137,8 @@
 - `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/release_close.rs`, `cas-cli/src/qa_batch/release_close_tests.rs`, `cas-cli/src/qa_author_override.rs`, `cas-cli/src/qa_post_release.rs` - exact-SHA release membership admitted by frozen declarations or shipping proof, portable ledger resolution, independent per-member release close with source-bound shipped candidate approval, no-write preview and legacy transformation proofs, published-SHA release verdicts across historical epic targets, authorship rules and one owner-scoped close notice per receipt grouped by refusal kind.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs`, `docs/qa/fast-lane.md` - hotfix eligibility, post-merge proof and revert choices.
 - `cas-cli/src/quality_ledger.rs`, `cas-cli/src/quality_ledger/estimates.rs`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` - append-only quality events and measured estimates.
-- `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value auditing and CI timing recipes.
+- `cas-cli/src/builtins/skills/cas-writing-tests/`, `cas-playwright-tests/` - general test quality and browser Faith contracts; one-release legacy redirects retain old names.
+- `cas-cli/src/builtins/skills/cas-test-audit/` - read-only test-value, Faith, smell and CI timing audits; `cas-playwright-debug/` owns failure diagnosis.
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` - Commander service, HTTP/SSE bridge, pairing, durable operator input and explicit hub-stop intent respected by updates.
 - `cas-cli/src/cli/hub_preview.rs`, `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/local_image.rs` - time-boxed candidate previews and authorized media.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - browser bootstrap, selected conversations and reply grants.

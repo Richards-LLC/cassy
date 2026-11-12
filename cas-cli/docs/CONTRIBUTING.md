@@ -4565,14 +4565,14 @@ argument arrays can be asserted on their immutable parsed fields, including
 let-else command routing. Unrelated fields, generated values and substring or
 inequality prose checks retain the ordinary rejection rules.
 
-Workers run `npm test`, `npm run typecheck` in `hub-web`, and
-`scripts/journey-eval.sh <task-artifact-dir>` for source-impact-selected journeys
-at four workers. Independent QA consumes matching passing worker receipts
-(base/head, selected IDs, native results and execution environment), then runs
-independent adjacent/demo/visual cells; missing or incompatible evidence needs
-its own affected checks. The wrapper resolves the task's declared target;
-`--affected <base>` binds an explicit base. No browser runs for an empty impact
-selection; it emits an explicit receipt. Caller spec/grep filters are refused.
+Workers run touched Vitest files and `npm run typecheck` in `hub-web`.
+Release batch QA owns source-impact-selected journeys through
+`scripts/journey-eval.sh <task-artifact-dir>`; matching passing receipts are
+consumed before missing checks. The wrapper resolves the task target and
+`--affected <base>` binds an explicit base. An empty impact selection emits an
+explicit receipt without launching a browser. Follow `cas-writing-tests` for
+general quality and `cas-playwright-tests` for browser authoring; the latter
+owns the Faith contract, target policy, config and locators.
 
 Factory PreToolUse denies worker/reviewer `--full`, unfiltered Playwright and
 unfiltered journey npm scripts. Named spec or canonical-ID runs remain allowed

@@ -28,6 +28,7 @@ import {
   type RowNote,
   type UndoOffer,
 } from "./fleet-ops";
+import { releaseHeader, type TrainActivity } from "./progress-view";
 import { epicTitle, focusEpicChoices, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
 import { labelled, writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
@@ -284,6 +285,17 @@ export function trainControls(document: Document, context: FleetOpsViewContext, 
   const note = noteLine(document, context, rowKey);
   if (note) wrap.append(note);
   return wrap;
+}
+
+/** Frozen release cards stay reachable even when the supervisor focuses elsewhere. */
+export function releaseCards(document: Document, context: FleetOpsViewContext | undefined, primary: ReleaseEpic | undefined, epics: readonly ReleaseEpic[], activity?: TrainActivity): HTMLElement[] {
+  const trains = [...(primary ? [primary] : []), ...epics.filter(epic => epic.freeze && epic.id !== primary?.id)];
+  if (!trains.length) return [releaseHeader(document, undefined)];
+  return trains.map(train => {
+    const header = releaseHeader(document, train, train.id === primary?.id ? activity : undefined);
+    if (context) header.append(trainControls(document, context, train));
+    return header;
+  });
 }
 
 /** Trailing controls for one task row: Assign… on a ready task, Ask supervisor to merge on an awaiting-merge one. */

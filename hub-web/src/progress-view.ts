@@ -43,8 +43,8 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined,
   const title = document.createElement("h3"); title.textContent = epicTitle(epic) || "Untitled release";
   if (epic?.title) title.title = epic.title;
   header.append(eyebrow, title);
-  if (epic?.freeze?.summary) {
-    const freeze = document.createElement("p"); freeze.className = "release-freeze"; freeze.textContent = epic.freeze.summary;
+  if (epic.freeze?.summary || epic.freeze_lift?.summary) {
+    const freeze = document.createElement("p"); freeze.className = "release-freeze"; freeze.textContent = epic.freeze?.summary ?? epic.freeze_lift!.summary;
     header.append(freeze);
   }
   const counts = epicCounts(epic);

@@ -15,7 +15,7 @@ import {
   type FleetAgent,
   type FleetTask,
 } from "./fleet-ops";
-import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
+import { phoneFleetNotice, agentControls, headerControls, taskControls, trainControls, releaseCards, undoBar, type FleetOpsHandlers, type FleetOpsViewContext } from "./fleet-ops-view";
 import { releaseHeader } from "./progress-view";
 import type { Scope } from "./types";
 import type { WriteAccessContext } from "./write-grant-view";
@@ -200,6 +200,23 @@ describe("the rail's controls draw that state (cas-a474)", () => {
       toggle.click();
       expect(choose.mock.calls[call]![1].request.op).toEqual({ kind: "set_auto_cut_paused", epic_id: "cas-tr", paused: !paused });
     }
+  });
+
+  it("keeps every frozen train actionable outside supervisor focus (cas-0e54)", () => {
+    const choose = vi.fn();
+    const frozen = (id: string) => ({ id, title: id, freeze: { frozen_at: "2026-11-12T22:00:00Z", summary: id } });
+    const primary = { id: "focused", title: "Current work" };
+    const epics = [primary, frozen("release-one"), frozen("release-two")];
+    const cards = releaseCards(document, context(["machine-read"], new FleetOpsState(), { choose }), primary, epics);
+    expect(cards).toHaveLength(3);
+    cards.slice(1).forEach(card => card.querySelector<HTMLButtonElement>("button")!.click());
+    expect(choose.mock.calls.map(call => call[1].request.op)).toEqual([
+      { kind: "lift_train_freeze", epic_id: "release-one" },
+      { kind: "lift_train_freeze", epic_id: "release-two" },
+    ]);
+    expect(releaseCards(document, undefined, epics[1], epics)).toHaveLength(2);
+    const lifted = { ...primary, freeze_lift: { actor: "release-lead", at: "2026-11-12T22:00:00Z", reason: "repair the cut", summary: "lift receipt" } };
+    expect(releaseHeader(document, lifted).querySelector(".release-freeze")?.textContent).toBe(lifted.freeze_lift.summary);
   });
 
   it("gates each menu item: a control pairing can pause but sees Stop disabled with the command that adds factory:manage", () => {

@@ -4,7 +4,7 @@
 # A delivery uses the stricter policy at base and head.
 version: 1
 main_journeys: [HUB-J4, HUB-J5, HUB-J13, HUB-J26, FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
-updated: '2026-11-11'
+updated: '2026-11-12'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -636,6 +636,10 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  CI-LIGHT-RUNNER-CAPACITY:
+    statement: Soundwave slots 3-8 are light-only listeners; one operator elevation provisions 5-8 without token output or sudo-argument exposure, reports six online, and the cache idle guard counts all eight listeners.
+    check: Run test-cassy-actions-runner-registration.sh through the real installer/operator scripts with fake privilege/network/host boundaries; cover slots1-8 and rejected out-of-range slots, repo labels/units, one elevation, tracing privacy and six online rows. Run test-prune-cassy-actions-cache.sh with a busy slot8 and the job-lock integration fixture. Operator platform proof must activate real units and capture GitHub online/busy status after install.
+    bug: {task: cas-91b0}
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
     check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
@@ -3477,3 +3481,14 @@ journeys:
     basis: New controls; no production traffic attribution yet.
   spec: hub-web/e2e/journeys/supervisor-commands.journey.ts
   catalog_gaps: Browser outcomes use a protocol double; Rust security tests and disposable Claude/Codex runs prove native mappings and observations.
+
+- id: OPS-LIGHT-RUNNERS
+  name: Provision six soundwave light runner lanes
+  status: live
+  kind: cli
+  entry: {url: 'cli:ops/install-light-lanes-5-8.sh', trigger: Operator adds light runner capacity}
+  steps: [Authenticate operator once, Register and start slots 5-8 with repository tokens, Refresh all-slot prune idle guard, Report slots 3-8 online and busy]
+  owners: [ops/install-light-lanes-5-8.sh, 'ops/systemd/cassy-actions-runner*.service', ops/systemd/cassy-actions-cache-prune.service, scripts/install-cassy-actions-runner.sh, scripts/prune-cassy-actions-cache.sh, scripts/test-cassy-actions-runner-registration.sh, scripts/test-prune-cassy-actions-cache.sh, scripts/test-cassy-actions-cache-job-lock.sh]
+  invariants: [CI-LIGHT-RUNNER-CAPACITY]
+  spec: scripts/test-cassy-actions-runner-registration.sh
+  traffic: {share_pct: null, basis: Operator-only provisioning; no invocation telemetry.}

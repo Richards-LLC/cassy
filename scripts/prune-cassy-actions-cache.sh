@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Linux-only provisioning/runner script: GNU coreutils and Linux kernel interfaces are required.
-# Bound both persistent runner slots, but only when the complete GitHub Runner
+# Bound the persistent Rust caches, but only when every GitHub Runner
 # job lifecycle is idle. Compiler-process absence alone is not an idle proof.
 set -euo pipefail
 
@@ -26,7 +26,8 @@ target_budget_bytes="${CASSY_ACTIONS_TARGET_BUDGET_BYTES:-50000000000}"
 sccache_budget_bytes="${CASSY_ACTIONS_SCCACHE_BUDGET_BYTES:-8589934592}"
 slot_budget_bytes="${CASSY_ACTIONS_SLOT_BUDGET_BYTES:-60000000000}"
 max_age_days="${CASSY_ACTIONS_CACHE_MAX_AGE_DAYS:-7}"
-runner_services=(cassy-actions-runner.service cassy-actions-runner-2.service)
+runner_services=(cassy-actions-runner.service)
+for slot in {2..8}; do runner_services+=("cassy-actions-runner-$slot.service"); done
 target_dirs=("$cache_root/cargo-target" "$cache_root/cargo-target-2")
 sccache_dirs=("$cache_root/sccache" "$cache_root/sccache-2")
 

@@ -113,6 +113,8 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
     std::fs::write(&draft, "notes\n").unwrap();
+    // cas-80df: a supervisor holding the branch cannot own the cut checkout.
+    run(repo, &["checkout", "-q", LANE]);
     poll(&none);
     let log = draft.with_file_name("auto-cut.log");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

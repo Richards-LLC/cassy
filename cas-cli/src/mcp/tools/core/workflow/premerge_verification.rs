@@ -249,7 +249,7 @@ struct Promotion {
 
 mod peer;
 mod automatic;
-pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
+pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
 

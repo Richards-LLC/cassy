@@ -402,8 +402,8 @@ bug_families:
     tasks: [cas-c55fa]
     journeys: [FACTORY-CLOSE, FACTORY-SPAWN, HUB-J26]
   advancing-owned-child-work:
-    title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
-    tasks: [cas-8a87]
+    title: Owned child CPU and output advancement prevent false recovery through the cas serve frontend while silent or exited children still escalate
+    tasks: [cas-8a87, cas-8ea3]
     journeys: [HUB-J26, FACTORY-SUPERVISE]
   narrow-refspec-spawn-freshness:
     title: Branch fetches refresh the requested origin tracking ref under a main-only fetch mapping before worker checkout

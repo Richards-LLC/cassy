@@ -673,7 +673,7 @@ pub(crate) fn child_progress(agent: &cas_types::Agent, now: DateTime<Utc>) -> Op
         return None;
     }
     let root = if let Some(parent) = agent.ppid {
-        if !descends_from_harness(registered, parent) { return None; }
+        if wedged::process_parent(registered) != Some(parent) { return None; }
         parent
     } else { registered };
     if !wedged::process_commandline(root).is_some_and(|raw| is_harness_command(&raw)) { return None; }

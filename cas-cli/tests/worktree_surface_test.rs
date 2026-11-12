@@ -4491,8 +4491,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 1 + 1,
-        "one merge-path fetch plus the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
+    assert_eq!(fetches, 1,
+        "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 

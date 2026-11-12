@@ -323,9 +323,7 @@ fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     let git = GitOperations::new(queue.repo.clone());
     let tracked = git.resolve_commit(&format!("refs/remotes/origin/{}", queue.target))
         .is_some_and(|tip| git.is_ancestor(&entry.sha, &tip));
-    if tracked || (!merged && git.has_origin_remote()) {
-        return Ok(tracked);
-    }
+    if tracked || (!merged && git.has_origin_remote()) { return Ok(tracked); }
     let target = git
         .fetch_merge_target(&queue.target)?
         .or_else(|| git.resolve_commit(&queue.target))
@@ -871,9 +869,9 @@ mod tests {
         );
     }
 
-    /// A train asks origin about its target once per entry for merge
-    /// admission (under the target lock, shared by containment, the target
-    /// sync and publication) and once for the close's integration proof.
+    /// A train asks origin about its target once per entry: under the merge
+    /// lock, shared by containment, the target sync, publication and the
+    /// close's integration proof.
     #[tokio::test]
     async fn train_merge_reads_origin_once_per_entry() {
         let fixture = Fixture::build(false);
@@ -898,6 +896,6 @@ mod tests {
             assert!(operations.is_ancestor(sha, "origin/epic/train"), "{:?}", queue.outcomes);
         }
         let reads = std::fs::read_to_string(&reads).unwrap_or_default();
-        assert_eq!(reads.lines().count(), 2 * fixture.ids.len(), "origin reads:\n{reads}");
+        assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
     }
 }

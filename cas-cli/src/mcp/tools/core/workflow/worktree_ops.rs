@@ -5662,11 +5662,8 @@ impl CasCore {
             // operator is then left holding a merge commit they did not ask
             // for on a branch they must now unpick. Refusing here costs
             // nothing; refusing after the merge costs a recovery.
-            let reconcile = if target_fetched {
-                manager.git().reconcile_target_with_fetched_origin(&worktree.parent_branch)
-            } else {
-                manager.git().reconcile_target_with_origin(&worktree.parent_branch)
-            };
+            let reconcile = if target_fetched { manager.git().reconcile_target_with_fetched_origin(&worktree.parent_branch) }
+                else { manager.git().reconcile_target_with_origin(&worktree.parent_branch) };
             if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
             {
                 return Err(McpError {

@@ -17172,8 +17172,12 @@ fn run_factory_branch_merge_gate_for_delivery(
              call — fix the task's assignee/epic-branch fields and retry."
         )));
     }
-    // One origin read per evaluation: every check below shares it.
+    // Origin history only grows: a delivery the tracking ref holds is integrated.
+    // Ask origin at most once, and only when cached refs cannot prove it.
     let mut origin_fetch_attempted = false;
+    let refresh = |attempted: &mut bool| if !*attempted {
+        *attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    };
     if task.deliverables.integration_batch.is_some() {
         origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
         if let Some(squash) = super::super::integration_batch::landed_batch_squash(
@@ -17303,13 +17307,15 @@ fn run_factory_branch_merge_gate_for_delivery(
             .map(str::trim)
             .filter(|receipt| is_safe_git_refname(receipt) && git_ref_exists(repo_path, receipt))
     {
-        origin_fetch_attempted = origin_fetch_attempted || fetch_parent_branch_best_effort(repo_path, parent_branch);
         let origin_parent = format!("origin/{parent_branch}");
         let on_target = |commit: &str| {
             git_commit_is_ancestor(repo_path, commit, parent_branch)
                 || (git_ref_exists(repo_path, &origin_parent)
                     && git_commit_is_ancestor(repo_path, commit, &origin_parent))
         };
+        if !(on_target(anchor) && on_target(receipt)) {
+            refresh(&mut origin_fetch_attempted);
+        }
         if on_target(anchor) && !on_target(receipt) {
             return MergeStateGateOutcome::Reject(crate::gates::tag("G-55", landed_anchor_receipt_rejection(
                 &task.id,
@@ -17403,7 +17409,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         KnownUnmergedCount::KnownZero => 0,
         KnownUnmergedCount::KnownPositive(count) => count,
         KnownUnmergedCount::Unknown => {
-            origin_fetch_attempted = origin_fetch_attempted || fetch_parent_branch_best_effort(repo_path, parent_branch);
+            refresh(&mut origin_fetch_attempted);
             match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
                 KnownUnmergedCount::KnownZero if !local_merge => 0,
                 KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
@@ -17420,16 +17426,18 @@ fn run_factory_branch_merge_gate_for_delivery(
         // consult origin before accepting the local zero; otherwise a worker
         // who committed on the primary checkout can merge into local `main`
         // and close successfully while origin/main remains untouched.
-        origin_fetch_attempted = origin_fetch_attempted || fetch_parent_branch_best_effort(repo_path, parent_branch);
         let local_epic_merge = parent_branch.starts_with("epic/");
         let origin_required =
             !local_merge && !local_epic_merge && origin_remote_configured(repo_path);
-        let origin_proves_delivery = git_ref_exists(repo_path, &origin_parent_branch)
+        let origin_proves_delivery = || git_ref_exists(repo_path, &origin_parent_branch)
             && matches!(
                 known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
                 KnownUnmergedCount::KnownZero
             );
-        if origin_required && !origin_proves_delivery {
+        if origin_required && !origin_proves_delivery() {
+            refresh(&mut origin_fetch_attempted);
+        }
+        if origin_required && !origin_proves_delivery() {
             // Keep the existing local-only epic exception and local-only
             // repositories, but force a normal remote-backed trunk through
             // the rejection path when origin cannot prove the delivery.
@@ -17447,20 +17455,18 @@ fn run_factory_branch_merge_gate_for_delivery(
     if stranded == 0 {
         if let Some(recorded_anchor) = trusted_anchor {
             // The local parent ref may be stale immediately after the
-            // supervisor merges a PR. Refresh before selecting a descendant
-            // branch tip that only origin currently proves integrated.
-            if !origin_fetch_attempted { fetch_parent_branch_best_effort(repo_path, parent_branch); }
-            let anchor = delivery_content_anchor_at_close(
-                repo_path,
-                recorded_anchor,
-                factory_branch.as_str(),
-                parent_branch,
-                validated_content_receipt,
-            );
-            if let Some(rejection) = anchored_delivery_content_gate(
+            // supervisor merges a PR: a refusal from cached refs is re-judged
+            // once after a refresh, which may prove a descendant branch tip.
+            let judge = || anchored_delivery_content_gate(
                 task,
                 repo_path,
-                anchor,
+                delivery_content_anchor_at_close(
+                    repo_path,
+                    recorded_anchor,
+                    factory_branch.as_str(),
+                    parent_branch,
+                    validated_content_receipt,
+                ),
                 parent_branch,
                 attribution.window,
                 content_identity,
@@ -17468,9 +17474,13 @@ fn run_factory_branch_merge_gate_for_delivery(
                 attribution
                     .window
                     .and_then(|window| window.supervisor_override_reason.as_deref()),
-            ) {
-                return rejection;
+            );
+            let mut outcome = judge();
+            if !origin_fetch_attempted && matches!(outcome, Some(MergeStateGateOutcome::Reject(_) | MergeStateGateOutcome::Unresolved(_))) {
+                refresh(&mut origin_fetch_attempted);
+                outcome = judge();
             }
+            if let Some(outcome) = outcome { return outcome; }
         }
         return MergeStateGateOutcome::Proceed;
     }
@@ -17505,8 +17515,8 @@ fn run_factory_branch_merge_gate_for_delivery(
     // origin Git state masquerade as integration. Missing origin ref
     // simply skips this block (no rescue); KnownPositive and Unknown
     // fall through to Reject.
-    if !local_merge && !origin_fetch_attempted {
-        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    if !local_merge {
+        refresh(&mut origin_fetch_attempted);
     }
     if !local_merge
         && git_ref_exists(repo_path, &origin_parent_branch)

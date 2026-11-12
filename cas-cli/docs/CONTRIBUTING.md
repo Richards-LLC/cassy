@@ -4846,6 +4846,14 @@ needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
 release freeze, not a temporary CI hold: only the operator can lift it in
 Commander, or a published release covering its tip ends it.
+For an open epic that is not yet a release train, the refusal returns the exact
+`factory action=train_freeze id=<epic> decision="promote"
+reason="release-freeze: <reason>"` retry payload. This single call validates
+that the lane exists and has not diverged from another open train, then writes
+`release-train`, the repository's integration work target, and the freeze in one
+update. Divergence refuses with the epic ids before changing the task. Promotion
+preserves the epic lane and repository selector. This promotion mode is MCP-only;
+there is no separate CLI train-freeze command.
 Commander's `freeze_train` operation does the same for the operator. Both
 `freeze_train` and `lift_train_freeze` require only a verified pairing's baseline
 `machine:read` scope, without worker-management permissions. Preview pairings

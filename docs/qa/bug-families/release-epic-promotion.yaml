@@ -1,0 +1,4 @@
+title: An operator-chosen release epic can become a visible train and freeze in one validated MCP call
+tasks: [cas-e49f]
+invariants: [CLI-RELEASE-EPIC-PROMOTION]
+journeys: [CLI-RELEASE]

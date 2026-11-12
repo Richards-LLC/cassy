@@ -290,8 +290,20 @@ fn train(store: &dyn cas_store::TaskStore, train_id: &str) -> Result<Task> {
 
 /// Freeze a train at its current tip. Repeating it reports the standing freeze.
 pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&str>) -> Result<String> {
+    freeze_with_promotion(root, train_id, actor, reason, false)
+}
+
+fn freeze_with_promotion(root: &Path, train_id: &str, actor: &str, reason: Option<&str>, promote: bool) -> Result<String> {
     let store = crate::store::open_task_store(root)?;
-    let mut task = train(store.as_ref(), train_id)?;
+    let mut task = store.get(train_id).with_context(|| format!("{train_id} not found"))?;
+    ensure!(task.task_type == crate::types::TaskType::Epic && !task.is_terminal(), "{train_id} is not an open epic");
+    if !is_release_train(&task) && !promote {
+        let command = serde_json::json!({
+            "action": "train_freeze", "id": train_id, "decision": "promote",
+            "reason": format!("release-freeze: {}", reason.unwrap_or("release requested")),
+        });
+        anyhow::bail!("TRAIN_PROMOTION_REQUIRED: {train_id} is not a release train. Promote and freeze it in one call to factory:\n{command}");
+    }
     ensure!(!is_cut_train(&task), "{train_id} is already cut; it accepts no merges");
     if let Some(freeze) = active(root, &task) {
         return Ok(format!(
@@ -301,13 +313,17 @@ pub(crate) fn freeze(root: &Path, train_id: &str, actor: &str, reason: Option<&s
         ));
     }
     let lane = task.effective_epic_branch().context("train has no lane")?.to_string();
-    let git = crate::worktree::GitOperations::new(repo_of(root, &task).context("train repository missing")?);
+    let repo = repo_of(root, &task).context("train repository missing")?;
+    let git = crate::worktree::GitOperations::new(repo.clone());
     let tip = git
         .fetch_merge_target(&lane)
         .ok()
         .flatten()
         .or_else(|| git.resolve_commit(&lane))
         .with_context(|| format!("cannot resolve the tip of {lane}"))?;
+    if promote {
+        crate::mcp::tools::core::task::release_train::prepare_promotion(store.as_ref(), &repo, &mut task, &tip)?;
+    }
     let now = Utc::now();
     task.labels.retain(|label| !label.starts_with(FROZEN_LABEL));
     task.labels.push(format!("{FROZEN_LABEL}{}:{tip}", now.timestamp()));
@@ -342,7 +358,7 @@ pub(crate) fn lift(root: &Path, train_id: &str, actor: &str) -> Result<String> {
 
 impl crate::mcp::CasCore {
     /// MCP release freeze: a live supervisor explicitly confirms the lift policy.
-    pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>) -> Result<String> {
+    pub(crate) fn train_freeze(&self, train_id: &str, reason: Option<&str>, promote: bool) -> Result<String> {
         let actor = self
             .resolve_live_supervisor_authority()
             .map_err(|_| anyhow::anyhow!("train_freeze requires a live registered supervisor"))?;
@@ -353,7 +369,8 @@ impl crate::mcp::CasCore {
             .ok_or_else(|| anyhow::anyhow!(
                 "TRAIN_FREEZE_CONFIRMATION_REQUIRED: train_freeze is a release freeze, not a temporary CI hold. Only the operator can lift it in Commander; a published release covering its tip also ends it. A supervisor cannot lift it. Confirm with reason=\"release-freeze: <reason>\". For a temporary CI wait, coordinate peers to defer merges; see CONTRIBUTING's Temporary CI merge hold follow-up. No freeze was applied by this call."
             ))?;
-        freeze(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason))
+        let _lock = crate::mcp::tools::core::task::release_train::lock_trains_blocking(&self.cas_root)?;
+        freeze_with_promotion(&self.cas_root, train_id, &format!("supervisor {}", actor.name), Some(reason), promote)
     }
 }
 
@@ -423,16 +440,121 @@ mod tests {
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
 
         for reason in [Some("Lane CI freeze until run 42582303864 finishes"), None, Some("release-freeze: ")] {
-            let error = core.train_freeze("cas-tr", reason).expect_err("unconfirmed release freeze");
+            let error = core.train_freeze("cas-tr", reason, false).expect_err("unconfirmed release freeze");
             eprintln!("{error}");
             assert_eq!(error.to_string().split(':').next(), Some("TRAIN_FREEZE_CONFIRMATION_REQUIRED"));
             assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         }
 
-        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release")).unwrap();
+        core.train_freeze("cas-tr", Some("release-freeze: cut the reviewed release"), false).unwrap();
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_some());
         lift(&root, "cas-tr", "operator").unwrap();
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
+    }
+
+    /// cas-e49f: replay the operator's own-target, unlabeled release epic
+    /// through the published factory entry, then the auto-cut consumer.
+    #[tokio::test]
+    async fn mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f() {
+        use crate::mcp::tools::core::task::release_train::active_trains;
+        use crate::mcp::tools::core::workflow::release_auto_cut;
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        let repo = temp.path();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id.clone());
+        let store = core.open_task_store().unwrap();
+        let mut epic = store.get("cas-tr").unwrap();
+        epic.labels.clear();
+        git(repo, &["branch", "-m", epic.effective_epic_branch().unwrap(), "epic/operator-release"]);
+        epic.branch = Some("epic/operator-release".into());
+        let lane = epic.effective_epic_branch().unwrap().to_string();
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = lane.clone();
+        epic.epic_verification_owner = Some(supervisor.id);
+        store.update(&epic).unwrap();
+        let remote = TempDir::new().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("scripts/release.sh"), "release fixture\n").unwrap();
+        git(repo, &["add", "scripts/release.sh"]);
+        git(repo, &["commit", "-qm", "release script on integration"]);
+        git(repo, &["checkout", "-q", &lane]);
+        git(repo, &["merge", "-q", "--no-edit", "main"]);
+        std::fs::create_dir_all(repo.join("changelog.d")).unwrap();
+        std::fs::write(repo.join("changelog.d/cas-e49f.md"), "release fixture\n").unwrap();
+        git(repo, &["add", "changelog.d/cas-e49f.md"]);
+        git(repo, &["commit", "-qm", "release inputs"]);
+        git(repo, &["push", "-q", "origin", &lane]);
+        git(repo, &["checkout", "-q", "main"]);
+        let tip = git(repo, &["rev-parse", &lane]);
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
+        let service = CasService::new(core, None);
+        let request = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut"});
+        let refusal = service.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
+        assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
+        // The last line is a replayable MCP payload, not pinned human prose.
+        let remedy: Value = serde_json::from_str(refusal.message.lines().last().unwrap()).unwrap();
+        assert_eq!(remedy, serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut", "decision":"promote"}));
+        service.factory(Parameters(serde_json::from_value(remedy).unwrap())).await.unwrap();
+        let promoted = active_trains(store.as_ref(), "main");
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].id, epic.id);
+        assert_eq!(promoted[0].deliverables.work_target.as_ref().unwrap().repo_selector, "project:freeze-test");
+        assert_eq!(freeze_of(&promoted[0]).unwrap().tip, tip);
+        crate::train_guardrails::notify_train_cuts(&root, &std::collections::BTreeSet::new(), Utc::now()).unwrap();
+        let wakes = crate::store::open_supervisor_queue_store(&root).unwrap().peek("freeze-supervisor", 10).unwrap();
+        assert_eq!(wakes.len(), 1);
+        assert!(wakes[0].payload.contains(&release_auto_cut::notes_draft(&root, &epic.id).unwrap().display().to_string()));
+        // No second promotion or freeze record on replay.
+        let before = serde_json::to_value(store.get(&epic.id).unwrap()).unwrap();
+        let replay = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut", "decision":"promote"});
+        service.factory(Parameters(serde_json::from_value(replay).unwrap())).await.unwrap();
+        assert_eq!(serde_json::to_value(store.get(&epic.id).unwrap()).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f() {
+        use crate::mcp::tools::service::CasService;
+        use rmcp::handler::server::wrapper::Parameters;
+
+        let _env = TestEnvGuard::temp_home();
+        let (temp, root) = fixture();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='freeze-test'\n[factory]\nepic_base_branch='main'\n").unwrap();
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        let supervisor = cas_types::Agent::new_with_role(
+            "freeze-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        core.open_agent_store().unwrap().register(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+        let store = core.open_task_store().unwrap();
+        git(temp.path(), &["checkout", "-qb", "epic/chosen"]);
+        std::fs::write(temp.path().join("chosen.txt"), "independent work\n").unwrap();
+        git(temp.path(), &["add", "chosen.txt"]);
+        git(temp.path(), &["commit", "-qm", "divergent lane"]);
+        git(temp.path(), &["checkout", "-q", "main"]);
+        let mut epic = store.get("cas-tr").unwrap();
+        epic.id = "cas-chosen".into();
+        epic.labels.clear();
+        epic.branch = Some("epic/chosen".into());
+        epic.deliverables.work_target.as_mut().unwrap().target_branch = "epic/chosen".into();
+        store.add(&epic).unwrap();
+        let before = serde_json::to_value(store.list(None).unwrap()).unwrap();
+        let service = CasService::new(core, None);
+        let request = serde_json::json!({"action":"train_freeze", "id":epic.id, "reason":"release-freeze: fixture cut", "decision":"promote"});
+        let refusal = service.factory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap_err();
+        assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        for id in ["cas-chosen", "cas-tr"] { assert!(refusal.message.contains(id)); }
+        assert_eq!(serde_json::to_value(store.list(None).unwrap()).unwrap(), before);
     }
 
     /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,

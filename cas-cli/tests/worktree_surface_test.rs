@@ -3136,7 +3136,12 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
 
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
-        assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id), "{case}: the carry-forward is audited on the task");
+        // c9e368c6d6 keeps the original dispatch for disjoint registry upkeep;
+        // d52358b7ed requires a task audit only when approval is rebound.
+        if latest.id != dispatch.id {
+            assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id),
+                "{case}: {path}: the carry-forward is audited on the task");
+        }
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", &format!("refs/heads/epic/rebound:{path}")]),
             content(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");

@@ -130,6 +130,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: &Path) -> Result<()> {
         LedgerCommand::RecordRelease { receipt } => {
             let repo = cas_root.parent().unwrap_or(cas_root);
             let version = record_release(cas_root, repo, receipt)?;
+            crate::mcp::tools::core::task::release_train::synchronize_open_trains(cas_root, repo, &version)?;
             println!("Recorded release {version}.");
         }
     }

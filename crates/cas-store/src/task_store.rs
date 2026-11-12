@@ -235,6 +235,7 @@ impl SqliteTaskStore {
         receipt_id: &str,
         expected: Option<&Task>,
         from_sync: bool,
+        parent: Option<Option<&Dependency>>,
     ) -> Result<Option<DateTime<Utc>>> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -475,6 +476,16 @@ impl SqliteTaskStore {
                 }
             }
 
+            if let Some(parent) = parent {
+                if let Some(dep) = parent {
+                    let epic_type: String = tx.query_row("SELECT task_type FROM tasks WHERE id = ?", params![dep.to_id], |r| r.get(0))?;
+                    if dep.from_id != task.id || dep.dep_type != DependencyType::ParentChild || epic_type != "epic" {
+                        return Err(StoreError::Parse("invalid replacement epic".into()));
+                    }
+                }
+                tx.execute("DELETE FROM dependencies WHERE from_id = ? AND dep_type = 'parent-child'", params![task.id])?;
+                if let Some(dep) = parent { Self::add_dependency_with_conn(&tx, dep, true)?; }
+            }
             if !receipt_id.is_empty() {
                 Self::record_mutation_receipt_with_conn(&tx, receipt_id, &task.id)?;
             }
@@ -1233,8 +1244,13 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update_with_mutation_receipt(&self, task: &Task, receipt_id: &str) -> Result<DateTime<Utc>> {
-        self.update_checked(task, receipt_id, None, false)?
+        self.update_checked(task, receipt_id, None, false, None)?
             .ok_or_else(|| StoreError::Other("unconditional task update was refused".to_string()))
+    }
+
+    fn update_with_parent(&self, task: &Task, parent: Option<&Dependency>, receipt_id: &str) -> Result<DateTime<Utc>> {
+        self.update_checked(task, receipt_id, None, false, Some(parent))?
+            .ok_or_else(|| StoreError::Other("task retarget refused".into()))
     }
 
     fn update_if_current_with_mutation_receipt(
@@ -1243,7 +1259,7 @@ impl TaskStore for SqliteTaskStore {
         expected: &Task,
         receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        self.update_checked(task, receipt_id, Some(expected), false)?
+        self.update_checked(task, receipt_id, Some(expected), false, None)?
             .ok_or_else(|| StoreError::Other(format!(
                 "task changed since close snapshot for {}; park refused (request_changes or another task update may have won). Reload the task before retrying close",
                 task.id
@@ -1251,7 +1267,7 @@ impl TaskStore for SqliteTaskStore {
     }
 
     fn update_from_sync(&self, task: &Task, expected: &Task) -> Result<Option<DateTime<Utc>>> {
-        self.update_checked(task, "", Some(expected), true)
+        self.update_checked(task, "", Some(expected), true, None)
     }
 
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {

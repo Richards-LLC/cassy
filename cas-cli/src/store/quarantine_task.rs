@@ -112,6 +112,10 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update(task)
     }
 
+    fn update_with_parent(&self, task: &Task, parent: Option<&Dependency>, receipt_id: &str) -> Result<DateTime<Utc>> {
+        self.inner.update_with_parent(task, parent, receipt_id)
+    }
+
     fn update_if_current_with_mutation_receipt(
         &self, task: &Task, expected: &Task, receipt_id: &str,
     ) -> Result<DateTime<Utc>> {

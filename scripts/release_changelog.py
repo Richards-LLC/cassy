@@ -15,7 +15,6 @@
       under the same `### ` title share one heading, in first-seen order
       (cas-7f95), so same-area fragments cannot fail MD024.
 
-  release_changelog.py rebase <ours-file> <base-file> <merge-base-version> <out-file>
       Resolve a CHANGELOG merge conflict with the base branch: the result is
       the base file with this branch's unreleased entries (as `promote` reads
       them, relative to <merge-base-version>) under its [Unreleased] heading.
@@ -141,49 +140,6 @@ def promote(text, version, date, base_version, fragments=()):
             'CHANGELOG.md [Unreleased] has no entries; write the release entries before releasing')
     out = lines[:start + 1] + ['', f'## [{version}] - {date}', ''] + entries + [''] + lines[end:]
     return '\n'.join(out) + '\n'
-
-
-def blocks(lines):
-    current = []
-    for line in lines:
-        if line.strip():
-            current.append(line)
-        elif current:
-            yield current
-            current = []
-    if current:
-        yield current
-
-
-def rebase(ours, base, merge_base_version):
-    entries, _, _ = region_entries(ours.splitlines(), merge_base_version)
-    kept = []
-    for block in blocks(entries):
-        text = '\n'.join(block)
-        kept.append((block, text in base))
-    # Drop duplicated blocks; drop a sub-heading only when every block under
-    # it was a duplicate, so a generic heading keeps its new entries.
-    out = []
-    for index, (block, duplicate) in enumerate(kept):
-        if duplicate:
-            is_heading = block[0].startswith('### ') and len(block) == 1
-            if not is_heading:
-                continue
-            following = []
-            for later, later_duplicate in kept[index + 1:]:
-                if later[0].startswith('### ') and len(later) == 1:
-                    break
-                following.append(later_duplicate)
-            if all(following):
-                continue
-        out.extend(block + [''])
-    lines = base.splitlines()
-    try:
-        start = lines.index(UNRELEASED)
-    except ValueError:
-        raise ChangelogError(f'base CHANGELOG.md has no "{UNRELEASED}" heading') from None
-    merged = lines[:start + 1] + ([''] + tidy(out) if tidy(out) else []) + lines[start + 1:]
-    return '\n'.join(merged) + '\n'
 
 
 def section(text, version):
@@ -347,9 +303,6 @@ def main(argv):
                                     [fragment.read_text() for fragment in fragments]))
             for fragment in fragments:
                 fragment.unlink()
-        elif len(argv) == 5 and argv[0] == 'rebase':
-            Path(argv[4]).write_text(
-                rebase(Path(argv[1]).read_text(), Path(argv[2]).read_text(), argv[3]))
         elif argv and argv[0] == 'verify-deliveries':
             parser = argparse.ArgumentParser()
             parser.add_argument('base_ref')

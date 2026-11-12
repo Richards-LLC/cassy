@@ -1868,6 +1868,12 @@ impl CasCore {
         if !task.notes.is_empty() { task.notes.push_str("\n\n"); }
         task.notes.push_str(&predicted);
 
+        if task.assignee.is_some() {
+            let parent = epic_id.as_deref().and_then(|id| task_store.get(id).ok());
+            super::release_train::check_published_base(&self.cas_root, task_store.as_ref(), &task, parent.as_ref())
+                .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+        }
+
         // Associate the creation event and dependency metadata with the
         // current session for the durable task audit trail.
         task_store
@@ -1915,14 +1921,10 @@ impl CasCore {
         let triage_notice = if task.assignee.is_some() {
             crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id))
         } else { String::new() };
-        let mut assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
+        let assignment_warning = match crate::task_assignment::enqueue(&self.cas_root, &task) {
             Ok(_) => String::new(),
             Err(error) => format!("\nAssignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."),
         };
-
-        if task.assignee.is_some() {
-            assignment_warning.push_str(&epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task));
-        }
 
         // Recall before indexing this task so an epic cannot surface itself as
         // "prior context" and turn an otherwise clean create receipt noisy.
@@ -2050,13 +2052,17 @@ impl CasCore {
                     // A fresh release train starts at integration even when
                     // the caller is still on the frozen train's checkout.
                     let base_choice = if super::release_train::is_release_train(&task) {
-                        crate::worktree::git::EpicBaseChoice::plain(&resolved.branch_ref)
+                        crate::worktree::git::EpicBaseChoice::plain(
+                            super::release_train::latest_published(&self.cas_root, project_root)
+                                .map_or(resolved.sha.clone(), |(_, sha)| sha))
                     } else {
                         git_ops.resolve_epic_base(&resolved.branch_ref)
                     };
                     let base_ref = base_choice.base_ref.clone();
                     let base_sha = if base_choice.used_head {
                         git_ops.ref_sha(&base_ref).unwrap_or_default()
+                    } else if super::release_train::is_release_train(&task) {
+                        base_ref.clone()
                     } else {
                         resolved.sha.clone()
                     };

@@ -120,6 +120,9 @@ pub(crate) fn reconcile_once(
     trigger: ReconcileTrigger,
     reconciler: &dyn Reconciler,
 ) -> Result<String> {
+    if let Some(tag) = scope.release_tag.as_deref() {
+        crate::mcp::tools::core::task::release_train::synchronize_open_trains(root, repo, tag)?;
+    }
     let key = operation_key(&scope.project_id, &scope.release_id, &scope.final_release_sha);
     let recorded = reconciler.completed(root, &key)?;
     let reused = recorded.is_some();
@@ -320,15 +323,17 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
     let tag = format!("v{version}");
     let mut failures = Vec::new();
     for root in release_roots(current_root)? {
-        let Some(context) = tracked_context(&root, &args.repo, &version)? else {
-            continue;
-        };
+        let Some((repo, _)) = crate::mcp::tools::core::task::repo_context::integration_branch(&root) else { continue; };
+        if crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3)).map_err(anyhow::Error::msg)?.is_none_or(|slug| !slug.eq_ignore_ascii_case(&args.repo)) { continue; }
+        let context = tracked_context(&root, &args.repo, &version)?;
         let result = (|| {
-            let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(&root)
-                .context("project checkout unavailable")?;
             // The tag may be newer than this checkout; fetching it is idempotent.
             let _ = git(&repo, &["fetch", "--quiet", "origin", "tag", &tag]);
             let tag_sha = published_tag_sha(&repo, &tag)?;
+            let Some(context) = context else {
+                crate::mcp::tools::core::task::release_train::synchronize_open_trains(&root, &repo, &tag)?;
+                return Ok(format!("{tag}: open train sync processed"));
+            };
             let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha)?;
             let trigger = ReconcileTrigger::Publish { tag: tag.clone() };
             reconcile_once(&root, &repo, &scope, trigger, &LocalReconciler)
@@ -745,6 +750,95 @@ mod tests {
             self.done.borrow_mut().push(receipt.clone());
             Ok(receipt)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_syncs_all_trains_or_names_one_repair_cas_4845() {
+        use cas_types::{Task, TaskType};
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let (temp, root, _, owner, _) = super::super::release_automation::tests::release_fixture();
+        let repo = temp.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]).unwrap();
+        git(repo, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/Example/Repo.git"]).unwrap();
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        fs::write(repo.join("shared.txt"), "base\n").unwrap();
+        git(repo, &["add", "shared.txt"]).unwrap();
+        git(repo, &["commit", "-qm", "shared base"]).unwrap();
+        let base = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        for (id, branch, path, body) in [
+            ("cas-b001", "epic/custom-cleanup", "train.txt", "work\n"),
+            ("cas-b002", "epic/conflicting", "shared.txt", "train\n"),
+            ("cas-b003", "epic/push-held", "pending.txt", "work\n"),
+        ] {
+            git(repo, &["checkout", "-qb", branch, &base]).unwrap();
+            fs::write(repo.join(path), body).unwrap();
+            git(repo, &["add", path]).unwrap();
+            git(repo, &["commit", "-qm", "pending train work"]).unwrap();
+            let mut train = Task::new(id.into(), branch.into());
+            train.task_type = TaskType::Epic;
+            train.labels.push("release-train".into());
+            train.branch = Some(branch.into());
+            train.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:release-fixture".into(), target_branch: "main".into(),
+            });
+            tasks.add(&train).unwrap();
+            git(repo, &["push", "-q", "origin", branch]).unwrap();
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let hook = bare.path().join("hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nwhile read old new ref; do [ \"$ref\" != refs/heads/epic/push-held ] || exit 1; done\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        fs::write(repo.join("shared.txt"), "release\n").unwrap();
+        fs::write(repo.join("released-fix.txt"), "required gate repair\n").unwrap();
+        git(repo, &["add", "shared.txt", "released-fix.txt"]).unwrap();
+        git(repo, &["commit", "-qm", "published gate repair"]).unwrap();
+        git(repo, &["tag", "v9.99.7"]).unwrap();
+        git(repo, &["push", "-q", "origin", "main", "--tags"]).unwrap();
+        let published = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        let scope = ReleaseScope {
+            project_id: "release-fixture".into(), repository: "Example/Repo".into(),
+            release_id: "v9.99.7".into(), reviewed_sha: published.clone(), final_release_sha: published.clone(),
+            release_tag: Some("v9.99.7".into()), promotion_pr: None, constituent_epic_ids: vec![],
+            included_task_ids: vec![], no_code_members: BTreeMap::new(), proof_refs: vec![],
+        };
+        let reconciler = Recording { recipient: owner.id, calls: Default::default(), done: Default::default() };
+        let trigger = ReconcileTrigger::Publish { tag: "v9.99.7".into() };
+        let receipt = root.join("publication.json");
+        fs::write(&receipt, r#"{"tag_name":"v9.99.7","draft":false,"published_at":"2026-01-01T00:00:00Z"}"#).unwrap();
+        super::published(&PublishedArgs { receipt, repo: "example/repo".into() }, Some(&root)).unwrap();
+        reconcile_once(&root, repo, &scope, trigger.clone(), &reconciler).unwrap();
+        let tip = git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap();
+        assert!(crate::worktree::GitOperations::new(repo.to_path_buf()).is_ancestor(&published, &tip));
+        assert_eq!(git(repo, &["rev-list", "--parents", "-n", "1", &tip]).unwrap().split_whitespace().count(), 3);
+        assert_eq!(git(repo, &["show", "epic/custom-cleanup:released-fix.txt"]).unwrap(), "required gate repair");
+        let repairs = || tasks.get_subtasks("cas-b002").unwrap().into_iter()
+            .filter(|t| t.labels.iter().any(|l| l == "release-repair")).collect::<Vec<_>>();
+        let repair = repairs().pop().expect("one publication conflict repair");
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b002").is_err());
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, &repair.id).is_ok());
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b003").is_err());
+        let held = git(repo, &["rev-parse", "epic/push-held"]).unwrap();
+        reconcile_once(&root, repo, &scope, trigger, &reconciler).unwrap();
+        assert_eq!(git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap(), tip);
+        assert_eq!(repairs().len(), 1);
+        assert_eq!(git(repo, &["status", "--porcelain", "--untracked-files=no"]).unwrap(), "");
+        fs::remove_file(hook).unwrap();
+        reconcile_once(&root, repo, &scope, ReconcileTrigger::Publish { tag: "v9.99.7".into() }, &reconciler).unwrap();
+        assert_eq!(git(repo, &["rev-parse", "epic/push-held"]).unwrap(), held);
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b003").is_ok());
+        git(repo, &["checkout", "-q", "epic/conflicting"]).unwrap();
+        assert!(git(repo, &["merge", "--no-ff", "--no-commit", "v9.99.7"]).is_err());
+        fs::write(repo.join("shared.txt"), "train\nrelease\n").unwrap();
+        git(repo, &["add", "shared.txt"]).unwrap();
+        git(repo, &["commit", "-qm", "resolve publication conflict"]).unwrap();
+        git(repo, &["push", "-q", "origin", "epic/conflicting"]).unwrap();
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b002").is_ok());
     }
 
     #[test]

@@ -9,8 +9,7 @@
 #
 # It commits the release onto the branch itself, so the version reaches main
 # through the same PR and the same merge-queue run as the code:
-#   1. merges the base branch in when the branch is behind it, resolving the
-#      release files (version lines, Cargo.lock, CHANGELOG, draft) itself;
+#   1. uses the train synchronized when the previous release published;
 #   2. computes the next version from the base branch's version;
 #   3. bumps the release crates and Cargo.lock, promotes CHANGELOG
 #      [Unreleased] and the changelog.d fragments to a dated [x.y.z]
@@ -161,79 +160,9 @@ branch_drafts() {
     git diff --name-only --diff-filter=A "$remote/$base...HEAD" -- 'docs/release-notes/*-v*-slack.md'
 }
 
-our_conflict_draft=""
 
 # Merge the base branch in. Conflicts in the release files resolve
 # mechanically; any other conflict aborts the merge and stops (exit 4).
-sync_with_base() {
-    local merge_base merge_base_version file conflicted=() other=() scratch
-    if git merge-base --is-ancestor "$remote/$base" HEAD; then
-        return 0
-    fi
-    merge_base="$(git merge-base HEAD "$remote/$base")"
-    merge_base_version="$(version_at "$merge_base")"
-    scratch="$(mktemp -d)"
-    git show HEAD:CHANGELOG.md >"$scratch/ours-changelog.md"
-    say "merging $remote/$base into $branch"
-    if git -c core.hooksPath=/dev/null merge --no-edit --no-ff "$remote/$base" >"$scratch/merge.log" 2>&1; then
-        rm -rf "$scratch"
-        return 0
-    fi
-    mapfile -t conflicted < <(git diff --name-only --diff-filter=U)
-    for file in "${conflicted[@]}"; do
-        case "$file" in
-            CHANGELOG.md|Cargo.lock|cas-cli/Cargo.toml|crates/cas-*/Cargo.toml|docs/release-notes/*-slack.md|hub-web/dist/*) ;;
-            *) other+=("$file") ;;
-        esac
-    done
-    if ((${#other[@]})); then
-        git merge --abort
-        rm -rf "$scratch"
-        printf 'error: merging %s conflicts outside the release files:\n' "$remote/$base" >&2
-        printf '  %s\n' "${other[@]}" >&2
-        printf 'Resolve the merge on %s by hand, push, then rerun scripts/release.sh.\n' "$branch" >&2
-        exit 4
-    fi
-    for file in "${conflicted[@]}"; do
-        case "$file" in
-            hub-web/dist/*)
-                # Generated files may conflict when two releases change web
-                # inputs. Take the base output (including deletions); prepare
-                # regenerates it from the merged sources and bumped version.
-                if git cat-file -e "$remote/$base:$file" 2>/dev/null; then
-                    git restore --source="$remote/$base" --staged --worktree -- "$file"
-                else
-                    git rm --quiet -- "$file"
-                    continue # The deletion is staged; no path remains to add.
-                fi
-                ;;
-            CHANGELOG.md)
-                git show ":3:$file" >"$scratch/base-changelog.md"
-                python3 "$script_dir/release_changelog.py" rebase "$scratch/ours-changelog.md" \
-                    "$scratch/base-changelog.md" "$merge_base_version" "$file"
-                ;;
-            docs/release-notes/*)
-                # Both sides added this path: theirs is a published draft.
-                our_conflict_draft="$scratch/$(basename "$file")"
-                git show ":2:$file" >"$our_conflict_draft"
-                git checkout --theirs -- "$file"
-                ;;
-            *)
-                # Version lines and lock entries: take the base side of each
-                # conflicting hunk only; the bump below rewrites the versions.
-                git show ":2:$file" >"$scratch/ours"
-                git show ":1:$file" >"$scratch/common" 2>/dev/null || : >"$scratch/common"
-                git show ":3:$file" >"$scratch/theirs"
-                git merge-file --theirs -q "$scratch/ours" "$scratch/common" "$scratch/theirs" || true
-                cp "$scratch/ours" "$file"
-                ;;
-        esac
-        git add -- "$file"
-    done
-    git -c core.hooksPath=/dev/null commit --quiet --no-edit
-    say "merged $remote/$base; resolved release files: ${conflicted[*]}"
-}
-
 set_versions() {
     local version="$1" manifest
     for manifest in "${release_manifests[@]}"; do
@@ -245,14 +174,11 @@ set_versions() {
         Cargo.lock
 }
 
-# The draft this release commits: --notes, our side of a draft path the base
-# also added, or the one draft this branch adds. Checked before any edit.
+# The draft this release commits: --notes or the one draft this branch adds.
 draft_source() {
     local version="$1" drafts=()
     if [[ -n "$notes_file" ]]; then
         printf '%s\n' "$notes_file"
-    elif [[ -n "$our_conflict_draft" ]]; then
-        printf '%s\n' "$our_conflict_draft"
     else
         mapfile -t drafts < <(branch_drafts)
         if ((${#drafts[@]} > 1)); then
@@ -298,7 +224,6 @@ lint_release_draft() {
 prepare() {
     local base_version version current prepared_commit drafts=() prepared_drafts=()
     fetch_base
-    sync_with_base
     base_version="$(version_at "$remote/$base")"
     [[ "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "cannot read $base's version"
     version="$(next_version "$base_version")"

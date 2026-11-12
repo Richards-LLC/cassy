@@ -753,6 +753,11 @@ pub trait TaskStore: Send + Sync {
     /// general write path.
     fn update(&self, task: &Task) -> Result<DateTime<Utc>>;
 
+    /// Persist task fields, replacement parent (None detaches), and receipt atomically.
+    fn update_with_parent(&self, _task: &Task, _parent: Option<&Dependency>, _receipt_id: &str) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other("atomic task retarget is unsupported by this store".into()))
+    }
+
     /// Apply a local read-modify-write only while the expected status and
     /// store-owned clock still match. Refusal has no row, event or receipt
     /// effects. Unlike replication, this may advance an active local delivery.

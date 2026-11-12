@@ -573,7 +573,13 @@ mod tests {
         std::fs::write(seed.path().join("work.txt"), "unreleased work\n").unwrap();
         git(seed.path(), &["add", "work.txt"]);
         git(seed.path(), &["commit", "-qm", "unreleased work"]);
-        git(seed.path(), &["branch", "epic/other"]);
+        git(seed.path(), &["branch", "epic/contained"]);
+        std::fs::write(seed.path().join("work.txt"), "more unreleased work\n").unwrap();
+        git(seed.path(), &["commit", "-qam", "more work"]);
+        git(seed.path(), &["checkout", "-qb", "epic/other", "main"]);
+        std::fs::write(seed.path().join("other.txt"), "divergent work\n").unwrap();
+        git(seed.path(), &["add", "other.txt"]);
+        git(seed.path(), &["commit", "-qm", "divergent work"]);
         git(seed.path(), &["config", &format!("url.{}.insteadOf", bare.path().display()),
             "https://github.com/example/train-test.git"]);
         git(seed.path(), &["push", "-q", "origin", "--all"]);
@@ -614,6 +620,12 @@ mod tests {
             let created = store.list(None).unwrap().into_iter().find(|t| t.title == "New repair").unwrap();
             assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, live.id, "{machine}");
 
+            let contained = train("cas-a666", "epic/contained", 200);
+            store.add(&contained).unwrap();
+            core.cas_task_create(Parameters(request("Contained sibling repair"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Contained sibling repair").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, live.id);
+
             let other = train("cas-a333", "epic/other", 100);
             store.add(&other).unwrap();
             let before = store.list(None).unwrap().len();
@@ -622,7 +634,7 @@ mod tests {
             for id in [&live.id, &other.id] { assert!(refusal.message.contains(id)); }
             assert_eq!(store.list(None).unwrap().len(), before);
 
-            for mut row in [live.clone(), other] {
+            for mut row in [live.clone(), other, contained] {
                 row.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
                 store.update(&row).unwrap();
             }

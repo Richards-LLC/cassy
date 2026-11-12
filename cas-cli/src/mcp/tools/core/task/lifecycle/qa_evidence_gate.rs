@@ -1,3 +1,4 @@
+//! Marker syntax is independent of cas-playwright-tests coverage/optional-lane policy.
 //! QA evidence close gate (cas-0cd5).
 //!
 //! Runs on every delivery close, immediately before the factory merge gate.

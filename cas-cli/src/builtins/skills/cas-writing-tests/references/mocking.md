@@ -126,3 +126,7 @@ remains implementation-coupled, even if a framework makes that override easy.
 ## Predicate fakes
 
 A fake update/count/query must evaluate the supplied predicates against fixture state. Return zero when no fixture row matches; model claimed ownership and transitions when concurrency is the promise. Canned count:1 is banned because it can pass while the real predicate rejects every row. Use a real disposable database for uniqueness, transactions, locks and rollback; reject a non-disposable target before setup/cleanup.
+
+For NestJS, build the real consuming module with Test.createTestingModule, overrideProvider(ExternalProvider).useValue(predicateFake), then invoke its public operation. Use an actual disposable database instead of a provider fake when the contract is transactional/unique/locking behavior.
+
+For Nuxt composables, use Vitest with the project's Nuxt test-utils environment; mockNuxtImport may replace an external transport seam while the consuming composable stays real. Reset fixture state between cases and keep dynamic imports when they establish deliberate module/mock isolation. DOM-only behavior belongs in a mounted component/browser case, not a fake Nuxt runtime test.

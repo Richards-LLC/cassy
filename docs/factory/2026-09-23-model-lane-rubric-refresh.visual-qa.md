@@ -1,5 +1,7 @@
 # Visual QA — PASS
 
+Historical evidence only; current authoring policy is `cas-playwright-tests`. Older version numbers below record the measured run and are not supported-version advice.
+
 **Summary:** PASS · 0 finding(s) · 0 informational · 0 allowlisted · 4 screenshot(s)
 
 Playwright: 1.63.0

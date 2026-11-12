@@ -1,3 +1,4 @@
+//! Marker syntax is independent of cas-playwright-tests coverage/optional-lane policy.
 //! QA evidence at close (cas-0cd5): the implementer's cas-qa-craft bundle
 //! must exist, be fresh, and prove a passing run before a user-facing
 //! delivery can park or close. Also refuses deliveries that add Playwright /

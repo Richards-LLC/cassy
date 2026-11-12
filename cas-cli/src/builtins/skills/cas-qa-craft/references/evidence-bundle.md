@@ -3,7 +3,7 @@
 ## API surfaces
 
 `qa.api_paths` selects non-rendered API/server code, including server-only TSX;
-keep rendered components out of these globs. Follow [Fewest tests](../../cas-tdd/SKILL.md#fewest-tests):
+keep rendered components out of these globs. Follow [Fewest tests](../../cas-writing-tests/SKILL.md#fewest-tests):
 one transcript per changed status/error code, including refusal cases. The only
 required artifacts are `LEDGER.md` (the transcript itself) and `contracts.diff`
 (captured comparison against vendored contract fixtures, empty when they agree).
@@ -24,11 +24,7 @@ mixed rendered changes still require the web bundle below.
 
 ## Playwright evidence bundle
 
-Rendered web/hub cells use this bundle with `@playwright/test` **^1.63**.
-Playwright below 1.63 means `NOT EXERCISED: <reason>`. CLI cells use terminal captures.
-The 1.64 recording and agent features are optional: use them only when the
-project's installed version supports them. Valid 1.63 captures remain acceptable;
-missing optional 1.64 features do not make a cell NOT EXERCISED.
+Rendered web/hub cells use the latest stable locked Playwright and matching browser binaries under the project's supported Node runtime. Follow [cas-playwright-tests](../../cas-playwright-tests/SKILL.md) for authoring/configuration; this reference owns evidence packaging. CLI cells use terminal captures.
 
 ## Layout
 
@@ -208,17 +204,13 @@ add the per-surface limits.
 ## Affected journeys
 
 <!-- cas-src:begin -->
-For hub-web deliveries, run vitest, tsc and the source-impact-selected journeys
-while iterating, with `scripts/journey-eval.sh <task-artifact-dir>` (default
-affected, four workers) or `--affected <base>`. Close and QA do not require a
-journey receipt.
+For hub-web deliveries, workers run touched vitest files and tsc. Release batch QA runs source-impact-selected journeys with `scripts/journey-eval.sh <task-artifact-dir>` or `--affected <base>`.
 <!-- cas-src:else -->
-For browser deliveries, run the project's unit, type and source-impact-selected
-journey checks while iterating. Close and QA do not require a journey receipt.
+For browser deliveries, workers run touched unit and type checks; release batch QA owns affected journeys through the project's existing runner.
 <!-- cas-src:end -->
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
-Workers produce affected-journey evidence; independent QA consumes matching
+Named failure iteration may produce receipts; batch QA consumes matching
 receipts before running missing checks (see [independent-pass.md](independent-pass.md)).
 The hook denies factory worker and QA full or unfiltered runs. A failure control may rerun the failing
 spec at one worker, keeping the original failure.
@@ -283,13 +275,7 @@ harness may still use `saveQaTrace(context, path, { secrets })` and
 Task `cas-1234` says: “User filters tasks and sees no matches.” The spec walks
 ledger cells M01 and M02. Set `visualChange` to the same value as the bundle's
 `visual_change`: only visual changes record chapters and media-mode captures.
-The example keeps 1.63-compatible recording options. On 1.64, optionally use
-10 fps to reduce encoder backlog: it encodes VP9 automatically and exposes `fps`
-on `use.video`, `recordVideo` and `screencast.start`. Omit `fps` on 1.63.
-Firefox/WebKit capture at most 25 fps. Optional 1.64 action styling uses
-`showActions({ style: { title: 'font-size: 16px' } })`, replacing deprecated
-`fontSize`; `style.point` and `style.highlight` also accept CSS declarations.
-Use the project's type tokens when styling; see the [official 1.64 notes](https://playwright.dev/docs/release-notes#version-164).
+Use current stable recording options. Start evidence at 10 fps when frame-rate control is needed; measure before raising it. Firefox/WebKit capture at most 25 fps. Action captions use showActions({ style: { title: 'font-size: 16px' } }); follow the project's type tokens.
 The worked example below is self-contained for other projects. Its chapter
 helper uses constructed stylesheets under `style-src 'self'`; adapt the caption
 styles to the target project's DESIGN.md.
@@ -354,7 +340,7 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('fix');
   await page.getByRole('button', { name: 'Apply' }).click();
-  await expect(page.getByRole('status')).toHaveText('1 task');
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(1); // fixture has one matching task
   await page.screenshot({ path: `${QA}/M01.png` });
 
   if (visualChange) {
@@ -364,9 +350,10 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
   }
   await page.getByRole('searchbox', { name: 'Filter' }).fill('zzz');
   await page.getByRole('button', { name: 'Apply' }).click();
+  await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(0);
   await expect(page.getByRole('main')).toMatchAriaSnapshot(`
-    - heading "Tasks" [level=1]
-    - status: No tasks match
+    - heading [level=1]
+    - status
     - list
   `);
   await page.screenshot({ path: `${QA}/M02.png` });
@@ -384,7 +371,7 @@ test('cas-1234 demo: filter to no matches', async ({ page }) => {
     ] as const) {
       await page.emulateMedia({ forcedColors: null, reducedMotion: null, contrast: null, ...media });
       expect(await page.evaluate((q) => matchMedia(q).matches, query)).toBe(true);
-      await expect(page.getByRole('status')).toHaveText('No tasks match');
+      await expect(page.getByRole('main').getByRole('listitem')).toHaveCount(0);
       await page.screenshot({ path: `${QA}/a11y-${name}.png` });
     }
     await page.screencast.stop();
@@ -443,7 +430,7 @@ and repeat that path in the close reason.
 
 `cas-playwright-debug` owns diagnosis when a step fails.
 
-## Measured gotchas (1.63.0)
+## Historical measurements (not authoring guidance)
 
 - `trace.screenshots: true` capped the screencast at 800×450 content inside a
   1280×720 frame. With `screenshots: false` it is full size. The per-action

@@ -632,7 +632,7 @@ test('a step that cannot run fails the state and skips the rest', async () => {
   const artifactDir = await mkdtemp(join(tmpdir(), 'visual-qa-journey-broken-'));
   const result = await runVisualQa({
     urls: [fixture('clean.html')],
-    journey: { name: 'broken', timeoutMs: 300, states: [{ name: 'missing', steps: [{ click: '#nope' }, { wait: 10 }] }] },
+    journey: { name: 'broken', timeoutMs: 300, states: [{ name: 'missing', steps: [{ click: '#nope' }, { waitFor: '#next' }] }] },
     artifactDir,
     strict: true,
     schemes: ['light'],

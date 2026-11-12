@@ -21,7 +21,7 @@ Every claim in a close reason or note carries exactly one verdict; "looks good",
 
 Climb as far as the blast radius demands and name the rung you reached: **1. read** (diff, `rg` wiring hits, typecheck) → **2. targeted test** of the changed path → **3. integration or real run** (the actual binary, script, endpoint or suite) → **4. user-path walk** (the journey driven end to end, per `cas-qa-craft`). Docs and one-file local edits stop at rung 1; shared code, config, schema and `pub` API need rung 3; user-facing paths reach rung 4 in batch QA. A `risk=blast-radius` claim below rung 3 on any `proof_targets` entry is NOT VERIFIED.
 
-Test count is never evidence; the one regression that fails without the fix is ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)).
+Test count is never evidence; the one regression that fails without the fix is ([Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests)).
 
 Each claim also states one **safety fact**: what could break and why it did not, backed by a rung ("every `parse_id` caller trims first: `rg -n parse_id` shows three call sites, each after `.trim()`").
 

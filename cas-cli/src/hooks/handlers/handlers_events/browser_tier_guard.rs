@@ -215,6 +215,6 @@ pub(super) fn denial(input: &HookInput) -> Option<&'static str> {
     }
     let command = input.tool_input.as_ref()?.get("command")?.as_str()?;
     unfiltered(command, 0).then_some(
-        "BROWSER TEST TIER: workers run touched vitest files; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here."
+        "BROWSER TEST TIER: authoring follows cas-playwright-tests; workers run touched vitest files and typecheck; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here."
     )
 }

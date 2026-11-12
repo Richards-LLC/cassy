@@ -28,7 +28,7 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    write `sweep: configured — <path>` in the ledger header, and add each valid finding as a
    `telemetry sweep` row labeled `eyewitness/telemetry`. If it is unset, write the exact header line
    `sweep: not configured`.
-3. For API cells follow [Fewest tests](../cas-tdd/SKILL.md#fewest-tests): one capture per changed
+3. For API cells follow [Fewest tests](../cas-writing-tests/SKILL.md#fewest-tests): one capture per changed
    status/error code, including refusals. Otherwise use
    [references/matrix-builder.md](references/matrix-builder.md): demo first,
    **at least three unmentioned conditions**, one adjacent surface, no replay cells. Cap the matrix at **8 cells**;
@@ -41,8 +41,10 @@ Record its verdict with `verification action=qa_record`, naming the round's `LED
    browser profiles and personas per channel/viewport, never a serial 1440→390→SMS replay ([kit](references/verify-harness.md), [maintenance](references/maintain.md)).
 4. Run `cas qa ledger init --task <id>` and edit the printed project-scoped
    ledger ([evidence guidance](references/evidence-ledger.md)). Drive every cell against the real
-   build: check `node --version` and `npx playwright --version` before a web walk; Node 26 requires Playwright ≥1.65. Use Playwright CLI by default (MCP for long walks) with `cas-playwright-debug` recording/healer guards, or the real binary for CLI.
-   Give every test sharing a fixture server/port the same test lock (1.63+; `-exclusive-` in 1.65) to prevent parallel-lane collisions. For API cells, `LEDGER.md` is the HTTP request/status/body transcript
+   build: check Node and the locked Playwright version. For browser authoring, target/network policy,
+   auth, locks and test agents, follow [cas-playwright-tests](../cas-playwright-tests/SKILL.md).
+   Use Playwright CLI by default (MCP for exploratory walks), with `cas-playwright-debug` for failure diagnosis.
+   For API cells, `LEDGER.md` is the HTTP request/status/body transcript
    against the real server build (for example `next build` then `next start`) or a configured
    deployed sandbox with project-provided credentials. Pair it with `contracts.diff` against
    vendored fixtures; these are the only two required API artifacts ([API
@@ -117,3 +119,5 @@ missing. Tier 0 (docs, tests, changelog) walks no journeys; Tier 2 (guards, CI, 
 Keep user-flow evidence here; see the [worked matrix](references/exemplar.md) and check the delivery's `design:` against
 [DESIGN.md first](../design-spec/references/design-md-first.md). `cas-playwright-debug` owns diagnosis, `cas-servers` process lifecycle, the task verifier judgment.
 Log automation-caused artifacts in the ledger's honesty section; never modify the verifier to pass a missing capture.
+
+A cas-allow-skip reason satisfies the static marker check only. It does not approve missing required coverage or focused tests in CI. Follow cas-playwright-tests: required fixture/auth/data failures fail, declared optional lanes report their reasons, and the merged full report rejects unexplained skips or zero required execution. CI forbidOnly remains independent.

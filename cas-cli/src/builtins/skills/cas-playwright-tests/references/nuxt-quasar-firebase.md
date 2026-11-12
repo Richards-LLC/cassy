@@ -20,6 +20,10 @@ A setup project signs in for each needed role and saves storageState with indexe
 ```ts
 import { test as setup, expect } from '@playwright/test';
 
+for (const key of ['QA_EMAIL', 'QA_PASSWORD', 'QA_ACCOUNT_ID']) {
+  if (!process.env[key]) throw new Error(`Missing required QA input: ${key}`);
+}
+
 setup('prepare reserved QA state', async ({ page }) => {
   // Config/fixture has already validated the origins and QA identity.
   await page.goto('/sign-in');

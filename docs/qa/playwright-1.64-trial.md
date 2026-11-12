@@ -1,5 +1,7 @@
 # Playwright 1.64 browser QA trial
 
+Historical evidence only; current authoring policy is `cas-playwright-tests`. Older version numbers below record the measured run and are not supported-version advice.
+
 Keep the 10 fps QA cap. Decline unattended healer adoption: the historical
 flake did not reproduce and the generated healer permits skipping correct tests.
 Coding agents default to the CLI; MCP remains available for exploratory walks.

@@ -32,7 +32,7 @@ const OWNED_SKILLS: [&str; 13] = [
     "cas-image-generate",
     "cli-routing",
     "cas-nuxt-playwright",
-    "cas-tdd",
+    "cas-writing-tests",
     "cas-retro",
     "cas-improve-architecture",
     "cas-wizard",

@@ -51,9 +51,9 @@ Treat every match below as a review candidate; sample 10 and retain the precisio
 | Candidate detector | Confirmed defect | Replacement / evidence |
 | --- | --- | --- |
 | CSS/Quasar class locators | Styling structure is the primary identity | Inspect role/label/test id; retain intentional machine selector contracts |
-| .first() | It suppresses strictness rather than testing specified order | Narrow a semantic container and prove the promised outcome |
-| networkidle | It substitutes connection silence for user readiness | Web-first state assertion or the required response plus UI outcome |
-| waitForTimeout | A sleep substitutes for completion | Event/barrier; controlled clock only for time logic |
+| Banned strictness fix: .first() | It suppresses strictness rather than testing specified order | Narrow a semantic container and prove the promised outcome |
+| Banned readiness substitute: networkidle | It substitutes connection silence for user readiness | Web-first state assertion or the required response plus UI outcome |
+| Banned completion substitute: waitForTimeout | A sleep substitutes for completion | Event/barrier; controlled clock only for time logic |
 | .catch(() => undefined) | It swallows a required action/assertion failure | Propagate the error; preserve intentional context-close cleanup separately |
 
 The five confirmed patterns above are banned authoring fixes. Also inspect isVisible() branching, soft returns, copy/word-list assertions and retries used to mask failures. toHaveText on fixture data and accessible-name locator inputs remain valid.

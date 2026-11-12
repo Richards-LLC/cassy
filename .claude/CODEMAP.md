@@ -83,7 +83,7 @@
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` — operations, registrations and bounded tool futures.
 - `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs` — response budgets and mutation receipts.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` — park/close orchestration, ownership and timeout recovery.
-- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution, receipts, report quality, proof claims and reviewed corrections.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` — attribution (including cancelled-to-successor delivery receipts), receipts, report quality, proof claims and reviewed corrections.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs` — shared delivery snapshots and finding-bound decisions used by report quality; registry enforcement is lane lint.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` — post-merge close and recovery-owner notices.
 - `cas-cli/src/mcp/tools/core/task/close_refusal.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` — close refusal facts and trusted note markers.

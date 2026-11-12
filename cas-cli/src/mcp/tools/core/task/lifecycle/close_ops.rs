@@ -13688,11 +13688,14 @@ pub(crate) struct TaskCommitIdentity {
     /// delivery tip supplied by the close path. Exact evidence that needs no
     /// commit-message convention.
     pub known_commits: Vec<String>,
+    /// Exact unmerged commits transferred by a cancelled task's explicit
+    /// successor link. Keep this authority distinct from ordinary WIP anchors.
+    pub superseded_commits: Vec<String>,
 }
 
 impl TaskCommitIdentity {
     fn is_empty(&self) -> bool {
-        self.task_id.is_none() && self.known_commits.is_empty()
+        self.task_id.is_none() && self.known_commits.is_empty() && self.superseded_commits.is_empty()
     }
 
     /// True when `commit` is one of the recorded task commits.
@@ -13701,11 +13704,19 @@ impl TaskCommitIdentity {
     /// the same commit (Cassy records full ids; git may hand back an
     /// abbreviation).
     fn matches_known_commit(&self, commit: &str) -> bool {
+        Self::matches_commit_in(&self.known_commits, commit) || self.matches_superseded_commit(commit)
+    }
+
+    fn matches_superseded_commit(&self, commit: &str) -> bool {
+        Self::matches_commit_in(&self.superseded_commits, commit)
+    }
+
+    fn matches_commit_in(known_commits: &[String], commit: &str) -> bool {
         let commit = commit.trim().to_ascii_lowercase();
         if commit.is_empty() {
             return false;
         }
-        self.known_commits.iter().any(|known| {
+        known_commits.iter().any(|known| {
             let known = known.trim().to_ascii_lowercase();
             !known.is_empty() && (known.starts_with(&commit) || commit.starts_with(&known))
         })
@@ -13745,6 +13756,7 @@ pub(crate) fn task_commit_identity(
         }
     }
     TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: task_attribution::authorized_merge_parents(task),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -13765,6 +13777,7 @@ pub(crate) fn task_commit_identity_in_repo(
     {
         fetch_parent_branch_best_effort(repo, &target.target_branch);
     }
+    task_attribution::include_superseded_commits(repo, task, &mut identity)?;
     if let Some(delivery) = task_attribution::validated_started_delivery(repo, task)? {
         identity.start_base = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.base_sha.clone());
@@ -15490,6 +15503,7 @@ fn epic_anchor_content_presence_inner(
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -16703,6 +16717,7 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(own);
     }
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -17055,6 +17070,7 @@ pub(crate) fn task_without_own_commits_judged(
         return false;
     }
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -17257,6 +17273,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         },
     };
     let fallback_content_identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -19838,6 +19855,7 @@ fn render_close_diff_stat(
                 .identity
                 .known_commits
                 .iter()
+                .chain(&window.identity.superseded_commits)
                 .filter(|known| {
                     // Keep if it's the receipt itself or an ancestor of the receipt.
                     known.trim().eq_ignore_ascii_case(full_sha.trim())
@@ -19859,6 +19877,8 @@ fn render_close_diff_stat(
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
                 identity: TaskCommitIdentity {
+                    superseded_commits: window.identity.superseded_commits.iter()
+                        .filter(|sha| filtered_commits.contains(sha)).cloned().collect(),
                     approved_merge_parents: Vec::new(),
                     start_base: window.identity.start_base.clone(),
                     task_id: window.identity.task_id.clone(),
@@ -22232,6 +22252,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         refname,
                         parent_branch,
                         &TaskCommitIdentity {
+                            superseded_commits: Vec::new(),
                             approved_merge_parents: Vec::new(),
                             start_base: None,
                             task_id: Some(t.id.clone()),
@@ -24775,6 +24796,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24798,6 +24820,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24820,6 +24843,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24851,6 +24875,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24887,6 +24912,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -32847,6 +32873,7 @@ esac
             basis: "task work cycle",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some(task.id.clone()),
@@ -35109,6 +35136,7 @@ esac
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-test1".to_string()),
@@ -37236,7 +37264,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
-        let identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+        let identity = TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
         let (dir, anchor) = build("");
         let presence =
@@ -37276,7 +37304,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
             let mut window = window_at(0, "historical delivery replay");
-            window.identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            window.identity = TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
@@ -37553,6 +37581,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
     fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
         let mut window = window_at(0, "cas-f2eb fixture");
         window.identity = TaskCommitIdentity {
+            superseded_commits: Vec::new(),
             approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-test1".into()),
@@ -46199,6 +46228,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -46246,6 +46276,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-41cd".to_string()),
@@ -46324,6 +46355,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -46358,6 +46390,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),

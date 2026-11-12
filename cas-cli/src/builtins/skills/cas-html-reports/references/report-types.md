@@ -246,15 +246,11 @@ is itself a requirement — same metrics, same order, same units.
 
 ### 12. Client-facing deliverable
 
-1. `[R]` **Executive summary** — outcome-first, in the client's vocabulary.
-2. `[R]` **Scope and period** — what was and was not covered.
-3. `[R]` **Findings** — each with impact stated in the client's terms.
-4. `[R]` **Recommendations** — prioritized, each with effort and expected benefit.
-5. `[O]` **Appendix** — supporting detail.
-
-Hygiene, non-negotiable: **no internal ticket IDs, no internal team or agent names, no tool or process
-narration, no internal system codenames**. Neutral, unbranded styling. Provenance still exists — it
-lives in the markdown source, which is internal, not on the client's page.
+Use [cas-client-report](../../cas-client-report/SKILL.md) for findings and recommendations to a
+client: outcome and at-a-glance figures above complete supporting detail, one combined forward
+section, cited claims and client-safe HTML/PDF. Its routing table selects SOW acceptance,
+shipped-feature showcases or customer release notes when one of those is the actual request.
+The shared technical contract remains reusable; this matrix does not add a second content order.
 
 ### 13. Research / market analysis
 

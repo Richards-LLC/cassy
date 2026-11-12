@@ -1150,6 +1150,10 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");
             println!("installed {directory}/skills/cas-sow-delivery-report/{file}");
         }
+        for file in ["SKILL.md", "references/accounting-entries.md"] {
+            let client_report = destination.join("skills/cas-client-report").join(file);
+            assert!(client_report.is_file(), "missing installed {}", client_report.display());
+        }
         // cas-d1dc: customer release notes install beside them.
         let notes = destination.join("skills/cas-customer-release-notes");
         for file in [

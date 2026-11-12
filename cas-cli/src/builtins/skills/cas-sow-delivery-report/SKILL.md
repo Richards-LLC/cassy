@@ -13,7 +13,8 @@ requirement with its status and screenshot evidence from the deployed app. Each
 change the client asked for in a feedback round gets a before/after pair. The
 project manager (PM) then receives the report and the client message to send.
 
-This skill adds only what an SOW delivery needs and reuses the rest:
+Use `cas-client-report` for general client findings; this skill owns SOW acceptance and feedback rounds.
+It adds only what an SOW delivery needs and reuses the rest:
 
 - `cas-html-reports`: markdown-first, the technical contract, the external
   audience row and the client-deliverable type.

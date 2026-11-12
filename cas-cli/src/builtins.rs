@@ -329,6 +329,14 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",
         content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
     },
@@ -1078,6 +1086,14 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
     },
     BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",
@@ -1876,6 +1892,14 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-client-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-client-report/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-client-report/references/accounting-entries.md"),
     },
     BuiltinFile {
         path: "skills/cas-feature-report/SKILL.md",
@@ -7219,6 +7243,7 @@ This is the body content."#;
             "skills/cas-sow-delivery-report/SKILL.md",
             "skills/cas-customer-release-notes/SKILL.md",
             "skills/cas-feature-report/SKILL.md",
+            "skills/cas-client-report/SKILL.md",
             "skills/cas-dataviz/SKILL.md",
             "skills/cas-ui-craft/SKILL.md",
             "skills/design-spec/SKILL.md",

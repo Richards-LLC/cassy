@@ -152,6 +152,8 @@
 
 ## Cross-cutting
 
+- `cas-cli/src/builtins/skills/cas-client-report/` - client report structure, review handoff and accounting-entry routing; shared catalogs in `cas-cli/src/builtins.rs`.
+
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, `cas-cli/tests/`; process isolation in `cas-cli/src/test_env_guard.rs`. Workers use capped named nextest filters; the merge queue owns the full Rust suite.
 - **Browser proof:** Vitest in `hub-web/src/`, Playwright in `hub-web/e2e/`, affected selection via `scripts/journey-eval.sh` and `scripts/journeys-for-diff.py`.
 - **Docs:** `cas-cli/docs/ARCHITECTURE.md`, `cas-cli/docs/CONTRIBUTING.md`, `docs/design/`, `docs/qa/`, `docs/qa/bug-families/`, `docs/release-reports/` (Markdown, brief, HTML/PDF and visual QA), `docs/status-words.md`.

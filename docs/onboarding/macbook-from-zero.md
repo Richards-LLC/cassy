@@ -392,6 +392,7 @@ You skipped `git submodule update --init --recursive` after the clone. Run it fr
 ### `Zig compiler not found` during `cargo build`
 
 `crates/ghostty_vt_sys/build.rs` can't find Zig. Fix by either:
+
 - `brew install zig` (recommended), or
 - `./scripts/bootstrap-zig.sh` from the repo root (downloads Zig 0.15.2 into `.context/zig/`), or
 - export `ZIG=/path/to/zig` before `cargo build`.
@@ -403,9 +404,11 @@ Xcode Command Line Tools missing or incomplete. Re-run `xcode-select --install` 
 ### `command not found: cas` after install
 
 `~/.local/bin` is not on `$PATH`. Run:
+
 ```bash
 echo $PATH | tr ':' '\n' | grep -E '\.local/bin'
 ```
+
 If nothing prints, redo the PATH export in Step 7 and open a new terminal tab.
 
 ### `cas: bad CPU type in executable`
@@ -415,6 +418,7 @@ You built for the wrong architecture (e.g., copied a Linux binary, or built on I
 ### `<Box> can't be nested inside <Text>` crash in Claude Code
 
 You're on Claude Code in the broken 2.1.117 – 2.1.125 range. Anthropic fixed this in **2.1.126**; upgrade forward:
+
 ```bash
 npm install -g @anthropic-ai/claude-code@latest
 claude --version    # confirm >= 2.1.126
@@ -423,6 +427,7 @@ claude --version    # confirm >= 2.1.126
 ### `cas serve` works in terminal but Claude Code shows MCP disconnected
 
 The shell Claude Code spawns has a different `$PATH` than your interactive zsh. Either:
+
 - Use the absolute path in `.mcp.json` (`"command": "/Users/you/.local/bin/cas"`), or
 - Move your `$PATH` exports from `~/.zprofile` to `~/.zshenv` so they apply to non-interactive shells too.
 
@@ -436,6 +441,7 @@ not fix a signature failure.
 ### Gatekeeper popup: `"cas" cannot be opened because the developer cannot be verified`
 
 You built locally, so Gatekeeper shouldn't be involved — but if you copied the binary via AirDrop, Mail, or Safari, the quarantine attribute may have been set:
+
 ```bash
 xattr -d com.apple.quarantine $(which cas) 2>/dev/null || true
 ```

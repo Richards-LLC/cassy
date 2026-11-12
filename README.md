@@ -50,7 +50,7 @@ A supervisor plans epics, cuts tasks, assigns them, reviews the work and merges 
 | **Task coordination** | Tasks carry dependencies, priorities, leases and close gates — a close is refused when the branch is unmerged or the tree is unverifiable |
 | **Session control** | `cas list`, `cas attach`, `cas kill`, `cas kill-all`; `--notify` for desktop alerts, `--record` for replayable sessions |
 | **Liveness triage** | `cas factory is-wedged`, `debug`, `kill` classify and recover a stuck worker; `cas factory preflight` reports readiness before spawning |
-| **Headless control** | `cas factory status|agents|activity|message` drive a running session without attaching a terminal |
+| **Headless control** | `cas factory status\|agents\|activity\|message` drive a running session without attaching a terminal |
 
 ### Bare Claude account picker
 
@@ -107,12 +107,12 @@ the account you picked.
 
 `cas serve` speaks [MCP](https://modelcontextprotocol.io/). It exposes twelve umbrella tools — each dispatching dozens of actions — plus two proxy tools when upstream MCP servers are configured:
 
-```
+```text
 coordination, knowledge, memory, pattern, rule, search,
 skill, spec, system, task, team, verification
 ```
 
-```
+```text
 # Remember something across sessions
 mcp__cas__memory action=remember content="This project uses Zod for validation"
 
@@ -303,7 +303,7 @@ Doctor reports which cloud bucket the project resolves to and why, warns when tw
 
 ### On disk
 
-```
+```text
 .cas/
 ├── cas.db          # SQLite — memories, tasks, rules, skills, entities, agents
 ├── config.toml     # project configuration

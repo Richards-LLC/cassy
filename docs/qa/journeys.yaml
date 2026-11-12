@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  selected-test-receipt-log:
+    title: Capped runs expose untouched selected output separately from automatic guards for direct supervisor receipt recording
+    tasks: [cas-70b8, cas-7b2d]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-SELECTED-TEST-LOG]
   reexec-cleanup-blocker-recovery:
     title: Timed-out cleanup refuses reexec with exact worker and occurrence identities and idle full-factory restart recovery while retaining cleanup custody
     tasks: [cas-624d2]
@@ -384,8 +389,8 @@ bug_families:
     tasks: [cas-aa18]
     journeys: [HUB-J11]
   release-report-message-permalink:
-    title: Report receipts preserve distinct provider-returned upload-message and file permalinks, including thread context
-    tasks: [cas-bbf4]
+    title: Report receipts retain the upload message ID when its link is unavailable and require a distinct file link; malformed non-null message links still fail
+    tasks: [cas-bbf4, cas-0c77]
     journeys: [CLI-RELEASE]
   worker-respawn-handoff-isolation:
     title: Recycling keeps task handoffs in artifacts and parking refuses new or retained repo-root handoffs from the delivered commit
@@ -593,11 +598,6 @@ bug_families:
     tasks: [cas-154b]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-PULL-CADENCE]
-  selected-test-receipt-log:
-    title: Capped runs expose untouched selected output separately from automatic guards for direct supervisor receipt recording
-    tasks: [cas-70b8, cas-7b2d]
-    journeys: [FACTORY-CLOSE]
-    invariants: [FACTORY-SELECTED-TEST-LOG]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -684,6 +684,10 @@ invariants:
     statement: Only the worker's same-session status can request its recycle, with the recorded recipe, retained task bindings, saved handoff and a quiet supervisor receipt; the per-worker cooldown survives dequeue and restart.
     check: Run typed_worker_respawn_queues_one_recycle_cas_53ed through message_send; verify one recycle, recipe and task retention, handoff path, quiet mail, sibling-session refusal and duplicate suppression after dequeue.
     bug: {task: cas-53ed}
+  FACTORY-SELECTED-TEST-LOG:
+    statement: Capped runs preserve full raw guard evidence and expose a separate untouched selected-test capture in their receipt. A live supervisor can record that capture directly; combined summaries, empty selections and failed guards remain refused.
+    check: Run factory_worker_check::tests::worker_proofs_include_fixed_guards_before_an_unrelated_filter through the guarded runner and record_supervisor_test. Require exact selected ANSI bytes, two summaries in the raw producer log, direct recording of the selected capture, rejection of the raw log, and failed retries retaining prior capture bytes.
+    bug: {task: cas-70b8}
   FACTORY-CLOSE-LATE-PARK:
     statement: CLOSE_OUTCOME prefers this close request's committed disposition over a legacy error-shaped park reply; an already parked row without a commit by this request cannot suppress a genuine refusal or its details.
     check: Run server_handler::tests::late_close_outcome_prefers_own_park_receipt_cas_fd21 through the real late-outcome recorder and stores with the 55s budget/142.5s elapsed replay; also run close_deadline_before_any_write_records_the_late_outcome_cas_3b81 through the deadline handler. Verify exact caller machine payloads and task status, without human-wording assertions.
@@ -711,8 +715,8 @@ invariants:
     statement: Higher-priority build queues never wake the supervisor; disk pressure sends one session notice updated only when waiting workers or reclaimable bytes change.
     check: Run capacity_notices_aggregate_disk_and_silence_priority_queue_cas_ed71 through persisted waits and the real supervisor outbox; verify queue silence, aggregated identities, unchanged/restarted scan silence, changed bytes/workers and resolved/recurrent episodes. Walk supervisor capacity reporting on the batch candidate.
   FACTORY-RELEASE-CLOSEOUT:
-    statement: Release receipts stamp the reconciler version; binaries older than the tag record stale refusals without effects, and qualified binaries replay unstamped or below-tag outcomes once. Release finalization closes unchanged approved shipped members independently, preserves already-closed outcomes and leaves REVIEW_MISSING as an individual residual; preview produces the same decisions without store or cache writes. Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle.
-    check: Run newer_reconciler_replays_stale_operation_once_cas_cf7c for legacy, older, equal and newer recorded versions, stale runtime refusal, one qualified replay and stable delivery intents/notice identity. Run published_train_closes_members_independently_cas_734b (real store, verification on, review SHA different from tag, peer-approved source distinct from the landed head, local synthetic candidate bound to the source and shipped tree, different-source and unshipped-tree candidates held, unrelated-head approval held, bound report, equal base/anchor, already closed, missing approval, stale generation and zero-write preview), release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
+    statement: Release receipts stamp the reconciler version; binaries older than the tag record stale refusals without effects, and qualified binaries replay unstamped or below-tag outcomes once. Release finalization closes unchanged approved shipped members independently, preserves already-closed outcomes and leaves REVIEW_MISSING as an individual residual; preview produces the same decisions without store or cache writes. Release replay preserves immutable delivery cycles, committed member outcomes and named exceptions; parent closure requires complete shipped children and explicit independent acceptance, and missing coverage queues one existing epic proof cycle under the recorded release identity without requiring a registered caller.
+    check: Run newer_reconciler_replays_stale_operation_once_cas_cf7c for legacy, older, equal and newer recorded versions, stale runtime refusal, one qualified replay and stable delivery intents/notice identity. Run published_train_closes_members_independently_cas_734b (real store, verification on, review SHA different from tag, peer-approved source distinct from the landed head, local synthetic candidate bound to the source and shipped tree, different-source and unshipped-tree candidates held, unrelated-head approval held, bound report, equal base/anchor, already closed, missing approval, stale generation and zero-write preview), release_replay_recovers_after_committed_effect_and_supervisor_turnover, queue_landed_premerge_candidate_closes_cas_192b0, landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk and release_operation_recovers_checkpoint_and_serializes_same_identity. Run unregistered_reconcile_queues_parent_review_cas_d47d through actual reconcile with closed shipped children; assert the release-owned pending dispatch, independent reviewer, absent verdict and stable replay. Require crash recovery, stable adapter notice intent, deleted parent branch, dead owner adoption, mismatched child coverage queued once, accepted parent/train lifecycle and no direct train closure on task creation. Actual isolated gabber release replay belongs to release batch proof after adapter integration.
   FACTORY-MERGE-QUEUE-CI-IDENTITY:
     statement: Successful canonical or legacy merge-group CI evidence can prove an exact landed delivery, including punctuated run citations, while unrelated or failed runs remain refused.
     check: Run supervisor_close_reuses_landed_queue_proof_cas_4386, direct_to_main_close_reuses_queue_after_capped_receipt_cas_d4310_cas_fe831 and supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386 through the close handler. Require legacy and full-validation wrapper receipts, a trailing colon and automatic discovery; retain event/status/repository/workflow/tree/artifact/containment refusals.
@@ -1406,10 +1410,6 @@ invariants:
     statement: Entity sync runs at its configured cadence independently of indexing and maintenance; quality and knowledge work never own the entity-sync lease, and existing team scope and task lifecycle guards remain authoritative.
     check: "Run cloud_pull_ticks_while_indexing_is_held_cas_154b through the real daemon loop with a channel-held index mutex and fake scheduling time; require a subsequent pull and an available entity lease during quality HTTP. Run hub_idle_sync_test::a_store_whose_lease_is_held_is_not_synced_twice against the real CLI binary: a held store must return Busy without any cloud request or queue drain, including discovery and registration. Retain existing daemon store-lease exclusion and team-only cycle regressions. On the delivered binary, measure creation or parking visibility between prowl and soundwave without forced sync, state the bound and publish the timing receipt."
     bug: {task: cas-154b}
-  FACTORY-SELECTED-TEST-LOG:
-    statement: Capped runs preserve full raw guard evidence and expose a separate untouched selected-test capture in their receipt. A live supervisor can record that capture directly; combined summaries, empty selections and failed guards remain refused.
-    check: Run factory_worker_check::tests::worker_proofs_include_fixed_guards_before_an_unrelated_filter through the guarded runner and record_supervisor_test. Require exact selected ANSI bytes, two summaries in the raw producer log, direct recording of the selected capture, rejection of the raw log, and failed retries retaining prior capture bytes.
-    bug: {task: cas-70b8}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration, Utc};
 
+pub(crate) mod host;
+
 /// The shortest retention after close that either surface accepts.
 pub const MIN_RETENTION_DAYS: i64 = 7;
 

@@ -31,6 +31,95 @@ pub(crate) struct Candidate {
     pub inherited_supervisor_call: Option<InheritedSupervisorCall>,
 }
 
+enum CandidatePreparation {
+    Ready(Result<Candidate, McpError>),
+    Pending(Option<std::thread::JoinHandle<()>>),
+}
+
+fn candidate_preparations() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ACTIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    ACTIVE.get_or_init(Default::default)
+}
+
+struct CandidatePreparationClaim(String);
+
+impl Drop for CandidatePreparationClaim {
+    fn drop(&mut self) {
+        candidate_preparations().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+fn bounded_candidate_preparation(
+    key: String,
+    wait: std::time::Duration,
+    prepare: impl FnOnce() -> Result<Candidate, McpError> + Send + 'static,
+    detached: impl FnOnce(&Result<Candidate, McpError>) + Send + 'static,
+) -> CandidatePreparation {
+    if !candidate_preparations().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
+        return CandidatePreparation::Pending(None);
+    }
+    let claim = CandidatePreparationClaim(key);
+    let phase = crate::mcp::tools::service::mutation_receipt::phase("candidate_preparation");
+    let (send, receive) = std::sync::mpsc::channel();
+    // Receipt acknowledgement closes the timeout/send race: a completed result
+    // that missed the response still produces its existing supervisor notice.
+    let (acknowledge, acknowledged) = std::sync::mpsc::channel();
+    let job = std::thread::Builder::new().name("premerge-candidate".into()).spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare))
+            .unwrap_or_else(|_| Err(fail("candidate preparation worker panicked; retry the merge")));
+        drop(phase);
+        drop(claim);
+        if send.send(result.clone()).is_err() || acknowledged.recv().is_err() {
+            detached(&result);
+        }
+    });
+    let job = match job {
+        Ok(job) => job,
+        Err(error) => return CandidatePreparation::Ready(Err(fail(error))),
+    };
+    match receive.recv_timeout(wait) {
+        Ok(result) => {
+            let _ = acknowledge.send(());
+            CandidatePreparation::Ready(result)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => CandidatePreparation::Pending(Some(job)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => CandidatePreparation::Ready(Err(
+            fail("candidate preparation worker stopped before returning its result; retry the merge"))),
+    }
+}
+
+fn candidate_preparation_notice(
+    core: &CasCore, task: &Task, source: &str, key: &str,
+    result: &Result<Candidate, McpError>,
+) {
+    let notify = || -> Result<(), String> {
+        let current = core.open_task_store().map_err(|e| e.to_string())?
+            .get(&task.id).map_err(|e| e.to_string())?;
+        if current.is_terminal() || current.status != task.status
+            || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+            || current.deliverables.work_target != task.deliverables.work_target
+        { return Ok(()); }
+        let retry = format!("factory action=worktree_merge id={source} task_id={}", task.id);
+        let (kind, occurrence, detail) = match result {
+            Ok(candidate) => ("premerge_candidate_ready", format!("{}:{}:{}:{}", task.id,
+                candidate.source_sha, candidate.target_sha, candidate.context_digest),
+                format!("Candidate ready for {}. Retry {retry}. The immutable candidate is cached; publication still requires its exact review.", task.id)),
+            Err(error) => ("premerge_candidate_failed", key.to_string(), format!(
+                "Candidate preparation failed for {}: {}. Resolve the failure, then retry {retry}.", task.id,
+                crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(&error.to_string()))),
+        };
+        let agents = core.open_agent_store().map_err(|e| e.to_string())?.list(None)
+            .map_err(|e| e.to_string())?;
+        let owner = core.get_agent_id().map_err(|e| e.to_string())?;
+        let recipient = crate::supervisor_notices::resolve(&agents, Some(&owner), None);
+        crate::supervisor_notices::enqueue(&core.cas_root, &recipient, kind, &detail, &occurrence)
+            .map_err(|e| e.to_string())
+    };
+    if let Err(error) = notify() {
+        tracing::warn!(task_id = %task.id, %error, "Candidate preparation notice failed");
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct InheritedSupervisorCall {
     pub prior_dispatch_id: String,
@@ -1377,6 +1466,43 @@ impl CasCore {
         digest: String,
         inherited_supervisor_call: Option<InheritedSupervisorCall>,
     ) -> Result<Candidate, McpError> {
+        // Coalescing only schedules work. The unchanged builder's resolved
+        // source/target/context key and file lock still own immutable authority.
+        let identity = serde_json::to_vec(&(&self.cas_root, &task.id,
+            &task.deliverables.factory_branch_anchor, repo, source, target,
+            &digest, &inherited_supervisor_call)).map_err(fail)?;
+        let key = format!("{:x}", Sha256::digest(identity));
+        let worker = self.clone();
+        let build_task = task.clone();
+        let build_repo = repo.to_path_buf();
+        let build_source = source.to_string();
+        let build_target = target.to_string();
+        let notice_core = self.clone();
+        let notice_task = task.clone();
+        let notice_source = source.to_string();
+        let notice_key = key.clone();
+        match bounded_candidate_preparation(key, std::time::Duration::from_secs(20),
+            move || worker.build_verification_candidate_sync(&build_task, &build_repo,
+                &build_source, &build_target, digest, inherited_supervisor_call),
+            move |result| candidate_preparation_notice(&notice_core, &notice_task,
+                &notice_source, &notice_key, result),
+        ) {
+            CandidatePreparation::Ready(result) => result,
+            CandidatePreparation::Pending(_) => Err(fail(format!(
+                "task {}: candidate preparation continues in the background; merge held. A supervisor notice reports completion. Retry factory action=worktree_merge id={source} task_id={}; the immutable cache is reused and exact review is still required before publication",
+                task.id, task.id))),
+        }
+    }
+
+    fn build_verification_candidate_sync(
+        &self,
+        task: &Task,
+        repo: &Path,
+        source: &str,
+        target: &str,
+        digest: String,
+        inherited_supervisor_call: Option<InheritedSupervisorCall>,
+    ) -> Result<Candidate, McpError> {
         let started = std::time::Instant::now();
         let source_sha = git(repo, &["rev-parse", source]).map_err(fail)?;
         let target_sha = review_target(repo, target).map_err(fail)?;
@@ -1929,6 +2055,87 @@ mod tests {
             Err("this is subsequent target progress, not the delivery landing".to_string())
         );
     }
+    #[test]
+    fn slow_candidate_build_returns_hold_and_reuses_cache_cas_352b() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        run(repo, &["init", "-q", "-b", "main"]);
+        run(repo, &["config", "user.name", "Fixture"]);
+        run(repo, &["config", "user.email", "fixture@example.invalid"]);
+        let target = commit_file(repo, ".gitignore", ".cas/\n", "base");
+        run(repo, &["checkout", "-q", "-b", "factory/w"]);
+        let source = commit_file(repo, "work.txt", "delivery\n", "delivery");
+        run(repo, &["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("candidate-owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "candidate-owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        )).unwrap();
+        let mut task = Task::new("cas-352b".into(), "Slow immutable candidate".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let digest = context_digest(&root, &task).unwrap();
+        let key = bound_candidate_key(&task.id, &repo.canonicalize().unwrap(),
+            "factory/w", &source, "main", &target, &digest, None).unwrap();
+        let directory = root.join("verification-candidates").join(key);
+        // Hold the actual immutable-candidate lock, not the provider-launch seam.
+        let held = crate::worktree::target_lock::lock_delivery_target(
+            &root, repo, &format!("candidate:{}", directory.display()),
+        ).unwrap();
+        let flight = format!("slow-candidate:{}", root.display());
+        let worker = core.clone();
+        let build_task = task.clone();
+        let build_repo = repo.to_path_buf();
+        let build_digest = digest.clone();
+        let notice_core = core.clone();
+        let notice_task = task.clone();
+        let notice_key = flight.clone();
+        let request_key = flight.clone();
+        let (returned_tx, returned_rx) = mpsc::channel();
+        let request = std::thread::spawn(move || {
+            let result = bounded_candidate_preparation(request_key, Duration::ZERO,
+                move || worker.build_verification_candidate_sync(&build_task, &build_repo,
+                    "factory/w", "main", build_digest, None),
+                move |result| candidate_preparation_notice(&notice_core, &notice_task,
+                    "factory/w", &notice_key, result),
+            );
+            returned_tx.send(result).unwrap();
+        });
+        let early = returned_rx.recv_timeout(Duration::from_secs(5));
+        let coalesced = if matches!(&early, Ok(CandidatePreparation::Pending(_))) {
+            matches!(bounded_candidate_preparation(flight, Duration::ZERO,
+                || panic!("duplicate candidate build"), |_| panic!("duplicate ready notice")),
+                CandidatePreparation::Pending(None))
+        } else { false };
+        drop(held);
+        request.join().unwrap();
+        let job = match early.expect("the response must return while candidate preparation is locked") {
+            CandidatePreparation::Pending(Some(job)) => job,
+            _ => panic!("expected a background candidate build"),
+        };
+        job.join().unwrap();
+        assert!(coalesced);
+        assert!(directory.join("candidate.json").exists());
+        let candidate = core.build_verification_candidate(&task, repo,
+            "factory/w", "main", digest, None).unwrap();
+        assert_eq!(candidate.source_sha, source);
+        assert_eq!(candidate.target_sha, target);
+        assert_eq!(run(repo, &["rev-parse", "main"]), target);
+        assert_eq!(run(repo, &["rev-parse", "factory/w"]), source);
+        assert!(cas_store::get_latest_verification_dispatch(&root, &task.id).unwrap().is_none());
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        let ready: Vec<_> = rows.iter().filter(|row|
+            row.summary.as_deref() == Some("premerge_candidate_ready")).collect();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].target, "supervisor");
+    }
+
     #[test]
     fn candidate_regenerates_dist_like_worktree_merge_cas_e4b9() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();

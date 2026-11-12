@@ -134,8 +134,11 @@ fn over_budget_wake_at_idle_boundary_hands_off_and_clears_once() {
     assert!(lane.rows(CONTEXT_RESET_CONTROL).is_empty(), "no clear before the judgement turn");
 
     lane.deliver_notice();
+    // cas-c7ed: a judgement longer than one injected section is stored whole.
+    let judgement_text = format!("Next: merge the no-op wake fix first. {}End of judgement.",
+        "Follow-up measures the next 10 real deliveries before widening the gate. ".repeat(40));
     crate::store::open_store(&lane.root).unwrap().add(&{
-        let mut judgement = cas_types::Entry::new("mem-judgement".into(), "Next: merge the no-op wake fix first.".into());
+        let mut judgement = cas_types::Entry::new("mem-judgement".into(), judgement_text.clone());
         judgement.tags = vec!["handoff".into(), "role:supervisor".into()];
         cas_core::memory::handoff::HandoffLineage::for_agent(&lane.agents[0]).stamp(&mut judgement);
         judgement
@@ -156,6 +159,8 @@ fn over_budget_wake_at_idle_boundary_hands_off_and_clears_once() {
         assert!(resumed[0].prompt.contains(kept), "resumed session lost {kept}: {}", resumed[0].prompt);
         assert!(lane.current_handoff().content.contains(kept), "SessionStart handoff lost {kept}");
     }
+    let stored = crate::store::open_store(&lane.root).unwrap().get(&lane.current_handoff().id).unwrap().content;
+    assert!(stored.contains(&judgement_text), "memory get must return the whole judgement: {stored}");
     assert_eq!(lane.rows(CONTEXT_RESET_CONTROL).len(), 1);
 }
 
@@ -266,6 +271,15 @@ fn handoff_receipt_and_injection_keep_only_live_work_and_readable_pending_rows()
     tasks.add(&parked).unwrap();
     let pending = SqliteSupervisorQueueStore::open(&lane.root).unwrap();
     pending.init().unwrap();
+    // cas-c7ed: 120 day-old idle/lifecycle notices queued before the live asks.
+    for index in 0..120 {
+        let kind = if index % 2 == 0 { "task_lifecycle" } else { "worker_idle" };
+        pending.notify(&lane.agents[0].id, kind, &json!({"actor":"stale-otter-1", "task_id":"cas-parked"}).to_string(),
+            cas_store::NotificationPriority::Normal).unwrap();
+    }
+    let day_ago = (chrono::Utc::now() - chrono::Duration::minutes(1505)).to_rfc3339();
+    rusqlite::Connection::open(lane.root.join("cas.db")).unwrap()
+        .execute("UPDATE supervisor_queue SET created_at=?1 WHERE event_type IN ('task_lifecycle','worker_idle')", [&day_ago]).unwrap();
     for _ in 0..89 {
         pending.notify(&lane.agents[0].id, "task_blocked", &json!({
             "actor":"nimble-badger-37", "task_id":"cas-parked",
@@ -288,4 +302,9 @@ fn handoff_receipt_and_injection_keep_only_live_work_and_readable_pending_rows()
     assert!(!row.contains('{'));
     assert!(snapshot["pending"][0]["age_minutes"].as_u64().is_some());
     assert!(content.contains(APPROVAL));
+    let fresh = snapshot["pending"].as_array().unwrap().iter().filter(|row| row["kind"] == "task_blocked").count();
+    assert_eq!(fresh, 89, "receipt keeps every live ask ahead of stale notices");
+    assert!(!content.lines().any(|line| line.contains("stale-otter-1")), "stale notices are not listed one per line: {content}");
+    let counted = content.lines().filter(|line| line.contains("120") && line.contains("worker_idle")).count();
+    assert_eq!(counted, 1, "one count line for the stale notices: {content}");
 }

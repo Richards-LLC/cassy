@@ -43,13 +43,13 @@
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/agent_model.rs` — harness launches and model observations.
 - `cas-cli/src/cli/doctor/`, `cas-cli/src/cli/update.rs`, `cas-cli/src/ops/` — diagnostics, upgrades and operational commands.
 - `cas-cli/src/cli/release_precheck.rs`, `scripts/release-precheck.py` — exact-SHA prechecks and dispatch recovery.
-- `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters.
+- `cas-cli/src/cli/release_automation.rs`, `cas-cli/src/cli/release_adapters.rs` — release inventory, promotion and reconciliation adapters; shared default-train election in `mcp/tools/core/task/release_train.rs` uses origin history and cut admission markers.
 - `cas-cli/src/cli/release_notice_failure.rs`, `cas-cli/src/issue_reconcile.rs` — exhausted release notices and issue reconciliation.
-- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch, handlers and shared schemas.
+- `cas-cli/src/hooks/handlers/`, `crates/cas-core/src/hooks/` — hook dispatch, handlers and shared schemas; `handlers_events/pre_tool.rs` classifies HEAD navigation separately from ref/path mutation and preserves checkout-specific containment remedies.
 - `cas-cli/src/config/`, `cas-cli/src/harness_policy.rs` — runtime settings and harness policy projections.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/knowledge/`, `cas-cli/src/extraction/` — composed retrieval, distillation and extraction.
 - `cas-cli/src/consolidation/`, `cas-cli/src/sync/`, `cas-cli/src/memory_migration/` — memory maintenance and harness synchronization.
-- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` — artifact publication, proof capture and report finalization.
+- `cas-cli/src/artifacts/`, `cas-cli/src/deliverable/` — artifact publication, proof capture and report finalization; `artifacts/proof.rs` restores a peer's committed evidence before review.
 - `cas-cli/src/builtins/` — canonical skills, agents, harness catalogs and reference-history manifest.
 - `cas-cli/src/rule_refs.rs`, `cas-cli/src/cli/rules.rs`, `docs/RULE_REFERENCES.md` — rule-marker navigation.
 - `cas-cli/src/model_eval.rs`, `cas-cli/src/phase_outcome.rs`, `fixtures/verification-plan-fit/` — dataset proofs and verifier replay fixtures.

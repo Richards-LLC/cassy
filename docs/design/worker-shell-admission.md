@@ -210,6 +210,6 @@ Rows:
 
 | Reviewer | Verdict | Date | Notes |
 | --- | --- | --- | --- |
-| Supervisor (prowl) | pending | | |
+| Supervisor (prowl, quick-hawk-35) | APPROVE | 2026-11-12 2:49 PM ET | 1: keep literal scripts admitted as opaque effect units; the write-root check still applies to the path. 2: refuse coproc outright. 3: depth 6 accepted; report the depth distribution from the replay, and raise it before merge if a real command needs more. 4: label rule accepted; the rule-based reviewer labels every deny and the operator spot-checks a random 20 rows. |
 | Supervisor (soundwave) | pending | | |
 | Operator | pending | | |

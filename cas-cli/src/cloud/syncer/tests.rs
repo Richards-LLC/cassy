@@ -5768,9 +5768,15 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
         id: parked.id.clone(),
         reason: "Verifier rejected the delivery; add the missing guard.".into(),
     })).await.unwrap();
+    // Check before appending a note: append_note already syncs, which would
+    // otherwise hide a request_changes write that never queued its own row.
+    let verdict_queue = SyncQueue::open(&reviewer).unwrap();
+    let verdict_rows = verdict_queue.pending_for_team("review-team", 10, 5).unwrap();
+    assert!(verdict_rows.iter().any(|item| item.entity_id == parked.id));
+    let discovery = "Peer verifier found the guard missing on the retry path.";
     core.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
         id: parked.id.clone(), note_type: "discovery".into(),
-        note: "Peer verifier found the guard missing on the retry path.".into(),
+        note: discovery.into(),
         supervisor_override: None, reason: None,
     })).await.unwrap();
     core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
@@ -5803,6 +5809,7 @@ async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     let returned = tasks.get(&parked.id).unwrap();
     assert_eq!(returned.status, TaskStatus::Open, "request_changes never reached the owner");
-    assert!(returned.notes.contains("guard missing on the retry path"), "discovery note lost");
+    assert!(returned.notes.contains(discovery), "discovery note lost");
+    assert_eq!(returned.assignee, parked.assignee);
     assert_eq!(tasks.get(&closed.id).unwrap().status, TaskStatus::Open, "reopen never reached the owner");
 }

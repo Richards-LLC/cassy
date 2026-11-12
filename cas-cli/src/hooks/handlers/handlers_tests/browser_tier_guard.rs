@@ -89,9 +89,6 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             let reason = denial(command, role).expect(command);
             assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
         }
-        // A refusal names the token it could not read as a spec or option.
-        let reason = denial("npx playwright test qa/a.spec.ts widen", role).unwrap();
-        assert!(reason.contains("`widen`"), "{reason}");
     }
 }
 

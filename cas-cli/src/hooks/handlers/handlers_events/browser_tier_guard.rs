@@ -278,3 +278,14 @@ pub(super) fn denial(input: &HookInput) -> Option<String> {
         reason
     })
 }
+
+#[cfg(test)]
+mod tests {
+    /// GH #1876: a refusal carries the token it could not read.
+    #[test]
+    fn a_refused_run_reports_the_token_it_could_not_read() {
+        let mut culprit = None;
+        assert!(super::unfiltered("npx playwright test qa/a.spec.ts widen", 0, &mut culprit));
+        assert_eq!(culprit.as_deref(), Some("widen"));
+    }
+}

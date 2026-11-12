@@ -279,8 +279,11 @@ PY"#;
 
 #[test]
 fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
-    let (_env, cwd) = role_env("worker");
+    let (_env, _config_home) = role_env("worker");
+    // From a project dir, as a worker runs it; the fixture's config home is
+    // itself a store parent.
     let project = tempfile::tempdir().unwrap();
+    let cwd = &project;
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     // GH #1838 and GH #1700: names only, no file is opened.
     for command in [

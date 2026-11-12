@@ -194,12 +194,12 @@ fn statement_references_store(
     }
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
+    let descends = invocation_recursively_reads_directories(&executable, args);
     // A listing descends into a store's parent but opens no file. An operand
     // that names a store itself is still refused below.
-    let recursive = invocation_recursively_reads_directories(&executable, args)
-        && !(names_inert && lists_names_only(&executable, args));
+    let recursive = descends && !(names_inert && lists_names_only(&executable, args));
     let recursive_operands = recursive_path_operand_indices(&executable, args);
-    let store_parent_cwd = recursive && cwd_is_store_or_parent(cwd);
+    let store_parent_cwd = descends && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
         let explicit_path = shell_argument_is_path(&executable, arg, cwd);
         let inferred_recursive_path = store_parent_cwd
@@ -210,7 +210,8 @@ fn statement_references_store(
             return true;
         }
     }
-    if store_parent_cwd
+    if recursive
+        && store_parent_cwd
         && matches!(executable.as_str(), "rg" | "grep" | "egrep" | "fgrep")
         && recursive_search_defaults_to_cwd(&executable, args)
         && recursive_path_operand_indices(&executable, args).is_empty()

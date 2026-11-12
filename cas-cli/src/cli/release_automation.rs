@@ -250,7 +250,7 @@ fn git_with_timeout(repo: &Path, args: &[&str], timeout: std::time::Duration) ->
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
-/// Single seam to the canonical oldest open train. Never closes or selects by GitHub labels.
+/// Prefer the caller's explicit lane; otherwise use the shared default election.
 fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
     use crate::mcp::tools::core::task::{release_train, repo_context};
     let (repo, integration) =
@@ -273,11 +273,14 @@ fn open_train(root: &Path) -> Result<(PathBuf, cas_types::Task)> {
         "release checkout belongs to another repository"
     );
     let branch = git(&caller, &["branch", "--show-current"])?;
-    let train = release_train::active_trains(store.as_ref(), &integration)
+    let explicit = release_train::active_trains(store.as_ref(), &integration)
         .into_iter()
-        .find(|train| train.effective_epic_branch() == Some(branch.as_str()))
-        .or_else(|| release_train::open_trains(store.as_ref(), &integration).into_iter().next())
-        .context("no open release train; create work on the train first")?;
+        .find(|train| train.effective_epic_branch() == Some(branch.as_str()));
+    let train = match explicit {
+        Some(train) => Some(train),
+        None => release_train::select_train(store.as_ref(), &caller, &integration)
+            .map_err(anyhow::Error::msg)?,
+    }.context("no open release train; create work on the train first")?;
     Ok((caller, train))
 }
 fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
@@ -435,12 +438,9 @@ fn track_on_train(
     // This is the cut boundary, before push/enqueue and independent of
     // reminder availability. New tasks must not join the frozen lane.
     let tasks = open_task_store(root)?;
-    let mut cut = tasks.get(&train.id)?;
-    if !crate::mcp::tools::core::task::release_train::is_cut_train(&cut) {
-        cut.labels.push(crate::mcp::tools::core::task::release_train::RELEASE_TRAIN_CUT_LABEL.into());
-        cut.updated_at = chrono::Utc::now();
-        tasks.update(&cut).context("could not persist release train cut marker")?;
-    }
+    crate::mcp::tools::core::task::release_train::mark_cut_trains(
+        root, repo, tasks.as_ref(), &train.id, &args.commit, &expected.integration,
+    ).map_err(anyhow::Error::msg).context("could not persist release train cut markers")?;
     // Review gaps belong to the cut receipt even when reminders are unavailable.
     save(&path, &expected)?;
     let tracking = (|| -> Result<()> {
@@ -1585,15 +1585,58 @@ pub(super) mod tests {
         use rmcp::handler::server::wrapper::Parameters;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
-        let (temp, root, train, _, args) = fixture();
+        let (temp, root, train, _, mut args) = fixture();
+        let repo = temp.path();
+        let store = open_task_store(&root).unwrap();
+        let old_main = git(repo, &["rev-parse", "main"]).unwrap();
+        git(repo, &["branch", "-f", "main", "HEAD"]).unwrap();
+        git(repo, &["update-ref", "refs/remotes/origin/main", "main"]).unwrap();
+        git(repo, &["commit", "--allow-empty", "-qm", "contained work"]).unwrap();
+        let contained = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        git(repo, &["commit", "--allow-empty", "-qm", "cut work"]).unwrap();
+        args.commit = git(repo, &["rev-parse", "HEAD"]).unwrap();
+        let divergent = git(repo, &["commit-tree", &format!("main^{{tree}}"), "-p", "main", "-m", "other work"]).unwrap();
+        let rows = [
+            ("cas-b001", "epic/stale", old_main.as_str(), -1, true),
+            ("cas-b002", "epic/contained", contained.as_str(), -1, true),
+            ("cas-b003", "epic/fresh", "main", 1, false),
+            ("cas-b004", "epic/older-copy", args.commit.as_str(), -1, true),
+            ("cas-b005", "epic/newer-copy", args.commit.as_str(), 1, false),
+            ("cas-b006", "epic/divergent", divergent.as_str(), -1, false),
+        ];
+        for (id, lane, tip, age, _) in rows {
+            git(repo, &["branch", lane, tip]).unwrap();
+            let mut sibling = train.clone();
+            sibling.id = id.into();
+            sibling.branch = Some(lane.into());
+            sibling.created_at += chrono::Duration::seconds(age);
+            store.add(&sibling).unwrap();
+        }
+        let unfinished = Task::new("cas-b007".into(), "Unfinished stale work".into());
+        store.create_atomic(&unfinished, &[], Some("cas-b001"), None).unwrap();
         // Trains are opt-in (GH #1613); this case covers the next train.
         fs::write(root.join("config.toml"),
             "[project]\ncanonical_id = \"release-fixture\"\n\n[factory]\nrelease_train = true\n").unwrap();
         let _cwd = env.enter_dir(temp.path());
         track(&args, &root).unwrap();
+        for (id, _, _, _, retired) in rows {
+            let sibling = store.get(id).unwrap();
+            assert_eq!(crate::mcp::tools::core::task::release_train::is_cut_train(&sibling), retired, "{id}");
+            assert_eq!(sibling.status, train.status, "{id}");
+        }
+        assert_eq!(store.get("cas-b007").unwrap().status, unfinished.status);
+        // After checking retirement, finish the fixture's other admissions
+        // so the existing rollover assertion exercises opening a fresh train.
+        for (id, _, _, _, retired) in rows {
+            if !retired {
+                let mut sibling = store.get(id).unwrap();
+                sibling.labels.push("release-train-cut".into());
+                store.update(&sibling).unwrap();
+            }
+        }
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
         core.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
-            "title": "Next train followup", "task_type": "task", "risk": "none",
+            "title": "Next train followup", "task_type": "task", "risk": "none", "epic": train.id,
         })).unwrap())).await.unwrap();
         let store = open_task_store(&root).unwrap();
         let child = store.list(None).unwrap().into_iter().find(|t| t.title == "Next train followup").unwrap();

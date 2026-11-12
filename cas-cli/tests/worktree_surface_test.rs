@@ -3010,14 +3010,13 @@ printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
     }
 }
 
-/// cas-d4b7, cas-0208 replay the manual rebinds and the Nov 10 re-reviews
-/// (cas-bcf0, cas-36cb, cas-0d5e): after approval a sibling lands an edit
-/// beside a delivered hunk, so the reviewed tree no longer recomputes, yet
-/// the delivery's own patch-id is unchanged and the merge is clean. The one
-/// approval rebinds with a receipt and the task closes on it. A change to
-/// the delivered patch itself gets a fresh review.
+/// cas-03bc (design rev 3.1 §1.3, option A): after approval a sibling lands
+/// an edit beside a delivered hunk. The delivery's own patch-id is unchanged
+/// and the merge is clean, but the target move touched a delivered path, so
+/// the approval does not carry: a fresh review is dispatched and nothing
+/// publishes before it. The only pre-merge carry is `tree_on` validation.
 #[tokio::test]
-async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
+async fn approval_redispatches_when_the_target_touched_a_delivered_path() {
     let mut env = test_env();
     let shared = |edits: &[(usize, &str)]| {
         (1..=20)
@@ -3025,12 +3024,9 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    let cases: [(&str, &[(usize, &str)]); 2] = [
-        // Line 5 is context of the line-3 hunk; the delivered patch is unchanged.
-        ("context edit", &[(5, "target 5")]),
-        ("patch changed", &[(18, "target 18")]),
-    ];
-    for (case, target_edits) in cases {
+    // Line 5 is context of the line-3 hunk; the delivered patch is unchanged.
+    let (case, target_edits): (&str, &[(usize, &str)]) = ("context edit", &[(5, "target 5")]);
+    {
         let fixture = rebound_merge_fixture(&mut env).await;
         std::fs::write(fixture.cas_root.join("config.toml"),
             "[verification]\nenabled=true\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n[qa]\nmode='batch'\n").unwrap();
@@ -3077,14 +3073,6 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
-        if case == "patch changed" {
-            std::fs::write(fixture.worker.join("delivery.txt"), "changed after approval\n").unwrap();
-            run_git(&["commit", "-am", "cas-e429: change the approved patch"], &fixture.worker);
-            run_git(&["push", "origin", &fixture.branch], &fixture.worker);
-            task = tasks.get(&task.id).unwrap();
-            task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
-            tasks.update(&task).unwrap();
-        }
         let result = fixture.service.factory(Parameters(merge)).await;
         let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
         let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
@@ -3094,27 +3082,9 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
                 .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
         assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
-        if case == "patch changed" {
-            assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
-            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
-            assert!(!landed, "{case}: nothing publishes before that review: {text}");
-            continue;
-        }
-        let verdict = cas_store::get_verification_for_dispatch(&fixture.cas_root, &latest.id).unwrap().unwrap();
-        assert_eq!(latest.state, cas::types::VerificationDispatchState::Resolved, "{case}: {text}");
-        assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
-
-        assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
-        assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id), "{case}: the carry-forward is audited on the task");
-        assert!(landed, "{case}: the rebound approval publishes: {text}");
-        assert_eq!(git_stdout(fixture.origin.path(), &["show", "refs/heads/epic/rebound:shared.rs"]),
-            shared(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
-        // Close consumes the carried approval through its landed mapping.
-        let closed = fixture.service.task(Parameters(task_req(serde_json::json!({
-            "action": "close", "id": task.id, "reason": "rebound approval landed",
-        })))).await;
-        let closed = match &closed { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
-        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{case}: {closed}");
+        assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
+        assert_eq!(handoffs, 2, "{case}: a target move on a delivered path gets a fresh review: {text}");
+        assert!(!landed, "{case}: nothing publishes before that review: {text}");
     }
 }
 

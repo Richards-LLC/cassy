@@ -60,7 +60,11 @@ broken registry or bug family.
 
 ## Run them and keep the evidence
 
-Release batch QA runs the affected journeys through the project's established runner. In cas-src use `scripts/journey-eval.sh <task-artifact-dir>`; its source selection and native ID filter remain authoritative. Consume matching receipts before missing checks. Workers may iterate a named failing spec while preserving the original failure, and run touched unit/type checks. Factory workers and QA cannot use --full or unfiltered Playwright.
+Release batch QA runs the affected journeys through the project's established runner.
+<!-- cas-src:begin -->
+Use `scripts/journey-eval.sh <task-artifact-dir>`; its source selection and native ID filter remain authoritative.
+<!-- cas-src:end -->
+Consume matching receipts before missing checks. Workers may iterate a named failing spec while preserving the original failure, and run touched unit/type checks. Factory workers and QA cannot use --full or unfiltered Playwright.
 
 Workers run only the tests covering the lines they touched, before park. The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. QA walks impacted journeys once per release batch. Read receipts; never rerun a passing check.
 

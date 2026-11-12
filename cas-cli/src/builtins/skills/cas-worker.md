@@ -38,7 +38,7 @@ One event gets one message. A close is the lifecycle report; never send a post-c
 summary or echo the close relay. After a merge request, wait for the supervisor's
 response; send no follow-up update.
 
-Stay available after handoff. Never self-dispatch: every time you go idle, use assigned work;
+Stay available after handoff. Never self-dispatch: use assigned work when idle;
 `ready` and `available` are backlog
   visibility, not authorization.
 

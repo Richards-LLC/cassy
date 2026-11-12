@@ -781,7 +781,7 @@ impl CasCore {
 
     pub(crate) async fn cas_task_update_with_delivery_mode(
         &self,
-        req: TaskUpdateRequest,
+        mut req: TaskUpdateRequest,
         target_repo: Option<&str>,
         target_branch: Option<&str>,
         proof_scope_fix: bool,
@@ -1841,6 +1841,14 @@ impl CasCore {
             changes.push("work_target");
         }
 
+        // A branch move to another train moves its membership in the same write.
+        if work_target_supplied && task.deliverables.work_target.is_some() && req.epic.is_none() && task.task_type != TaskType::Epic {
+            let matches: Vec<_> = task_store.list(None).map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|epic| epic.task_type == TaskType::Epic && !epic.is_terminal()
+                    && super::repo_context::inherited_work_target_from_epic(epic).as_ref() == task.deliverables.work_target.as_ref()).collect();
+            if matches.len() > 1 { return Err(Self::error(ErrorCode::INVALID_PARAMS, "Multiple epics own this target; specify epic")); }
+            req.epic = matches.first().map(|epic| epic.id.clone());
+        }
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
         let _source_admission = if req.assignee.as_deref().is_some_and(|assignee| !assignee.trim().is_empty())
@@ -2089,8 +2097,8 @@ impl CasCore {
             if matches!(new_status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
                 && new_status != task.status
             {
-                crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
-                    new_status != TaskStatus::InProgress)
+                crate::phase_outcome::check_with_parent(&self.cas_root, task_store.as_ref(), &task.id,
+                    new_status != TaskStatus::InProgress, req.epic.as_deref().map(|epic| (!epic.trim().is_empty()).then_some(epic.trim())))
                     .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
             }
             if new_status != task.status {
@@ -2237,131 +2245,40 @@ impl CasCore {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        // Handle epic association change
+        let mut parent_change: Option<Option<Dependency>> = None;
         if let Some(epic_id) = req.epic {
             let epic_id = epic_id.trim();
-            let existing_parent_deps: Vec<Dependency> = task_store
-                .get_dependencies(&req.id)
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to read dependencies: {e}")),
-                    data: None,
-                })?
-                .into_iter()
-                .filter(|dep| dep.dep_type == DependencyType::ParentChild)
-                .collect();
-            let previous_parent_ids: Vec<String> = existing_parent_deps
-                .iter()
-                .map(|dep| dep.to_id.clone())
-                .collect();
-
-            // Validate requested epic first so we don't drop existing relationships on failure.
-            if !epic_id.is_empty() {
-                match task_store.get(epic_id) {
-                    Ok(epic_task) => {
-                        if epic_task.task_type != TaskType::Epic {
-                            return Err(McpError {
-                                code: ErrorCode::INVALID_PARAMS,
-                                message: Cow::from(format!(
-                                    "Task {} is not an epic (type: {})",
-                                    epic_id, epic_task.task_type
-                                )),
-                                data: None,
-                            });
-                        }
-                    }
-                    Err(_) => {
-                        return Err(McpError {
-                            code: ErrorCode::INVALID_PARAMS,
-                            message: Cow::from(format!("Epic not found: {epic_id}")),
-                            data: None,
-                        });
-                    }
+            let parents: Vec<_> = task_store.get_dependencies(&req.id)
+                .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e.to_string()))?
+                .into_iter().filter(|d| d.dep_type == DependencyType::ParentChild).collect();
+            let epic = if epic_id.is_empty() { None } else {
+                let epic = task_store.get(epic_id).map_err(|_| Self::error(ErrorCode::INVALID_PARAMS, format!("Epic not found: {epic_id}")))?;
+                if epic.task_type != TaskType::Epic {
+                    return Err(Self::error(ErrorCode::INVALID_PARAMS, format!("Task {epic_id} is not an epic (type: {})", epic.task_type)));
                 }
-            }
-
-            let replacement = if epic_id.is_empty() {
-                None
-            } else {
-                Some(Dependency {
-                    from_id: req.id.clone(),
-                    to_id: epic_id.to_string(),
-                    dep_type: DependencyType::ParentChild,
-                    created_at: chrono::Utc::now(),
-                    created_by: self.get_agent_id().ok(),
-                })
+                Some(epic)
             };
-            // cas-c85e / cas-6fb6: the delivery target a move into this
-            // epic implies, decided before any edge changes so a refusal
-            // leaves the task graph untouched.
-            let retarget = if !epic_id.is_empty() && !work_target_supplied {
-                let epic_task = task_store.get(epic_id).map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to reload epic {epic_id}: {e}")),
-                    data: None,
-                })?;
-                let previous_parents: Vec<Task> = previous_parent_ids
-                    .iter()
-                    .filter(|id| id.as_str() != epic_id)
-                    .filter_map(|id| task_store.get(id).ok())
-                    .collect();
+            let already_matches = if epic.is_some() { parents.len() == 1 && parents[0].to_id == epic_id } else { parents.is_empty() };
+            let retarget = epic.as_ref().filter(|_| !work_target_supplied).and_then(|epic| {
+                let previous: Vec<_> = parents.iter().filter(|d| d.to_id != epic_id)
+                    .filter_map(|d| task_store.get(&d.to_id).ok()).collect();
                 super::repo_context::work_target_for_task_moved_into_epic(
-                    &self.cas_root,
-                    &task,
-                    &epic_task,
-                    &previous_parents,
-                    || known_epics(task_store.as_ref()),
-                )
-                .filter(|target| task.deliverables.work_target.as_ref() != Some(target))
-            } else {
-                None
-            };
-            // A parked or recorded delivery never reaches here: the guard
-            // above refuses `epic=` for it with the proof_scope_fix route.
-            let already_matches = match replacement.as_ref() {
-                Some(dep) => {
-                    existing_parent_deps.len() == 1 && existing_parent_deps[0].to_id == dep.to_id
-                }
-                None => existing_parent_deps.is_empty(),
-            };
+                    &self.cas_root, &task, epic, &previous, || known_epics(task_store.as_ref()))
+                    .filter(|target| task.deliverables.work_target.as_ref() != Some(target))
+            });
             if !already_matches {
-                for dep in existing_parent_deps {
-                    task_store
-                        .remove_dependency(&req.id, &dep.to_id)
-                        .map_err(|e| McpError {
-                            code: ErrorCode::INTERNAL_ERROR,
-                            message: Cow::from(format!(
-                                "Failed to remove existing epic dependency: {e}"
-                            )),
-                            data: None,
-                        })?;
-                }
-                if let Some(dep) = replacement.as_ref() {
-                    task_store.add_dependency(dep).map_err(|e| McpError {
-                        code: ErrorCode::INTERNAL_ERROR,
-                        message: Cow::from(format!("Failed to add epic dependency: {e}")),
-                        data: None,
-                    })?;
-                }
+                parent_change = Some(epic.as_ref().map(|epic| Dependency {
+                    from_id: req.id.clone(), to_id: epic.id.clone(), dep_type: DependencyType::ParentChild,
+                    created_at: chrono::Utc::now(), created_by: self.get_agent_id().ok(),
+                }));
                 changes.push("epic");
             }
-
-            // cas-c85e (GH #997): moving a task into an epic must move its
-            // delivery target too, exactly as dep_add parent-linking and
-            // create under an epic do. Otherwise a task created on trunk keeps
-            // its trunk WorkTarget and worktree_merge publishes straight to
-            // trunk, bypassing the epic's PR/CI gate. Runs even when the edge
-            // already exists so a task moved before this fix can be repaired
-            // by repeating `epic=`. A distinct explicit target is kept.
             if let Some(target) = retarget {
                 task.deliverables.work_target = Some(target);
                 changes.push("work_target");
-            } else if !already_matches && !epic_id.is_empty() && !work_target_supplied
-                && let Some(target) = task.deliverables.work_target.as_ref()
-            {
-                warnings.push(format!(
-                    "Work target kept: {} @ {}.", target.repo_selector, target.target_branch,
-                ));
+            } else if !already_matches && epic.is_some() && !work_target_supplied
+                && let Some(target) = task.deliverables.work_target.as_ref() {
+                warnings.push(format!("Work target kept: {} @ {}.", target.repo_selector, target.target_branch));
             }
         }
 
@@ -2647,8 +2564,8 @@ impl CasCore {
         if let Some((_, status)) = lifecycle_status_change
             && matches!(status, TaskStatus::InProgress | TaskStatus::Closed | TaskStatus::AwaitingMerge)
         {
-            crate::phase_outcome::check(&self.cas_root, task_store.as_ref(), &task.id,
-                status != TaskStatus::InProgress)
+            crate::phase_outcome::check_with_parent(&self.cas_root, task_store.as_ref(), &task.id,
+                status != TaskStatus::InProgress, epic_update_supplied.then_some(req_epic_for_blocker_guard.as_deref()))
                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
         }
         // Fence queue repair until the old assignment and its lease have been
@@ -2661,7 +2578,10 @@ impl CasCore {
         } else {
             None
         };
-        task.updated_at = task_store.update(&task).map_err(|e| McpError {
+        task.updated_at = match parent_change.as_ref() {
+            Some(parent) => task_store.update_with_parent(&task, parent.as_ref(), ""),
+            None => task_store.update(&task),
+        }.map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to update: {e}")),
             data: None,
@@ -2709,8 +2629,6 @@ impl CasCore {
             crate::github_issue_attach::spawn_attach_cited_issues(&self.cas_root, &task);
             let notice = crate::finding_triage::staffing_notice(&self.cas_root, std::slice::from_ref(&task.id));
             if !notice.is_empty() { warnings.push(notice.trim().to_string()); }
-            let release = super::lifecycle::epic_lane::published_release_note(&self.cas_root, task_store.as_ref(), &task);
-            if !release.is_empty() { warnings.push(release.trim().to_string()); }
         }
 
         let qa_withdraw_reason = if demo_statement_cleared {
@@ -4084,6 +4002,23 @@ mod epic_move_work_target_tests {
 
         add_parent(&core, &trunk.id, &lane_epic.id).await.unwrap();
         assert_eq!(branch_of(&store, &trunk.id), "epic/f29b");
+
+        // Retargeting unfinished work is also a move out of its frozen train.
+        let mut frozen = store.get(&lane_epic.id).unwrap();
+        frozen.labels.push("release-train".into()); store.update(&frozen).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&cas_dir, &frozen.id, "fixture", None).unwrap();
+        git(&["branch", "epic/next"]);
+        let mut successor = lane_epic.clone();
+        successor.id = "cas-next".into();
+        successor.branch = Some("epic/next".into());
+        successor.deliverables.work_target = Some(at("epic/next"));
+        store.add(&successor).unwrap();
+        let request = serde_json::from_value(serde_json::json!({"id":trunk.id})).unwrap();
+        core.cas_task_update_with_delivery_mode(request, None, Some("epic/next"),
+            false, None, None, None, None, false).await.unwrap();
+        assert_eq!(branch_of(&store, &trunk.id), "epic/next");
+        assert_eq!(parent_of(&store, &trunk.id), vec![successor.id]);
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&cas_dir, &trunk.id).is_ok());
     }
 
     #[tokio::test]

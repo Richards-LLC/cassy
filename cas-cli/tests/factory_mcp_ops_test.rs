@@ -1547,9 +1547,9 @@ async fn test_factory_focus_epic_routes_clear_field() {
 // spawn_workers tests
 // =============================================================================
 
-/// Staffing receipts warn about published release history without refusing work.
+/// B1: behind-release staffing refuses before assignment, create or queue mutation.
 #[tokio::test]
-async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
+async fn staffing_refuses_behind_latest_published_release_cas_4845() {
     let _guard = EnvGuard::set(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
     let env = FactoryTestEnv::with_server_supervisor();
     std::fs::write(env.cas_root.join("config.toml"), "[project]\ncanonical_id = \"cas-a3c3-fixture\"\n").unwrap();
@@ -1582,7 +1582,6 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
     );
     published.release_version = Some("v1.2.3".into());
     cas_store::record_quality_event(&env.cas_root, &published).unwrap();
-    let gap = git_stdout(repo, &["rev-list", "--count", "epic/requested..v1.2.3"]);
     let merged_tree = git_stdout(repo, &["merge-tree", "--write-tree", "--no-messages", "main", &epic_tip]);
     let synced_origin = git_stdout(repo, &["commit-tree", &merged_tree, "-p", "main", "-p", &epic_tip, "-m", "origin synced with release"]);
     for (behind, pinned, refs) in [
@@ -1609,32 +1608,31 @@ async fn staffing_warns_only_behind_latest_published_release_cas_a3c3() {
         };
         let task_id = child_task_of_epic(&env, "cas-release-gap", "Staff published base");
         pin(&task_id);
-        let assignment = assign(&env, &task_id, worker).await.unwrap();
-        assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), Some(worker));
+        let assignment = assign(&env, &task_id, worker).await;
+        assert_eq!(assignment.is_err(), behind && !pinned);
+        assert_eq!(env.task_store().get(&task_id).unwrap().assignee.as_deref(), if behind && !pinned { None } else { Some(worker) });
         let spawn_task = child_task_of_epic(&env, "cas-release-gap", "Spawn published base");
         pin(&spawn_task);
         let mut req = factory_req("spawn_workers");
         req.cli = Some("grok".into());
         req.isolate = Some(true);
         req.task_id = Some(spawn_task);
-        let spawn = get_text(&env.service.factory_request(Parameters(req)).await.unwrap());
+        let spawn = env.service.factory_request(Parameters(req)).await;
+        assert_eq!(spawn.is_err(), behind && !pinned);
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
             "action":"create", "title":format!("Create staffed work behind={behind} pinned={pinned} refs={refs}"),
             "task_type":"task", "risk":"none", "confirm_warning":true,
             "epic":"cas-release-gap", "assignee":worker,
             "target_branch":pinned.then_some("main"),
         })).unwrap();
-        let created = get_text(&env.service.task(Parameters(request)).await.unwrap());
-        for response in [assignment, spawn, created] {
-            assert_eq!(response.contains("EPIC_BEHIND_RELEASE"), behind && !pinned, "behind={behind} pinned={pinned} refs={refs}: {response}");
-            if behind && !pinned {
-                assert!(response.contains("tag=v1.2.3"), "{response}");
-                assert!(response.contains(&format!("missing_commits={gap}")), "{response}");
-            }
-        }
+        let before = env.task_store().list(None).unwrap().len();
+        let created = env.service.task(Parameters(request)).await;
+        assert_eq!(created.is_err(), behind && !pinned);
+        assert_eq!(env.task_store().list(None).unwrap().len(), before + usize::from(!behind || pinned));
         let queued = env.spawn_queue().peek(10).unwrap();
-        assert_eq!(queued.len(), 1);
-        env.spawn_queue().mark_processed(queued[0].id).unwrap();
+        assert_eq!(queued.len(), usize::from(!behind || pinned));
+        for queued in queued { env.spawn_queue().mark_processed(queued.id).unwrap(); }
+
     }
 }
 

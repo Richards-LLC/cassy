@@ -105,13 +105,11 @@ a real completion boundary, remains visible normally.
 
 ## Staffing behind a published release
 
-Worker spawn and task assignment receipts include `EPIC_BEHIND_RELEASE` when
-the subject epic lacks commits from the latest recorded published release.
-The advisory names the tag and missing commit count, and asks the supervisor
-to sync the integration branch into the epic first. It does not refuse work or
-move Git refs. Publication comes from the target repository's Release ledger;
-a tag alone is not publication evidence. Missing receipts or unavailable refs
-produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
+Worker spawn, assignment and staffed creation refuse `RELEASE_SYNC_REQUIRED`
+before mutation when the target lacks the latest published tag. Publication
+syncs every open train or names one `release-repair` task; that repair remains
+admissible. Successors wait for publication and use its tag, and target moves
+replace train membership in the same transaction. Release cuts do no base sync.
 
 ## Worker contracts across machines
 

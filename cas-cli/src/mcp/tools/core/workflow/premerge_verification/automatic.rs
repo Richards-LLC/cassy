@@ -971,8 +971,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             );
         }
         // GH #1867: a no-code close dispatch has no candidate proof. The same
-        // daemon-owned verifier reviews it and records the exact verdict; a
-        // held verdict reaches the owner, who would otherwise never see it.
+        // daemon-owned verifier reviews it and records the exact verdict, and
+        // the owner hears about either outcome.
         for status in ["approved", "rejected"] {
             let dir = tempfile::tempdir().unwrap();
             let root = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -1012,9 +1012,11 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             assert_eq!(verdict.status.to_string(), status);
             assert_eq!(verdict.agent_id,
                 cas_store::get_verification_dispatch(&root, &dispatch.id).unwrap().verifier_agent_id);
+            // Approval queues the ordinary close recovery; a held verdict
+            // queues its own notice. Either way the owner sees one row.
             assert_eq!(
                 prompts.iter().filter(|row| row.prompt.contains(&dispatch.id)).count(),
-                usize::from(status == "rejected"),
+                1,
                 "{status}: {prompts:?}"
             );
         }

@@ -119,6 +119,7 @@ pub(crate) fn synchronize_open_trains(root: &Path, repo: &Path, tag: &str) -> an
         })();
         if let Err(error) = result {
             let repair = sync_repair(store.as_ref(), &train, tag, &error.to_string()).map_err(anyhow::Error::msg)?;
+            eprintln!("Publication {tag}: {} sync requires {repair}: {error}", train.id);
             store.append_note(&train.id, &format!("Publication {tag}: sync held by {repair}: {error}"))?;
         }
     }

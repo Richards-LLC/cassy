@@ -332,7 +332,7 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
             let tag_sha = published_tag_sha(&repo, &tag)?;
             let Some(context) = context else {
                 crate::mcp::tools::core::task::release_train::synchronize_open_trains(&root, &repo, &tag)?;
-                return Ok(format!("{tag}: open trains synchronized"));
+                return Ok(format!("{tag}: open train sync processed"));
             };
             let scope = tag_scope(&root, &repo, Some(&context), &context.train_id, &tag, &tag_sha)?;
             let trigger = ReconcileTrigger::Publish { tag: tag.clone() };
@@ -757,6 +757,7 @@ mod tests {
     fn publication_syncs_all_trains_or_names_one_repair_cas_4845() {
         use cas_types::{Task, TaskType};
         let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, _, owner, _) = super::super::release_automation::tests::release_fixture();
         let repo = temp.path();
         let bare = tempfile::tempdir().unwrap();

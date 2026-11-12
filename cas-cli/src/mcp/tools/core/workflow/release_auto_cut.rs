@@ -24,7 +24,7 @@ use crate::types::Task;
 
 /// The operator's Commander pause; a synced label, like the freeze.
 pub(crate) const PAUSED_LABEL: &str = "release-auto-cut-paused";
-/// Records the tip Cassy started a cut at, so a cut starts once per tip.
+/// Records the started tip; only a corrected notes-lint failure can retry it.
 const STARTED_LABEL: &str = "release-auto-cut:";
 /// How long the supervisor has to write a missing notes draft.
 const NOTES_DEADLINE_MINUTES: i64 = 30;

@@ -1000,7 +1000,9 @@ pub(super) mod tests {
     fn notes_check_uses_frozen_train_linter_cas_8703b() {
         use clap::Parser;
         let _env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let (temp, root, mut train, _, _) = fixture();
+        train.deliverables.work_target.as_mut().unwrap().repo_selector = "project:release-fixture".into();
         let repo = temp.path();
         fs::create_dir(repo.join("scripts")).unwrap();
         let script = repo.join("scripts/release-train-announce.py");
@@ -1022,7 +1024,7 @@ pub(super) mod tests {
         ]).unwrap();
         assert!(super::super::run_command(&cli, Some(&root)).is_err());
         fs::write(&draft, "readable notes").unwrap();
-        assert!(super::super::run_command(&cli, Some(&root)).is_ok());
+        super::super::run_command(&cli, Some(&root)).unwrap();
         // The check does not move the caller's branch or replace its script.
         assert_eq!(git(repo, &["branch", "--show-current"]).unwrap(), "main");
         assert!(Command::new("python3").arg(&script).arg("--lint").arg(&draft).status().unwrap().success());

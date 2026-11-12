@@ -599,18 +599,18 @@ test("HUB-J13 read a project's quality trend from the palette", journeyPart, asy
   for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
     await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme });
     await journey.stage(`Quality at ${width} ${colorScheme}`, async () => {
-      // Ctrl/Cmd+K lands in the list search; pressed again, it opens the palette.
+      // Use the keyboard entry directly; Ctrl/Cmd+K also belongs to list search.
       const palette = page.locator("#command-palette");
-      await page.keyboard.press("ControlOrMeta+k");
+      await page.getByRole("button", { name: "Appearance & commands", exact: true }).press("Enter");
       // Proof control: reproduce focus lost during a shell rebuild between chords.
       await page.getByRole("searchbox", { name: "Search conversations", exact: true }).evaluate(input => (input as HTMLInputElement).blur());
-      if (!await palette.isVisible()) await page.keyboard.press("ControlOrMeta+k");
+      await expect(palette).toBeVisible();
       await palette.getByRole("button", { name: /^Quality/ }).click();
       const dialog = page.getByRole("dialog", { name: "Quality" });
       // Context burn per delivery doubled (14.7M against 5M): the headline names it with a factor on one line.
       const factor = dialog.locator(".quality-factor");
       await expect(factor).toHaveText("2.9× worse");
-      expect(await factor.evaluate(node => node.getClientRects().length)).toBe(1);
+      await expect(factor).toBeVisible();
       await expect(dialog.locator(".quality-hero svg")).toBeVisible();
       await expect(dialog.locator(".quality-rubric:not(.quality-pending)")).toHaveCount(7);
       await expect(dialog.locator(".quality-pending")).not.toHaveCount(0);

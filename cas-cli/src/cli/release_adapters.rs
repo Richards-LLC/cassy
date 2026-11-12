@@ -783,7 +783,7 @@ mod tests {
         git(repo, &["checkout", "-q", "main"]).unwrap();
         fs::write(repo.join("shared.txt"), "release\n").unwrap();
         fs::write(repo.join("released-fix.txt"), "required gate repair\n").unwrap();
-        git(repo, &["add", "."]).unwrap();
+        git(repo, &["add", "shared.txt", "released-fix.txt"]).unwrap();
         git(repo, &["commit", "-qm", "published gate repair"]).unwrap();
         git(repo, &["tag", "v9.99.7"]).unwrap();
         git(repo, &["push", "-q", "origin", "main", "--tags"]).unwrap();

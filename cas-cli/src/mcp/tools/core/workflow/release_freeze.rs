@@ -498,13 +498,13 @@ mod tests {
         let tip = git(repo, &["rev-parse", &lane]);
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
         let service = CasService::new(core, None);
-        let request = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut"});
+        let request = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut"});
         let refusal = service.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
         assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         // The last line is a replayable MCP payload, not pinned human prose.
         let remedy: Value = serde_json::from_str(refusal.message.lines().last().unwrap()).unwrap();
-        assert_eq!(remedy, serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"}));
+        assert_eq!(remedy, serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut", "decision":"promote"}));
         service.factory(Parameters(serde_json::from_value(remedy).unwrap())).await.unwrap();
         let promoted = active_trains(store.as_ref(), "main");
         assert_eq!(promoted.len(), 1);
@@ -517,7 +517,7 @@ mod tests {
         assert!(wakes[0].payload.contains(&release_auto_cut::notes_draft(&root, &epic.id).unwrap().display().to_string()));
         // No second promotion or freeze record on replay.
         let before = serde_json::to_value(store.get(&epic.id).unwrap()).unwrap();
-        let replay = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"});
+        let replay = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: fixture cut", "decision":"promote"});
         service.factory(Parameters(serde_json::from_value(replay).unwrap())).await.unwrap();
         assert_eq!(serde_json::to_value(store.get(&epic.id).unwrap()).unwrap(), before);
     }
@@ -550,7 +550,7 @@ mod tests {
         store.add(&epic).unwrap();
         let before = serde_json::to_value(store.list(None).unwrap()).unwrap();
         let service = CasService::new(core, None);
-        let request = serde_json::json!({"action":"train_freeze", "id":epic.id, "reason":"release-freeze: v4.21.0 cut", "decision":"promote"});
+        let request = serde_json::json!({"action":"train_freeze", "id":epic.id, "reason":"release-freeze: fixture cut", "decision":"promote"});
         let refusal = service.factory(Parameters(serde_json::from_value(request).unwrap())).await.unwrap_err();
         assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         for id in ["cas-chosen", "cas-tr"] { assert!(refusal.message.contains(id)); }

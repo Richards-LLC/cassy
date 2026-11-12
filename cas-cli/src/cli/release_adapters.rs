@@ -324,7 +324,7 @@ pub fn published(args: &PublishedArgs, current_root: Option<&Path>) -> Result<()
     let mut failures = Vec::new();
     for root in release_roots(current_root)? {
         let Some((repo, _)) = crate::mcp::tools::core::task::repo_context::integration_branch(&root) else { continue; };
-        if crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3)).map_err(anyhow::Error::msg)?.as_deref() != Some(args.repo.as_str()) { continue; }
+        if crate::github_repo::origin_slug(&repo, std::time::Duration::from_secs(3)).map_err(anyhow::Error::msg)?.is_none_or(|slug| !slug.eq_ignore_ascii_case(&args.repo)) { continue; }
         let context = tracked_context(&root, &args.repo, &version)?;
         let result = (|| {
             // The tag may be newer than this checkout; fetching it is idempotent.
@@ -807,6 +807,9 @@ mod tests {
         };
         let reconciler = Recording { recipient: owner.id, calls: Default::default(), done: Default::default() };
         let trigger = ReconcileTrigger::Publish { tag: "v9.99.7".into() };
+        let receipt = root.join("publication.json");
+        fs::write(&receipt, r#"{"tag_name":"v9.99.7","draft":false,"published_at":"2026-01-01T00:00:00Z"}"#).unwrap();
+        published(&PublishedArgs { receipt, repo: "example/repo".into() }, Some(&root)).unwrap();
         reconcile_once(&root, repo, &scope, trigger.clone(), &reconciler).unwrap();
         let tip = git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap();
         assert!(crate::worktree::GitOperations::new(repo.to_path_buf()).is_ancestor(&published, &tip));

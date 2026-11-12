@@ -348,6 +348,16 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.sha }}
 
+      - uses: ./.github/actions/setup-rust-linux
+        with:
+          cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: "false"
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      # After the cache restore, which replaces target/.
       - id: plan
         name: Select this delivery's impacted tests
         env:
@@ -358,15 +368,6 @@ jobs:
           python3 scripts/ci-test-impact.py history
           python3 scripts/ci-test-impact.py lane --phase plan --out target/ci-impact/lane.json \
             --github-output "$GITHUB_OUTPUT"
-
-      - uses: ./.github/actions/setup-rust-linux
-        with:
-          cache-key: fast-validation-suite-archive
-          shared-key: fast-validation-suite-build
-          cache-save-if: "false"
-
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
 
       - id: own
         name: Build the selection and run own tests

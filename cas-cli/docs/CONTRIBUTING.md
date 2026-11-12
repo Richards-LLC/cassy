@@ -3102,8 +3102,8 @@ runs, a capped test PASS in every workspace crate whose sources or tests
 changed. A receipt in another crate does not count, and a missing test receipt
 is refused with its fix. Pull requests keep the targeted `ci-test-impact.py`
 fallback. The merge queue is the final-tree integration gate
-and the only gate to `main`; its required checks either run on the exact merged tree or reuse the complete
-source-tree receipt after the strictly checked release-plumbing delta. Commander journeys run there only when `hub-web/`
+and the only gate to `main`; its required checks run on the exact merged tree.
+Commander journeys run there only when `hub-web/`
 product inputs change. Do not add lane-merge compile checks, park re-runs or a
 separate assembly journey run. If more than two merge-queue ejections per epic
 follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.

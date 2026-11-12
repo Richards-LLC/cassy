@@ -29,6 +29,19 @@ fn train_task(id: &str, labels: &[String]) -> Task {
     train
 }
 
+fn wait_release(log: &Path, expected: i32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(code) = std::fs::read_to_string(log).unwrap_or_default().lines().rev()
+            .find_map(|line| line.strip_prefix("RELEASE_EXIT=")?.parse::<i32>().ok()) {
+            assert_eq!(code, expected);
+            return;
+        }
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// The Nov 6 design: a green exact tip with fragments is cut by Cassy, inside
 /// the cadence, never while red, paused or queued, and never without the
 /// supervisor's notes, which it waits for with one wake.
@@ -44,7 +57,7 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     commit(repo, "scripts/release.sh");
     std::fs::write(repo.join("scripts/release-cut.py"), include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../scripts/release-cut.py"))).unwrap();
     commit(repo, "scripts/release-cut.py");
-    std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CAS_ROOT/../release-ran\"\n").unwrap();
+    std::fs::write(repo.join("scripts/release.sh"), "#!/bin/sh\nif grep -q bad \"$2\"; then\n printf '{\"blockers\":{\"NOTES_LINT\":\"fixture\"}}' > \"${2%/*}/cut-plan.json\"\n exit 5\nfi\nprintf '%s\\n' \"$*\" > \"$CAS_ROOT/../release-ran\"\n").unwrap();
     run(repo, &["update-index", "--chmod=+x", "scripts/release.sh"]);
     std::fs::set_permissions(repo.join("scripts/release.sh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     run(repo, &["commit", "-qam", "release script"]);
@@ -100,21 +113,21 @@ fn green_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() {
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
     assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
-    std::fs::write(&draft, "notes\n").unwrap();
+    std::fs::write(&draft, "bad notes\n").unwrap();
     // cas-80df: a supervisor holding the branch cannot own the cut checkout.
     run(repo, &["checkout", "-q", LANE]);
     poll(&none);
     let log = draft.with_file_name("auto-cut.log");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !std::fs::read_to_string(&log).unwrap_or_default().contains("RELEASE_EXIT=") {
-        assert!(std::time::Instant::now() < deadline, "release.sh never finished");
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-    assert!(std::fs::read_to_string(&log).unwrap().contains("RELEASE_EXIT=0"));
+    wait_release(&log, 5);
+    poll(&none);
+    assert!(!repo.join("release-ran").exists());
+    std::fs::write(&draft, "notes\n").unwrap();
+    poll(&none);
+    wait_release(&log, 0);
     let ran = std::fs::read_to_string(repo.join("release-ran")).unwrap();
     assert_eq!(ran.trim(), format!("--notes {}", draft.display()));
     poll(&none);
     let notes = open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
-    assert_eq!(notes.matches("AUTO-CUT: started").count(), 1, "one cut per tip");
-    assert_eq!(wakes().len(), 1);
+    assert_eq!(notes.matches("AUTO-CUT: started").count(), 2);
+    assert_eq!(wakes().len(), 2);
 }

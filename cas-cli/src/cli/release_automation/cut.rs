@@ -9,7 +9,7 @@ pub struct PlanArgs {
     #[arg(long)] pub notes: Option<PathBuf>,
     #[arg(long, default_value = "origin/main")] pub base: String,
     /// Bind the leased runner's plan, blockers and first admission time.
-    #[arg(long)] pub admit: bool,
+    #[arg(long, hide = true)] pub admit: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,15 +24,21 @@ pub(super) struct CutPlan {
 }
 
 fn capture<T>(blockers: &mut BTreeMap<String, String>, code: &str, result: Result<T>) -> Option<T> {
-    result.map_err(|error| { blockers.insert(code.into(), error.to_string()); }).ok()
+    result.map_err(|error| {
+        let fix = match code { "NOTES_LINT" => "correct the draft using the pinned train linter", "NO_CODE_PROOF" => "declare and publish the report proof in CAS_RELEASE_INPUTS", "VERSION_RECEIPT" => "choose an unowned version above the integration version", "IDENTITY" => "select the canonical repository and current open train tip", _ => "repair the named input and re-run release plan" };
+        let message = format!("{error}; fix: {fix}");
+        blockers.entry(code.into()).and_modify(|old| { old.push_str("; "); old.push_str(&message); }).or_insert(message);
+    }).ok()
 }
 
 fn python(repo: &Path, tip: &str, script: &str, args: &[&str], context: &str) -> Result<()> {
     use std::io::Write;
     let mut source = tempfile::NamedTempFile::new()?;
     source.write_all(git(repo, &["show", &format!("{tip}:scripts/{script}")])?.as_bytes())?;
-    let output = Command::new("python3").arg("-I").arg(source.path()).args(args)
-        .current_dir(repo).env("CAS_RELEASE_CONTEXT_JSON", context).output()?;
+    let mut command = Command::new("python3");
+    command.arg("-I").arg(source.path()).args(args).current_dir(repo).env("CAS_RELEASE_CONTEXT_JSON", context);
+    let timeout = std::time::Duration::from_secs(5);
+    let output = crate::bounded_process::run_command(&mut command, crate::bounded_process::Deadline::after(timeout), timeout).map_err(|error| anyhow::anyhow!("{error:?}"))?;
     ensure!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr).trim());
     Ok(())
 }
@@ -45,7 +51,7 @@ pub(super) fn evaluate(args: &PlanArgs, root: &Path, repo: &Path) -> CutPlan {
         open_task_store(root).and_then(|store| store.get(id)).map_err(Into::into)));
     if let Some(train) = &train {
         capture(&mut blockers, "IDENTITY", (|| {
-            ensure!(crate::mcp::tools::core::task::release_train::is_release_train(train), "expected a release train");
+            ensure!(crate::mcp::tools::core::task::release_train::is_release_train(train) && !train.is_terminal(), "expected an open release train");
             let context = new_context(repo, train)?;
             ensure!(crate::qa_batch::commit(repo, &context.branch).as_deref() == Some(tip.as_str()), "train tip changed; re-plan");
             ensure!(crate::mcp::tools::core::task::repo_context::repo_answers_to(repo, &train.deliverables.work_target.as_ref().context("train target missing")?.repo_selector), "train repository identity differs");
@@ -58,7 +64,12 @@ pub(super) fn evaluate(args: &PlanArgs, root: &Path, repo: &Path) -> CutPlan {
         .unwrap_or_default();
     let previous = capture(&mut blockers, "VERSION_RECEIPT", (|| -> Result<Option<ReleaseContext>> {
         let path = receipt_path(root, &version)?;
-        if !path.exists() { return Ok(None) }
+        if !path.exists() {
+            let manifest = git(repo, &["show", &format!("{}:cas-cli/Cargo.toml", args.base)])?;
+            let base = manifest.lines().find_map(|line| line.strip_prefix("version = \"")).context("integration version missing")?.trim_end_matches('"');
+            ensure!(semver::Version::parse(&version)? > semver::Version::parse(base)?, "release version must advance the integration version");
+            return Ok(None)
+        }
         let value: ReleaseContext = serde_json::from_slice(&fs::read(path)?)?;
         ensure!(train.as_ref().is_some_and(|train| train.id == value.train_id), "version belongs to another train");
         Ok(Some(value))
@@ -103,6 +114,7 @@ pub fn plan(args: &PlanArgs, root: &Path) -> Result<()> {
     if args.admit {
         if let Some(train) = &args.train {
             let path = crate::mcp::tools::core::workflow::release_auto_cut::notes_draft(root, train)?.with_file_name("cut-plan.json");
+            fs::create_dir_all(path.parent().context("cut plan directory")?)?;
             value.cut_started_at = fs::read(&path).ok().and_then(|bytes| serde_json::from_slice::<CutPlan>(&bytes).ok()).and_then(|old| old.cut_started_at);
             if value.blockers.is_empty() {
                 let at = value.cut_started_at.get_or_insert_with(|| chrono::Utc::now().to_rfc3339()).clone();

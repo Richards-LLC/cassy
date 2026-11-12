@@ -100,7 +100,11 @@ test "$(awk '$2 == "online" {n++} END {print n+0}' "$fixture/operator-output")" 
 printf 'PASS one elevation installs four repo runners, hides tokens under tracing, and reports six online\n'
 
 # Run the real installer light path, substituting host/network boundaries only.
-mkdir -p "$fixture/runner"
+mkdir -p "$fixture/runner" "$fixture/repo/ops/systemd"
+cp "$script_dir/install-cassy-actions-runner.sh" "$script_dir/cassy-actions-runner-registration.sh" "$fixture/repo/scripts/"
+for slot in {3..8}; do
+    cp "$script_dir/../ops/systemd/cassy-actions-runner-$slot.service" "$fixture/repo/ops/systemd/"
+done
 cat >"$fixture/runner/config.sh" <<'STUB'
 #!/usr/bin/env bash
 while (($#)); do
@@ -135,9 +139,18 @@ sudo() {
     "$@"
 }
 systemctl() { printf '%s\n' "$*" >>"$TEST_ROOT/unit-calls"; }
+dirname() {
+    # Exercise repository discovery under the deployed CI checkout prefix.
+    if [[ "$1" == "$TEST_ROOT/repo/scripts/install-cassy-actions-runner.sh" ]]; then
+        printf '/var/lib/cassy-actions/runner-3/_work/cassy/cassy/scripts\n'
+    else
+        command dirname "$@"
+    fi
+}
 cd() {
     case "$1" in
-        /var/lib/cassy-actions/runner-*) builtin cd "$TEST_ROOT/runner" ;;
+        /var/lib/cassy-actions/runner-[3-8]) builtin cd "$TEST_ROOT/runner" ;;
+        /var/lib/cassy-actions/runner-3/_work/cassy/cassy/scripts/..) builtin cd "$TEST_ROOT/repo" ;;
         *) builtin cd "$@" ;;
     esac
 }
@@ -145,7 +158,7 @@ STUB
 for slot in {3..8}; do
     if ! BASH_ENV="$fixture/host-boundaries" TEST_ROOT="$fixture" RUNNER_TOKEN=fixture-token \
         RUNNER_SLOT="$slot" RUNNER_REGISTRATION=repo \
-        bash "$script_dir/install-cassy-actions-runner.sh" >"$fixture/light-output" 2>&1; then
+        bash "$fixture/repo/scripts/install-cassy-actions-runner.sh" >"$fixture/light-output" 2>&1; then
         cat "$fixture/light-output" >&2
         exit 1
     fi

@@ -1417,6 +1417,10 @@ invariants:
   CLI-RELEASE-CLOCK:
     statement: Publication receipts and reports share the last recorded delivery merge through each host installation; retries preserve the admitted cut and install times, and missing endpoints never meet the thirty/twenty-minute budgets.
     check: Run test-release-latency-receipt.sh, test-install-on-publish.sh and the release_clock_receipt_row_reaches_report_without_stage_timings and release_tracking_and_installed_notice_are_restart_safe named Rust tests. Record three consecutive real release receipts inside budget before closing the release-flow epic.
+  CLI-RELEASE-EPIC-PROMOTION:
+    statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and exercise auto-cut eligibility, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    bug: {task: cas-e49f}
   CLI-RELEASE-TRAIN-SUCCESSION:
     statement: Publication imports the published tag into each open train in one merge or names one repair; a successor waits for publication and starts at its tag. Retargeting unfinished work also replaces its parent atomically.
     check: Run publication_syncs_all_trains_or_names_one_repair_cas_4845, successor_waits_for_publication_and_uses_tag_cas_4845, staffing_refuses_behind_latest_published_release_cas_4845, dep_add_parent_moves_a_trunk_fallback_onto_a_lane_targeted_epic_cas_6fb6 and retarget_parent_and_receipt_commit_or_roll_back_together_cas_4845; inspect conflict replay deduplication, staffing refusal and receipt-failure rollback. Run scripts/test-release.sh for the cut path after deleting cut-time sync.
@@ -1485,7 +1489,7 @@ journeys:
   entry: {url: 'cli:cas release', trigger: Prepare the release train}
   steps: [Assemble the train with lane impact checks, Resolve exact-SHA shipped deliveries and proof references, Preview member decisions before push and refuse unreviewed included deliveries or zero closable members, Enqueue the release tree for full validation, Read older-release missing-review residuals in the cut receipt, Read the release publication receipt]
   owners: [cas-cli/src/qa_batch.rs, cas-cli/src/qa_batch/release_close.rs, cas-cli/src/qa_batch/release_close_tests.rs, scripts/train-ci.py, scripts/test-train-ci.py, scripts/install-on-publish.sh, scripts/test-install-on-publish.sh, scripts/release-report-post.py, scripts/test-release-report-post.py, cas-cli/src/release_reconcile.rs, crates/cas-store/src/release_reconcile_store.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/release_parent.rs, cas-cli/src/cli/release_automation.rs, cas-cli/src/mcp/tools/core/task/release_train.rs, cas-cli/src/cli/release_notice_failure.rs, cas-cli/src/cli/release_adapters.rs, scripts/release.sh, scripts/release_changelog.py, scripts/test-release-completion.py, cas-cli/src/finding_triage.rs]
-  invariants: [CLI-RELEASE-TRAIN-SUCCESSION, CLI-RELEASE-CLOCK, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
+  invariants: [CLI-RELEASE-EPIC-PROMOTION, CLI-RELEASE-TRAIN-SUCCESSION, CLI-RELEASE-CLOCK, CLI-RELEASE-NOTICE-EXHAUSTION, CLI-RELEASE-INSTALLED-RECONCILER, FACTORY-RELEASE-PORTABLE-LEDGER, FACTORY-FINDING-PRIORITY, FACTORY-RELEASE-CLOSEOUT]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-SPAWN

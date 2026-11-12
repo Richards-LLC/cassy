@@ -366,8 +366,8 @@ admitted() {
     jq -e '.state == "MERGED" or .autoMergeRequest != null or .mergeQueueEntry != null' >/dev/null
 }
 pr_state() {
-    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f branch="$base" -f query='
-query($owner: String!, $name: String!, $number: Int!, $branch: String!) {
+    "$gh_bin" api graphql -F owner="${repo_slug%%/*}" -F name="${repo_slug#*/}" -F number="$pr_number" -f query='
+query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       state autoMergeRequest { enabledAt } mergeQueueEntry { state }

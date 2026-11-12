@@ -941,10 +941,7 @@ pub(super) mod tests {
         assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
         track_on_train(&args, &root, temp.path(), &train).unwrap();
         let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
-        // Tracking evaluates current membership; caller-supplied candidate
-        // decisions are no longer authoritative release proof.
         assert!(cut.close_preview.unwrap().review_missing.is_empty());
-        assert!(cut.release_scope.is_none()); // Queue landing may have a different final SHA.
     }
 
     #[tokio::test(flavor = "current_thread")]

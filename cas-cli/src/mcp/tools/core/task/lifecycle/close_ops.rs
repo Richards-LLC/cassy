@@ -17172,8 +17172,10 @@ fn run_factory_branch_merge_gate_for_delivery(
              call — fix the task's assignee/epic-branch fields and retry."
         )));
     }
+    // One origin read per evaluation: every check below shares it.
+    let mut origin_fetch_attempted = false;
     if task.deliverables.integration_batch.is_some() {
-        fetch_parent_branch_best_effort(repo_path, parent_branch);
+        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
         if let Some(squash) = super::super::integration_batch::landed_batch_squash(
             task, repo_path, parent_branch, attribution.receipt,
         ) {
@@ -17301,7 +17303,9 @@ fn run_factory_branch_merge_gate_for_delivery(
             .map(str::trim)
             .filter(|receipt| is_safe_git_refname(receipt) && git_ref_exists(repo_path, receipt))
     {
-        let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        if !origin_fetch_attempted {
+            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        }
         let origin_parent = format!("origin/{parent_branch}");
         let on_target = |commit: &str| {
             git_commit_is_ancestor(repo_path, commit, parent_branch)
@@ -17395,14 +17399,15 @@ fn run_factory_branch_merge_gate_for_delivery(
     }
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
-    let mut origin_fetch_attempted = false;
     // cas-1cc7: a new target may exist only on origin after a retarget.
     // Unknown local Git state is not the local-epic KnownZero exception.
     let mut stranded = match known_unmerged_factory_commits(repo_path, commit_ish, parent_branch) {
         KnownUnmergedCount::KnownZero => 0,
         KnownUnmergedCount::KnownPositive(count) => count,
         KnownUnmergedCount::Unknown => {
-            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            if !origin_fetch_attempted {
+                origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            }
             match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
                 KnownUnmergedCount::KnownZero if !local_merge => 0,
                 KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
@@ -17419,7 +17424,9 @@ fn run_factory_branch_merge_gate_for_delivery(
         // consult origin before accepting the local zero; otherwise a worker
         // who committed on the primary checkout can merge into local `main`
         // and close successfully while origin/main remains untouched.
-        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        if !origin_fetch_attempted {
+            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+        }
         let local_epic_merge = parent_branch.starts_with("epic/");
         let origin_required =
             !local_merge && !local_epic_merge && origin_remote_configured(repo_path);
@@ -17448,7 +17455,9 @@ fn run_factory_branch_merge_gate_for_delivery(
             // The local parent ref may be stale immediately after the
             // supervisor merges a PR. Refresh before selecting a descendant
             // branch tip that only origin currently proves integrated.
-            let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            if !origin_fetch_attempted {
+                fetch_parent_branch_best_effort(repo_path, parent_branch);
+            }
             let anchor = delivery_content_anchor_at_close(
                 repo_path,
                 recorded_anchor,

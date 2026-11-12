@@ -423,7 +423,7 @@ if "$dry_run"; then
     exit 0
 fi
 # Best-effort measured history; an older installed CLI cannot block a cut.
-for estimate_stage in train_tip_suite merge_queue release_publish; do
+for estimate_stage in merge_queue release_publish; do
     "$cas_bin" ledger estimate pipeline "$estimate_stage" --preview >&2 \
         || say "$estimate_stage ETA unavailable; no measured range"
 done

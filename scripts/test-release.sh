@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
-# Deterministic self-test for scripts/release.sh (and its CHANGELOG helper
-# scripts/release_changelog.py), the one-command release
-# (cas-f95b). A bare repository stands in for origin and a fake gh records
-# every PR call, so nothing here reaches GitHub.
-#
-# Proves: the version is computed from the base branch; the bump, Cargo.lock,
-# CHANGELOG promotion and draft land in one commit on the epic branch; the PR
-# opens with auto-merge; when another release lands first the command merges
-# the base, resolves the release files itself and re-bumps; a conflict outside
-# the release files stops with exit 4; an ejected PR stops the watch with
-# exit 3; a merged PR ends it with exit 0.
+# Deterministic release preparation and leased-owner tests. Bare Git origins
+# exercise versioning, changelog promotion, notes, retry and publication;
+# fake cas/gh boundaries record admission without contacting GitHub.
 set -euo pipefail
 # A git hook (the pre-push fast rows) exports GIT_DIR and friends. A fixture
 # `git init` would then reinitialise the real repository (cas-f95b), so drop
@@ -602,7 +594,7 @@ one_item_hotfix_train() {
         [[ "$(grep -c '^pr merge ' "$tmp/one-hotfix-gh.log")" == 1 ]] &&
         grep -q "^release track --commit $cut --version $version " "$tmp/one-hotfix-cas.log" || return 1
     grep -q "^ledger estimate release v$version$" "$tmp/one-hotfix-cas.log" || return 1
-    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 3 ]] || return 1
+    [[ "$(grep -c '^ledger estimate pipeline ' "$tmp/one-hotfix-cas.log")" == 2 ]] || return 1
     # Stand in only for the external merge queue's landing, then invoke the
     # same publisher as the release workflow against its exact landed SHA.
     git -C "$fixture" switch --quiet main

@@ -1179,6 +1179,7 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
     cas::store::known_repos::ensure_host_schema().unwrap();
     set_test_agent_role(&cas_dir, AgentRole::Worker);
 
+    std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id='gh1006-fixture'\n").unwrap();
     let store = open_task_store(&cas_dir).unwrap();
     let mut parked = cas::types::Task::new("cas-pk06".to_string(), "Parked hub delivery".to_string());
     parked.status = TaskStatus::AwaitingMerge;
@@ -1186,20 +1187,14 @@ async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_10
     parked.deliverables.factory_branch_anchor = Some(parked_tip.clone());
     store.add(&parked).unwrap();
 
-    let service = CasService::new(core.clone(), None);
-    let created = unified_task(
-        &service,
-        serde_json::json!({
-            "action": "create",
-            "risk": "none",
-            "title": "Burn-down fix",
-            "target_repo": repo.to_str().unwrap(),
-            "target_branch": "epic/burn-down",
-            "assignee": "test-agent"
-        }),
-    )
-    .await;
-    let task_id = extract_task_id(&created).unwrap().to_string();
+    let task_id = "cas-aacc".to_string();
+    let mut next = cas::types::Task::new(task_id.clone(), "Burn-down fix".into());
+    next.assignee = Some("test-agent".into());
+    next.risk = vec![cas::types::TaskRisk::None];
+    next.deliverables.work_target = Some(cas::types::WorkTarget {
+        repo_selector: "project:gh1006-fixture".into(), target_branch: "epic/burn-down".into(),
+    });
+    store.add(&next).unwrap();
 
     core
         .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))

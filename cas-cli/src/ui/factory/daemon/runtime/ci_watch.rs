@@ -222,6 +222,7 @@ pub(crate) fn ci_completed_runs(
 
 /// Probe each pending `ci_completed` reminder once; a failed read leaves
 /// the row pending for the next poll.
+// gate[W-50 watchdog]: ci_completed reminder
 pub(crate) fn collect_ci_wakes(
     transport: &impl CiTransport,
     candidates: &[(cas_store::Reminder, CiCompleted)],
@@ -1346,6 +1347,7 @@ pub(crate) fn read_github(
 /// cas-e369: as above, also tracking supervisor-owned epic PRs. An epic PR
 /// that leaves the queue unmerged wakes the supervisor exactly like a parked
 /// delivery does; it has no worker to instruct.
+// gate[W-44 watchdog]: Merge-queue ejection and repair cycle
 pub(crate) fn collect_tracked_merge_queue_ejections(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -1463,6 +1465,7 @@ pub(crate) fn collect_tracked_merge_queue_ejections(
 /// deliberately not used as the discriminator; the required job name is the
 /// stable check identity. Matching the current PR head prevents a stale red
 /// run from waking a worker after a corrective push.
+// gate[W-43 watchdog]: PR-lane failure (pr_lane_failed)
 pub(crate) fn collect_pr_lane_failures(
     transport: &dyn CiTransport,
     deliveries: &[AwaitingMergeDelivery],
@@ -1527,6 +1530,7 @@ fn is_branch_ci_verdict(run: &CiRun) -> bool {
 /// green run resolves an older failure, while a newer red run replaces it.  We
 /// deliberately do this before looking up failed jobs/logs so a historical
 /// backlog is both silent and cheap to scan.
+// gate[W-42 watchdog]: CI red-run watcher
 pub(crate) fn collect_failures(
     transport: &dyn CiTransport,
     watched_branches: &BTreeSet<String>,

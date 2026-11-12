@@ -339,6 +339,80 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue(json.loads(destination.read_text())["uncertain"])
 
+    def test_lane_runs_own_module_tests_before_the_ring_that_selects_them(self):
+        """cas-08c8 shape: a module edit breaks a consumer suite outside it."""
+        self.select("cas-cli/src/alpha.rs")
+        fake = self.root / "fake-cargo"
+        calls = self.root / "output/cargo.calls"
+        fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
+                        'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
+                        '*binary_id*) if [ -n "$BASE_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
+                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
+                        ' if [ -n "$RING_UNPARSED" ]; then echo "Summary [ 0.01s] 2 tests run: 0 passed, 2 failed"; exit 100; fi; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
+                        '*) echo "Summary [ 0.01s] 1 test run: 1 passed" ;; esac\n')
+        fake.chmod(0o755)
+        env = dict(os.environ, CARGO=str(fake), CALLS=str(calls))
+        state, outputs = self.root / "output/lane.json", self.root / "output/github"
+        def phase(name, *extra):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", name, "--base-sha", self.base, "--history", str(self.history),
+                       "--out", str(state), "--github-output", str(outputs), *extra]
+            return subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True)
+        self.assertEqual(phase("plan").returncode, 0)
+        self.assertEqual(phase("own").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual((values["mode"], values["ring-shards"]), ("scoped", "[1]"))
+        own_run = next(line for line in calls.read_text().splitlines() if "nextest run" in line)
+        self.assertIn("test(/^alpha::/)", own_run)
+        self.assertNotIn("binary(beta_test)", own_run)
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual(values["failed"], "true", "a parsed failure waits for base attribution")
+        ring_run = calls.read_text().splitlines()[-1]
+        self.assertIn("--archive-file suite.tar.zst", ring_run)
+        own = json.loads(state.read_text())["split"]["own"]
+        self.assertIn(f"-E {own} ", own_run)
+        self.assertIn(f"and not ({own})", ring_run)
+        self.assertIn("binary(beta_test)", ring_run)
+        self.assertIn("--partition count:1/1", ring_run)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "passes at the base: this delivery broke it")
+        env["BASE_FAILS"] = "1"
+        self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
+        # Verifier repro: an inherited FAIL beside a new TIMEOUT stays red.
+        env["RING_TIMEOUT"] = "1"
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "the new timeout is not inherited")
+        caused = json.loads(state.with_name("ring-attribution.json").read_text())["caused"]
+        self.assertEqual([f["test"] for f in caused], ["beta_test::hangs"])
+        del env["RING_TIMEOUT"]
+        env["RING_UNPARSED"] = "1"
+        self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,
+                            "an unsuccessful outcome with no parsed test line stays red")
+        del env["RING_UNPARSED"], env["BASE_FAILS"]
+        self.select("scripts/release.sh")
+        self.assertEqual(phase("plan").returncode, 0)
+        split = json.loads(state.read_text())["split"]
+        self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
+
+    def test_lane_binds_to_the_recorded_start_base_and_logs_a_fallback(self):
+        self.select("cas-cli/src/alpha.rs")
+        recorded = self.git("rev-parse", "HEAD")
+        self.select("cas-cli/src/gamma.rs")
+        state = self.root / "output/lane.json"
+        def plan_with(ref):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", self.base, "--history", str(self.history),
+                       "--out", str(state), "--recorded-base-ref", ref]
+            self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
+            return json.loads(state.read_text())["plan"]
+        self.git("update-ref", "refs/cas/delivery-base/lane", recorded)
+        bound = plan_with("refs/cas/delivery-base/lane")
+        self.assertEqual((bound["base"], bound["base_source"]), (recorded, "recorded start base"))
+        self.assertEqual(bound["paths"], ["cas-cli/src/gamma.rs"], "the start base excludes work merged before it")
+        unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "unrelated root")
+        self.git("update-ref", "refs/cas/delivery-base/lane", unrelated)
+        fallback = plan_with("refs/cas/delivery-base/lane")
+        self.assertEqual(fallback["base"], self.base)
+        self.assertTrue(fallback["base_source"].startswith("inferred"), fallback["base_source"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -249,6 +249,7 @@ struct Promotion {
 
 mod peer;
 mod automatic;
+pub(crate) mod cycle;
 pub(crate) use peer::{PeerReceiptIngested, TAG as PEER_PREMERGE_TAG, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
@@ -276,6 +277,24 @@ fn is_regenerated_output(path: &str) -> bool {
                 | "cas-cli/src/builtins/codex/agents/task-verifier.toml"
                 | ".codex/agents/task-verifier.toml"
         )
+}
+
+/// cas-0208: generated output a delivery's own patch-id leaves out. A target
+/// move regenerates these, so they never mean the reviewed change moved.
+const OWN_PATCH_EXCLUDED: &[&str] = &[
+    "hub-web/dist",
+    ".claude/CODEMAP.md",
+    "cas-cli/src/builtins/reference-history.json",
+    "cas-cli/src/builtins/codex/agents/task-verifier.toml",
+    ".codex/agents/task-verifier.toml",
+];
+
+/// cas-0208: patch-id of the delivery's own change (`source` over its merge
+/// base with `target`), whitespace-exact with three lines of context and
+/// without generated output. Unchanged target edits elsewhere, even beside a
+/// delivered hunk, leave it equal; any edit to the delivered change does not.
+fn own_patch_id(repo: &Path, source: &str, target: &str) -> Option<String> {
+    crate::qa_pass::change_patch_id_excluding(repo, source, target, OWN_PATCH_EXCLUDED)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String, String> {
@@ -434,7 +453,9 @@ fn refresh_review_target(repo: &Path, target: &str) -> Result<(), String> {
 fn fail(message: impl std::fmt::Display) -> McpError {
     CasCore::error(
         ErrorCode::INVALID_PARAMS,
-        format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        crate::gates::tag("G-104",
+            format!("PRE-MERGE VERIFICATION: {message}. Publication or close is held."),
+        ),
     )
 }
 
@@ -861,12 +882,13 @@ impl Approval {
         }
         let candidate = &self.candidate;
         // A local merge whose push failed is not a landed mapping. With an
-        // origin, only fetched remote history can repair an interrupted write.
+        // origin, only its tracking ref (refreshed by push and merge) can repair.
         let operations = crate::worktree::GitOperations::new(candidate.repository.clone());
-        let target = operations
+        let tracked = format!("refs/remotes/origin/{}", candidate.target_branch);
+        let target = if operations.resolve_commit(&tracked).is_some() { tracked } else { operations
             .fetch_merge_target(&candidate.target_branch)
             .map_err(|error| format!("publication could not be confirmed: {error}"))?
-            .unwrap_or_else(|| candidate.target_branch.clone());
+            .unwrap_or_else(|| candidate.target_branch.clone()) };
         let commits = git(
             &candidate.repository,
             &[
@@ -895,9 +917,9 @@ impl Approval {
                 verdict.id == self.verdict_id && verdict.status == VerificationStatus::Approved
             })
         {
-            return Err("the exact candidate approval is no longer current".into());
+            return Err(crate::gates::tag("G-104", "the exact candidate approval is no longer current"));
         }
-        self.candidate.validate(root, task)
+        self.candidate.validate(root, task).map_err(|error| crate::gates::tag("G-104", error))
     }
 
     /// Reconciled delivery can close on its original mapping after other
@@ -906,10 +928,7 @@ impl Approval {
         &self,
         operations: &crate::worktree::GitOperations,
     ) -> Result<Option<(String, String)>, String> {
-        if !self.reconcile_promotion()? {
-            return Ok(None);
-        }
-        let record = self.promotion()?.ok_or("published mapping missing")?;
+        // One origin read, before reconciliation reads its tracking ref.
         let target = operations
             .fetch_merge_target(&self.candidate.target_branch)
             .map_err(|error| error.to_string())?
@@ -917,6 +936,10 @@ impl Approval {
                 &self.candidate.repository,
                 &["rev-parse", &self.candidate.target_branch],
             )?);
+        if !self.reconcile_promotion()? {
+            return Ok(None);
+        }
+        let record = self.promotion()?.ok_or("published mapping missing")?;
         git(
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
@@ -1041,6 +1064,7 @@ impl CasCore {
         Ok(())
     }
 
+    // gate[N-15 notice]: Candidate verification handoff or automatic verifier launch
     pub(crate) fn emit_premerge_review_handoff(
         &self,
         task: &Task,
@@ -1153,6 +1177,7 @@ impl CasCore {
 
     /// Return a reusable approval, or dispatch this delivery's existing task
     /// verifier and return a hold. This runs before acquiring the target lock.
+    // gate[G-104 merge-admission as-of]: Pre-merge verification hold on the candidate
     pub(crate) fn prepare_premerge_verification(
         &self,
         task: &Task,
@@ -1207,7 +1232,6 @@ impl CasCore {
         {
             return Ok(None);
         }
-        refresh_review_target(repo, target).map_err(fail)?;
         // A peer machine's committed evidence lands where the verifier reads,
         // before the digest so a restored LEDGER.md is part of this candidate.
         crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task);
@@ -1220,6 +1244,7 @@ impl CasCore {
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         {
+            let receipt = dispatch.receipt().map_err(fail)?;
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -1247,7 +1272,7 @@ impl CasCore {
                 && candidate.source_branch == source
                 && candidate.target_branch == target
                 && (candidate.validate(&self.cas_root, task).is_ok()
-                    || (dispatch.delivery_transaction_id.is_some()
+                    || (receipt.transaction().is_some()
                         && repository_proof::verify_repository_proof(&candidate.proof).is_ok()))
             {
                 if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -1285,7 +1310,7 @@ impl CasCore {
                     task.id, dispatch.id, dispatch.state
                 )));
             }
-            if dispatch.delivery_transaction_id.is_some() {
+            if receipt.transaction().is_some() {
                 return Err(fail(
                     "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
                 ));
@@ -1316,6 +1341,8 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
+        // Only a new review reads origin before the merge lock.
+        refresh_review_target(repo, target).map_err(fail)?;
         let candidate = self.build_verification_candidate(
             task,
             repo,
@@ -1343,12 +1370,13 @@ impl CasCore {
         }
         let requester = self.get_agent_id()?;
         let owner = self.verification_dispatch_owner(&requester)?;
+        // gate[N-12 notice]: Premerge candidate verification dispatch
         let dispatch = cas_store::create_verification_dispatch_bound(
             &self.cas_root,
             &task.id,
             &requester,
             &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?,
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -1366,11 +1394,13 @@ impl CasCore {
         )))
     }
 
-    /// cas-d4b7: the target moved under an approved candidate, so the reviewed
-    /// tree no longer recomputes. When the source tip, plan context and the
-    /// patch the merge adds to the new target are all unchanged, the approval
-    /// is rebound to the new candidate with a receipt and no verifier runs.
-    /// Any mismatch returns None and the caller dispatches a fresh review.
+    /// cas-d4b7, cas-0208: the target moved under an approved candidate, so
+    /// the reviewed tree no longer recomputes ("target changed reviewed
+    /// delivery files" in `tree_on`). When the plan context and the delivery's
+    /// own patch-id are unchanged and the new candidate merges cleanly, the
+    /// approval is rebound to the new candidate with a receipt and no verifier
+    /// runs. A conflict or any change to the delivered patch returns None and
+    /// the caller dispatches a fresh review.
     #[allow(clippy::too_many_arguments)]
     fn rebind_unchanged_patch(
         &self,
@@ -1392,18 +1422,18 @@ impl CasCore {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
-            || dispatch.receipt_id.is_some()
+            || matches!(dispatch.receipt().map_err(fail)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
             || prior.context_digest != digest
             || prior.repository != repository
             || prior.source_branch != source
             || prior.target_branch != target
-            || task.deliverables.factory_branch_anchor.as_deref() != Some(prior.source_sha.as_str())
-            || git(repo, &["rev-parse", source]).ok().as_deref() != Some(prior.source_sha.as_str())
+            || git(repo, &["rev-parse", source]).ok().as_deref()
+                != task.deliverables.factory_branch_anchor.as_deref()
             || review_target(repo, target).ok().as_deref() == Some(prior.target_sha.as_str())
         {
             return Ok(None);
         }
-        let Ok(approved) = delivered_patch_id(repo, &prior.target_sha, &prior.tree) else {
+        let Some(approved) = own_patch_id(repo, &prior.source_sha, &prior.target_sha) else {
             return Ok(None);
         };
         // The fresh-review path enforces this gate; a rebind may not skip it.
@@ -1427,18 +1457,17 @@ impl CasCore {
         if candidate.validate(&self.cas_root, task).is_err() {
             return Ok(None);
         }
-        let Ok(current) = delivered_patch_id(repo, &candidate.target_sha, &candidate.tree) else {
-            return Ok(None);
-        };
-        if current != approved {
+        if own_patch_id(repo, &candidate.source_sha, &candidate.target_sha).as_deref()
+            != Some(approved.as_str())
+        {
             return Ok(None);
         }
-        let matched = format!("full-context patch-id {current}");
         let receipt = format!(
-            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} unchanged, target {} -> {}, delivered {matched} identical.",
+            "VERDICT REBIND: approved verdict {} (dispatch {}) carried to candidate {} with no verifier; source {} -> {}, target {} -> {}, clean merge, delivery's own patch-id {approved} (generated output excluded) identical.",
             verdict.id,
             dispatch.id,
             candidate.proof.head_commit,
+            prior.source_sha,
             candidate.source_sha,
             prior.target_sha,
             candidate.target_sha,
@@ -1451,8 +1480,10 @@ impl CasCore {
             &verdict.id,
             &requester,
             &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &cas_types::VerificationProofBoundary { receipt_id: dispatch.receipt_id.clone(),
+                ..cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()) },
             &receipt,
+            &candidate.source_sha,
         )
         .map_err(fail)?;
         let store = self.open_task_store()?;

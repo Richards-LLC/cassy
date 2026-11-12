@@ -200,6 +200,7 @@ pub(crate) fn codex_native_env_denials(
 
 /// Read the same flattened factory policy used by the CLI configuration.
 /// Invalid configuration is a launch error, never an empty denial policy.
+// gate-audit[input]: Validates serialized worker-resource configuration before executing any policy.
 pub fn load_worker_policy(cas_root: Option<&Path>) -> std::io::Result<FactoryWorkerPolicy> {
     let Some(root) = cas_root else {
         return Ok(Default::default());

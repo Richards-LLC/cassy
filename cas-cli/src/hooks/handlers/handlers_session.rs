@@ -230,6 +230,7 @@ pub fn handle_session_start(
     let context = if suppress_custom_profile_context {
         String::new()
     } else if is_plan_mode {
+        // gate[N-54 notice]: Plan-mode context
         eprintln!("cas: Plan mode detected, building planning context");
         build_plan_context(input, 10, cas_root)?
     } else if config.hooks.as_ref().map(|h| h.ai_context).unwrap_or(false) {
@@ -272,17 +273,21 @@ pub fn handle_session_start(
     // over-budget payload degrades to counts + remediation command instead of
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
+    // gate[N-56 notice]: Messages newer than this handoff
     let context = crate::hooks::handoff_updates::inject(context, cas_root);
     let context = resume_context_delta(cas_root, input, context);
     let mut assembler = SessionContextAssembler::new(context);
+    // gate[N-55 notice]: Supervisor lane handoff
     if !lane_handoff.is_empty() {
         assembler.prepend_protected(lane_handoff);
     }
 
+    // gate[N-57 notice]: Agent role mismatch
     if let Some(warning) = registration_role_warning {
         assembler.append_protected(warning);
     }
 
+    // gate[N-58 notice]: Viktor inbound
     #[cfg(feature = "mcp-proxy")]
     if is_supervisor
         && let Some(inbound) = crate::mcp::viktor_watch::surface_inbound_at_session_start(
@@ -293,6 +298,7 @@ pub fn handle_session_start(
         assembler.prepend_protected(inbound);
     }
 
+    // gate[N-59 notice]: Viktor upstream absent at SessionStart
     #[cfg(feature = "mcp-proxy")]
     if let Some(warning) = crate::mcp::viktor_watch::session_start_warning(cas_root) {
         assembler.prepend_degradable_with_priority(
@@ -308,6 +314,7 @@ pub fn handle_session_start(
     // this at the protected top of supervisor context so it survives the
     // SessionStart preview/budget compaction path.
     if is_supervisor {
+        // gate[N-61 notice]: Factory MCP binary skew
         if let Some(banner) = crate::factory_binary_skew::supervisor_banner(
             cas_root,
             std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
@@ -319,6 +326,7 @@ pub fn handle_session_start(
                 DegradationPriority::Context,
             );
         }
+        // gate[N-62 notice]: Concurrent supervisors (local)
         if let Some(banner) =
             active_peer_supervisor_banner(cas_root, std::env::var("CAS_AGENT_NAME").ok().as_deref())
         {
@@ -331,6 +339,7 @@ pub fn handle_session_start(
         }
     }
 
+    // gate[N-63 notice]: Configured Slack channels
     if let Some(channels) = crate::cli::session_start_channels(cas_root, chrono::Utc::now()) {
         assembler.append_degradable_with_priority(
             "Configured Slack channels",
@@ -344,6 +353,7 @@ pub fn handle_session_start(
     // from the same Cassy Cloud snapshot `cas peers` renders, so a `/clear`
     // never hides a live peer. Supervisors only, bounded by its own deadline;
     // an unreachable cloud is one "unknown" line, never "no peers".
+    // gate[N-64 notice]: Live peer supervisors from Cloud
     if !suppress_custom_profile_context
         && let Some(peers) = crate::cloud::peers_session_start::session_start_peers_for_role(
             agent_role.as_deref(),
@@ -364,6 +374,7 @@ pub fn handle_session_start(
     // says is done: tasks delivered on the default branch, epics whose
     // children all ended, tasks idle for two weeks. Report only; each close
     // goes through the ordinary gates.
+    // gate[N-65 notice]: Backlog hygiene
     if !suppress_custom_profile_context
         && let Some((full, compact)) = crate::backlog_hygiene::session_start_block_for_role(
             agent_role.as_deref(),
@@ -383,6 +394,7 @@ pub fn handle_session_start(
         Path::new(&input.cwd),
         cas_root,
     );
+    // gate[N-66 notice]: Codemap freshness
     if let Some(staleness) =
         crate::hooks::handlers::handlers_events::codemap::evaluate_codemap_at(&docs_measurement)
             .and_then(|evaluation| evaluation.staleness)
@@ -406,6 +418,7 @@ pub fn handle_session_start(
         }
     }
 
+    // gate[N-67 notice]: Project-overview freshness
     {
         match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(
             &docs_measurement,
@@ -432,6 +445,7 @@ pub fn handle_session_start(
     // comments above). The banner is not severity-ranked against those
     // modules, so it sits below them in the supervisor's initial view.
     if is_supervisor {
+        // gate[N-68 notice]: Prior-factory WIP
         if let Some(banner) =
             crate::hooks::handlers::session_hygiene::build_session_start_wip_banner_sized(cas_root)
         {
@@ -448,6 +462,7 @@ pub fn handle_session_start(
     // Surfaced to every role, not just supervisors — the stale files are the
     // worker's own operating guidance, and the `cas update --sync` warning that
     // reports the skip is invisible to unattended/scripted syncs.
+    // gate[N-69 notice]: Stale builtin references
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_stale_reference_banner_sized(
             cas_root,
@@ -462,6 +477,7 @@ pub fn handle_session_start(
     }
 
     // cas-3199: a managed-file conflict skips the project's whole skill sync.
+    // gate[N-70 notice]: Skill sync blocked
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_managed_conflict_banner_sized(
             cas_root,
@@ -485,6 +501,7 @@ pub fn handle_session_start(
         cas_root,
         &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
     );
+    // gate[N-71 notice]: Unfiled reports
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_unfiled_reports_banner_sized(
             cas_root,
@@ -502,6 +519,7 @@ pub fn handle_session_start(
     // (2) No issue target configured in a project that stages requests. Never
     // suggests a value — guessing from `origin` routes Cassy bugs into a
     // consumer's own tracker (filing-cas-bugs.md).
+    // gate[N-72 notice]: Issue repository target unset
     if let Some(banner) =
         crate::hooks::handlers::session_hygiene::build_session_start_issues_target_banner_sized(
             cas_root, &config,
@@ -521,6 +539,7 @@ pub fn handle_session_start(
     // as an EADDRINUSE failure with no hint that the squatter is Cassy's own.
     // Visibility only: this banner never signals anything.
     if is_supervisor {
+        // gate[N-73 notice]: Orphaned factory resources
         if let Some(banner) =
             crate::hooks::handlers::session_hygiene::build_session_start_orphan_banner_sized(
                 cas_root,
@@ -541,6 +560,7 @@ pub fn handle_session_start(
     // cache/query/parse failures, and a hard subprocess timeout all emit
     // nothing and cannot fail SessionStart.
     if is_supervisor {
+        // gate[N-74 notice]: GitHub issue triage
         if let Some(banner) = crate::hooks::handlers::issue_triage::build_session_start_banner_sized(
             cas_root, &config,
         ) {
@@ -558,6 +578,7 @@ pub fn handle_session_start(
     // .cas/config.toml *and* at least one platform reports a `Stale` ID.
     // Appended last so it sits below codemap / project-overview / WIP.
     // Reuses the already-loaded `config` from earlier in this handler.
+    // gate[N-75 notice]: Integrations freshness
     if let Some(banner) = build_integrations_session_start_banner(cas_root, &config) {
         assembler.append_protected(banner);
     }
@@ -566,6 +587,7 @@ pub fn handle_session_start(
     // near the end with other runtime banners so immutable role guidance stays
     // budget-stable, while worker worktree assertions can still prepend above
     // it when they detect a more urgent safety issue.
+    // gate[N-76 notice]: Large-artifact staging
     if let Some(banner) = build_large_artifact_staging_banner(&config) {
         assembler.append_protected(banner);
     }
@@ -578,6 +600,7 @@ pub fn handle_session_start(
         .unwrap_or_else(|_| {
             crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Codex
         });
+    // gate[N-77 notice]: Codex finish hint
     if is_codex {
         assembler.append_protected(
             "Codex skills: if the `finish` skill is installed, type `$finish` or say `finish` to wrap up the session.".to_string(),
@@ -599,9 +622,11 @@ pub fn handle_session_start(
     // fall through silently. Best-effort — git failures or absent env vars
     // are treated as "no mismatch".
     // ========================================================================
+    // gate[N-78 notice]: Worker worktree alert
     let context = build_worker_worktree_assertion(&input.cwd, context);
 
     // Operator project holds lead every startup, including resume deltas.
+    // gate[N-79 notice]: Project hold
     let context = cas_store::project_hold::notice(cas_root)
         .map(|hold| format!("## Project hold\n{hold}\n\n{context}"))
         .unwrap_or(context);
@@ -732,6 +757,7 @@ fn resume_context_delta(cas_root: &Path, input: &HookInput, context: String) -> 
         .filter(|(_, fingerprint)| !previous.contains(fingerprint))
         .map(|(section, _)| *section)
         .collect();
+    // gate[N-80 notice]: Resume unchanged
     if changed.is_empty() {
         "Cassy resume: base context unchanged; previously delivered guidance still applies.\n"
             .into()

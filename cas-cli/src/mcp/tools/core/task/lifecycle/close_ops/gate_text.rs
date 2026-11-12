@@ -309,7 +309,7 @@ pub(crate) fn worker_pending_dispatch(task_id: &str, dispatch_id: &str, owner: &
 
 /// `task action=start` on a clean parked delivery.
 pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> String {
-    format!(
+    crate::gates::tag("G-05", format!(
         "Cannot start a task that is awaiting merge. The worker work is \
          already complete; wait for the supervisor to merge the factory branch; \
          the merge verdict closes the task. If review fails — the supervisor \
@@ -321,7 +321,7 @@ pub(crate) fn awaiting_merge_start_refusal(task_id: &str, tool_prefix: &str) -> 
          merge-queue conflict dequeue or a moved target), its assigned worker \
          can start task {task_id} to resolve it; Cassy measures the local target and \
          origin/<target>, so `git fetch origin <target>` first if that ref is stale."
-    )
+    ))
 }
 
 /// cas-5597: the one completion signal a worker sends (or does not).
@@ -336,6 +336,7 @@ pub(crate) fn waiting_for_release_verdict(task_id: &str, tip: &str, supervisor_p
 
 /// VERIFICATION REQUIRED as a factory worker sees it: the gate line with its
 /// handoff, and nothing addressed to the verifier or the supervisor.
+// gate[N-17 notice]: VERIFICATION REQUIRED gate text
 pub(crate) fn worker_verification_required(task_id: &str, gate_line: &str) -> String {
     format!("⚠️ VERIFICATION REQUIRED\n\nTask {task_id} requires verification before closing.\n\n{gate_line}")
 }

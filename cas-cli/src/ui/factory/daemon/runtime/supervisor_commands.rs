@@ -630,6 +630,11 @@ impl FactoryDaemon {
                 if let Some(Ok(Some(detail))) = record.hook.take().map(|job| futures_util::FutureExt::now_or_never(job)).flatten() {
                     record.receipt.phase = Phase::Observed;
                     record.receipt.detail = detail;
+                    if record.receipt.command == Command::ReloadCassy {
+                        crate::quality_ledger::intervention(self.app.cas_dir(), cas_store::InterventionKind::McpReconnect,
+                            format!("commander_mcp|{}|{}", record.receipt.device_id, record.receipt.client_ref),
+                            None, Some(&record.receipt.device_id), None);
+                    }
                 }
             } else if record.hook.is_none() && matches!(record.receipt.command, Command::Compact | Command::Clear | Command::Finish | Command::ReloadCassy) {
                 let root = self.app.cas_dir().to_path_buf();

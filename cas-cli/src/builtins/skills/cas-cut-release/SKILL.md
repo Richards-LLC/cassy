@@ -28,12 +28,18 @@ them against `cas-playwright-debug`'s healer guard before adopting any changes.
    `docs/release-notes/RUBRIC.md` and `docs/RELEASE_SLACK_RUBRIC.md`, or keep
    it anywhere and pass `--notes <file>` (`{{VERSION}}` becomes the version).
    Declare the train's constituent epics in the draft's `CAS_RELEASE_INPUTS`, and pass the audit's printed included task IDs to `batch_receipt`.
-   Commit the regenerated `.claude/CODEMAP.md` and the previous release's
-   report there too; no docs PR follows. Fixture versions use `9.99.x`.
+   Commit the regenerated `.claude/CODEMAP.md` (`/codemap`) and the previous
+   release's report there too; no docs PR follows. The command refuses while a
+   file added or removed since the map's last commit is unmapped. Deliveries never edit
+   CODEMAP or PRODUCT_OVERVIEW: the command folds the `docs/qa/bug-families/`
+   and `docs/product-overview.d/` fragments into the registry and overview
+   (`scripts/doc-fragments.py compile`); refresh the overview with
+   project-overview when its fragments call for it. Fixture versions use `9.99.x`.
    The train's ready-to-cut notice prompts this preparation after review.
    Auto-cut: when the exact train tip is green with changelog fragments,
    Cassy freezes the train and runs `scripts/release.sh --notes` itself with
-   the draft at the `release-notes.md` path its wake names. Write that draft;
+   the draft at the `release-notes.md` path its wake names. Write that draft
+   and commit a regenerated CODEMAP;
    Cassy never writes or posts notes. The operator pauses auto-cut in Commander.
 2. Read the train CI receipt and complete log artifact; fix every red first.
    The existing CI suite at the newest train tip replaces a local pre-cut full

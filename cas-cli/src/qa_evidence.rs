@@ -2918,6 +2918,7 @@ pub fn run_close_gate(
 
 /// Read historical evidence from `ctx`, but direct replacement evidence to
 /// the current project namespace. The problem retains the historical path.
+// gate-audit[forward]: G-53 Computes the close QA evidence rejection; accepting close producer tags the result.
 pub fn run_close_gate_with_write_dir(
     ctx: &EvidenceContext<'_>,
     tier: EvidenceTier,

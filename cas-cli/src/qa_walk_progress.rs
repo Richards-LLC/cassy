@@ -119,6 +119,7 @@ pub(crate) fn read(
                 .display()
                 .to_string();
             match progress(&file, now) {
+                // gate[W-10 watchdog]: QA walk output flat (qa-flat)
                 Some((stamp, age)) if age >= config.factory().stall_threshold_secs as i64 => {
                     let advisory = Advisory {
                         key: format!("qa-flat:{}:{name}:{stamp}", task.id),
@@ -173,6 +174,7 @@ pub(crate) fn read(
                     | crate::mcp::tools::service::worker_liveness::Liveness::AwaitingFirstPrompt)
             })
     }));
+    // gate[W-11 watchdog]: QA walk critical-path split hint (qa-split)
     if let ([task], Some(idle)) = (scoped.as_slice(), idle) {
         report.advisories.push(Advisory {
             key: format!("qa-split:{}:{}", task.id, idle.name),

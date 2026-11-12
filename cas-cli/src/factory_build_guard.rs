@@ -518,6 +518,9 @@ pub(crate) fn inspect_capacity(cas_root: &Path, config: &FactoryConfig) -> Build
     inspect_task(cas_root, config, 1, None, false)
 }
 
+// gate-audit[build_guard_disabled_override]: bypass G-135 The operator disables soft capacity admission; successful spawn/build producer emits the tag after admission.
+// gate-audit[reclaim]: selector Controls capacity measurement cleanup, never authorizes an over-capacity build.
+// gate-audit[accepted_by]: factory_spawn_workers_in_with_name_source
 fn inspect_task(
     cas_root: &Path,
     config: &FactoryConfig,
@@ -606,6 +609,7 @@ fn macos_available_memory() -> Option<u64> {
     (u64::from(stats.free_count) + u64::from(stats.inactive_count)).checked_mul(page_size)
 }
 
+// gate-audit[forward]: Returns the operator env switch; successful spawn or capped-build admission emits G-135. Hard OS builder slots remain mandatory.
 fn build_guard_disabled_override() -> bool {
     std::env::var("CAS_FACTORY_BUILD_GUARD")
         .ok()

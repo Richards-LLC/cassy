@@ -169,6 +169,7 @@ fn supervisor_senders(
 
 /// cas-bf890: the one digest row that stands for `notices`. It names a few by
 /// id and summary and says how to read any of them whole.
+// gate[N-83 notice]: Inbox digest notices
 fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
     if notices.is_empty() {
         return None;
@@ -320,6 +321,7 @@ pub(crate) struct CurrentTurn<'a> {
 /// body is the turn's own prompt. Without a known turn only unmarked rows are
 /// eligible. Rendered bodies spend `budget` (cas-1f0c). Keep the completion
 /// result so an overflow or failed drain is retried at the next boundary.
+// gate[N-90 notice]: Inbox tool-boundary block
 pub(crate) fn surface_factory_inbox_after_tool_result(
     cas_root: Option<&Path>,
     input: &HookInput,
@@ -430,6 +432,7 @@ enum Surfacing<'a> {
 /// direct rows this agent read with `inbox_poll` before the turn began and
 /// never acknowledged. A turn-start hook already does this for typed turns;
 /// a teammate-message turn has none, and new mail need not have arrived.
+// gate[N-92 notice]: Polled-unacked repeat
 pub(crate) fn surface_polled_unacked(
     cas_root: &Path,
     input: &HookInput,
@@ -791,6 +794,7 @@ fn render_block(
 /// cas-062b: Commander messages the operator sent before typing this turn's
 /// pane prompt. The hook can only follow the typed prompt, so it says which
 /// came first; without this the typed prompt was answered first.
+// gate[N-88 notice]: Inbox send-order note
 fn operator_sent_first_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;
@@ -819,6 +823,7 @@ fn polled_unacked_note(ids: &[i64]) -> Option<String> {
 /// cas-1f0c: a row the wake named whose assignment no longer applies. Its
 /// receipt is written, so without this the wake's promise of a body would end
 /// in silence.
+// gate[N-85 notice]: Inbox withdrawn note
 fn withdrawn_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;
@@ -833,6 +838,7 @@ fn withdrawn_note(ids: &[i64]) -> Option<String> {
 /// cas-1f0c: named rows whose body the daemon's time fallback claimed to
 /// send in full as a Teams copy. A crash between claim and write leaves no
 /// copy, so the note also names `inbox_poll`.
+// gate[N-87 notice]: Inbox sent-in-full note
 fn sent_in_full_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;
@@ -845,6 +851,7 @@ fn sent_in_full_note(ids: &[i64]) -> Option<String> {
 }
 
 /// cas-1f0c: rows left unread because their bodies did not fit this block.
+// gate[N-86 notice]: Inbox not-shown-here note and pending list
 fn over_budget_note(
     rows: &[(i64, usize)],
     queue: &dyn cas_store::PromptQueueStore,
@@ -1057,6 +1064,7 @@ fn already_surfaced_envelopes(
         .collect()
 }
 
+// gate[N-84 notice]: Inbox already-shown note
 fn already_shown_note(ids: &[i64]) -> Option<String> {
     if ids.is_empty() {
         return None;

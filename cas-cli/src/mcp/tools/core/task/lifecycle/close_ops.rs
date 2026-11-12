@@ -2,7 +2,6 @@ use crate::mcp::tools::core::task::audit;
 pub(crate) mod gate_text;
 mod loaded_proof;
 mod registry_upkeep;
-mod docs_upkeep;
 mod report_quality;
 mod fast_lane_gate;
 mod proof_claims;
@@ -97,6 +96,7 @@ enum CloseVerificationDispatch {
     AlreadyActive(cas_types::VerificationDispatch),
 }
 
+// gate[N-10 notice]: Close-path verification dispatch creation
 fn request_close_verification_dispatch(
     cas_root: &std::path::Path,
     task_id: &str,
@@ -122,8 +122,7 @@ fn request_close_verification_dispatch(
         // An existing cycle keeps its requester, owner and proof immutable.
         // Matching proof may still acquire this assignee's close declaration.
         let matching_proof = dispatch.owner_agent_id == owner_id
-            && dispatch.receipt_id == boundary.receipt_id
-            && dispatch.delivery_transaction_id == boundary.delivery_transaction_id
+            && dispatch.receipt().map_err(cas_store::StoreError::Parse)? == boundary.receipt().map_err(cas_store::StoreError::Parse)?
             && dispatch.repository == boundary.repository;
         if let Some((reason, expected_assignee)) = no_delivery_intent.filter(|_| matching_proof) {
             let (encoded, assignee): (String, Option<String>) = tx.query_row(
@@ -162,6 +161,7 @@ mod verification_dispatch_tests {
     /// read. Exercise that same production dispatcher deterministically.
     #[test]
     fn concurrent_supervisor_dispatch_returns_pending_to_worker_cas_3792() {
+        for cycle_bound in [false,true] {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");
@@ -170,7 +170,7 @@ mod verification_dispatch_tests {
         let mut task = Task::new("cas-racing-close".into(), "No delivery".into());
         task.assignee = Some("worker".into());
         tasks.add(&task).unwrap();
-        let boundary = cas_types::VerificationProofBoundary::task();
+        let boundary = cas_types::VerificationProofBoundary { receipt_id: cycle_bound.then(|| "dc-close".to_string()), ..cas_types::VerificationProofBoundary::task() };
         let original = cas_store::create_verification_dispatch_bound(
             &root,
             "cas-racing-close",
@@ -195,7 +195,7 @@ mod verification_dispatch_tests {
             }
             let before = cas_store::get_verification_dispatch(&root, &original.id).unwrap();
             let different_boundary = cas_types::VerificationProofBoundary::delivery(
-                "receipt-for-other-proof".into(),
+                "wcr-other-proof".into(),
                 "transaction-for-other-proof".into(),
             );
             for (requester, owner, requested) in [
@@ -239,6 +239,7 @@ mod verification_dispatch_tests {
                     before
                 );
             }
+        }
         }
     }
 }
@@ -369,6 +370,8 @@ pub(crate) fn delivery_audit_text_rejection(value: &str) -> Option<&'static str>
     None
 }
 
+// gate[G-32 park integrity]: No-code intent and proof (code proof required, code intent violated, inline note rejected)
+// gate-audit[has_reviewable_code]: input Measured delivery content decides whether the no-code declaration is truthful; not an override.
 fn no_code_close_proof<'a>(
     task_id: &str,
     execution_note: Option<&str>,
@@ -379,22 +382,22 @@ fn no_code_close_proof<'a>(
         return Ok(None);
     }
     let proof_reference = external_ref.map(str::trim).filter(|value| !value.is_empty()).ok_or_else(|| {
-        format!(
+        crate::gates::tag("G-32", format!(
             "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but no external_ref was supplied inline or persisted on the task. Retry close with `{caller}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch.",
             caller = crate::mcp::tools::core::guidance::caller_prefix(),
-        )
+        ))
     })?;
     if let Some(reason) = delivery_audit_text_rejection(proof_reference) {
-        return Err(format!(
+        return Err(crate::gates::tag("G-32", format!(
             "⚠️ NO-CODE PROOF REQUIRED\n\nTask {task_id} declares execution_note=no-code, but the supplied external_ref {reason}. Retry with `{caller}task action=close id={task_id} execution_note=no-code external_ref=<portable-reference>` so the paired metadata is validated before verification dispatch.",
             caller = crate::mcp::tools::core::guidance::caller_prefix(),
-        ));
+        )));
     }
     if has_reviewable_code {
-        return Err(format!(
+        return Err(crate::gates::tag("G-32", format!(
             "⚠️ NO-CODE INTENT VIOLATED\n\nTask {task_id} declares execution_note=no-code, but its task-attributed branch history contains reviewable code changes. Ask a live registered supervisor to run `{}` to clear the methodology and invalidate the old proof cycle, then complete the ordinary review/merge gates; no-code cannot be used to bypass code delivery proof.",
             super::proof_scope::methodology_recovery_command(task_id, ""),
-        ));
+        )));
     }
     Ok(Some(proof_reference))
 }
@@ -432,22 +435,23 @@ fn prepare_no_code_close_metadata(
 ) -> Result<(), String> {
     let validated_inline = match inline_execution_note {
         Some(raw) => {
-            let validated = crate::mcp::tools::types::validate_execution_note(Some(raw))?;
+            let validated = crate::mcp::tools::types::validate_execution_note(Some(raw))
+                .map_err(|message| crate::gates::tag("G-32", message))?;
             if validated.as_deref() != Some("no-code") {
-                return Err(format!(
+                return Err(crate::gates::tag("G-32", format!(
                     "INLINE EXECUTION NOTE REJECTED: task close accepts only execution_note=no-code, paired with a portable external_ref. Record other execution methodologies with `{}task action=update id={} execution_note=<methodology>` before requesting verification.",
                     crate::mcp::tools::core::guidance::caller_prefix(),
                     task.id,
-                ));
+                )));
             }
             if let Some(stored) = task.execution_note.as_deref()
                 && stored != "no-code"
             {
-                return Err(format!(
+                return Err(crate::gates::tag("G-32", format!(
                     "INLINE NO-CODE INTENT REJECTED: Task {} already records execution_note={stored}. task close may set no-code only when execution_note is empty or already no-code; it cannot replace a reviewed methodology. Ask a live registered supervisor to run `{}` to correct it and invalidate the old proof cycle, then retry close with portable proof; delivered code still requires ordinary delivery gates.",
                     task.id,
                     super::proof_scope::methodology_recovery_command(&task.id, "no-code"),
-                ));
+                )));
             }
             validated
         }
@@ -740,6 +744,7 @@ impl TaskCloseDisposition {
     }
 }
 
+// gate-audit[forward]: G-26 Pure renderer; gate-close authority validation tags its refusal.
 pub(super) fn gate_supervisor_authority_error(
     operation: &str,
     error: SupervisorAuthorityError,
@@ -2875,27 +2880,29 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     build_proofs: BuildProofs,
     scoped_proof_cache: &mut ScopedProofTargetCache,
 ) -> Result<(), String> {
+    // gate[G-76 park as-of]: Loaded proof for risk=concurrency
     if task.risk.contains(&TaskRisk::Concurrency)
         && build_proofs != BuildProofs::DeferredToAssembly
         && !has_loaded_proof_note(&task.notes)
     {
         let missing = loaded_proof_missing_evidence(&task.notes);
-        return Err(format!(
+        return Err(crate::gates::tag("G-76", format!(
             "TASK CLOSE REJECTED: task {} declares risk=concurrency but its loaded_proof receipt is incomplete (missing evidence: {missing}). Add one with action=notes note_type=loaded_proof proving the whole or explicit non-Rust target under -j16 for at least 3 loops with a passing result, then retry close.",
             task.id,
-        ));
+        )));
     }
+    // The same G-61 scope rule also protects closes without a factory park.
     if task.risk.contains(&TaskRisk::BlastRadius) {
         let (uncovered, notice) =
             uncovered_blast_radius_scope(proof_repo, changed_paths, &task.proof_targets);
         if !uncovered.is_empty() {
-            return Err(format!(
+            return Err(crate::gates::tag("G-61", format!(
                 "TASK CLOSE REJECTED: task {} declares blast-radius proof narrower than its delivery diff; uncovered source modules: {}{}. {}",
                 task.id,
                 uncovered.join(", "),
                 notice,
                 proof_targets_scope_fix_command(task, &uncovered),
-            ));
+            )));
         }
     }
     // cas-4cbb: a factory worker never builds, so its close carries no
@@ -2907,6 +2914,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     // cas-90e8 (L3 P2): platform proof needs a macOS cargo/xcodebuild run a
     // factory worker is forbidden to make, so a worker close defers it to
     // assembly with the build proofs; every other close still owes it here.
+    // gate[G-78 park as-of]: Platform proof and platform-risk plausibility
     if task.risk.contains(&TaskRisk::Platform) && !has_platform_proof_note(&task.notes) {
         let missing = platform_proof_missing_evidence(&task.notes).join(", ");
         let caller = crate::mcp::tools::core::guidance::caller_prefix();
@@ -2924,12 +2932,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
         let implausible = platform_risk_implausibility(task, changed_paths)
             .map(|warning| format!("{warning}\n\n"))
             .unwrap_or_default();
-        return Err(format!(
+        return Err(crate::gates::tag("G-78", format!(
             "{implausible}TASK CLOSE REJECTED: task {id} declares risk=platform but its platform_proof receipt is incomplete (missing evidence: {missing}). \
              Add one with `{caller}task action=notes id={id} note_type=platform_proof notes=\"...\"` containing macOS, a platform command, and a passing result, \
              then retry `{caller}task action=close id={id}`. {correction}",
             id = task.id,
-        ));
+        )));
     }
     // cas-fe831: reuse the queue's full-suite proof only after checking
     // declared risks. A verified tree receipt is scoped-test evidence, never
@@ -2937,13 +2945,16 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
     if build_proofs == BuildProofs::ScopedByMergeQueue {
         return Ok(());
     }
+    // gate[G-79 park as-of]: Scoped integration-test proof (targets, base, surface)
     let required_targets = required_scoped_proof_targets(
         proof_repo,
         target_repo,
         changed_paths,
         scoped_proof_cache,
     )
-    .map_err(|unresolved| format!("TASK CLOSE REJECTED: task {}: {unresolved}", task.id))?;
+    .map_err(|unresolved| {
+        crate::gates::tag("G-79", format!("TASK CLOSE REJECTED: task {}: {unresolved}", task.id))
+    })?;
     if !required_targets.is_empty() {
         if let Some(expected_base) = expected_base {
             let actual_base = scoped_proof_note_base(&task.notes);
@@ -2963,7 +2974,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                     .as_deref()
                     .is_some_and(|base| scoped_proof_base_matches(proof_repo, base, expected_base))
             {
-                return Err(format!(
+                return Err(crate::gates::tag("G-79", format!(
                     "TASK CLOSE REJECTED: task {} scoped proof receipt has base {:?}, but this delivery must be proven against SCOPED_PROOF_BASE={expected_base} — the first parent of its earliest commit, which is the diff the required targets were derived from. Run `{}` and add the resulting passing receipt to a progress note.",
                     task.id,
                     actual_base.as_deref(),
@@ -2973,12 +2984,12 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                         target_repo,
                         Some(expected_base),
                     ),
-                ));
+                )));
             }
         }
         let missing = scoped_proof_note_covers(&task.notes, &required_targets);
         if !missing.is_empty() {
-            return Err(format!(
+            return Err(crate::gates::tag("G-79", format!(
                 "TASK CLOSE REJECTED: task {} changed a module with integration-test proof targets that were not run or recorded as passing; missing targets: {}. Run `{}` and add its `SCOPED_PROOF: targets=<complete target set> result=PASS base=<sha> head=<sha>` line (or, when that exceeds the note limit, the short `SCOPED_PROOF_RECEIPT: id=… path=…` line it prints) to a progress note before retrying close. If the scoped command cannot run, a registered supervisor may record an equivalent full `cargo nextest run -p cas` receipt with its durable log path in the note; every real required target must be covered.",
                 task.id,
                 missing.join(", "),
@@ -2988,7 +2999,7 @@ fn validate_risk_close_proofs_with_base_and_target_and_cache(
                     target_repo,
                     expected_base,
                 ),
-            ));
+            )));
         }
     }
     Ok(())
@@ -3590,7 +3601,7 @@ mod risk_proof_tests {
     }
 
     #[test]
-    fn blast_radius_close_guides_supervisor_proof_target_widening() {
+    fn focused_proof_close_guides_supervisor_scope_widening() {
         let mut task = Task::new("cas-d86d-guidance".into(), "proof guidance".into());
         task.risk = vec![TaskRisk::BlastRadius];
         task.proof_targets = vec!["lifecycle".into()];
@@ -4871,6 +4882,7 @@ mod risk_proof_tests {
     }
 }
 
+// gate-audit[negative_result]: input Validates declaration/receipt completeness before measuring a negative result.
 fn negative_result_missing_receipts(
     req: &TaskCloseRequest,
     negative_result: &NegativeResultCloseRequest,
@@ -4932,6 +4944,8 @@ fn validate_negative_result_reference(reference: &str) -> Result<(), TaskLifecyc
     Ok(())
 }
 
+// gate[G-88 close-after-merge integrity]: request_changes role gate (supervisor only)
+// gate-audit[is_supervisor]: input Derived authenticated role enforcing G-128, not an optional bypass.
 fn request_changes_role_gate(
     is_supervisor: bool,
     task_id: &str,
@@ -4940,13 +4954,16 @@ fn request_changes_role_gate(
         Ok(())
     } else {
         Err(TaskLifecycleGateError::SupervisorOnly {
-            message: format!(
+            message: crate::gates::tag("G-88", format!(
                 "task request_changes rejected: only supervisors may decline an AwaitingMerge delivery. Task {task_id} stays parked; a worker cannot reject its own work to escape the delivery proof boundary."
-            ),
+            )),
         })
     }
 }
 
+// gate[G-22 park integrity]: supervisor_override authority and non-empty reason
+// gate-audit[is_supervisor]: input Validates that a requested waiver has live supervisor authority.
+// gate-audit[requested]: input Validates waiver authority/reason; the final close separately records each check actually waived.
 pub(crate) fn validate_supervisor_override(
     requested: bool,
     reason: Option<&str>,
@@ -4956,20 +4973,18 @@ pub(crate) fn validate_supervisor_override(
         return Ok(());
     }
     if !is_supervisor {
-        return Err(
-            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor."
-                .to_string(),
-        );
+        return Err(crate::gates::tag("G-22",
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true is only available to a registered supervisor.",
+        ));
     }
     if reason
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_none()
     {
-        return Err(
-            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty close reason."
-                .to_string(),
-        );
+        return Err(crate::gates::tag("G-22",
+            "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty close reason.",
+        ));
     }
     Ok(())
 }
@@ -5539,6 +5554,8 @@ impl CasCore {
         Ok(caller)
     }
 
+    // gate[G-26 park as-of]: Gate task close needs a recorded DECISION note
+    // gate-audit[forward]: G-26 Typed validation error; close_task_with_dispositions_inner emits its code.
     fn validate_gate_decision_close(
         &self,
         task: &cas_types::Task,
@@ -5561,6 +5578,8 @@ impl CasCore {
         Ok(())
     }
 
+    // gate[G-24 park integrity]: Non-integration close authority and receipt fields (evidence_only, negative_result)
+    // gate-audit[forward]: G-24 Typed non-integration receipt validation; close producer tags the refusal.
     fn validate_nonintegration_close(
         &self,
         task_id: &str,
@@ -5647,6 +5666,8 @@ impl CasCore {
         }))
     }
 
+    // gate[G-27 park integrity]: External verification receipt rejected
+    // gate-audit[forward]: G-27 External proof validation; close producer tags the refusal.
     fn validate_external_verification_close(
         &self,
         task: &cas_types::Task,
@@ -5785,9 +5806,10 @@ impl CasCore {
         }))
     }
 
+    // gate[G-87 close-after-merge integrity]: Task cancel supervisor authority (TASK CANCEL REJECTED)
     fn cancellation_supervisor(&self) -> Result<cas_types::Agent, String> {
         self.resolve_live_supervisor_authority()
-            .map_err(|error| match error {
+            .map_err(|error| crate::gates::tag("G-87", match error {
                 SupervisorAuthorityError::Identity(error) => format!(
                     "TASK CANCEL REJECTED: cancel requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                 ),
@@ -5801,9 +5823,10 @@ impl CasCore {
                     "TASK CANCEL REJECTED: only a live registered supervisor may cancel or reopen cancelled work. Caller `{}` has role {}.",
                     caller.name, caller.role
                 ),
-            })
+            }))
     }
 
+    // gate[G-28 park integrity]: Delivery receipt rejected (worker completion receipt lease, identity, shape, tip, base)
     async fn submit_worker_completion_receipt(
         &self,
         raw_receipt: &str,
@@ -5817,24 +5840,27 @@ impl CasCore {
         let caller_id = match self.get_registered_agent_id_read_only() {
             Ok(id) => id,
             Err(_) => {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: an already registered authenticated Cassy worker holding the exact active task lease is required.",
-                ));
+                )));
             }
         };
         let agent_store = self.open_agent_store()?;
         let caller = match agent_store.get(&caller_id) {
             Ok(caller) => caller,
             Err(_) => {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: authenticated session is not an active registered Cassy worker holding the exact active task lease.",
-                ));
+                )));
             }
         };
         if caller.role != cas_types::AgentRole::Worker || !caller.is_alive() {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: only a live authenticated worker session holding the exact active task lease may submit a new receipt.",
-            ));
+            )));
         }
         let lease = agent_store.get_lease(&task.id).map_err(|error| McpError {
             code: ErrorCode::INTERNAL_ERROR,
@@ -5855,9 +5881,10 @@ impl CasCore {
         let (lease_epoch, retry_receipt_id) = match lease {
             Some(lease) if lease.agent_id == caller.id => (Some(lease.epoch), None),
             Some(_) => {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: authenticated caller does not hold the exact active task lease. Assignment/display-name and request identity fields are non-authoritative; use the lease-owning worker session.",
-                ));
+                )));
             }
             None => match latest_delivery.as_ref() {
                 Some((receipt, _)) if receipt.worker_agent_id == caller.id => {
@@ -5894,9 +5921,9 @@ impl CasCore {
                     } else {
                         String::new()
                     };
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                         "DELIVERY RECEIPT REJECTED: no exact active task lease belongs to the authenticated caller. A new receipt requires the lease-owning worker session; only that same session may retry its already-persisted exact receipt.{stale_anchor_guidance}"
-                    )));
+                    ))));
                 }
             },
         };
@@ -5910,10 +5937,10 @@ impl CasCore {
                 data: None,
             })?;
         if input.task_id != task.id {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                 "DELIVERY RECEIPT REJECTED: receipt task {} does not match close task {}.",
                 input.task_id, task.id
-            )));
+            ))));
         }
         if input.proof_reference.is_empty()
             || input.proof_reference.len() > 256
@@ -5923,17 +5950,19 @@ impl CasCore {
                 .all(|byte| byte.is_ascii_alphanumeric() || b":._/-".contains(&byte))
             || !delivery_audit_text_is_portable(&input.proof_reference)
         {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: proof_reference must be 1-256 opaque ASCII characters from [A-Za-z0-9:._/-]. It is audit linkage only and never grants authority.",
-            ));
+            )));
         }
         if input.scope_summary.trim().is_empty()
             || input.scope_summary.len() > 1000
             || !delivery_audit_text_is_portable(&input.scope_summary)
         {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: scope_summary must be non-empty, at most 1000 bytes, portable, and contain no absolute path or secret-shaped payload.",
-            ));
+            )));
         }
         let full_sha =
             |value: &str| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
@@ -5941,42 +5970,56 @@ impl CasCore {
             || !full_sha(&input.merge_base_sha)
             || !full_sha(&input.target_sha)
         {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: commit_sha, merge_base_sha, and target_sha must be full 40-character hexadecimal commit IDs.",
-            ));
+            )));
         }
 
         if input.worker_agent_id != caller.id {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: receipt worker_agent_id must match the authenticated lease-owning worker session; request identity claims never grant authority.",
-            ));
+            )));
         }
         let expected_source = format!("factory/{}", caller.name);
         // cas-73b8: or the worker's own per-task branch for this task.
         let task_source = crate::factory_isolation::worker_task_branch(&caller.name, &task.id);
         if input.source_branch != expected_source && input.source_branch != task_source {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                 "DELIVERY RECEIPT REJECTED: source branch must be the registered worker branch `{expected_source}` or its per-task branch `{task_source}`."
-            )));
+            ))));
         }
-        let receipt =
-            cas_store::build_worker_completion_receipt(&input, &caller.name, chrono::Utc::now());
+        // cas-50b2: read outside the delivery transaction on purpose. Only
+        // request_changes and reopen move the cycle, and neither applies to
+        // an InProgress task under this worker's live lease, so the cycle
+        // read here is the one this park mints; an exact retry in the same
+        // cycle rebuilds the same receipt id.
+        let cycle = cas_store::current_delivery_cycle(
+            &self.cas_root, &task.id, task.deliverables.delivery_cycle,
+        ).map_err(|error| {
+            Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to read delivery cycle: {error}"))
+        })?;
+        let receipt = cas_store::build_worker_completion_receipt_in_cycle(
+            &input, &caller.name, chrono::Utc::now(), cycle,
+        );
         if let Some((latest_receipt, latest_transaction)) = latest_delivery.as_ref()
             && latest_receipt.id != receipt.id
             && super::proof_scope::delivery_state_locks_scope(latest_transaction.state)
         {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                 "DELIVERY RECEIPT REJECTED: task {} already has active delivery proof {} in state {}. The proposed receipt is a distinct proof boundary and cannot replace it. Retry the exact persisted receipt or complete/recover the active delivery cycle first; task, deliverables, lease, receipts, transactions, events, dispatch, verdict, and outbox are unchanged.",
                 task.id, latest_receipt.id, latest_transaction.state
-            )));
+            ))));
         }
         if retry_receipt_id
             .as_ref()
             .is_some_and(|expected| expected != &receipt.id)
         {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: authenticated caller has no active task lease and the proposed receipt is not its already-persisted exact proof boundary. Reclaim/start the task before submitting new proof.",
-            ));
+            )));
         }
         let existing_delivery =
             cas_store::get_worker_delivery_by_receipt(&self.cas_root, &receipt.id).map_err(
@@ -5996,25 +6039,26 @@ impl CasCore {
             && let Err(message) =
                 validate_completion_artifact_path(&self.cas_root, &task.id, artifact_path)
         {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                 "DELIVERY RECEIPT REJECTED: invalid artifact_path: {message}"
-            )));
+            ))));
         }
         if existing_delivery.as_ref().is_some_and(|(_, transaction)| {
             transaction.state == cas_types::WorkerDeliveryState::Delivered
                 && task.status != TaskStatus::Closed
         }) {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                 "DELIVERY RECEIPT REJECTED: receipt {} belongs to a terminal Delivered proof cycle, but task {} has been reopened. Submit a fresh cycle-bound receipt after completing and proving the new work. Task, deliverables, lease, delivery, dispatch, verdict, and events are unchanged.",
                 receipt.id, task.id
-            )));
+            ))));
         }
         let target = match task.deliverables.work_target.as_ref() {
             Some(target) => target,
             None => {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: transactional delivery requires a declared WorkTarget/RepoContext; legacy close remains available without completion_receipt.",
-                ));
+                )));
             }
         };
         let context = match crate::mcp::tools::core::task::repo_context::resolve_repo_context(
@@ -6022,14 +6066,15 @@ impl CasCore {
             target,
         ) {
             Ok(context) => context,
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-28", message))),
         };
         if input.repo_selector != context.repo_selector
             || input.target_branch != context.target_branch
         {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: repository selector or target branch does not match the task's server-resolved RepoContext.",
-            ));
+            )));
         }
         let source_sha = resolve_branch_sha(&context.repo_root, &input.source_branch);
         let target_sha = resolve_branch_sha(&context.repo_root, &input.target_branch);
@@ -6039,19 +6084,22 @@ impl CasCore {
             &input.target_branch,
         );
         if source_sha.as_deref() != Some(input.commit_sha.as_str()) {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: changed worker tip; commit_sha is not the current source-branch tip.",
-            ));
+            )));
         }
         if target_sha.as_deref() != Some(input.target_sha.as_str()) {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: target tip changed before receipt acceptance; refresh target_sha and merge_base.",
-            ));
+            )));
         }
         if merge_base.as_deref() != Some(input.merge_base_sha.as_str()) {
-            return Ok(Self::tool_error(
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-28",
                 "DELIVERY RECEIPT REJECTED: merge_base_sha does not match the live source/target merge base.",
-            ));
+            )));
         }
         // Receipt acceptance is an alternate close entry: bind snapshot
         // approval before the immutable proof cycle can be persisted.
@@ -6069,16 +6117,17 @@ impl CasCore {
             &task.id,
             crate::mcp::tools::core::guidance::caller_prefix(),
         ) {
-            return Ok(Self::tool_error(error));
+            return Ok(Self::tool_error(crate::gates::tag("G-75", error)));
         }
         let worker_path = match self.resolve_worker_worktree_path(task, Some(&context)) {
             Ok(Some(path)) => path,
             Ok(None) => {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: no task-owned worker worktree resolves for the declared repository.",
-                ));
+                )));
             }
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-28", message))),
         };
         let hook_evidence = match run_declared_pre_close_hook(
             task,
@@ -6089,9 +6138,9 @@ impl CasCore {
         ) {
             Ok(evidence) => evidence,
             Err(message) => {
-                return Ok(Self::tool_error(format!(
+                return Ok(Self::tool_error(crate::gates::tag("G-28", format!(
                     "DELIVERY RECEIPT REJECTED: task-owned pre-close proof failed.\n\n{message}"
-                )));
+                ))));
             }
         };
 
@@ -6100,9 +6149,10 @@ impl CasCore {
         // can advance; a straggler source or changed target cannot publish.
         let candidate_repository = if existing_delivery.is_none() {
             if commit_is_merged_into_parent(&context.repo_root, &input.commit_sha, &input.target_branch) {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: this source is already integrated. Close using its existing pre-merge approval; a fresh completion receipt cannot add a post-merge verifier.",
-                ));
+                )));
             }
             let candidate = self.build_completion_candidate(
                 task, &context.repo_root, &input.source_branch, &input.target_branch,
@@ -6114,7 +6164,7 @@ impl CasCore {
         } else {
             cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .filter(|dispatch| dispatch.receipt().is_ok_and(|boundary| boundary.transaction().is_some_and(|(id,_)| id==receipt.id)))
                 .and_then(|dispatch| dispatch.repository)
         };
         let initial_state = cas_types::WorkerDeliveryState::AwaitingVerification;
@@ -6131,9 +6181,10 @@ impl CasCore {
             // are one SQLite intent transaction. Receipt B therefore cannot
             // persist if active dispatch A rejects the new boundary.
             let Some(lease_epoch) = lease_epoch else {
-                return Ok(Self::tool_error(
+                return Ok(Self::tool_error(crate::gates::tag(
+                    "G-28",
                     "DELIVERY RECEIPT REJECTED: a new immutable receipt requires the authenticated caller's exact active task lease.",
-                ));
+                )));
             };
             cas_store::create_worker_delivery_with_dispatch_for_lease_at_repository(
                 &self.cas_root,
@@ -6148,9 +6199,9 @@ impl CasCore {
             .map(|(transaction, _)| transaction)
             .map_err(|error| McpError {
                 code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-28", format!(
                     "DELIVERY RECEIPT REJECTED: exact verification proof boundary conflict: {error}"
-                )),
+                ))),
                 data: None,
             })?
         };
@@ -6159,6 +6210,7 @@ impl CasCore {
             == cas_types::WorkerDeliveryState::AwaitingVerification
         {
             // Exact retries validate and recover only their own boundary.
+            // gate[N-11 notice]: Receipt-path verification dispatch
             cas_store::create_verification_dispatch_bound(
                 &self.cas_root,
                 &task.id,
@@ -6224,7 +6276,7 @@ impl CasCore {
             task.status = projected_status;
             task.pending_verification = projected_pending_verification;
             task.deliverables.pre_close_hook = Some(hook_evidence.clone());
-            task.deliverables.factory_branch_anchor = Some(input.commit_sha.clone());
+            task.deliverables.mint_or_append(&input.commit_sha);
             task.deliverables.parked_branch = Some(input.source_branch.clone());
             task.updated_at = chrono::Utc::now();
             match task_store.update_if_current(task, &expected) {
@@ -6253,7 +6305,7 @@ impl CasCore {
         if transaction.state == cas_types::WorkerDeliveryState::AwaitingVerification {
             let dispatch = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| dispatch.receipt_id.as_deref() == Some(receipt.id.as_str()))
+                .filter(|dispatch| dispatch.receipt().is_ok_and(|boundary| boundary.transaction().is_some_and(|(id,_)| id==receipt.id)))
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Exact receipt verification dispatch is unavailable"))?;
             self.emit_premerge_review_handoff(task, &dispatch)?;
         }
@@ -7096,8 +7148,9 @@ impl CasCore {
             {
                 parking.deliverables.historical_factory_branch_anchors.push(recorded.to_string());
             }
-            parking.deliverables.factory_branch_anchor =
-                advanced.deliverables.factory_branch_anchor;
+            if let Some(tip) = advanced.deliverables.factory_branch_anchor.as_deref() {
+                parking.deliverables.mint_or_append(tip);
+            }
             parking.notes = advanced.notes;
             // Keep the original store clock for the guarded park below.
         }
@@ -7106,6 +7159,7 @@ impl CasCore {
 
     /// Reject an explicit old or target-side receipt before QA or merge-state
     /// gates can use it to measure a different head from the current delivery.
+    // gate-audit[forward]: G-58 Commit receipt identity validation; close producer tags the refusal.
     fn stale_fresh_park_receipt_refusal(
         &self,
         task_store: &dyn cas_store::TaskStore,
@@ -7401,7 +7455,7 @@ impl CasCore {
             .as_deref()
             .unwrap_or("none")
             .to_string();
-        task.deliverables.factory_branch_anchor = Some(factory_branch_anchor.to_string());
+        task.deliverables.mint_or_append(factory_branch_anchor);
         task.updated_at = now;
         let timestamp = now.format("%Y-%m-%d %H:%M");
         let audit = format!(
@@ -7448,6 +7502,8 @@ impl CasCore {
     /// commit anchor. Reopen clears the anchor, so terminal evidence cannot
     /// authorize a later cycle. This guard must not advance, repair, or fail a
     /// transaction; those transitions belong to the delivery path.
+    // gate[G-86 close-after-merge integrity]: Direct update status=closed guards (delivery state, merge predicate)
+    // gate-audit[forward]: G-86 Typed direct-close guard; task-update callers emit the refusal code.
     pub(crate) fn guard_direct_update_close_delivery_state(
         &self,
         task: &Task,
@@ -7647,8 +7703,12 @@ impl CasCore {
             TaskCommitAttribution { receipt: None, window: review_window.as_ref() },
         ) {
             MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_) => Ok(()),
-            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
+            // Non-handoff rejections carry their own code from their producer.
+            MergeStateGateOutcome::Reject(message) if !gate_preflight::is_merge_handoff(&message) => {
                 Err(TaskLifecycleGateError::UnmergedChildBranch { message })
+            }
+            MergeStateGateOutcome::Reject(message) | MergeStateGateOutcome::Unresolved(message) => {
+                Err(TaskLifecycleGateError::UnmergedChildBranch { message: crate::gates::tag("G-55", message) })
             }
         }
     }
@@ -7708,6 +7768,17 @@ impl CasCore {
         result
     }
 
+    // gate-audit[supervisor_override]: bypass G-33,G-35,G-45,G-51,G-53,G-64,G-67,G-68,G-71,G-74,G-61,G-76,G-78,G-79,G-83,G-125 Each accepted close waiver is carried to the final response after compaction.
+    // gate-audit[stranded_branch_override]: bypass G-125 A live supervisor accepts measured stranded children; malformed waiver authority still refuses.
+    // gate-audit[skip_verification]: selector Derived waiver outcome; the external supervisor_override acceptor supplies G-68 exactly once.
+    // gate-audit[bypass_close_gates]: selector A measured non-delivery disposition selects applicable checks; it does not waive a delivered-code check.
+    // gate-audit[evidence_only]: selector Chooses a separately authorized, measured non-integration terminal disposition.
+    // gate-audit[negative_result]: selector Chooses a separately authorized, measured negative result; no code delivery is approved.
+    // gate-audit[validate_supervisor_override]: selector Validation of authority; only explicit accepted_override_codes at actual waived checks count.
+    // gate-audit[shipped_timeout_waiver]: selector Replays a previously issued exact-dispatch approval; lookup does not mint an override.
+    // gate-audit[tags_from]: registry_upkeep.rs#finish
+    // gate-audit[no_delivery]: selector Chooses the separately measured non-delivery disposition; does not approve a delivered-code bypass.
+    // gate-audit[skip_reason]: selector Derived verification disposition; only actual waived gates contribute override codes.
     async fn close_task_with_dispositions_inner(
         &self,
         Parameters(mut req): Parameters<TaskCloseRequest>,
@@ -7748,13 +7819,14 @@ impl CasCore {
         {
             return Ok(close_refusal::gate("phase_outcome_gate", "provide_outcome_receipt", message));
         }
+        let mut accepted_override_codes = Vec::new();
         if task.task_type == TaskType::Epic && !task.is_terminal() {
             if let Ok(actor) = self.get_agent_id() {
                 if let Err(error) = crate::qa_post_release::arm_on_merge(&self.cas_root,&task,&actor) {
                     tracing::warn!(%error,epic=%task.id,"could not arm post-release fallback");
                 }
             }
-            if let Some(reason) = crate::qa_post_release::gate(&self.cas_root,&task,false) {
+            if let Some(reason) = crate::qa_post_release::gate_with_overrides(&self.cas_root,&task,false,&mut accepted_override_codes) {
                 return Ok(close_refusal::gate("post_release_gate", "complete_post_release_check", reason));
             }
             // An override use appends an audit note; do not overwrite it later.
@@ -7789,13 +7861,14 @@ impl CasCore {
                     None => held.push(blocker),
                 }
             }
+            // gate[G-21 park as-of]: Open blocks dependency at close (shipped-blocker exemption)
             if !held.is_empty() {
-                return Ok(Self::tool_error(format!(
+                return Ok(Self::tool_error(crate::gates::tag("G-21", format!(
                     "Cannot close task {}: blocking dependencies are still open: {}. Close those blocker tasks first, \
                      or remove an incorrect `blocks` dependency with `{}task action=dep_remove id={} to_id=<blocker-id> dep_type=blocks`. \
                      A blocker whose delivery is already on its target no longer holds a close; these have none there.",
                     req.id, held.join(", "), crate::mcp::tools::core::guidance::caller_prefix(), req.id
-                )));
+                ))));
             }
         }
 
@@ -7808,14 +7881,16 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+
         // This is a declaration for one attempt, never a sticky methodology
         // or a new close disposition. Delivered keeps its verification and
         // dirty-work checks even after absence of delivery has been proven.
         let no_delivery_declared = req.no_delivery.unwrap_or(false);
         if no_delivery_declared {
             if req.reason.as_deref().is_none_or(|reason| reason.trim().is_empty()) {
-                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: no_delivery=true requires a non-empty reason for this attempt."));
+                return Ok(Self::tool_error(crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: no_delivery=true requires a non-empty reason for this attempt.")));
             }
+            // gate[G-23 park integrity]: Close-disposition exclusivity
             if req.commit_receipt.is_some() || completion_receipt.is_some()
                 || external_verification_receipt.is_some() || negative_result.is_some()
                 || evidence_only.is_some() || inline_execution_note.is_some()
@@ -7823,7 +7898,7 @@ impl CasCore {
                 || req.stranded_branch_override.is_some()
                 || matches!(task.task_type, TaskType::Gate | TaskType::Epic)
             {
-                return Ok(Self::tool_error("NO DELIVERY CLOSE REJECTED: no_delivery is a separate declaration for individual helpers; cannot combine it with delivery receipts, methodologies, overrides or other close dispositions."));
+                return Ok(Self::tool_error(crate::gates::tag("G-23", "NO DELIVERY CLOSE REJECTED: no_delivery is a separate declaration for individual helpers; cannot combine it with delivery receipts, methodologies, overrides or other close dispositions.")));
             }
         }
 
@@ -7836,52 +7911,52 @@ impl CasCore {
             || completion_receipt.is_some() || external_verification_receipt.is_some()
             || task.task_type == TaskType::Gate || task.task_type == TaskType::Epic)
         {
-            return Ok(Self::tool_error("EVIDENCE ONLY CLOSE REJECTED: evidence_only is a distinct non-integration disposition for individual report tasks; cannot combine with negative_result, completion_receipt, external_verification_receipt, Gate or Epic.".to_string()));
+            return Ok(Self::tool_error(crate::gates::tag("G-23", "EVIDENCE ONLY CLOSE REJECTED: evidence_only is a distinct non-integration disposition for individual report tasks; cannot combine with negative_result, completion_receipt, external_verification_receipt, Gate or Epic.")));
         }
         let evidence_only_receipt = match self.validate_nonintegration_close(
             &req.id, &req, evidence_only.as_ref(), "evidence_only") {
             Ok(receipt) => receipt,
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-24", message))),
         };
         if task.task_type == TaskType::Gate && completion_receipt.is_some() {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-23", format!(
                 "GATE CLOSE REJECTED: task {} closes directly on a recorded DECISION note; a worker completion receipt is not applicable.",
                 task.id
-            )));
+            ))));
         }
         if completion_receipt.is_some() && external_verification_receipt.is_some() {
-            return Ok(Self::tool_error(
-                "TASK CLOSE REJECTED: completion_receipt and external_verification_receipt are distinct delivery contracts and cannot be supplied together."
-                    .to_string(),
-            ));
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-23",
+                "TASK CLOSE REJECTED: completion_receipt and external_verification_receipt are distinct delivery contracts and cannot be supplied together.",
+            )));
         }
         if negative_result.is_some() && external_verification_receipt.is_some() {
-            return Ok(Self::tool_error(
-                "TASK CLOSE REJECTED: negative_result and external_verification_receipt are distinct close dispositions and cannot be supplied together."
-                    .to_string(),
-            ));
+            return Ok(Self::tool_error(crate::gates::tag(
+                "G-23",
+                "TASK CLOSE REJECTED: negative_result and external_verification_receipt are distinct close dispositions and cannot be supplied together.",
+            )));
         }
         if task.task_type == TaskType::Gate && external_verification_receipt.is_some() {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-23", format!(
                 "GATE CLOSE REJECTED: task {} has the Decision disposition; external_verification_receipt is not applicable.",
                 task.id
-            )));
+            ))));
         }
         if task.task_type == TaskType::Gate && negative_result.is_some() {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-23", format!(
                 "GATE CLOSE REJECTED: task {} has the Decision disposition; negative_result is not applicable.",
                 task.id
-            )));
+            ))));
         }
 
         let negative_result_receipt =
             match self.validate_nonintegration_close(&req.id, &req, negative_result.as_ref(), "negative_result") {
                 Ok(receipt) => receipt,
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-24", message))),
             };
         let close_disposition = if task.task_type == TaskType::Gate {
             if let Err(message) = self.validate_gate_decision_close(&task) {
-                return Ok(Self::tool_error(message.to_string()));
+                return Ok(Self::tool_error(crate::gates::tag("G-26", message.to_string())));
             }
             TaskCloseDisposition::Decision
         } else if evidence_only_receipt.is_some() {
@@ -7898,7 +7973,7 @@ impl CasCore {
             external_verification_receipt.as_deref(),
         ) {
             Ok(receipt) => receipt,
-            Err(message) => return Ok(Self::tool_error(message)),
+            Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-27", message))),
         };
 
         if let Some(raw_receipt) = completion_receipt.as_deref() {
@@ -7923,11 +7998,12 @@ impl CasCore {
         {
             return Ok(Self::success(already_closed_message(&task)));
         }
+        // gate[G-30 park integrity]: Cancelled task cannot be closed
         if task.status == TaskStatus::Cancelled {
-            return Ok(Self::tool_error(format!(
+            return Ok(Self::tool_error(crate::gates::tag("G-30", format!(
                 "TASK CLOSE REJECTED: {} is cancelled without delivery, not closed/delivered. Reopen it first if work should resume; otherwise leave its cancellation history intact.",
                 task.id
-            )));
+            ))));
         }
 
         // A delivery's refusals collect here, so one reply names every failure.
@@ -7947,7 +8023,9 @@ impl CasCore {
                 .unwrap_or_else(|| {
                     self.cas_root.parent().unwrap_or(&self.cas_root).to_path_buf()
                 });
+            // gate[G-31 park integrity]: Proof claim receipt required
             if let Err(message) = proof_claims::validate_claims(reason, &self.cas_root, &receipt_root) {
+                let message = crate::gates::tag("G-31", message);
                 if !park_gated {
                     return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
                 }
@@ -7971,6 +8049,10 @@ impl CasCore {
             return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
         }
 
+        if supervisor_override && is_supervisor_from_env() && req.reason.as_deref().is_some_and(|reason|
+            tmpfs_receipt_path_in_close_reason(reason, close_reason_artifacts_root(&self.cas_root).as_deref()).is_some())
+        { accepted_override_codes.push("G-33"); }
+        // gate[G-33 park as-of]: Tmpfs proof receipt rejected
         if !(supervisor_override && is_supervisor_from_env())
             && let Some(reason) = req.reason.as_deref()
             && let Some(path) = tmpfs_receipt_path_in_close_reason(
@@ -7978,9 +8060,9 @@ impl CasCore {
                 close_reason_artifacts_root(&self.cas_root).as_deref(),
             )
         {
-            let message = format!(
+            let message = crate::gates::tag("G-33", format!(
                 "TMPFS PROOF RECEIPT REJECTED: close reason cites `{path}` as evidence. Durable proof must not live on tmpfs. Store it under the configured [factory] artifacts_root/<project-key>/<task-id>/ (or another sanctioned durable artifacts root) and retry; harness scratchpads under /tmp are ephemeral and cannot be close evidence. If that path is discussion rather than a cited receipt, cite your durable artifact under artifacts_root/<project-key>/<task-id>/ in the same reason and the mention will pass. A supervisor may use supervisor_override=true only for a legitimate historical reference."
-            );
+            ));
             if !park_gated {
                 return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
             }
@@ -7990,12 +8072,13 @@ impl CasCore {
         // cas-d8b2: an exact release verdict recorded after an expired Tier 1
         // cycle can satisfy it. Resolve this before the timeout early return;
         // it never waives integration/content, QA, or dedicated-review gates.
+        // gate[G-35 park as-of]: Release verdict supersedes stale dispatch / shipped-timeout waiver
         let superseding_release_verdict = if close_disposition.requires_delivery_gates() {
             match crate::qa_batch::release_supersedes_stale_dispatch(&self.cas_root, &task) {
                 Ok(receipt) => receipt,
-                Err(error) => return Ok(Self::tool_error(format!(
+                Err(error) => return Ok(Self::tool_error(crate::gates::tag("G-35", format!(
                     "VERIFICATION DISPATCH INVALID: cannot validate release recovery for {}: {error}", task.id
-                ))),
+                )))),
             }
         } else { None };
         // cas-4b22: supervisor policy. Shipped work may pass a timed-out
@@ -8008,9 +8091,9 @@ impl CasCore {
         .flatten();
         if let Some(dispatch_id) = shipped_timeout_waiver.as_deref() {
             if let Err(error) = cas_store::timeout_verification_dispatch(&self.cas_root, &req.id, chrono::Utc::now()) {
-                return Ok(Self::tool_error(format!(
+                return Ok(Self::tool_error(crate::gates::tag("G-35", format!(
                     "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} could not record timed-out dispatch {dispatch_id}: {error}", req.id
-                )));
+                ))));
             }
             close_notes.record(&mut task, &format!(
                 "[{}] ✅ DECISION supervisor_override passed timed-out verification dispatch {dispatch_id}: the delivery is already shipped (merged PR or queue run; commit_receipt on origin target). Reason: {}",
@@ -8028,12 +8111,13 @@ impl CasCore {
             && !crate::qa_batch::release_close::parent_dispatch_covered(&self.cas_root, &task.id)
             && shipped_timeout_waiver.is_none()
         {
+            // gate[G-34 park as-of]: Exact verification dispatch must resolve (pending, claimed, unreadable, timed out)
             match cas_store::get_latest_verification_dispatch(&self.cas_root, &req.id) {
                 Err(error) => {
-                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", format!(
                         "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable exact dispatch state: {}. Cassy refuses to infer close authority.",
                         req.id, error
-                    ))));
+                    )))));
                 }
                 Ok(Some(dispatch))
                     if matches!(
@@ -8072,7 +8156,7 @@ impl CasCore {
                                 )),
                                 data: None,
                             })?;
-                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
+                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", gate_text::verification_timeout_message(
                             &req.id,
                             required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Dispatch {
@@ -8082,7 +8166,7 @@ impl CasCore {
                             },
                             crate::mcp::tools::core::guidance::supervisor_prefix(),
                             crate::mcp::tools::core::guidance::caller_prefix(),
-                        ))));
+                        )))));
                     }
                     // cas-5c33: a dispatch whose bound proof no longer holds
                     // can never be resolved — `verification action=add`
@@ -8134,16 +8218,16 @@ impl CasCore {
                             .as_ref()
                             .map(|proof| format!(" Bound head: {}.", proof.head_commit))
                             .unwrap_or_default();
-                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                        return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", format!(
                             "⚠️ VERIFICATION REQUIRED\n\nTask {} cannot close until exact pending dispatch {} records its capability-bound verifier or registered supervisor-direct verdict.{} If the bound worker or verifier is unavailable, a registered supervisor can recover without them: {} action=add task_id={} dispatch_id={} status=approved summary=\"...\", then the supervisor must retry ordinary task close; never ask the worker to re-close.",
                             req.id, dispatch.id, bound_head, sup_ver, req.id, dispatch.id
-                        ))));
+                        )))));
                     }
                 }
                 Ok(Some(dispatch))
                     if dispatch.state == cas_types::VerificationDispatchState::TimedOut =>
                 {
-                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, gate_text::verification_timeout_message(
+                    return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-34", gate_text::verification_timeout_message(
                         &req.id,
                         required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
@@ -8153,7 +8237,7 @@ impl CasCore {
                         },
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                    ))));
+                    )))));
                 }
                 Ok(_) => {}
             }
@@ -8210,6 +8294,7 @@ impl CasCore {
                         task.status,
                         self.caller_is_task_assignee(&task),
                     );
+                    // gate[G-36 park integrity]: Work halted (urgent stop)
                     if super::stale_close_guard::agent_task_work_halted(&agent.metadata)
                         && !halt_exempt
                     {
@@ -8258,6 +8343,7 @@ impl CasCore {
                 let caller_id = self.get_agent_id().ok();
                 let caller_name = std::env::var("CAS_AGENT_NAME").ok();
                 let caller_session = std::env::var("CAS_SESSION_ID").ok();
+                // gate[G-37 epic-close integrity]: Epic verification owner gate
                 if let Err(msg) = epic_close_owner_gate(
                     &req.id,
                     &owner,
@@ -8268,7 +8354,7 @@ impl CasCore {
                 {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
-                        message: Cow::from(gate_preflight::refusal_reply(gate_refusals, msg.to_string())),
+                        message: Cow::from(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-37", msg.to_string()))),
                         data: None,
                     });
                 }
@@ -8334,8 +8420,9 @@ impl CasCore {
                     target,
                 ) {
                     Ok(context) => Some(context),
+                    // gate[G-38 park integrity]: Close repo/target resolution fail-closed (repo context, git repository, default branch)
                     Err(message) => return Ok(close_refusal::gate("work_target_gate", "resolve_work_target",
-                        gate_preflight::refusal_reply(gate_refusals, message))),
+                        gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-38", message)))),
                 }
             }
             None => None,
@@ -8431,9 +8518,10 @@ impl CasCore {
         {
             match (declared_repo_context.as_ref(), req.commit_receipt.as_deref()) {
                 (Some(context), Some(receipt)) => {
+                    // gate[G-39 close-after-merge integrity]: Pushed task receipt rejected (retired implementer recovery)
                     match validate_pushed_task_receipt(&task, context, receipt) {
                         Ok(boundary) => Some(boundary),
-                        Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
+                        Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-39", message)))),
                     }
                 }
                 _ => None,
@@ -8458,7 +8546,7 @@ impl CasCore {
                 req.commit_receipt.as_deref(), true)
             {
                 Ok(evidence) => task.deliverables.pre_close_hook = Some(evidence),
-                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!("PRE-CLOSE HOOK FAILED: {message}")))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-41", format!("PRE-CLOSE HOOK FAILED: {message}"))))),
             }
         }
         let standalone_target_repo = if close_repo_verified {
@@ -8493,6 +8581,7 @@ impl CasCore {
             }
             measured
         });
+        // gate[G-42 park integrity]: Task commit identity resolution
         let mut task_commit_identity = match task_commit_identity_in_repo(
             &close_project_root,
             no_delivery_task.as_ref().unwrap_or(&task),
@@ -8502,7 +8591,7 @@ impl CasCore {
                 .map(|(receipt, _)| receipt.commit_sha),
         ) {
             Ok(identity) => identity,
-            Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
+            Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-42", message)))),
         };
         // An approved proof can be followed by an administrative re-claim
         // before the worker retries close. Keep the exact delivery commits
@@ -8592,11 +8681,12 @@ impl CasCore {
             };
             let subtasks = task_store.get_subtasks(&req.id).map_err(|error| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!(
+                message: Cow::from(crate::gates::tag("G-125", format!(
                     "epic-close merge gate: failed to read subtasks of {}: {error}", req.id,
-                )),
+                ))),
                 data: None,
             })?;
+            // gate[G-127 epic-close integrity]: Gone epic branch fallback and child retarget
             let published = (task.delivery_mode != cas_types::DeliveryMode::LocalMerge)
                 .then(|| epic_autoclose::published_retired_epic_target(
                     &close_project_root, &target_branch, req.commit_receipt.as_deref(), &subtasks,
@@ -8616,9 +8706,11 @@ impl CasCore {
                 .unwrap_or(target_branch);
             let unmerged =
                 check_unmerged_epic_branches(&close_project_root, &req.id, &target_branch);
+            // gate[G-124 epic-close integrity]: Epic unmerged worker branches (epic-id namespace check)
             if !unmerged.is_empty() {
                 let branch_list = unmerged.join("\n  - ");
-                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                let fallback = |message: String| if gone_epic_branch.is_some() { crate::gates::tag("G-127", message) } else { message };
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, fallback(crate::gates::tag("G-124", format!(
                     "⚠️ MERGE REQUIRED\n\n\
                     Epic {} has {} unmerged worker branch(es):\n  - {}\n\n\
                     Worker branches must be merged to {} before closing the epic.\n\n\
@@ -8634,7 +8726,7 @@ impl CasCore {
                     target_branch,
                     req.id,
                     tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
-                ))));
+                ))))));
             }
 
             // cas-8f8f: per-child factory-branch merge-state guard for
@@ -8696,21 +8788,26 @@ impl CasCore {
                     // supervisor-only, and audited, and it only exists once the
                     // gate has actually blocked.
                     let Some(reason) = req.stranded_branch_override.as_deref() else {
+                        let msg = crate::gates::tag("G-125", msg);
+                        // The refusal was measured against the gone-branch fallback target.
+                        let msg = if gone_epic_branch.is_some() { crate::gates::tag("G-127", msg) } else { msg };
                         return Ok(close_refusal::gate("epic_close_merge_gate", "reconcile_child_deliveries",
                             gate_preflight::refusal_reply(gate_refusals, msg)));
                     };
+                    // gate[G-126 epic-close integrity]: Epic close override rejected (stranded_branch_override)
                     let narrative = match validate_stranded_branch_override_reason(reason) {
                         Ok(narrative) => narrative,
                         Err(error) => {
-                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-126", format!(
                                 "EPIC CLOSE OVERRIDE REJECTED: {error}"
-                            ))));
+                            )))));
                         }
                     };
+                    accepted_override_codes.push("G-125");
                     let caller = match self.resolve_live_supervisor_authority() {
                         Ok(caller) => caller,
                         Err(error) => {
-                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, match error {
+                            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-126", match error {
                                 SupervisorAuthorityError::Identity(error) => format!(
                                     "EPIC CLOSE OVERRIDE REJECTED: stranded_branch_override requires an authenticated registered supervisor; caller identity could not be resolved ({error})."
                                 ),
@@ -8726,7 +8823,7 @@ impl CasCore {
                                     "EPIC CLOSE OVERRIDE REJECTED: only a live registered supervisor may use stranded_branch_override. Caller `{}` has role {}.",
                                     caller.name, caller.role
                                 ),
-                            })));
+                            }))));
                         }
                     };
                     // The waived gate output is stored verbatim, but not before
@@ -8868,10 +8965,11 @@ impl CasCore {
             Err(_) if !close_repo_verified && worker_worktree_path.is_none() => String::new(),
             Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
         };
+        // gate[G-25 park integrity]: Evidence-only measurement (never-merge proof, workflow paths only)
         let measured_evidence = if let Some(receipt) = evidence_only_receipt.as_ref() {
             match evidence_only::measure(&close_project_root, &task, &resolved_parent_branch, &receipt.reference) {
                 Ok(measured) => Some(measured),
-                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!("EVIDENCE ONLY CLOSE REJECTED: {message}")))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-25", format!("EVIDENCE ONLY CLOSE REJECTED: {message}"))))),
             }
         } else { None };
 
@@ -8886,8 +8984,9 @@ impl CasCore {
             let landed = super::super::integration_batch::landed_batch_squash(
                 &task, &close_project_root, &resolved_parent_branch, Some(receipt),
             );
+            // gate[G-44 close-after-merge integrity]: Integration batch receipt rejected (receipt must be the recorded squash)
             if supplied.is_none() || supplied != landed {
-                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash")));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-44", "INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"))));
             }
             let original = batch.delivered_head.clone();
             close_notes.record(&mut task, &format!(
@@ -8906,6 +9005,7 @@ impl CasCore {
         // prevents is false assurance in the audit trail rather than a
         // premature close. Ancestry, diff and work-cycle checks stay with the
         // gates below; this asks only whether the receipt is ours to verify.
+        // gate[G-43 park integrity]: commit_receipt repo binding (receipt not found in this repository)
         if let Some(receipt) = req.commit_receipt.as_deref()
             && close_repo_verified
             && let Some(message) = commit_receipt_repo_binding_error(
@@ -8914,7 +9014,7 @@ impl CasCore {
                 &resolved_parent_branch,
             )
         {
-            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message)));
+            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-43", message))));
         }
 
         // A resolved approval owns its exact correction head, even if the
@@ -8951,6 +9051,8 @@ impl CasCore {
         // already carry the worker's next task or a force-push. The live tip
         // counts only as an attributable continuation of this delivery
         // (GH #744). An anchor that cannot be resolved refuses the close.
+        if shipped_timeout_waiver.is_some() { accepted_override_codes.push("G-35"); }
+        if deferred_epic_override_note.is_some() { accepted_override_codes.push("G-125"); }
         let parked_head = if close_disposition.requires_delivery_gates()
             && !supervisor_closing_merged_anchor
             && req.commit_receipt.is_none()
@@ -9006,6 +9108,7 @@ impl CasCore {
                 }
                 Ok(None) => None,
                 Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-45");
                     close_notes.record(
                         &mut task,
                         &format!(
@@ -9015,18 +9118,20 @@ impl CasCore {
                     );
                     None
                 }
-                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, message))),
+                // gate[G-45 park integrity]: Parked anchor resolution (parked delivery unresolved, own-commit check)
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-45", message)))),
             }
         } else {
             None
         };
+        // gate[G-46 park integrity]: Stale or prior commit_receipt at fresh park
         if let Some(receipt) = req.commit_receipt.as_deref()
             && let Some(refusal) = self.stale_fresh_park_receipt_refusal(
                 task_store.as_ref(), &task, &close_project_root,
                 &resolved_parent_branch, receipt, commit_receipt_window.as_ref(),
             )
         {
-            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, refusal)));
+            return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-46", refusal))));
         }
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
@@ -9034,31 +9139,32 @@ impl CasCore {
         // an explicit fresh declaration plus positive absence measurements
         // can exempt a helper from delivery gates. Audit notes grant nothing
         // on the next attempt, and no methodology or synthetic receipt is set.
+        // gate[G-47 park integrity]: No delivery close rejected (declaration and absence measurement)
         let empty_delivery = if no_delivery_declared {
             if recovery_branch.is_some() || !(close_repo_verified || worker_worktree_path.is_some()) {
-                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required.")));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: a verified repository without a recovery delivery is required."))));
             }
             let actor = match self.get_registered_agent_id_read_only()
                 .and_then(|id| self.open_agent_store()?.get(&id).map_err(|error|
                     Self::error(ErrorCode::INVALID_REQUEST, error.to_string())))
             {
                 Ok(actor) => actor,
-                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
-                    "NO DELIVERY CLOSE REJECTED: registered caller required ({error}).")))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", format!(
+                    "NO DELIVERY CLOSE REJECTED: registered caller required ({error}).")))))
             };
             let passes = match cas_store::list_qa_passes(&self.cas_root, &task.id) {
                 Ok(passes) => passes,
-                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
-                    "NO DELIVERY CLOSE REJECTED: QA history is unavailable ({error}).")))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", format!(
+                    "NO DELIVERY CLOSE REJECTED: QA history is unavailable ({error}).")))))
             };
             if passes.iter().any(|pass| !pass.is_withdrawn()) {
-                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a recorded QA round still binds this task; a declaration cannot withdraw it.")));
+                return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: a recorded QA round still binds this task; a declaration cannot withdraw it."))));
             }
             match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id) {
                 Ok(None) => {}
-                Ok(Some(_)) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, "NO DELIVERY CLOSE REJECTED: a worker delivery receipt is recorded."))),
-                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
-                    "NO DELIVERY CLOSE REJECTED: worker delivery history is unavailable ({error}).")))),
+                Ok(Some(_)) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", "NO DELIVERY CLOSE REJECTED: a worker delivery receipt is recorded.")))),
+                Err(error) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", format!(
+                    "NO DELIVERY CLOSE REJECTED: worker delivery history is unavailable ({error}).")))))
             }
             let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
             let measurement = match measure_no_delivery(
@@ -9066,8 +9172,8 @@ impl CasCore {
                 commit_receipt_window.as_ref(),
             ) {
                 Ok(measurement) => measurement,
-                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, format!(
-                    "NO DELIVERY CLOSE REJECTED: {message}")))),
+                Err(message) => return Ok(Self::tool_error(gate_preflight::refusal_reply(gate_refusals, crate::gates::tag("G-47", format!(
+                    "NO DELIVERY CLOSE REJECTED: {message}")))))
             };
             close_notes.record(&mut task, &format!(
                 "No delivery declared by {}: {}. {measurement} QA and factory-branch delivery gates do not apply for this attempt; verification and dirty-work checks remain required.",
@@ -9150,7 +9256,6 @@ impl CasCore {
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, qa_receipt,
             );
-            let mut upkeep_refusals = Vec::new();
             let rule_head = super::qa_evidence_gate::delivered_head(
                 &task, &evidence_repo, &resolved_parent_branch, qa_receipt,
             );
@@ -9159,49 +9264,19 @@ impl CasCore {
             ) {
                 gate_refusals.push(message);
             }
-            match registry_upkeep::at_park(
-                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
-                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
-            ) {
-                Ok(notices) => registry_upkeep_notices = notices,
-                Err(message) => upkeep_refusals.push(message),
-            }
-            match docs_upkeep::at_park(
-                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
-                &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
-                supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
-            ) {
-                Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => upkeep_refusals.push(message),
-            }
+            // cas-4b33: journey registry upkeep (G-49) runs as the lane lint
+            // and CODEMAP/PRODUCT_OVERVIEW are regenerated at release prep, so
+            // park no longer re-judges shared docs (G-50 removed).
             // cas-5d07: a report reaches the operator only as the report the
             // skill describes; not deferred by the fast lane.
+            // gate[G-51 park as-of]: Report not ready for the operator (report quality)
             match report_quality::at_park(
                 &mut close_notes, &mut task, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => gate_refusals.push(message),
-            }
-            if fast_lane_stage.on_lane() {
-                upkeep_refusals = fast_lane_gate::defer_upkeep(
-                    &mut close_notes, &mut task, &fast_lane_stage, upkeep_refusals,
-                    &mut registry_upkeep_notices,
-                );
-            }
-            // Returning a merged delivery changes the task, so it happens once,
-            // for all of its upkeep findings, and ends this attempt.
-            if !upkeep_refusals.is_empty() {
-                let message = upkeep_refusals.join("\n\n");
-                let recovery = self.return_merged_delivery_for_source_fix(
-                    &task, &evidence_repo, &resolved_parent_branch, &message,
-                );
-                gate_refusals.push(format!("{message}{recovery}"));
-                if !recovery.is_empty() {
-                    return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
-                }
+                Err(message) => gate_refusals.push(crate::gates::tag("G-51", message)),
             }
             let qa_base = qa_window.and_then(|window| {
                 let head = super::qa_evidence_gate::delivered_head(
@@ -9234,7 +9309,8 @@ impl CasCore {
                             fast_lane_receipt_passed = true;
                             Some(Ok(Vec::new()))
                         }
-                        fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(message)),
+                        // gate[G-54 close-after-merge as-of]: Fast-lane post-merge receipt (pending, failed, unreadable, revert needed, walk failed)
+                        fast_lane_gate::ReceiptGate::Hold(message) => Some(Err(crate::gates::tag("G-54", message))),
                         fast_lane_gate::ReceiptGate::Failed(message) => {
                             // A failed receipt/revert requires a new source delivery;
                             // ordinary post-merge upkeep remains supervisor-owned.
@@ -9243,12 +9319,13 @@ impl CasCore {
                                 &self.cas_root, &actor, &task, &evidence_repo,
                                 &resolved_parent_branch, &message,
                             ).unwrap_or_else(|error| format!("Cassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id));
-                            gate_refusals.push(format!("{message}\n\n{recovery}"));
+                            gate_refusals.push(crate::gates::tag("G-54", format!("{message}\n\n{recovery}")));
                             return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                         }
                     }
                 }
             };
+            // gate[G-53 park as-of]: QA evidence rejected (implementer evidence bundle, pair coverage, batch deferral)
             match fast_lane_qa.unwrap_or_else(|| super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
                 &self.cas_root,
                 &task,
@@ -9257,13 +9334,14 @@ impl CasCore {
                 qa_receipt,
                 attributed_paths.as_deref(),
                 qa_base.as_deref(),
-            )) {
+            ).map_err(|message| crate::gates::tag("G-53", message))) {
                 Ok(notes) => {
                     for note in notes {
                         close_notes.record(&mut task, &note);
                     }
                 }
                 Err(message) if supervisor_override => {
+                    accepted_override_codes.push("G-53");
                     close_notes.record(
                         &mut task,
                         &format!(
@@ -9301,7 +9379,7 @@ impl CasCore {
                     close_notes.record(&mut task, &note);
                 }
                 MergeStateGateOutcome::Unresolved(message) => {
-                    gate_refusals.push(message);
+                    gate_refusals.push(crate::gates::tag("G-55", message));
                     return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                 }
                 MergeStateGateOutcome::Reject(msg) => {
@@ -9389,9 +9467,10 @@ impl CasCore {
                     // commit origin lacks can never be the delivery anchor.
                     // The anchor checks below judge a pushed tip, so they wait
                     // for the push; the tip's receipts can be read already.
+                    // gate[G-59 park integrity]: Unpushed delivery tip (close refused at park)
                     let unpushed_refusal = measured_branch.as_deref().zip(anchor.as_deref()).and_then(|(branch, tip)| {
                         unpushed_delivery_tip(&close_project_root, branch, tip, task.delivery_mode)
-                            .map(|pushed| unpushed_delivery_tip_refusal(branch, tip, &pushed))
+                            .map(|pushed| crate::gates::tag("G-59", unpushed_delivery_tip_refusal(branch, tip, &pushed)))
                     });
                     let tip_is_pushed = unpushed_refusal.is_none();
                     gate_refusals.extend(unpushed_refusal);
@@ -9433,7 +9512,8 @@ impl CasCore {
                                 let receipt_was_tip = req.commit_receipt.as_deref()
                                     .and_then(|receipt| resolve_task_commit_receipt_sha(&close_project_root, receipt).ok())
                                     .is_some_and(|receipt| commit_ids_match(&receipt, tip));
-                                gate_refusals.push(if receipt_was_tip {
+                                // gate[G-60 park integrity]: Park anchor absent, unattributable advance or persisted anchor unreadable
+                                gate_refusals.push(crate::gates::tag("G-60", if receipt_was_tip {
                                     format!(
                                         "PARK REFUSED: recorded delivery anchor {boundary} is absent from {branch}, and commit_receipt={tip} cannot replace it: the commits since {branch} left the target are not all attributable to {id} (another task's commit or work after a sibling's lease), or this is a rewritten delivery. No park or anchor change was recorded. Do not retry the same receipt; ask the supervisor to review the delivery and request changes or rebind the branch.",
                                         id = task.id,
@@ -9443,7 +9523,7 @@ impl CasCore {
                                         "PARK REFUSED: delivery anchor {boundary} is absent from locally measured {branch} at tip {tip}. No park or anchor change was recorded. Re-run `{}task action=close id={} commit_receipt={tip}` at that tip. If the rewritten delivery cannot be attributed, ask the supervisor to request changes and review the replacement delivery.",
                                         crate::mcp::tools::core::guidance::caller_prefix(), task.id,
                                     )
-                                });
+                                }));
                                 return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                             }
                         }
@@ -9483,9 +9563,9 @@ impl CasCore {
                         if merge_conflicted && !task.deliverables.merge_conflicted {
                             self.mark_awaiting_merge_conflicted(task_store.as_ref(), &task.id);
                         }
-                        gate_refusals.push(format!(
+                        gate_refusals.push(crate::gates::tag("G-60", format!(
                             "PARK REFUSED: cannot attribute the advance at commit {offending}. Kept delivery anchor {recorded}; ignored locally measured delivery tip {tip}. No anchor or QA round changed. {remedy}",
-                        ));
+                        )));
                         return Ok(Self::tool_error(gate_preflight::park_reply(gate_refusals)));
                     }
                     // Focused-test receipts at this
@@ -9579,21 +9659,21 @@ impl CasCore {
                     // may be another task's work.
                     let qa_anchor = match task_store.get(&task.id) {
                         Ok(stored) => stored.deliverables.factory_branch_anchor,
-                        Err(error) => return Ok(Self::tool_error(format!(
+                        Err(error) => return Ok(Self::tool_error(crate::gates::tag("G-60", format!(
                             "PARK REFUSED: cannot read persisted delivery anchor: {error}. Re-run close for {}.",
                             task.id,
-                        ))),
+                        )))),
                     };
                     // A declined or concurrent advance must not dispatch QA
                     // for a retired anchor absent from the pushed source.
                     if !qa_anchor.as_deref().zip(anchor.as_deref()).is_some_and(|(boundary, tip)| {
                         git_commit_is_ancestor(&close_project_root, boundary, tip)
                     }) {
-                        return Ok(Self::tool_error(format!(
+                        return Ok(Self::tool_error(crate::gates::tag("G-60", format!(
                             "PARK REFUSED: persisted delivery anchor {:?} is absent from the locally measured source at {:?}. Re-run `{}task action=close id={}` at that tip; ask the supervisor to request changes if attribution prevents the advance.",
                             qa_anchor, anchor,
                             crate::mcp::tools::core::guidance::caller_prefix(), task.id,
-                        )));
+                        ))));
                     }
                     // G7 never refuses a park. Snapshot the attributed delivery
                     // before QA dispatch, even if independent QA is disabled.
@@ -9654,9 +9734,10 @@ impl CasCore {
             ) } {
                 super::qa_dispatch::QaCloseGate::Clear => {}
                 super::qa_dispatch::QaCloseGate::Refuse(refusal) => {
-                    return Ok(Self::tool_error(refusal));
+                    return Ok(Self::tool_error(crate::gates::tag("G-64", refusal)));
                 }
                 super::qa_dispatch::QaCloseGate::Waived(note) => {
+                    accepted_override_codes.push("G-64");
                     close_notes.record(&mut task, &note);
                 }
             }
@@ -9774,6 +9855,10 @@ impl CasCore {
                 }))
             });
 
+        if skip_verification && !depth_light && matches!(skip_reason, VerificationSkipReason::SupervisorBypass) {
+            accepted_override_codes.push("G-68");
+        }
+
         // Also allow supervisor to skip verification jail when they are the
         // task assignee for a non-epic task (fixes supervisor self-close deadlock).
         let supervisor_is_assignee = is_supervisor_from_env()
@@ -9841,6 +9926,7 @@ impl CasCore {
             && no_verification_on_record
             && verification_tier.is_some()
             && super::review_tier::release_verdict_owns(&self.cas_root, &task, &close_project_root)));
+        // gate[G-67 close-after-merge as-of]: Waiting for release verdict (Tier 1 in qa.mode=batch)
         if let Some(decision) = verification_tier.as_ref().filter(|_| release_verdict_covers && parent_release_review.is_none()) {
             match crate::qa_batch::satisfying_release_verdict(
                 &self.cas_root,
@@ -9855,7 +9941,9 @@ impl CasCore {
                 ),
                 // cas-bc15: a live supervisor's reasoned override waives the
                 // release verdict for this delivery, and the task records it.
-                Ok(None) if supervisor_override => close_notes.record(
+                Ok(None) if supervisor_override => {
+                    accepted_override_codes.push("G-67");
+                    close_notes.record(
                     &mut task,
                     &format!(
                         "[{}] ✅ DECISION supervisor_override waived the release verdict at {}: {}",
@@ -9863,22 +9951,24 @@ impl CasCore {
                         decision.tip,
                         req.reason.as_deref().unwrap_or_default().trim(),
                     ),
-                ),
+                );
+                },
                 Ok(None) => {
-                    return Ok(Self::tool_error(gate_text::waiting_for_release_verdict(
+                    return Ok(Self::tool_error(crate::gates::tag("G-67", gate_text::waiting_for_release_verdict(
                         &req.id,
                         &decision.tip,
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
-                    )));
+                    ))));
                 }
                 Err(error) => {
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(crate::gates::tag("G-67", format!(
                         "⚠️ VERIFICATION DISPATCH INVALID\n\nTask {} has unreadable release verdict state: {error}. Cassy refuses to infer close authority.",
                         req.id
-                    )));
+                    ))));
                 }
             }
         }
+        // gate[G-68 park as-of]: Verification jail (VERIFICATION REQUIRED / FAILED / timed out)
         if verification_enabled
             && !skip_verification
             && !depth_light
@@ -9909,12 +9999,12 @@ impl CasCore {
                 ) {
                     Ok(dispatch) => dispatch,
                     Err(error) => {
-                        return Ok(Self::tool_error(format!(
+                        return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
                             "⚠️ VERIFICATION DISPATCH INVALID\n\n\
                                  Task {} has unreadable durable verification-dispatch state: {}. \
                                  Cassy refuses to infer authority or recovery from corrupt metadata.",
                             req.id, error
-                        )));
+                        ))));
                     }
                 };
                 let mut superseded_approved_verdict_id = None;
@@ -9950,6 +10040,7 @@ impl CasCore {
                     typed_dispatch = None;
                 }
 
+                // gate[G-69 close-after-merge integrity]: Repository-proof revalidation after verdict
                 if let Some(dispatch) = typed_dispatch.as_ref()
                     && let Some(repository) = dispatch.repository.as_ref()
                     && !reviewed_delivery.as_ref().is_some_and(|reviewed| {
@@ -10051,7 +10142,7 @@ impl CasCore {
                     }
                     let elapsed_mins = (now - timed_out.requested_at).num_seconds() / 60;
                     let recovery_action = timed_out.recovery_action.to_string();
-                    return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                    return Ok(Self::tool_error(crate::gates::tag("G-68", gate_text::verification_timeout_message(
                         &req.id,
                         required_verification_type(task.task_type),
                         gate_text::VerificationTimeout::Dispatch {
@@ -10061,7 +10152,7 @@ impl CasCore {
                         },
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         crate::mcp::tools::core::guidance::caller_prefix(),
-                    )));
+                    ))));
                 }
 
                 match latest {
@@ -10077,7 +10168,7 @@ impl CasCore {
                     Ok(Some(v)) if v.status == VerificationStatus::Rejected => {
                         // Verification rejected, block close
                         if crate::release_reconcile::active() && task.task_type != TaskType::Epic {
-                            return Ok(Self::tool_error("RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch."));
+                            return Ok(Self::tool_error(crate::gates::tag("G-128", "RELEASE_MEMBER_REVIEW_REQUIRED: existing task review is missing; retained in the release receipt without issuing a post-release dispatch.")));
                         }
                         // Only auto-claim if the closing agent is the task's assignee.
                         // If a supervisor closes a worker's task, skip the lease to avoid
@@ -10106,7 +10197,7 @@ impl CasCore {
                             String::new()
                         };
 
-                        return Ok(Self::tool_error(format!(
+                        return Ok(Self::tool_error(crate::gates::tag("G-68", format!(
                             "⚠️ VERIFICATION FAILED\n\n\
                             Task {} has a rejected verification with {} issue(s) ({} blocking).\n\n\
                             Summary: {}\n\n\
@@ -10137,7 +10228,7 @@ impl CasCore {
                                     verifier_agent, req.id
                                 )
                             }
-                        )));
+                        ))));
                     }
                     Ok(Some(ref v))
                         if matches!(
@@ -10210,7 +10301,7 @@ impl CasCore {
                         // verification alias must track the supervisor CLI —
                         // hardcoding mcp__cas__verification hands a Codex
                         // supervisor an alias they cannot call.
-                        return Ok(Self::tool_error(gate_text::verification_timeout_message(
+                        return Ok(Self::tool_error(crate::gates::tag("G-68", gate_text::verification_timeout_message(
                             &req.id,
                             required_verification_type(task.task_type),
                             gate_text::VerificationTimeout::Legacy {
@@ -10218,7 +10309,7 @@ impl CasCore {
                             },
                             crate::mcp::tools::core::guidance::supervisor_prefix(),
                             crate::mcp::tools::core::guidance::caller_prefix(),
-                        )));
+                        ))));
                     }
                     Ok(None) | Ok(Some(_)) => {
                         // No verification or pending/error status.
@@ -10358,6 +10449,7 @@ impl CasCore {
                             return Ok(Self::tool_error(message));
                         }
 
+                        // gate[G-70 close-after-merge as-of]: Pre-merge approval missing for a merged factory delivery
                         if !is_epic && !empty_delivery
                             && !(supervisor_tier_two_recovery && merged_receipt.is_some())
                             && task.deliverables.factory_branch_anchor.is_some()
@@ -10367,11 +10459,11 @@ impl CasCore {
                             let delivery_branch = task.deliverables.parked_branch.as_deref()
                                 .or_else(|| task.deliverables.factory_branch_start.as_ref().map(|start| start.branch.as_str()))
                                 .or(task.assignee.as_deref()).unwrap_or("<delivery branch>");
-                            return Ok(Self::tool_error(format!(
+                            return Ok(Self::tool_error(crate::gates::tag("G-70", format!(
                                 "PRE-MERGE APPROVAL MISSING: factory delivery {} has no reusable pre-merge verdict. Close does not dispatch a post-merge verifier. Supervisor recovery: {}factory action=worktree_merge id={} task_id={} to reconcile its existing candidate and promotion. If no pre-merge dispatch exists, use {}task action=request_changes id={} reason=\"Prepare a reviewable correction before publication\" and review that fresh delivery before merging it. Repeating close cannot create a post-merge approval.",
                                 task.id, crate::mcp::tools::core::guidance::supervisor_prefix(), delivery_branch, task.id,
                                 crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
-                            )));
+                            ))));
                         }
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
@@ -10512,6 +10604,7 @@ impl CasCore {
                         };
 
                         // Send verification blocked activity event (for supervisor visibility)
+                        // gate[N-18 notice]: Worker verification-blocked activity
                         if let Ok(agent_id) = self.get_agent_id() {
                             let event = crate::mcp::socket::DaemonEvent::WorkerActivity {
                                 session_id: agent_id,
@@ -10522,6 +10615,13 @@ impl CasCore {
                             let _ = crate::mcp::socket::send_event(&self.cas_root, &event);
                         }
 
+                        // A fresh cycle that replaced an approved verdict on
+                        // changed files is also the revalidation gate's refusal.
+                        let revalidated = |message: String| if superseded_approved_verdict_id.is_some() {
+                            crate::gates::tag("G-69", message)
+                        } else {
+                            message
+                        };
                         let requester_id = self.get_agent_id()?;
                         let owner_id = self.verification_dispatch_owner(&requester_id)?;
                         let supervisor_direct_recovery = self
@@ -10545,8 +10645,7 @@ impl CasCore {
                                 // especially when a genuinely different proof
                                 // boundary won the race. Its owner/verifier can
                                 // still finish the original verdict unchanged.
-                                let conflict = if dispatch.receipt_id != proof_boundary.receipt_id
-                                    || dispatch.delivery_transaction_id != proof_boundary.delivery_transaction_id
+                                let conflict = if dispatch.receipt().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))? != proof_boundary.receipt().map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?
                                     || dispatch.repository != proof_boundary.repository
                                 {
                                     "This close requested a different proof boundary. The active dispatch was neither reused nor replaced."
@@ -10555,13 +10654,13 @@ impl CasCore {
                                 } else {
                                     "The proof boundary and owner are unchanged; the requester differs."
                                 };
-                                return Ok(Self::tool_error(gate_text::worker_verification_required(
+                                return Ok(Self::tool_error(revalidated(crate::gates::tag("G-68", gate_text::worker_verification_required(
                                     &req.id,
                                     &gate_text::worker_pending_dispatch(
                                         &req.id, &dispatch.id, &dispatch.owner_agent_id,
                                         &dispatch.deadline_at.to_string(), conflict,
                                     ),
-                                )));
+                                )))));
                             }
                         };
 
@@ -10736,12 +10835,12 @@ impl CasCore {
                         // reason are for the supervisor and verifier, who get them
                         // from the dispatch itself.
                         if is_factory_worker {
-                            return Ok(Self::tool_error(gate_text::worker_verification_required(
+                            return Ok(Self::tool_error(revalidated(crate::gates::tag("G-68", gate_text::worker_verification_required(
                                 &req.id,
                                 &verification_gate,
-                            )));
+                            )))));
                         }
-                        return Ok(Self::tool_error(format!(
+                        return Ok(Self::tool_error(revalidated(crate::gates::tag("G-68", format!(
                             "⚠️ VERIFICATION REQUIRED\n\n\
                                 Task {} requires verification before closing.\n\n\
                                 {}{}\n\n\
@@ -10768,7 +10867,7 @@ impl CasCore {
                                     req.id
                                 )
                             }
-                        )));
+                        )))));
                     }
                     Err(_) => {
                         // Verification store error, proceed anyway
@@ -10800,6 +10899,7 @@ impl CasCore {
                             && worktree.status == WorktreeStatus::Active
                             && worktree.merged_at.is_none();
 
+                        // gate[G-72 epic-close integrity]: Worktree merge required jail (System-A worktree)
                         if needs_merge {
                             // Set pending_worktree_merge flag to enable worktree jail
                             let agent_id = self.get_agent_id().ok();
@@ -10812,7 +10912,7 @@ impl CasCore {
                                 tracing::warn!(task_id = %req.id, error = %e, "failed to set pending_worktree_merge on task");
                             }
 
-                            return Ok(Self::tool_error(format!(
+                            return Ok(Self::tool_error(crate::gates::tag("G-72", format!(
                                 "⚠️ WORKTREE MERGE REQUIRED\n\n\
                                 Task {} has an associated worktree that needs to be merged before closing.\n\n\
                                 📍 Worktree: {}\n\
@@ -10832,7 +10932,7 @@ impl CasCore {
                                     "{}factory",
                                     crate::mcp::tools::core::guidance::caller_prefix()
                                 ),
-                            )));
+                            ))));
                         }
                     }
                 }
@@ -10884,9 +10984,9 @@ impl CasCore {
                     // Preserve its real diagnostic for the next administrative
                     // retry using the existing close-rejection activity stream.
                     self.record_close_rejection_activity(&task.id, "PRE-CLOSE HOOK FAILED", &message);
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(crate::gates::tag("G-41", format!(
                         "⚠️ PRE-CLOSE HOOK FAILED\n\n{message}"
-                    )));
+                    ))));
                 }
             }
         } else {
@@ -10933,13 +11033,14 @@ impl CasCore {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
                 let receipt = clean_tree_receipt(worker_wt);
                 let uncommitted = &receipt.tracked_dirty;
+                // gate[G-73 park integrity]: Uncommitted work in isolated worktree
                 if !uncommitted.is_empty() {
                     let file_list = uncommitted
                         .iter()
                         .map(|u| format!("  {}  {}", u.status, u.path))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return Ok(Self::tool_error(format!(
+                    return Ok(Self::tool_error(crate::gates::tag("G-73", format!(
                         "⚠️ UNCOMMITTED WORK\n\n\
                         task close rejected: the worker's tree has uncommitted tracked \
                         changes. Closing now would lose the work when the worktree is \
@@ -10956,7 +11057,7 @@ impl CasCore {
                         worker_wt.display(),
                         req.id,
                         tool_prefix = crate::mcp::tools::core::guidance::caller_prefix()
-                    )));
+                    ))));
                 }
                 // Tree is not dirty — but "not dirty" is not automatically
                 // "clean and matching". Name whatever the receipt could not
@@ -11033,8 +11134,8 @@ impl CasCore {
         // to a legacy `git diff HEAD` path on the main worktree — that
         // path has been deleted in this commit because it reintroduced
         // the exact wrong-worktree-scope bug cas-bc1b was filed to fix.
+        // gate[G-74 park integrity]: Execution-note diff contracts (additive-only / value-only)
         if close_disposition.requires_delivery_gates()
-            && !supervisor_override
             && task.execution_note.as_deref() == Some("additive-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
@@ -11065,13 +11166,15 @@ impl CasCore {
                         .map(|v| format!("  {} ({})", v.path, v.status))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return Ok(Self::tool_error(format!(
+                    if supervisor_override {accepted_override_codes.push("G-74");} else {
+                    return Ok(Self::tool_error(crate::gates::tag("G-74", format!(
                         "⚠️ ADDITIVE-ONLY VIOLATION\n\n\
                         task close rejected: execution_note=additive-only but diff contains \
                         modifications.\n\n\
                         Modified/deleted/renamed files:\n{file_list}\n\n\
                         Use execution_note=null or test-first to modify existing files."
-                    )));
+                    ))));
+                    }
                 }
             }
         }
@@ -11084,7 +11187,6 @@ impl CasCore {
         // gates below; unlike an additive-only task, it has a real modified
         // diff for those gates to inspect.
         if close_disposition.requires_delivery_gates()
-            && !supervisor_override
             && task.execution_note.as_deref() == Some("value-only")
         {
             if let Some(worker_wt) = worker_worktree_path.as_ref() {
@@ -11112,14 +11214,16 @@ impl CasCore {
                         .map(|v| format!("  {} ({})", v.path, v.status))
                         .collect::<Vec<_>>()
                         .join("\n");
-                    return Ok(Self::tool_error(format!(
+                    if supervisor_override {accepted_override_codes.push("G-74");} else {
+                    return Ok(Self::tool_error(crate::gates::tag("G-74", format!(
                         "⚠️ VALUE-ONLY VIOLATION\n\n\
                         task close rejected: execution_note=value-only permits only \
                         modifications to existing files.\n\n\
                         Added/deleted/copied/renamed files:\n{file_list}\n\n\
                         Use execution_note=additive-only for new-file-only work, or \
                         execution_note=null or test-first for broader changes."
-                    )));
+                    ))));
+                    }
                 }
             }
         }
@@ -11267,6 +11371,7 @@ impl CasCore {
                     epic_has_recorded_delivery |= receipt.is_some();
                 }
             }
+            // gate[G-71 epic-close integrity]: Epic delivery tip and epic build basis required
             let delivered_tip = match close_task_delivery_tip(
                 &task,
                 proof_repo,
@@ -11279,7 +11384,7 @@ impl CasCore {
                 epic_has_recorded_delivery,
             ) {
                 Ok(tip) => tip,
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-71", message))),
             };
             let epic_assembly_basis = if let Some(proof) = crate::qa_batch::release_close::parent_integration(&self.cas_root, &task.id) {
                 Some(proof)
@@ -11287,11 +11392,12 @@ impl CasCore {
                 match epic_build_proof_basis(&task, delivered_tip.as_deref(), proof_repo) {
                     Ok(basis) => basis,
                     Err(message) if supervisor_override => {
+                        accepted_override_codes.push("G-71");
                         let audit = format!("decision: epic tip already contained in the default branch; supervisor overrode {message} Reason: {}", req.reason.as_deref().unwrap_or_default());
                         close_notes.record(&mut task, &audit);
                         Some(audit)
                     }
-                    Err(message) => return Ok(Self::tool_error(message)),
+                    Err(message) => return Ok(Self::tool_error(crate::gates::tag("G-71", message))),
                 }
             } else { None };
             let has_delivery_window = task.task_type != TaskType::Epic || delivered_tip.is_some();
@@ -11404,7 +11510,7 @@ impl CasCore {
                 &task.id,
                 crate::mcp::tools::core::guidance::caller_prefix(),
             ) {
-                return Ok(Self::tool_error(error));
+                return Ok(Self::tool_error(crate::gates::tag("G-75", error)));
             }
             // cas-3efd: compile-only checks do not replace the
             // supervisor's epic-assembly run. An ASSEMBLY_PROOF on the parent
@@ -11447,6 +11553,7 @@ impl CasCore {
             // cas-74cb: an epic's own close answers with its assembly when it
             // has one; otherwise its scoped proof stays required.
             let closing_epic = task.task_type == TaskType::Epic;
+            // gate[G-80 epic-close as-of]: Build proof / ASSEMBLY_PROOF for the epic tip
             let build_proofs = close_build_proofs(
                 is_factory_worker,
                 assembly_proof.is_some(),
@@ -11456,7 +11563,8 @@ impl CasCore {
             let refusal_epic_id = closing_epic.then(|| task.id.clone());
             let epic_refusal = move |message: String| {
                 if let Some(epic_id) = refusal_epic_id.as_deref() {
-                    format!("{message}\n\n{}", epic_assembly_proof_instruction(epic_id))
+                    let instruction = epic_assembly_proof_instruction(epic_id);
+                    crate::gates::tag("G-80", format!("{message}\n\n{instruction}"))
                 } else {
                     message
                 }
@@ -11553,6 +11661,14 @@ impl CasCore {
                 if !supervisor_override {
                     return Ok(Self::tool_error(epic_refusal(message)));
                 }
+                for code in crate::gates::codes_in(&message) {
+                    match code {
+                        "G-76" => accepted_override_codes.push("G-76"),
+                        "G-61" => accepted_override_codes.push("G-61"),
+                        "G-78" => accepted_override_codes.push("G-78"),
+                        _ => {},
+                    }
+                }
                 // Supervisor authority and a non-empty reason were checked at
                 // entry. Waive only the declared-risk mismatch; the mandatory
                 // scoped proof derived from the actual diff still runs.
@@ -11601,7 +11717,10 @@ impl CasCore {
                                 scoped_proof_base.as_deref(),
                                 &required_targets,
                             ) {
-                                Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
+                                Ok(measurement) => {
+                                    accepted_override_codes.push("G-79");
+                                    accepted_inherited_scoped_failures = Some(measurement);
+                                },
                                 Err(audit_error) => {
                                     return Ok(Self::tool_error(epic_refusal(format!(
                                         "{scoped_error} Inherited base-red audit rejected: {audit_error}. Alternatively, cite merge_group_run=<run id> in the supervisor override reason to reuse successful CI for a landed tree containing this delivery."
@@ -11673,6 +11792,7 @@ impl CasCore {
                     ).is_ok());
                 // cas-7efe: single close-time resolver, not a bare "main".
                 if !integrated_delivery {
+                    // gate[G-81 park integrity]: Merge reality check (zero commits, never pushed)
                     match check_factory_branch_merge_reality_with_delivery_mode(
                         &close_project_root,
                         assignee,
@@ -11682,7 +11802,7 @@ impl CasCore {
                     ) {
                         MergeRealityOutcome::Proceed => {}
                         MergeRealityOutcome::Refuse(msg) => {
-                            return Ok(Self::tool_error(msg));
+                            return Ok(Self::tool_error(crate::gates::tag("G-81", msg)));
                         }
                     }
                 }
@@ -11742,8 +11862,9 @@ impl CasCore {
             // cas-bc15: a live supervisor's reasoned override (validated
             // above) answers deferred batch evidence, and the task records it.
             if !supervisor_override {
-                return Ok(Self::tool_error(message));
+                return Ok(Self::tool_error(crate::gates::tag("G-83", message)));
             }
+            accepted_override_codes.push("G-83");
             close_notes.record(&mut task, &format!(
                 "[{}] ✅ DECISION supervisor_override waived deferred batch evidence ({message}): {}",
                 chrono::Utc::now().format("%Y-%m-%d %H:%M"),
@@ -12023,12 +12144,13 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
         let _terminal_close_lock = terminal_close_lock(&self.cas_root, &req.id);
+        // gate[G-84 close-after-merge integrity]: Final-write compare-and-swap (changed while running)
         let close_refused = |change: &str| {
             let caller = crate::mcp::tools::core::guidance::caller_prefix();
-            Self::tool_error(format!(
+            Self::tool_error(crate::gates::tag("G-84", format!(
                 "CLOSE REFUSED: task {} changed while this close was running ({change}), for example a supervisor proof_scope_fix or request_changes. Nothing was closed and the newer state was kept. Reload it with `{caller}task action=show id={}`, then retry `{caller}task action=close id={}`.",
                 req.id, req.id, req.id
-            ))
+            )))
         };
         let pending_notes = close_notes.pending(&task).to_owned();
         let mut current = task_store.get(&req.id).ok();
@@ -12202,15 +12324,16 @@ impl CasCore {
                     super::supervisor_push::LifecycleTransition::Closed,
                     &occurrence,
                 );
+                // gate[G-85 close-after-merge integrity]: Closed lifecycle outbox push failure
                 return Err(Self::error(
                     ErrorCode::INTERNAL_ERROR,
-                    super::supervisor_push::lifecycle_push_failure_message(
+                    crate::gates::tag("G-85", super::supervisor_push::lifecycle_push_failure_message(
                         &req.id,
                         TaskStatus::Closed,
                         super::supervisor_push::LifecycleTransition::Closed,
                         &key,
                         &e,
-                    ),
+                    )),
                 ));
             }
 
@@ -12625,6 +12748,12 @@ impl CasCore {
             receipt = gate_text::upkeep_receipt(&self.cas_root,
                 configured_artifacts_root.as_deref(), &task.id, "close", receipt, &registry_upkeep_notices);
         }
+        if epic_override_note_pending { accepted_override_codes.push("G-125"); }
+        for code in accepted_override_codes.into_iter().chain(close_notes.override_codes.iter().copied())
+            .chain(crate::gates::override_codes_in(&registry_upkeep_notices.join("\n")))
+        {
+            receipt = crate::gates::override_tag(code, receipt);
+        }
         Ok(Self::success(receipt))
     }
 
@@ -12683,6 +12812,7 @@ impl CasCore {
     /// exactly the "closed while uncommitted / never-pushed" data-loss
     /// near-miss from BUG-merge-gate-inconsistent-close-without-integration.
     /// This fix adds System B as a fallback so those gates actually run.
+    // gate[G-40 park integrity]: Worker worktree resolution (close hook context rejected)
     pub(crate) fn resolve_worker_worktree_path(
         &self,
         task: &cas_types::Task,
@@ -12727,15 +12857,15 @@ impl CasCore {
         if let (Some(worktree), Some(system_b_path)) = (system_a.as_ref(), system_b.as_ref())
             && worktree.path != *system_b_path
         {
-            return Err(
+            return Err(crate::gates::tag(
+                "G-40",
                 "PRE-CLOSE HOOK CONTEXT REJECTED: multiple distinct task worktrees match the \
-                 declared target. No close-time executable gate was run."
-                    .to_string(),
-            );
+                 declared target. No close-time executable gate was run.",
+            ));
         }
         if let Some(worktree) = system_a {
             validate_pre_close_worktree(&worktree.path, expected, Some(&worktree.branch))
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::gates::tag("G-40", error.to_string()))?;
             if let Some(assignee) = task.assignee.as_deref() {
                 // cas-8606 follow-through: any of the worker's own branches,
                 // including a per-task branch, as on the System-B path.
@@ -12744,7 +12874,7 @@ impl CasCore {
                     crate::factory_isolation::branch_at(&worktree.path).as_deref(),
                 );
                 validate_pre_close_worktree(&worktree.path, expected, Some(&expected_branch))
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| crate::gates::tag("G-40", error.to_string()))?;
             }
             return Ok(Some(worktree.path));
         }
@@ -12758,7 +12888,7 @@ impl CasCore {
                 crate::factory_isolation::branch_at(path).as_deref(),
             );
             validate_pre_close_worktree(path, expected, Some(&expected_branch))
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| crate::gates::tag("G-40", error.to_string()))?;
         }
         Ok(system_b)
     }
@@ -12804,6 +12934,8 @@ impl CasCore {
     ///    the registry. Same liveness logic as above.
     /// 4. Everything failed → `AssigneeUnregistered` (never falsely reported
     ///    as "assignee inactive" — the agent row is simply missing).
+    // gate-audit[bypass_requested]: bypass G-68 Pure verification classification; final close producer tags the actual accepted waiver.
+    // gate-audit[accepted_by]: close_task_with_dispositions_inner
     pub(crate) fn compute_verification_skip_reason(
         &self,
         task: &cas_types::Task,
@@ -13073,15 +13205,16 @@ impl CasCore {
                 )
             })?;
         } else if !is_supervisor_from_env() {
+            // gate[H-45 mcp]: MCP lifecycle role gates (supervisor-only actions)
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
-                format!(
+                crate::gates::tag("H-45", format!(
                     "task reopen rejected: only supervisors may reopen a closed or \
                      blocked task (CAS_AGENT_ROLE=supervisor). Task {} stays as-is. \
                      Message your supervisor if you believe this task needs rework \
                      or its blocker should be lifted — do not reopen it yourself.",
                     req.id
-                ),
+                )),
             ));
         }
 
@@ -13438,6 +13571,8 @@ impl CasCore {
                     work_target.target_branch,
                     req.reason.trim(),
                 ));
+                // The syncing wrapper implements only the guarded update; the
+                // receipt variant refused every logged-in supervisor (cas-8144).
                 task_store.update_if_current(&granted, &task)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
                         format!("task merge source authorization rejected: {error}")))?;
@@ -13562,11 +13697,14 @@ pub(crate) struct TaskCommitIdentity {
     /// delivery tip supplied by the close path. Exact evidence that needs no
     /// commit-message convention.
     pub known_commits: Vec<String>,
+    /// Exact unmerged commits transferred by a cancelled task's explicit
+    /// successor link. Keep this authority distinct from ordinary WIP anchors.
+    pub superseded_commits: Vec<String>,
 }
 
 impl TaskCommitIdentity {
     fn is_empty(&self) -> bool {
-        self.task_id.is_none() && self.known_commits.is_empty()
+        self.task_id.is_none() && self.known_commits.is_empty() && self.superseded_commits.is_empty()
     }
 
     /// True when `commit` is one of the recorded task commits.
@@ -13575,11 +13713,19 @@ impl TaskCommitIdentity {
     /// the same commit (Cassy records full ids; git may hand back an
     /// abbreviation).
     fn matches_known_commit(&self, commit: &str) -> bool {
+        Self::matches_commit_in(&self.known_commits, commit) || self.matches_superseded_commit(commit)
+    }
+
+    fn matches_superseded_commit(&self, commit: &str) -> bool {
+        Self::matches_commit_in(&self.superseded_commits, commit)
+    }
+
+    fn matches_commit_in(known_commits: &[String], commit: &str) -> bool {
         let commit = commit.trim().to_ascii_lowercase();
         if commit.is_empty() {
             return false;
         }
-        self.known_commits.iter().any(|known| {
+        known_commits.iter().any(|known| {
             let known = known.trim().to_ascii_lowercase();
             !known.is_empty() && (known.starts_with(&commit) || commit.starts_with(&known))
         })
@@ -13619,6 +13765,7 @@ pub(crate) fn task_commit_identity(
         }
     }
     TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: task_attribution::authorized_merge_parents(task),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -13639,6 +13786,7 @@ pub(crate) fn task_commit_identity_in_repo(
     {
         fetch_parent_branch_best_effort(repo, &target.target_branch);
     }
+    task_attribution::include_superseded_commits(repo, task, &mut identity)?;
     if let Some(delivery) = task_attribution::validated_started_delivery(repo, task)? {
         identity.start_base = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.base_sha.clone());
@@ -15364,6 +15512,7 @@ fn epic_anchor_content_presence_inner(
     target: &str,
 ) -> (DeliveryContentPresence, Option<String>) {
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -15772,6 +15921,7 @@ fn validated_delivery_content_review(
 /// outcome.
 const CHILD_CONTENT_GATE_BUDGET: std::time::Duration = std::time::Duration::from_secs(35);
 
+// gate[G-56 close-after-merge integrity]: Delivery content presence (content dropped, unverifiable, timed out, review rejected)
 fn anchored_delivery_content_gate(
     task: &Task,
     repo_path: &std::path::Path,
@@ -15815,11 +15965,11 @@ fn anchored_delivery_content_gate(
         // An expired probe surfaces as an error, and some callers read an
         // error as dropped content. Never report a verdict measured past the
         // budget: refuse with the retry instead.
-        return Some(MergeStateGateOutcome::Reject(format!(
+        return Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
             "DELIVERY CONTENT CHECK TIMED OUT: proving task {}'s delivery {anchor} on {parent_branch} took longer than {}s ({elapsed_ms} ms measured), so Cassy made no decision and changed nothing. Retry the close when the host is less loaded; if it keeps timing out, the epic history is too long to measure inside one tool call — report it with this message.",
             task.id,
             budget.as_secs()
-        )));
+        ))));
     }
     match (outcome, audit.note()) {
         (None | Some(MergeStateGateOutcome::Proceed), Some(note)) => {
@@ -15834,6 +15984,8 @@ fn anchored_delivery_content_gate(
     }
 }
 
+// gate-audit[supervisor_override_reason]: bypass G-58 Only a validated historical-receipt exception is accepted; content-presence refusals remain mandatory.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn anchored_delivery_content_gate_unbounded(
     task: &Task,
     repo_path: &std::path::Path,
@@ -15986,13 +16138,13 @@ fn anchored_delivery_content_gate_unbounded(
                     )));
                 }
                 Err(reason) => {
-                    return Some(MergeStateGateOutcome::Reject(format!(
+                    return Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
                         "DELIVERY REVIEW REJECTED: {reason}"
-                    )));
+                    ))));
                 }
                 Ok(None) => {}
             }
-            Some(MergeStateGateOutcome::Reject(format!(
+            Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
                 "⚠️ DELIVERY CONTENT DROPPED\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but its tree effect is absent from the current \
@@ -16009,7 +16161,7 @@ fn anchored_delivery_content_gate_unbounded(
                  review are recorded.",
                 paths.join(", "),
                 dropped_line_samples(repo_path, anchor, parent_branch, &paths),
-            )))
+            ))))
         }
         DeliveryContentPresence::Unknown { reason } => {
             match validated_delivery_content_review(
@@ -16025,13 +16177,13 @@ fn anchored_delivery_content_gate_unbounded(
                     )));
                 }
                 Err(review_error) => {
-                    return Some(MergeStateGateOutcome::Reject(format!(
+                    return Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
                         "DELIVERY REVIEW REJECTED: {review_error}"
-                    )));
+                    ))));
                 }
                 Ok(None) => {}
             }
-            Some(MergeStateGateOutcome::Reject(format!(
+            Some(MergeStateGateOutcome::Reject(crate::gates::tag("G-56", format!(
                 "⚠️ DELIVERY CONTENT UNVERIFIABLE\n\n\
                  task close rejected: delivery anchor `{anchor}` is reachable from \
                  `{parent_branch}`, but Cassy could not prove its tree effect is still \
@@ -16045,7 +16197,7 @@ fn anchored_delivery_content_gate_unbounded(
                  commit must be the anchor or a descendant of it, be reachable on \
                  the target, and carry a non-empty diff. The resolved commits and \
                  review are recorded."
-            )))
+            ))))
         }
     }
 }
@@ -16429,6 +16581,7 @@ pub(crate) fn unpushed_delivery_tip(
     (!git_commit_is_ancestor(repo_path, tip, &remote)).then_some(pushed)
 }
 
+// gate-audit[forward]: G-59 Pure renderer; park caller tags unpushed delivery refusal.
 fn unpushed_delivery_tip_refusal(branch: &str, tip: &str, pushed: &str) -> String {
     let [push] = match crate::worktree::GitOperations::git_remedies([&["push", "origin", branch]]) {
         Ok(commands) => commands,
@@ -16573,6 +16726,7 @@ pub(crate) fn resolve_close_delivery_branch(
         return Ok(own);
     }
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -16755,6 +16909,8 @@ fn checkout_is_clean(worktree: &std::path::Path) -> bool {
 /// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
 /// Inspect both local and origin refs: a merged local lane cannot hide a newer
 /// remote delivery. All measurements use immutable IDs from one ref inventory.
+// gate-audit[evidence_only]: selector Disposition measurement excludes mutually exclusive declarations; does not waive delivery policy.
+// gate-audit[negative_result]: selector Disposition measurement excludes mutually exclusive declarations; does not waive delivery policy.
 fn measure_no_delivery(
     repo: &std::path::Path,
     task: &Task,
@@ -16923,6 +17079,7 @@ pub(crate) fn task_without_own_commits_judged(
         return false;
     }
     let identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -17005,6 +17162,9 @@ pub(crate) fn run_factory_branch_merge_gate_with_attribution(
     run_factory_branch_merge_gate_for_delivery(task, req, parent_branch, repo_path, attribution, None)
 }
 
+// gate[G-55 park integrity]: Delivery merged into its target before close (factory-branch merge state)
+// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged by the returned receipt narrative.
+// gate-audit[accepted_by]: close_task_with_dispositions_inner
 fn run_factory_branch_merge_gate_for_delivery(
     task: &Task,
     _req: &TaskCloseRequest,
@@ -17029,16 +17189,22 @@ fn run_factory_branch_merge_gate_for_delivery(
     if assignee.is_some_and(|name| !is_safe_git_refname(name))
         || !is_safe_git_refname(parent_branch)
     {
-        return MergeStateGateOutcome::Reject(format!(
+        return MergeStateGateOutcome::Reject(crate::gates::tag("G-55", format!(
             "⚠️ INVALID BRANCH NAME\n\n\
              task close rejected: the assignee ({assignee:?}) or resolved parent \
              branch ({parent_branch:?}) is not a safe git ref name (empty, or \
              starts with '-'). This looks like corrupted task data or a malformed \
              call — fix the task's assignee/epic-branch fields and retry."
-        ));
+        )));
     }
+    // Origin history only grows: a delivery the tracking ref holds is integrated.
+    // Ask origin at most once, and only when cached refs cannot prove it.
+    let mut origin_fetch_attempted = false;
+    let refresh = |attempted: &mut bool| if !*attempted {
+        *attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    };
     if task.deliverables.integration_batch.is_some() {
-        fetch_parent_branch_best_effort(repo_path, parent_branch);
+        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
         if let Some(squash) = super::super::integration_batch::landed_batch_squash(
             task, repo_path, parent_branch, attribution.receipt,
         ) {
@@ -17116,6 +17282,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         },
     };
     let fallback_content_identity = TaskCommitIdentity {
+        superseded_commits: Vec::new(),
         approved_merge_parents: Vec::new(),
         start_base: None,
         task_id: Some(task.id.clone()),
@@ -17166,20 +17333,22 @@ fn run_factory_branch_merge_gate_for_delivery(
             .map(str::trim)
             .filter(|receipt| is_safe_git_refname(receipt) && git_ref_exists(repo_path, receipt))
     {
-        let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
         let origin_parent = format!("origin/{parent_branch}");
         let on_target = |commit: &str| {
             git_commit_is_ancestor(repo_path, commit, parent_branch)
                 || (git_ref_exists(repo_path, &origin_parent)
                     && git_commit_is_ancestor(repo_path, commit, &origin_parent))
         };
+        if !(on_target(anchor) && on_target(receipt)) {
+            refresh(&mut origin_fetch_attempted);
+        }
         if on_target(anchor) && !on_target(receipt) {
-            return MergeStateGateOutcome::Reject(landed_anchor_receipt_rejection(
+            return MergeStateGateOutcome::Reject(crate::gates::tag("G-55", landed_anchor_receipt_rejection(
                 &task.id,
                 anchor,
                 receipt,
                 parent_branch,
-            ));
+            )));
         }
     }
     let commit_ish = trusted_anchor
@@ -17260,14 +17429,13 @@ fn run_factory_branch_merge_gate_for_delivery(
     }
     let local_merge = task.delivery_mode == cas_types::DeliveryMode::LocalMerge;
     let origin_parent_branch = format!("origin/{parent_branch}");
-    let mut origin_fetch_attempted = false;
     // cas-1cc7: a new target may exist only on origin after a retarget.
     // Unknown local Git state is not the local-epic KnownZero exception.
     let mut stranded = match known_unmerged_factory_commits(repo_path, commit_ish, parent_branch) {
         KnownUnmergedCount::KnownZero => 0,
         KnownUnmergedCount::KnownPositive(count) => count,
         KnownUnmergedCount::Unknown => {
-            origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+            refresh(&mut origin_fetch_attempted);
             match known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch) {
                 KnownUnmergedCount::KnownZero if !local_merge => 0,
                 KnownUnmergedCount::KnownPositive(count) if !local_merge => count,
@@ -17284,16 +17452,18 @@ fn run_factory_branch_merge_gate_for_delivery(
         // consult origin before accepting the local zero; otherwise a worker
         // who committed on the primary checkout can merge into local `main`
         // and close successfully while origin/main remains untouched.
-        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
         let local_epic_merge = parent_branch.starts_with("epic/");
         let origin_required =
             !local_merge && !local_epic_merge && origin_remote_configured(repo_path);
-        let origin_proves_delivery = git_ref_exists(repo_path, &origin_parent_branch)
+        let origin_proves_delivery = || git_ref_exists(repo_path, &origin_parent_branch)
             && matches!(
                 known_unmerged_factory_commits(repo_path, commit_ish, &origin_parent_branch),
                 KnownUnmergedCount::KnownZero
             );
-        if origin_required && !origin_proves_delivery {
+        if origin_required && !origin_proves_delivery() {
+            refresh(&mut origin_fetch_attempted);
+        }
+        if origin_required && !origin_proves_delivery() {
             // Keep the existing local-only epic exception and local-only
             // repositories, but force a normal remote-backed trunk through
             // the rejection path when origin cannot prove the delivery.
@@ -17311,20 +17481,18 @@ fn run_factory_branch_merge_gate_for_delivery(
     if stranded == 0 {
         if let Some(recorded_anchor) = trusted_anchor {
             // The local parent ref may be stale immediately after the
-            // supervisor merges a PR. Refresh before selecting a descendant
-            // branch tip that only origin currently proves integrated.
-            let _ = fetch_parent_branch_best_effort(repo_path, parent_branch);
-            let anchor = delivery_content_anchor_at_close(
-                repo_path,
-                recorded_anchor,
-                factory_branch.as_str(),
-                parent_branch,
-                validated_content_receipt,
-            );
-            if let Some(rejection) = anchored_delivery_content_gate(
+            // supervisor merges a PR: a refusal from cached refs is re-judged
+            // once after a refresh, which may prove a descendant branch tip.
+            let judge = || anchored_delivery_content_gate(
                 task,
                 repo_path,
-                anchor,
+                delivery_content_anchor_at_close(
+                    repo_path,
+                    recorded_anchor,
+                    factory_branch.as_str(),
+                    parent_branch,
+                    validated_content_receipt,
+                ),
                 parent_branch,
                 attribution.window,
                 content_identity,
@@ -17332,9 +17500,13 @@ fn run_factory_branch_merge_gate_for_delivery(
                 attribution
                     .window
                     .and_then(|window| window.supervisor_override_reason.as_deref()),
-            ) {
-                return rejection;
+            );
+            let mut outcome = judge();
+            if !origin_fetch_attempted && matches!(outcome, Some(MergeStateGateOutcome::Reject(_) | MergeStateGateOutcome::Unresolved(_))) {
+                refresh(&mut origin_fetch_attempted);
+                outcome = judge();
             }
+            if let Some(outcome) = outcome { return outcome; }
         }
         return MergeStateGateOutcome::Proceed;
     }
@@ -17369,8 +17541,8 @@ fn run_factory_branch_merge_gate_for_delivery(
     // origin Git state masquerade as integration. Missing origin ref
     // simply skips this block (no rescue); KnownPositive and Unknown
     // fall through to Reject.
-    if !local_merge && !origin_fetch_attempted {
-        origin_fetch_attempted = fetch_parent_branch_best_effort(repo_path, parent_branch);
+    if !local_merge {
+        refresh(&mut origin_fetch_attempted);
     }
     if !local_merge
         && git_ref_exists(repo_path, &origin_parent_branch)
@@ -17533,6 +17705,7 @@ fn run_factory_branch_merge_gate_for_delivery(
                         // A divergent epic stays fail-closed: advancing it needs
                         // an explicit conflict/authority decision, not a close
                         // gate side effect.
+                        // gate[G-57 close-after-merge integrity]: Lagging epic integration receipt
                         if let Some(note) = validate_lagging_epic_receipt_on_integration_branch(
                             repo_path,
                             receipt,
@@ -17696,7 +17869,7 @@ fn run_factory_branch_merge_gate_for_delivery(
             ("gh", &["pr", "create", "--base", parent_branch]),
         ]) {
             Ok(commands) => commands,
-            Err(refusal) => return MergeStateGateOutcome::Reject(refusal),
+            Err(refusal) => return MergeStateGateOutcome::Reject(crate::gates::tag("G-55", refusal)),
         };
     let epic_push_state_step = if parent_published_on_origin {
         format!(
@@ -18648,14 +18821,14 @@ pub(crate) fn resolve_close_gate_repo_root(
         }
     }
 
-    Err(format!(
+    Err(crate::gates::tag("G-38", format!(
         "⚠️ CLOSE GATE GIT REPOSITORY ERROR\n\n\
          Cannot resolve a git repository containing Cassy root {}. Close-time \
          merge enforcement refuses to proceed because git state would be \
          unknowable. Start Cassy from a project checkout or configure CAS_ROOT \
          beneath the intended repository, then retry.",
         cas_root.display()
-    ))
+    )))
 }
 
 /// Resolve the repository's default branch for close-time merge enforcement.
@@ -18696,7 +18869,7 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
         }
     }
 
-    Err(format!(
+    Err(crate::gates::tag("G-38", format!(
         "⚠️ CLOSE GATE DEFAULT BRANCH ERROR\n\n\
          Cannot resolve the default branch for git repository {}. \
          refs/remotes/origin/HEAD is unset and neither local `main` nor \
@@ -18704,7 +18877,7 @@ fn resolve_close_gate_default_branch(repo_path: &std::path::Path) -> Result<Stri
          configure origin/HEAD or set an explicit task/epic base branch, \
          then retry.",
         repo_path.display()
-    ))
+    )))
 }
 
 /// cas-cf64: resolve the real integration target for a non-epic task with
@@ -19307,6 +19480,7 @@ fn supervisor_merged_anchor_close(
         && anchor.is_some_and(|anchor| commit_is_merged_into_parent(repo, anchor, target_branch))
 }
 
+// gate-audit[input]: Validates requested Git refs and receipt bindings; caller retains gate authority.
 fn validate_pre_close_worktree(
     path: &std::path::Path,
     expected: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -19690,6 +19864,7 @@ fn render_close_diff_stat(
                 .identity
                 .known_commits
                 .iter()
+                .chain(&window.identity.superseded_commits)
                 .filter(|known| {
                     // Keep if it's the receipt itself or an ancestor of the receipt.
                     known.trim().eq_ignore_ascii_case(full_sha.trim())
@@ -19711,6 +19886,8 @@ fn render_close_diff_stat(
                 basis: "durable task commit identity across task lifetime",
                 task_floor: window.task_floor,
                 identity: TaskCommitIdentity {
+                    superseded_commits: window.identity.superseded_commits.iter()
+                        .filter(|sha| filtered_commits.contains(sha)).cloned().collect(),
                     approved_merge_parents: Vec::new(),
                     start_base: window.identity.start_base.clone(),
                     task_id: window.identity.task_id.clone(),
@@ -20159,6 +20336,7 @@ fn target_reachable_squash_of(
         && source_tree == resolve_branch_sha(repo, &format!("{receipt}^{{tree}}"))
 }
 
+// gate-audit[supervisor_override_reason]: bypass G-58 A validated historical-receipt waiver is tagged in its success narrative.
 pub(crate) fn validate_task_commit_receipt(
     repo_path: &std::path::Path,
     receipt: &str,
@@ -20209,9 +20387,9 @@ pub(crate) fn validate_task_commit_receipt(
             .as_deref()
             .filter(|reason| !reason.trim().is_empty())
         {
-            prior_cycle_basis = Some(format!(
+            prior_cycle_basis = Some(crate::gates::override_tag("G-58",format!(
                 " Registered supervisor override accepted historical receipt despite task epoch boundary. Reason: {reason}"
-            ));
+            )));
         } else if task_attribution::in_work_window(
             window,
             commit_epoch,
@@ -20382,6 +20560,7 @@ fn validate_lagging_epic_receipt_on_integration_branch(
 /// rule.  A rejected push is re-read once: another closer may simply have
 /// advanced the epic further.  We never auto-merge or force-push divergent
 /// shared epic history.
+// gate-audit[forward]: G-125 Epic-close reconciliation helper; it returns a refusal to the registered parent decision.
 fn advance_clean_epic_after_child_integration(
     repo_path: &std::path::Path,
     epic_id: &str,
@@ -20639,14 +20818,16 @@ pub(crate) fn find_squash_tree_match(
 struct CloseNoteTracker<'a> {
     store: &'a dyn cas_store::TaskStore,
     persisted_bytes: usize,
+    override_codes: std::collections::BTreeSet<&'static str>,
 }
 
 impl<'a> CloseNoteTracker<'a> {
     fn new(store: &'a dyn cas_store::TaskStore, task: &Task) -> Self {
-        Self { store, persisted_bytes: task.notes.len() }
+        Self { store, persisted_bytes: task.notes.len(), override_codes: Default::default() }
     }
 
     fn record(&mut self, task: &mut Task, note: &str) {
+        self.override_codes.extend(crate::gates::override_codes_in(note));
         if append_close_decision_note(self.store, task, note) {
             self.persisted_bytes = task.notes.len();
         }
@@ -20843,6 +21024,7 @@ fn supervisor_merge_commit_for_receipt(
     ancestor_candidate
 }
 
+// gate[G-58 park integrity]: Invalid task commit receipt
 fn commit_receipt_rejection(
     repo_path: &std::path::Path,
     task_id: &str,
@@ -20866,7 +21048,7 @@ fn commit_receipt_rejection(
              decision."
                 .to_string()
         });
-    format!(
+    crate::gates::tag("G-58", format!(
         "⚠️ INVALID TASK COMMIT RECEIPT\n\n\
          task close rejected: commit_receipt `{receipt}` is not valid merge \
          evidence: {reason}.\n\n\
@@ -20879,7 +21061,7 @@ fn commit_receipt_rejection(
          1. To pick another receipt, {steps}\n\
          {merge_recovery}\n\n{stop}",
         steps = gate_text::commit_receipt_recovery_steps(task_id, parent_branch, caller),
-    )
+    ))
 }
 
 /// Resolve a close against the merge evidence the caller supplied, if any.
@@ -20996,6 +21178,7 @@ pub(crate) fn check_zero_commit_close(
     commit_receipt: Option<&str>,
     commit_receipt_window: Option<&TaskCommitReceiptWindow>,
 ) -> ZeroCommitCloseOutcome {
+    // gate[G-82 park integrity]: Zero-commit / no-diff ambiguity on a code task
     // Not a code-expecting task type → no ambiguity.
     if !matches!(
         task_type,
@@ -21043,7 +21226,7 @@ pub(crate) fn check_zero_commit_close(
         }
         let task_type_str = format!("{task_type:?}").to_lowercase();
         let wt_display = worker_worktree_path.display();
-        return ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
+        return ZeroCommitCloseOutcome::AmbiguousCodeTask(crate::gates::tag("G-82", format!(
             "⚠️ NO-DIFF CLOSE ON CODE TASK\n\n\
             task close rejected: this is a {task_type_str} task with no \
             execution_note, no merge evidence, and \
@@ -21082,7 +21265,7 @@ pub(crate) fn check_zero_commit_close(
                 task_id,
                 crate::mcp::tools::core::guidance::caller_prefix(),
             ),
-        ));
+        )));
     }
     if let Some(outcome) = resolve_merge_evidence(
         worker_worktree_path,
@@ -21097,7 +21280,7 @@ pub(crate) fn check_zero_commit_close(
     // Case 3: ambiguous zero-commit close.
     let task_type_str = format!("{task_type:?}").to_lowercase();
     let wt_display = worker_worktree_path.display();
-    ZeroCommitCloseOutcome::AmbiguousCodeTask(format!(
+    ZeroCommitCloseOutcome::AmbiguousCodeTask(crate::gates::tag("G-82", format!(
         "⚠️ ZERO-COMMIT CLOSE ON CODE TASK\n\n\
         task close rejected: this is a {task_type_str} task with no \
         execution_note and 0 commits on the \
@@ -21132,7 +21315,7 @@ pub(crate) fn check_zero_commit_close(
             task_id,
             crate::mcp::tools::core::guidance::caller_prefix(),
         ),
-    ))
+    )))
 }
 
 /// Captures everything the supervisor needs to see at a glance: which
@@ -22078,6 +22261,7 @@ pub(crate) fn collect_epic_branch_statuses_with_options(
                         refname,
                         parent_branch,
                         &TaskCommitIdentity {
+                            superseded_commits: Vec::new(),
                             approved_merge_parents: Vec::new(),
                             start_base: None,
                             task_id: Some(t.id.clone()),
@@ -23362,6 +23546,7 @@ fn branch_content_direction_against_ref_with_snapshot(
 /// [`run_factory_branch_merge_gate`]: this is a data-state guard,
 /// not a review gate. The close route is selected from the epic's persisted
 /// delivery mode.
+// gate[G-125 epic-close integrity]: Per-child epic merge gate (EPIC CLOSE CHECK INCOMPLETE / BLOCKED)
 pub(crate) fn run_epic_close_merge_gate(
     task: &Task,
     req: &TaskCloseRequest,
@@ -24620,6 +24805,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24643,6 +24829,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24665,6 +24852,7 @@ mod additive_only_tests {
             "epic",
             Some(anchor.as_str()),
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24696,6 +24884,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24732,6 +24921,7 @@ mod additive_only_tests {
             "epic",
             None,
             &TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -24905,6 +25095,7 @@ pub(crate) enum LightweightLintOutcome {
     PassWithFallback(String),
 }
 
+// gate-audit[forward]: G-41 Pre-close context validation supplies the enclosing hook gate.
 fn target_only_receipt_lint_parent(
     repo: &std::path::Path,
     receipt: &str,
@@ -25006,6 +25197,7 @@ fn commits_have_equivalent_patch(repo_path: &std::path::Path, left: &str, right:
     patch_id(left) == patch_id(right)
 }
 
+// gate-audit[forward]: G-41 Pure pre-close refusal renderer; no acceptance path.
 fn stale_rebased_anchor_rejection(
     task_id: &str,
     parked_anchor: &str,
@@ -25095,6 +25287,7 @@ fn parked_anchor_delivery_ref(
 /// task's declared repository. Local branches and cached origin refs cannot
 /// authorize a retired-worker close or a reopened QA request.
 /// Callers must establish live registered supervisor authority first.
+// gate-audit[forward]: G-41 Receipt validation for declared pre-close context; run_declared_pre_close_hook returns the coded refusal.
 pub(crate) fn validate_pushed_task_receipt(
     task: &Task,
     context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -25156,6 +25349,9 @@ pub(crate) fn validate_pushed_task_receipt(
         task.id, context.repo_root.display()))
 }
 
+// gate-audit[forward]: G-41 Pure diagnostic for the declared pre-close hook; does not accept a waiver.
+// gate-audit[supervisor_override]: selector Alters recovery guidance only; no authorization decision.
+// gate-audit[reachable_from_worktree]: selector Renders measured reachability in a refusal, never grants a bypass.
 fn pre_close_unreachable_rejection(
     task_id: &str,
     commit: &str,
@@ -25181,6 +25377,8 @@ fn pre_close_unreachable_rejection(
     )
 }
 
+// gate[G-41 park as-of]: Declared pre-close hook (pre-close hook failed, unreachable, target-only, stale anchor)
+// gate-audit[supervisor_override]: selector Selects a separately validated pushed-receipt recovery context; the declared pre-close hook still runs.
 pub(crate) fn run_declared_pre_close_hook(
     task: &cas_types::Task,
     repo_context: &crate::mcp::tools::core::task::repo_context::RepoContext,
@@ -30143,6 +30341,10 @@ mod merge_state_gate_tests {
         assert_ne!(parked.status, TaskStatus::Closed, "{text}");
         assert!(handoff && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
+        // cas-50b2: the reviewed correction appends B to the parked cycle.
+        let cycle = cas_store::delivery_cycles(&root, &task.id).unwrap();
+        assert_eq!(cycle.iter().map(|c| (c.cycle, c.anchors.clone(), c.ended)).collect::<Vec<_>>(),
+            [(1, vec![a.clone(), b.clone()], false)]);
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
         assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
         assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);
@@ -32680,6 +32882,7 @@ esac
             basis: "task work cycle",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some(task.id.clone()),
@@ -34942,6 +35145,7 @@ esac
             basis: "latest task lease claim/transfer after administrative request_changes",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-test1".to_string()),
@@ -37069,7 +37273,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             (dir, anchor)
         };
         let window = window_at(0, "cas-18aa repro");
-        let identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
+        let identity = TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some("cas-test1".into()), known_commits: Vec::new() };
 
         let (dir, anchor) = build("");
         let presence =
@@ -37109,7 +37313,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             task.status = TaskStatus::AwaitingMerge;
             task.deliverables.factory_branch_anchor = Some(anchor.clone());
             let mut window = window_at(0, "historical delivery replay");
-            window.identity = TaskCommitIdentity { approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
+            window.identity = TaskCommitIdentity { superseded_commits: Vec::new(), approved_merge_parents: Vec::new(), start_base: None, task_id: Some(id.into()), known_commits: vec![anchor.clone()] };
             let outcome = anchored_delivery_content_gate(&task, repo, &anchor, target,
                 Some(&window), &window.identity, None, None);
             eprintln!("historical replay {id} anchor={anchor} target={target}: {outcome:?}");
@@ -37386,6 +37590,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
     fn f2eb_stat(p: &std::path::Path, receipt: &str) -> String {
         let mut window = window_at(0, "cas-f2eb fixture");
         window.identity = TaskCommitIdentity {
+            superseded_commits: Vec::new(),
             approved_merge_parents: Vec::new(),
             start_base: None,
             task_id: Some("cas-test1".into()),
@@ -46032,6 +46237,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -46079,6 +46285,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-41cd".to_string()),
@@ -46157,6 +46364,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() - chrono::Duration::hours(2),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),
@@ -46191,6 +46399,7 @@ mod zero_change_close_tests {
             basis: "latest task lease claim/transfer",
             task_floor: chrono::Utc::now() + chrono::Duration::hours(1),
             identity: TaskCommitIdentity {
+                superseded_commits: Vec::new(),
                 approved_merge_parents: Vec::new(),
                 start_base: None,
                 task_id: Some("cas-f1b1".to_string()),

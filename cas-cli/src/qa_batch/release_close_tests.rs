@@ -170,6 +170,7 @@ fn published_train_closes_members_independently_cas_734b() {
     bound.peer_premerge = Some(cas_types::PeerPremergeAttestation {
         message_id: "peer-message".into(), sender_machine_id: "peer".into(), sender_session: "peer-session".into(),
         receipt: cas_types::PeerPremergeReceipt {
+            registry_version: None,
             status: cas_types::VerificationStatus::Approved, project_id: "close-fixture".into(),
             supervisor_id: "supervisor".into(), task_id: "cas-approved".into(),
             source_branch: "factory/cas-approved".into(), source_sha: anchor.clone(), target_branch: "main".into(),
@@ -182,6 +183,17 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("UPDATE verification_dispatches SET state='resolved', repository_proof=?1 WHERE id=?2",
         rusqlite::params![serde_json::to_string(&bound).unwrap(), dispatch.id]).unwrap();
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
+    let cycle = cas_store::delivery_cycles(&root, "cas-approved").unwrap().pop().unwrap();
+    conn.execute("UPDATE verification_dispatches SET receipt_id=?1 WHERE id=?2",
+        rusqlite::params![cycle.cycle_id, dispatch.id]).unwrap();
+    let stamp = serde_json::json!({"cycle_id": cycle.cycle_id, "approved_anchor": anchor,
+        "registry_version": crate::gates::registry_version_in_force(),
+        "dispatch_id": dispatch.id, "verdict_id": "ver-approved"});
+    conn.execute("INSERT INTO events(event_type,entity_type,entity_id,summary,metadata) VALUES ('verification_added','verification','ver-approved','approval',?1)",
+        [stamp.to_string()]).unwrap();
+    // A newer task dispatch must not hide an approval of this delivery cycle.
+    cas_store::create_verification_dispatch_bound(&root, "cas-approved", "worker", "supervisor",
+        &cas_types::VerificationProofBoundary::task(), chrono::Utc::now() + chrono::Duration::hours(1), false).unwrap();
     // cas-0d3f: a local premerge verdict binds a synthetic commit, with the
     // delivery's source and reviewed tree in its immutable candidate manifest.
     let tree = git(&["rev-parse", &format!("{anchor}^{{tree}}")]);
@@ -251,6 +263,46 @@ fn published_train_closes_members_independently_cas_734b() {
     let cache_before = snapshot(&cache);
     let inventory = resolve_release_inventory(&root, &repo, &scope).unwrap();
     let preview = crate::release_reconcile::preview_release(&root, &repo, &inventory).unwrap();
+    assert_eq!(snapshot(&root), before);
+    assert_eq!(snapshot(&cache), cache_before);
+    // cas-afdf: replay a consolidated store copy outside Git from the
+    // original repository. Only the candidate's store location is relocated;
+    // repository, proof, key, source and tree bindings remain unchanged.
+    let replay = tempfile::tempdir().unwrap();
+    let copied_root = replay.path().join("store");
+    std::fs::create_dir_all(&copied_root).unwrap();
+    for (path, bytes) in &before {
+        let relative = path.strip_prefix(&root).unwrap();
+        if relative == Path::new("cas.db") || path.to_string_lossy().ends_with("-wal") { continue; }
+        let copy = copied_root.join(relative);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        if relative.starts_with("verification-candidates") && path.file_name().unwrap() == "candidate.json" {
+            let mut candidate: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            candidate["cas_root"] = serde_json::json!(copied_root);
+            std::fs::write(copy, serde_json::to_vec(&candidate).unwrap()).unwrap();
+        } else {
+            std::fs::write(copy, bytes).unwrap();
+        }
+    }
+    conn.backup(rusqlite::MAIN_DB, copied_root.join("cas.db"), None).unwrap();
+    assert!(crate::worktree::GitOperations::new(replay.path().to_path_buf()).canonical_repo_key().is_err());
+    env.set("CAS_ROOT", &copied_root);
+    env.remove("CAS_CLONE_PATH");
+    {
+        let _cwd = env.enter_dir(&repo);
+        let replay_inventory = resolve_release_inventory(&copied_root, &repo, &scope).unwrap();
+        let replay_preview = crate::release_reconcile::preview_release(&copied_root, &repo, &replay_inventory).unwrap();
+        assert_eq!(serde_json::to_value(&replay_preview).unwrap(), serde_json::to_value(&preview).unwrap());
+        // Sharing an origin URL cannot substitute a different Git common dir.
+        let foreign = replay.path().join("other-repository");
+        git(&["clone", "--shared", "--quiet", repo.to_str().unwrap(), foreign.to_str().unwrap()]);
+        let output = Command::new("git").arg("-C").arg(&foreign)
+            .args(["remote", "set-url", "origin", "https://github.com/example/close-fixture.git"]).output().unwrap();
+        assert!(output.status.success());
+        assert!(resolve_release_inventory(&copied_root, &foreign, &scope).is_err());
+    }
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_CLONE_PATH", &repo);
     assert_eq!(snapshot(&root), before);
     assert_eq!(snapshot(&cache), cache_before);
     use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;

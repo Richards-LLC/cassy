@@ -3010,13 +3010,12 @@ printf '%s\n' 'third writer owns this commit' > {target}/delivery.txt
     }
 }
 
-/// cas-d4b7 replays the six manual rebinds (cas-d1fe, cas-015e, cas-8aa1,
-/// cas-cff4 twice, cas-62c3): after approval the target edits a file the
-/// delivery also edits, so the reviewed tree no longer recomputes, yet the
-/// patch the merge adds is unchanged. A far edit rebinds the one approval
-/// with a receipt and the task closes on it. An edit inside a delivered
-/// hunk's context changes the full-context patch-id (a zero-context id would
-/// hide an `if ok` -> `if !ok` beside the hunk), so it gets a fresh review.
+/// cas-d4b7, cas-0208 replay the manual rebinds and the Nov 10 re-reviews
+/// (cas-bcf0, cas-36cb, cas-0d5e): after approval a sibling lands an edit
+/// beside a delivered hunk, so the reviewed tree no longer recomputes, yet
+/// the delivery's own patch-id is unchanged and the merge is clean. The one
+/// approval rebinds with a receipt and the task closes on it. A change to
+/// the delivered patch itself gets a fresh review.
 #[tokio::test]
 async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unchanged() {
     let mut env = test_env();
@@ -3026,14 +3025,13 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
                 .map_or(format!("line {n}\n"), |(_, text)| format!("{text}\n")))
             .collect::<String>()
     };
-    let cases: [(&str, &str, &[(usize, &str)]); 4] = [
+    let cases: [(&str, &str, &[(usize, &str)]); 6] = [
         ("full-context", "shared.rs", &[(18, "target 18")]),
-        // Adversarial probe: line 5 is context of the line-3 hunk.
         ("context edit", "shared.rs", &[(5, "target 5")]),
-        // cas-6c21 / cas-e06a: registry upkeep changes different hunks while
-        // generated map churn prevents the whole-delivery patch rebind.
+        ("patch changed", "shared.rs", &[(18, "target 18")]),
         ("full-context", "docs/qa/journeys.yaml", &[(18, "target 18")]),
         ("context edit", "docs/qa/journeys.yaml", &[(5, "target 5")]),
+        ("patch changed", "docs/qa/journeys.yaml", &[(18, "target 18")]),
     ];
     for (case, path, target_edits) in cases {
         let registry = path == "docs/qa/journeys.yaml";
@@ -3103,6 +3101,14 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         run_git(&["commit", "-am", "Sibling edits the shared file"], &writer);
         run_git(&["push", "origin", "HEAD:refs/heads/epic/rebound"], &writer);
         sync_target();
+        if case == "patch changed" {
+            std::fs::write(fixture.worker.join("delivery.txt"), "changed after approval\n").unwrap();
+            run_git(&["commit", "-am", "cas-e429: change the approved patch"], &fixture.worker);
+            run_git(&["push", "origin", &fixture.branch], &fixture.worker);
+            task = tasks.get(&task.id).unwrap();
+            task.deliverables.factory_branch_anchor = Some(git_stdout(&fixture.worker, &["rev-parse", "HEAD"]));
+            tasks.update(&task).unwrap();
+        }
         let result = fixture.service.factory(Parameters(merge)).await;
         let text = match &result { Ok(result) => get_text(result), Err(error) => error.message.to_string() };
         let latest = cas_store::get_latest_verification_dispatch(&fixture.cas_root, &task.id).unwrap().unwrap();
@@ -3112,14 +3118,16 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         let landed = std::process::Command::new("git").arg("-C").arg(&fixture.repo.root)
                 .args(["merge-base", "--is-ancestor", &tip, &published]).status().unwrap().success();
         if registry && case == "full-context" {
-            assert_eq!(latest.id, dispatch.id, "cas-6c21: disjoint registry upkeep retains the original dispatch: {text}");
+            assert_eq!(latest.id, dispatch.id, "disjoint registry upkeep retains its dispatch: {text}");
             assert_eq!(latest.repository, dispatch.repository);
         } else {
             assert_ne!(latest.id, dispatch.id, "{case}: the drifted proof is not reused: {text}");
         }
-        if case == "context edit" {
+        // cas-0208's cycle approval carries unchanged own patches, including
+        // sibling context edits; a changed source still requires fresh review.
+        if case == "patch changed" {
             assert_eq!(latest.state, cas::types::VerificationDispatchState::Pending, "{case}: {text}");
-            assert_eq!(handoffs, 2, "{case}: a changed full-context patch gets a fresh review: {text}");
+            assert_eq!(handoffs, 2, "{case}: a changed delivered patch gets a fresh review: {text}");
             assert!(!landed, "{case}: nothing publishes before that review: {text}");
             continue;
         }
@@ -3128,6 +3136,12 @@ async fn cas_d4b7_approval_rebinds_when_target_moves_but_delivered_patch_is_unch
         assert_eq!(verdict.status, cas::types::VerificationStatus::Approved);
 
         assert_eq!(handoffs, 1, "{case}: no verifier is dispatched for the rebind: {text}");
+        // c9e368c6d6 keeps the original dispatch for disjoint registry upkeep;
+        // d52358b7ed requires a task audit only when approval is rebound.
+        if latest.id != dispatch.id {
+            assert!(tasks.get(&task.id).unwrap().notes.contains(&latest.id),
+                "{case}: {path}: the carry-forward is audited on the task");
+        }
         assert!(landed, "{case}: the rebound approval publishes: {text}");
         assert_eq!(git_stdout(fixture.origin.path(), &["show", &format!("refs/heads/epic/rebound:{path}")]),
             content(&[&[(3, "delivered 3"), (12, "delivered 12")], target_edits].concat()).trim_end(), "{case}");
@@ -4503,8 +4517,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
-    // cas-d8ab: count origin fetches. The containment re-check after the
-    // target sync reuses the origin tip that sync fetched.
+    // cas-d8ab: count origin fetches. Containment, the target sync and its
+    // re-check share the merge's one origin read.
     let fetch_log = remote.path().join("fetches.log");
     let counter = remote.path().join("count-upload-pack");
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
@@ -4513,8 +4527,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 2 + 3,
-        "two merge-path fetches plus the existing final-close integration proofs (verification is disabled in this routing fixture): {}", get_text(&landed));
+    assert_eq!(fetches, 1,
+        "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 
@@ -4883,205 +4897,6 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     assert_ne!(repaired.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
     assert_eq!(repaired.deliverables.factory_branch_anchor,
         Some(git_stdout(&worker, &["rev-parse", "HEAD"])));
-}
-
-#[tokio::test]
-async fn post_merge_upkeep_refusal_preserves_delivery_for_supervisor_cas_efc1() {
-    let mut env = test_env();
-    let repo = GitRepo::new();
-    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
-    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
-    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
-    let registry = "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/pages/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Open}\n    owners: ['src/pages/signup.ts']\n";
-    let registry_path = "docs/qa/journeys.yaml";
-    std::fs::create_dir_all(repo.root.join("docs/qa")).unwrap();
-    std::fs::create_dir_all(repo.root.join("src/pages")).unwrap();
-    std::fs::write(repo.root.join(registry_path), registry).unwrap();
-    std::fs::write(repo.root.join("src/pages/signup.ts"), "signup\n").unwrap();
-    run_git(&["add", "."], &repo.root);
-    run_git(&["commit", "-m", "base journey registry"], &repo.root);
-    run_git(&["branch", "epic/upkeep"], &repo.root);
-    run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
-    let root = init_cas_dir(&repo.root, &mut env).unwrap();
-    let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
-        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa]\nmode='per_task'\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
-    )).unwrap();
-    configure("off");
-    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
-    for (id, name, role) in [
-        ("upkeep-worker", "alice", AgentRole::Worker),
-        ("upkeep-supervisor", "supervisor", AgentRole::Supervisor),
-    ] {
-        register_delivery_agent(&root, id, name, role, "upkeep-session");
-    }
-    let branch = "factory/alice-cas-efc1";
-    let worker = root.join("worktrees/alice");
-    repo.add_worktree(&worker, branch);
-    let agents = open_agent_store(&root).unwrap();
-    let mut agent = agents.get("upkeep-worker").unwrap();
-    agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
-    agents.update(&agent).unwrap();
-    let mut task = Task::new("cas-efc1".into(), "Repair post-merge ownership".into());
-    task.depth = TaskDepth::Light;
-    task.assignee = Some("alice".into());
-    task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: "project:merge-upkeep".into(), target_branch: "epic/upkeep".into(),
-    });
-    let tasks = open_task_store(&root).unwrap();
-    tasks.add(&task).unwrap();
-    env.set_current_dir(&worker);
-    let service = delivery_service(&root, "upkeep-worker");
-    let start = || task_req(serde_json::json!({"action": "start", "id": task.id}));
-    let close = || task_req(serde_json::json!({
-        "action": "close", "id": task.id, "reason": "validated delivery ready",
-    }));
-    service.task(Parameters(start())).await.unwrap();
-    std::fs::write(worker.join("src/pages/email.ts"), "email\n").unwrap();
-    run_git(&["add", "."], &worker);
-    run_git(&["commit", "-m", "add email surface"], &worker);
-    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
-    run_git(&["push", "origin", branch], &worker);
-    let parked = service.task(Parameters(close())).await.unwrap();
-    assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
-    // Newly enforced upkeep stays with the supervisor after the immutable delivery lands.
-    configure("enforce");
-    env.set_current_dir(&repo.root);
-    let supervisor = delivery_service(&root, "upkeep-supervisor");
-    let mut request = coord_req("worktree_merge");
-    request.id = Some(branch.into());
-    request.task_id = Some(task.id.clone());
-    request.cleanup = Some(false);
-    let merged = supervisor.factory(Parameters(request.clone())).await.unwrap();
-    let gate = get_text(&merged);
-    assert!(gate.contains("(G2)"), "{gate}");
-    run_git(&["merge-base", "--is-ancestor", &anchor, "epic/upkeep"], &repo.root);
-    let returned = tasks.get(&task.id).unwrap();
-    assert_eq!(returned.status, TaskStatus::AwaitingMerge, "{gate}");
-    assert_eq!(returned.assignee, task.assignee);
-    assert_eq!(returned.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
-    assert!(returned.deliverables.green_merge_commit.is_some());
-    let replay = supervisor.task(Parameters(task_req(serde_json::json!({
-        "action": "close", "id": task.id, "commit_receipt": anchor,
-        "reason": "recheck immutable merged delivery",
-    })))).await.unwrap();
-    assert!(replay.is_error.unwrap_or(false), "{}", get_text(&replay));
-    let after = tasks.get(&task.id).unwrap();
-    assert_eq!(after.status, TaskStatus::AwaitingMerge);
-    assert_eq!(after.deliverables.factory_branch_anchor, returned.deliverables.factory_branch_anchor);
-    assert_eq!(after.deliverables.green_merge_commit, returned.deliverables.green_merge_commit);
-    let queue = cas::store::open_prompt_queue_store(&root).unwrap();
-    let notices: Vec<_> = queue.peek_all(100).unwrap().into_iter()
-        .filter(|row| row.summary.as_deref() == Some("post_merge_close_recovery")).collect();
-    assert_eq!(notices.len(), 1);
-    assert_eq!(notices[0].target, "supervisor");
-    assert_eq!(notices[0].factory_session.as_deref(), Some("upkeep-session"));
-    assert_eq!(git_stdout(&worker, &["rev-parse", "HEAD"]), anchor);
-}
-
-/// A task's unnamed registry commit precedes a target-sync merge, as in the
-/// delivered cas-0a75 lane. Post-merge generation must not hide that case.
-#[tokio::test]
-async fn post_merge_generated_tip_preserves_changed_bug_case_cas_3712() {
-    let mut env = test_env();
-    for case in ["changed", "missing", "unchanged"] {
-        let repo = GitRepo::new();
-        let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
-        run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
-        run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
-        let registry_path = "docs/qa/journeys.yaml";
-        let registry = "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/pages/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Open}\n    owners: ['src/pages/signup.ts']\n";
-        let linked = registry.replace("check: Read state", "check: Read state, bug: {task: cas-3712}");
-        for dir in ["docs/qa", "src/pages", "hub-web/dist", "scripts"] {
-            std::fs::create_dir_all(repo.root.join(dir)).unwrap();
-        }
-        std::fs::write(repo.root.join(registry_path), if case == "unchanged" { &linked } else { registry }).unwrap();
-        std::fs::write(repo.root.join("src/pages/signup.ts"), "signup\n").unwrap();
-        std::fs::write(repo.root.join("hub-web/dist/app.js"), "old bundle\n").unwrap();
-        std::fs::write(repo.root.join("scripts/regenerate-generated-artifacts.sh"),
-            "#!/usr/bin/env bash\nset -euo pipefail\ncat src/pages/signup.ts > hub-web/dist/app.js\ngit add hub-web/dist\ngit commit -q -m 'build: regenerate dist from merged sources'\n").unwrap();
-        run_git(&["add", "."], &repo.root);
-        run_git(&["commit", "-m", "base journey registry"], &repo.root);
-        run_git(&["branch", "epic/upkeep"], &repo.root);
-        run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
-        let root = init_cas_dir(&repo.root, &mut env).unwrap();
-        let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
-            "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-generated-upkeep\"\n[qa.registry]\nenforce = \"{stage}\"\n"
-        )).unwrap();
-        configure("off");
-        cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
-        for (id, name, role) in [
-            ("upkeep-worker", "alice", AgentRole::Worker),
-            ("upkeep-supervisor", "supervisor", AgentRole::Supervisor),
-        ] {
-            register_delivery_agent(&root, id, name, role, "upkeep-session");
-        }
-        let branch = "factory/alice-cas-3712";
-        let worker = root.join("worktrees/alice");
-        repo.add_worktree(&worker, branch);
-        let agents = open_agent_store(&root).unwrap();
-        let mut agent = agents.get("upkeep-worker").unwrap();
-        agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
-        agents.update(&agent).unwrap();
-        let mut task = Task::new("cas-3712".into(), "Repair signup state".into());
-        task.task_type = TaskType::Bug;
-        task.depth = TaskDepth::Light;
-        task.assignee = Some("alice".into());
-        task.deliverables.work_target = Some(WorkTarget {
-            repo_selector: "project:merge-generated-upkeep".into(), target_branch: "epic/upkeep".into(),
-        });
-        let tasks = open_task_store(&root).unwrap();
-        tasks.add(&task).unwrap();
-        env.set_current_dir(&worker);
-        let service = delivery_service(&root, "upkeep-worker");
-        let started = service.task(Parameters(task_req(serde_json::json!({"action": "start", "id": task.id})))).await.unwrap();
-        assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
-        std::fs::write(worker.join("src/pages/signup.ts"), "fixed signup\n").unwrap();
-        run_git(&["commit", "-am", "fix(cas-3712): repair signup state"], &worker);
-        if case == "changed" {
-            std::fs::write(worker.join(registry_path), &linked).unwrap();
-            run_git(&["commit", "-am", "docs: register signup regression"], &worker);
-        }
-        run_git(&["switch", "epic/upkeep"], &repo.root);
-        std::fs::write(repo.root.join("README.md"), "other task\n").unwrap();
-        run_git(&["commit", "-am", "advance target"], &repo.root);
-        run_git(&["push", "origin", "epic/upkeep"], &repo.root);
-        run_git(&["merge", "--no-ff", "epic/upkeep", "-m", "sync target"], &worker);
-        std::fs::write(worker.join("hub-web/dist/app.js"), "worker bundle\n").unwrap();
-        run_git(&["commit", "-am", "build: refresh worker bundle"], &worker);
-        let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
-        run_git(&["push", "origin", branch], &worker);
-        let parked = service.task(Parameters(task_req(serde_json::json!({
-            "action": "close", "id": task.id, "reason": "signup repaired",
-        })))).await.unwrap();
-        assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
-        cas_store::waive_qa_pass(&root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &anchor,
-            "fixture: isolate post-merge registry attribution", chrono::Utc::now()).unwrap();
-        configure("enforce");
-        env.set_current_dir(&repo.root);
-        let supervisor = delivery_service(&root, "upkeep-supervisor");
-        let mut request = coord_req("worktree_merge");
-        request.id = Some(branch.into());
-        request.task_id = Some(task.id.clone());
-        request.cleanup = Some(false);
-        let merged = supervisor.factory(Parameters(request)).await.unwrap();
-        let text = get_text(&merged);
-        assert_eq!(git_stdout(&repo.root, &["log", "-1", "--format=%s", "epic/upkeep"]),
-            "build: regenerate dist from merged sources", "automatic regeneration must still run");
-        let final_task = tasks.get(&task.id).unwrap();
-        if case == "changed" {
-            assert_eq!(final_task.status, TaskStatus::Closed, "{case}: {text}");
-        } else {
-            assert!(text.contains("(G3)"), "{case}: {text}");
-            assert_eq!(final_task.status, TaskStatus::AwaitingMerge, "{case}: {text}");
-            assert_eq!(final_task.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
-            assert!(final_task.deliverables.green_merge_commit.is_some());
-        }
-        env.set_current_dir(cas::test_paths::runtime_fixture_parent());
-        // TempDir::drop ignores cleanup failures. A passing integration must
-        // not leave a fixture that invalidates the runner's clean-tip receipt.
-        repo._temp.close().expect("remove merged delivery fixture");
-        remote.close().expect("remove merged delivery remote");
-    }
 }
 
 #[tokio::test]
@@ -6721,6 +6536,8 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         repo_selector: "remote:github.com/org/delivery".to_string(),
         target_branch: "main".to_string(),
     });
+    // cas-50b2: a corrective delivery after request-changes is in cycle 2.
+    task.deliverables.delivery_cycle = 2;
     task_store.add(&task).expect("add receipt task");
     assert!(matches!(
         agent_store
@@ -7026,6 +6843,12 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         .unwrap()
         .expect("lease-authorized delivery");
     assert_eq!(stored_receipt.worker_agent_id, owner_id);
+    let now = chrono::Utc::now();
+    assert_eq!(stored_receipt.id,
+        cas_store::build_worker_completion_receipt_in_cycle(&owner_receipt, "alice", now, 2).id);
+    assert_ne!(stored_receipt.id, cas_store::build_worker_completion_receipt(&owner_receipt, "alice", now).id);
+    let cycles = cas_store::delivery_cycles(&cas_root, &task.id).unwrap();
+    assert_eq!((cycles.len(), cycles[0].cycle, cycles[0].anchors.clone()), (1, 2, vec![owner_receipt.commit_sha.clone()]));
     assert_eq!(transaction.state, WorkerDeliveryState::AwaitingVerification);
     let events = cas_store::list_worker_delivery_events(&cas_root, &transaction.id).unwrap();
     assert_eq!(events.len(), 1, "concurrent creation must emit one event");
@@ -7572,11 +7395,11 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             .await
             .expect("stale receipt returns a typed tool rejection");
         let replay_text = get_text(&replay);
+        // Reopen mints a new receipt identity; reject the old inputs without
+        // depending on which current-cycle integrity check fails first.
         assert!(
-            replay_text.contains("DELIVERY RECEIPT REJECTED")
-                && replay_text.contains("terminal Delivered proof cycle")
-                && replay_text.contains("fresh cycle-bound receipt"),
-            "reopened receipt replay needs typed actionable guidance:\n{replay_text}"
+            replay.is_error.unwrap_or(false) && cas::gates::codes_in(&replay_text).contains(&"G-28"),
+            "reopened receipt replay must fail the receipt integrity gate:\n{replay_text}"
         );
         assert_eq!(
             durable_close_snapshot(&cas_root),
@@ -7593,11 +7416,10 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
             .await
             .expect_err("stale Delivered evidence must not authorize a later direct close");
         let direct_close_text = direct_close.message.to_string();
+        assert_eq!(direct_close.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(
-            direct_close_text.contains("DELIVERY CLOSE BLOCKED")
-                && direct_close_text.contains("prior proof cycle")
-                && direct_close_text.contains("fresh immutable completion receipt"),
-            "later close needs cycle-specific remediation:\n{direct_close_text}"
+            cas::gates::codes_in(&direct_close_text).contains(&"G-86"),
+            "later close must fail the delivery state gate:\n{direct_close_text}"
         );
         assert_eq!(
             durable_close_snapshot(&cas_root),

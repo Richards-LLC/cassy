@@ -84,7 +84,7 @@ survived the conflict; judge the masked failure under §3.
 
 Where the project has a journey registry, the QA task's journey table is the
 park-time impact for the reviewed head: every live journey in it needs its own
-ledger row ([journey rows](journeys.md#journey-rows)), and each upkeep escape
+ledger row ([journey rows](journeys.md#journey-rows)), and each escape
 the task lists is a claim to check against the diff. A reason that does not
 hold is a Normal finding.
 

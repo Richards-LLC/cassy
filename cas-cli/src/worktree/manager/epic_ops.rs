@@ -155,6 +155,7 @@ impl WorktreeManager {
     }
 
     /// Cleanup worker branches after epic completion
+    // gate-audit[force]: selector Selects low-level branch deletion after the caller removal policy has been decided.
     pub fn cleanup_worker_branches(
         &self,
         epic_branch: &str,

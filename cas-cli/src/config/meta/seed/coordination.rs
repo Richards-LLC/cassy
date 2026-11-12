@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
+// gate-audit[input]: Registers configuration documentation containing refusal examples; it makes no request decision.
 pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut ConfigRegistry) {
     // Runtime FactoryConfig fields must also be discoverable and settable.
     for (key, name, description, value_type, default, constraint) in [

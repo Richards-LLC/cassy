@@ -645,8 +645,8 @@ test('a step that cannot run fails the state and skips the rest', async () => {
 });
 
 test('journey steps reject fixed sleeps', async () => {
-  const { loadJourney } = await import('./visual-qa.mjs');
-  await assert.rejects(loadJourney({ states: [{ name: 'sleep', steps: [{ wait: 10 }] }] }));
+  await assert.rejects(runBuiltinVisualQa({ urls: [fixture('clean.html')],
+    journey: { states: [{ name: 'sleep', steps: [{ wait: 10 }] }] } }));
 });
 
 test('ambiguous journey actions fail without clicking', async () => {

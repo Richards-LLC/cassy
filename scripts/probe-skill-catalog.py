@@ -673,7 +673,7 @@ def main():
     parser.add_argument("--named", choices=["yes", "no"])
     parser.add_argument("--inventory", choices=["synthetic", "builtin"], default="synthetic")
     parser.add_argument("--audience", choices=["worker", "reviewer"], default="worker")
-    parser.add_argument("--invoke", choices=["cas-technical-drawing", "init"])
+    parser.add_argument("--invoke", choices=["cas-technical-drawing", "init", "cas-writing-tests", "cas-playwright-tests"])
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--verifier-child", action="store_true", help="script a native verifier spawn and measure the child")
     args = parser.parse_args()

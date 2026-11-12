@@ -569,8 +569,9 @@ struct CheckRow {
     fail: u32,
     flaky: u32,
     error: u32,
-    /// Sum of observed durations; rows without one count in `untimed`, never as zero.
-    minutes: f64,
+    /// Sum of observed durations, absent when none was observed; rows without
+    /// one count in `untimed`, never as zero.
+    minutes: Option<f64>,
     timed: u32,
     untimed: u32,
 }
@@ -583,7 +584,7 @@ impl CheckRow {
             CheckOutcome::Flaky => self.flaky += 1,
             CheckOutcome::Error => self.error += 1,
         }
-        self.minutes += minutes.unwrap_or(0.0);
+        if let Some(minutes) = minutes { *self.minutes.get_or_insert(0.0) += minutes; }
         self.timed += u32::from(minutes.is_some());
         self.untimed += u32::from(minutes.is_none());
     }
@@ -1353,7 +1354,7 @@ fn render(report: &LedgerReport) -> String {
     }
 
     let counts = |row: &CheckRow| {
-        let timing = if row.timed > 0 { format!(", {:.0} min over {} timed", row.minutes, row.timed) } else { String::new() };
+        let timing = row.minutes.map_or_else(String::new, |minutes| format!(", {minutes:.0} min over {} timed", row.timed));
         format!("{}/{}/{}/{}{timing}, {} untimed", row.pass, row.fail, row.flaky, row.error, row.untimed)
     };
     let _ = writeln!(out, "\nCheck results for this project, {window} (pass/fail/flaky/could not run)");

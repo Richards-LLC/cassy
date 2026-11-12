@@ -535,8 +535,8 @@ mod tests {
         git(&root, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
         git(&root, &["push", "-q", "origin", "main"]);
         std::fs::create_dir_all(root.join(".cas")).unwrap();
-        std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let core = CasCore::with_daemon(root.clone(), None, None);
+        std::fs::write(root.join(".cas/config.toml"), "[project]\ncanonical_id = \"train-successor-fixture\"\n[factory]\nrelease_train = true\nepic_base_branch = \"main\"\n").unwrap();
+        let core = CasCore::with_daemon(root.join(".cas"), None, None);
         core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
         let mut frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
@@ -547,7 +547,7 @@ mod tests {
         git(&root, &["commit", "-qm", "unpublished checker fix"]);
         git(&root, &["push", "-q", "origin", &lane]);
         git(&root, &["checkout", "-q", "main"]);
-        crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&root.join(".cas"), &frozen.id, "operator", None).unwrap();
         let before = store.list(None).unwrap().len();
         assert!(core.cas_task_create(Parameters(request("Waiting successor"))).await.is_err());
         assert_eq!(store.list(None).unwrap().len(), before);

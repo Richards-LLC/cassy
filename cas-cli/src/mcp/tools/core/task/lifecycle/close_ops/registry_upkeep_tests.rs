@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::RegistryEnforcement;
+use cas_store::TaskStore;
 use std::process::Command;
 
 struct Fixture {

@@ -160,7 +160,7 @@
 - `cas-cli/src/cli/release_notice_failure.rs` - exhausted installed-notice reporting through the release owner's keyed outbox, without reconciliation.
 - `scripts/install-on-publish.sh`, `scripts/test-install-on-publish.sh` - native release polling, version verification before reconciliation, capped installed-notice attempts with retained failed receipts and keyed owner reporting, and per-version publication retries after installing the latest release.
 - **Release/CI:** `scripts/release.sh`, `scripts/train-ci.py` (attempt-aware shard fan-in and durable missing-receipt red state), `scripts/release-integration-gates.py`, `.github/workflows/ci.yml`, `.github/workflows/full-validation.yml` and `.github/actions/full-gate-job/`.
-- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
+- **Proof/scripts:** `scripts/run-verified-tests.sh`, `scripts/fast-rows-pre-push.sh`, `scripts/check-test-shape.py` (CLI argv and encoded Python fixture payload provenance; run at park against the resolved delivery target by `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/receipt_scope.rs`), `scripts/check-changed-markdown.py`; host tooling in `ops/systemd/` and `scripts/qa-rig/`.
 - `scripts/resolve-ci-base.sh`, `scripts/ci-queue-flakes.py` - exhaustive suite bases and individual script/web recovery.
 - **Config:** `.mcp.json`, `.claude/settings.json`, `.codex/hooks.json`, `cas-cli/src/config/`, `hub-web/DESIGN.md`.
 

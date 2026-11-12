@@ -117,7 +117,7 @@ fn registry_upkeep_mismatched_merge_parent_uses_task_only_delta() {
             assert_eq!(paths, Some(vec!["src/pages/signup.ts".into()]));
         } else {
             assert_eq!(head, integrated);
-            assert_eq!(base, target_base);
+            assert_eq!(git(repo, &["rev-parse", &base]), target_base);
             assert_eq!(paths, None);
         }
     }

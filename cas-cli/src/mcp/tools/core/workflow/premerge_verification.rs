@@ -1,8 +1,10 @@
 //! The existing task verifier reviews an immutable merge candidate before publication.
 //! Candidate preparation never holds the integration target lock. Promotion retains
 //! the original dispatch and records the exact candidate-to-landed tree mapping.
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use cas_types::{
     RepositoryProofBoundary, Task, Verification, VerificationDispatch, VerificationProvenance,
@@ -36,8 +38,14 @@ enum CandidatePreparation {
     Pending(Option<std::thread::JoinHandle<()>>),
 }
 
-fn candidate_preparations() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    static ACTIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+#[derive(Default)]
+struct CandidatePreparationFlight {
+    result: Mutex<Option<Result<Candidate, McpError>>>,
+    ready: Condvar,
+}
+
+fn candidate_preparations() -> &'static Mutex<HashMap<String, Arc<CandidatePreparationFlight>>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<String, Arc<CandidatePreparationFlight>>>> = OnceLock::new();
     ACTIVE.get_or_init(Default::default)
 }
 
@@ -55,19 +63,38 @@ fn bounded_candidate_preparation(
     prepare: impl FnOnce() -> Result<Candidate, McpError> + Send + 'static,
     detached: impl FnOnce(&Result<Candidate, McpError>) + Send + 'static,
 ) -> CandidatePreparation {
-    if !candidate_preparations().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
-        return CandidatePreparation::Pending(None);
-    }
+    let flight = {
+        let mut active = candidate_preparations().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flight) = active.get(&key).cloned() {
+            drop(active);
+            // A concurrent exact receipt shares the same bounded build. Only a
+            // real timeout may hold it; coalescing alone is not a pending result.
+            let (result, _) = flight.ready.wait_timeout_while(
+                flight.result.lock().unwrap_or_else(|e| e.into_inner()), wait,
+                |result| result.is_none(),
+            ).unwrap_or_else(|e| e.into_inner());
+            return match result.clone() {
+                Some(result) => CandidatePreparation::Ready(result),
+                None => CandidatePreparation::Pending(None),
+            };
+        }
+        let flight = Arc::new(CandidatePreparationFlight::default());
+        active.insert(key.clone(), flight.clone());
+        flight
+    };
     let claim = CandidatePreparationClaim(key);
     let phase = crate::mcp::tools::service::mutation_receipt::phase("candidate_preparation");
     let (send, receive) = std::sync::mpsc::channel();
     // Receipt acknowledgement closes the timeout/send race: a completed result
     // that missed the response still produces its existing supervisor notice.
     let (acknowledge, acknowledged) = std::sync::mpsc::channel();
+    let build_flight = flight.clone();
     let job = std::thread::Builder::new().name("premerge-candidate".into()).spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare))
             .unwrap_or_else(|_| Err(fail("candidate preparation worker panicked; retry the merge")));
         drop(phase);
+        *build_flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
+        build_flight.ready.notify_all();
         drop(claim);
         if send.send(result.clone()).is_err() || acknowledged.recv().is_err() {
             detached(&result);
@@ -75,7 +102,12 @@ fn bounded_candidate_preparation(
     });
     let job = match job {
         Ok(job) => job,
-        Err(error) => return CandidatePreparation::Ready(Err(fail(error))),
+        Err(error) => {
+            let result = Err(fail(error));
+            *flight.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result.clone());
+            flight.ready.notify_all();
+            return CandidatePreparation::Ready(result);
+        }
     };
     match receive.recv_timeout(wait) {
         Ok(result) => {

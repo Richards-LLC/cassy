@@ -2513,6 +2513,68 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
+/// GH #1870: a Codex whose code-mode host never starts passes every login
+/// probe, yet each shell command times out negotiating with that host. Spawn
+/// and recycle refuse it before a worker is advertised as ready.
+#[test]
+fn test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870() {
+    run_isolated_codex_test(
+        "test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for a Codex code-mode host that never starts"]
+async fn test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_codex_exec_host_that_never_starts_refuses_spawn_and_recycle_gh_1870_in_isolated_child",
+    );
+    env.create_epic("Test Epic");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    let host = home.join("fake-bin/codex-code-mode-host");
+    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexec sleep 30\n");
+
+    let mut spawn = factory_req("spawn_workers");
+    spawn.count = Some(1);
+    spawn.cli = Some("codex".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(spawn))
+        .await
+        .expect_err("a host that never starts refuses the spawn");
+    assert!(error.message.contains(host.to_str().unwrap()), "{error}");
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+
+    let mut session = TestEnvGuard::new();
+    session.set("CAS_FACTORY_SESSION", "session-recycle");
+    let account = home.join(".codex").display().to_string();
+    register_recyclable_worker(
+        &env,
+        "fair-crane-83",
+        &[
+            ("worker_cli", "codex"),
+            ("worker_model", cas::config::STOCK_WORKER_MODEL),
+            ("worker_account_dir", &account),
+        ],
+    );
+    let mut recycle = factory_req("recycle_worker");
+    recycle.target = Some("fair-crane-83".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(recycle.clone()))
+        .await
+        .expect_err("a host that never starts refuses the recycle");
+    assert!(error.message.contains(host.to_str().unwrap()), "{error}");
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+
+    cas::test_paths::warm_stub(&host, "#!/bin/sh\nexit 0\n");
+    env.service
+        .factory_request(Parameters(recycle))
+        .await
+        .expect("a host that starts is recyclable");
+}
+
 #[tokio::test]
 async fn test_spawn_workers_invalid_cli_returns_error() {
     // An unrecognised cli value should return an MCP error, not silently use defaults.

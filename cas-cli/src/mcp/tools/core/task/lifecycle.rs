@@ -793,20 +793,25 @@ fn shared_epic_note(epic_id: &str, hold: &crate::cloud::peer_claims::PeerHold) -
     hold.shared_epic_note(epic_id, &crate::mcp::tools::core::guidance::caller_prefix())
 }
 
-fn no_code_external_ref_guidance(task: &Task) -> &'static str {
-    if task.execution_note.as_deref() == Some("no-code") {
-        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references."
-    } else {
-        ""
+fn no_code_external_ref_guidance(task: &Task) -> String {
+    if task.execution_note.as_deref() != Some("no-code") {
+        return String::new();
     }
+    let [title, schema] = crate::qa_ledger::DECLARATION_MARKERS;
+    format!(
+        "\n\n📎 No-code close requirement: record a non-empty portable `external_ref` for the produced report/artifact before closing. Local absolute paths and secret-shaped values are not durable proof references.\n\
+         QA ledger: a `LEDGER.md` in the task artifacts must pass `cas qa ledger check` only when it declares the canonical QA matrix with a `{title}` title, a `{schema}` header or the matrix header row; any other report is not parsed as QA evidence."
+    )
 }
 
 /// Task start carries the no-code close requirement, or for any other task
 /// the one-line test principle (cas-5a52).
 fn start_guidance(task: &Task) -> String {
-    match no_code_external_ref_guidance(task) {
-        "" => format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE),
-        no_code => no_code.to_string(),
+    let no_code = no_code_external_ref_guidance(task);
+    if no_code.is_empty() {
+        format!("\n\n🧪 {}", crate::task_assignment::TEST_PRINCIPLE)
+    } else {
+        no_code
     }
 }
 

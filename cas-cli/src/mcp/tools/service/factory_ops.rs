@@ -328,7 +328,30 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             crate::capability::probe_account_auth(cli, account_dir, deadline)
         },
         || installed_codex_version(deadline),
-    )
+    )?;
+    preflight_codex_exec_host(specs, deadline)
+}
+
+/// GH #1870: a logged-in account still cannot run a command when Codex's
+/// shell-execution host never starts. Refused as its own failure, so it never
+/// reads as a login problem.
+fn preflight_codex_exec_host(
+    specs: &[cas_mux::WorkerSpec],
+    deadline: crate::bounded_process::Deadline,
+) -> Result<(), String> {
+    if !specs.iter().any(|spec| spec.cli == cas_mux::SupervisorCli::Codex) {
+        return Ok(());
+    }
+    let host = crate::capability::probe_codex_exec_host(deadline);
+    if host.availability != cas_factory::CapabilityAvailability::Unavailable {
+        return Ok(());
+    }
+    Err(format!(
+        "spawn refused: Codex shell execution is unavailable — {}. {} \
+         No worktree was created and no task was assigned.",
+        host.reason.unwrap_or_default(),
+        host.remediation.unwrap_or_default(),
+    ))
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -3136,8 +3159,7 @@ impl CasService {
         );
         let force_build_guard = req.force.unwrap_or(false);
         // Route only a single task, never silently split an ordered worker queue.
-        // Run even after admission recovers: an earlier routed request must
-        // replay its existing ask rather than queue a second local worker.
+        // Accepted asks retain ownership; unsent asks yield to recovered local capacity.
         if req.task_ids.is_none()
             && let Some(task_id) = req.task_id.as_deref()
         {
@@ -3168,6 +3190,14 @@ impl CasService {
                 ErrorCode::INVALID_REQUEST,
                 build_guard.refusal_message(),
             ));
+        }
+        let live_workers = crate::factory_build_routing::live_worker_count(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error))?;
+        if live_workers.saturating_add(slots) > factory_config.max_workers && !force_build_guard {
+            return Err(Self::error(ErrorCode::INVALID_REQUEST, format!(
+                "Worker capacity: {live_workers}/{} live on this machine; {slots} requested",
+                factory_config.max_workers,
+            )));
         }
         let build_guard_notice = build_guard.receipt_notice(force_build_guard);
         let throttle_notice =
@@ -4390,6 +4420,24 @@ impl CasService {
                 ),
             ));
         }
+        // GH #1870: a relaunch on an account or Codex install that cannot run
+        // commands only advertises another dead worker; refuse it like a spawn.
+        // Unlike a spawn, the recorded account is not re-selected: only an
+        // affirmative probe verdict refuses.
+        let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+        let specs = std::slice::from_ref(&spec);
+        preflight_account_auth_with(
+            specs,
+            |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+            || installed_codex_version(deadline),
+        )
+        .and_then(|()| preflight_codex_exec_host(specs, deadline))
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                format!("recycle_worker refused for {worker_name}: {error} Nothing was stopped or queued."),
+            )
+        })?;
         let mut spec_payload = serde_json::to_value(&spec).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,

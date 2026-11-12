@@ -114,6 +114,33 @@ fn cli_round_trip() {
             code = source.replace('ASSERTION', extra + '\n    ' + assertion)
             self.assertTrue(shape.message_assertions(code, 'src/cli.rs'))
 
+    def test_escaped_python_caller_payload_cas_8447(self):
+        source = r"""def test_entry(self):
+    name = 'Bank *operating* | R&D'
+    self.chart['accounts'][2]['Name'] = name
+    self.model['entries'][1]['lines'][1]['account'] = name
+    self.save('chart.json', self.chart)
+    markdown = self.run_cli(fmt='markdown')
+    self.assertIn(r'Bank \*operating\* \| R&amp;D', markdown.stdout)
+"""
+        cases = [(source, False),
+                 (source.replace('    self.assertIn(', "    label = 'é'; self.assertIn("), False),
+                 (source + "\ndef test_unrelated(self):\n" + source.splitlines()[-1] + '\n', True),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', 'Bank *operating* | R&amp;D'), False),
+                 (source.replace(r'Bank \*operating\* \| R&amp;D', r'Unrelated \*account\* \| R&amp;D'), True),
+                 (source.replace("    self.chart['accounts'][2]['Name'] = name\n", '').replace(
+                     "    self.model['entries'][1]['lines'][1]['account'] = name\n", ''), True),
+                 (source.replace('    markdown =', "    name = 'Changed account'\n    markdown ="), True),
+                 (source.replace('self.assertIn(', 'self.assertNotIn('), True),
+                 (source.replace('    self.assertIn(', "    # pin: escaped wording\n    self.assertIn(").replace(
+                     r'Bank \*operating\* \| R&amp;D', 'The entry must preserve all wording in this generated report.'), True)]
+        for code, rejected in cases:
+            line = max(i for i, text in enumerate(code.splitlines(), 1) if 'self.assert' in text)
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    self.assertEqual(bool(shape.message_assertions(code, 'tests/test_entry.py', changed)), rejected)
+                    self.assertEqual(bool(shape.lint_text_pins(code, 'tests/test_entry.py', changed_lines=changed)), rejected)
+
     def hits(self, code, path='src/lib.rs'):
         return shape.lint(code, path)
 

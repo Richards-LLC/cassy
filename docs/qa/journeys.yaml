@@ -189,10 +189,10 @@ bug_families:
     invariants: [HUB-J26-REGISTERED-RUN-STALL]
     journeys: [HUB-J26]
   peer-ask-merge-scope:
-    title: Only explicit asks hold related merges and correlated typed answers clear them
-    tasks: [cas-5ec1]
-    invariants: [HUB-J5-NO-ACTION-WAKES]
-    journeys: [HUB-J5]
+    title: Only explicitly scoped asks hold related merges; contextual mentions grant no hold and correlated typed answers clear holds
+    tasks: [cas-5ec1, cas-5d65]
+    invariants: [HUB-J5-NO-ACTION-WAKES, FACTORY-STRUCTURED-PEER-HOLD]
+    journeys: [HUB-J5, FACTORY-MERGE]
   image-viewer-reload-readiness:
     title: Image-viewer recovery waits for the restored turn after reload without racing the transient conversation list
     tasks: [cas-4acf]
@@ -603,6 +603,25 @@ bug_families:
     tasks: [cas-154b]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-PULL-CADENCE]
+  authenticated-recycle-fixtures:
+    title: Hermetic reset and dead-worker recovery fixtures satisfy account and execution-host admission while preserving refusal and work-retention checks
+    tasks: [cas-613e]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  escaped-caller-account-data:
+    title: Exact encoded caller account names remain data-integrity assertions while unrelated prose stays rejected
+    tasks: [cas-8447]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-ESCAPED-CALLER-SHAPE]
+  fresh-machine-worker-capacity:
+    title: Spawn routing honors native live worker caps, recovered local capacity and existing task deliveries
+    tasks: [cas-a92f]
+    journeys: [FACTORY-SPAWN]
+    invariants: [FACTORY-FRESH-WORKER-CAPACITY]
+  quality-palette-keyboard-focus:
+    title: Quality opens once from the visible keyboard target before its trend is read
+    tasks: [cas-c008]
+    journeys: [HUB-J13]
+    invariants: [HUB-J13-QUALITY-PALETTE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1016,7 +1035,7 @@ invariants:
     check: Run a_merge_waits_on_the_supervisors_unanswered_peer_ask_cas_bddf9 through merge override and operator adoption, and project-navigation.test.ts through history and the Needs-you DOM. In batch QA inspect the same override row on desktop and phone, including a retained code-only summary.
     bug: {task: cas-ef6e}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicitly scoped CAS_MERGE_HOLD asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
@@ -1396,9 +1415,6 @@ invariants:
     statement: A publication reconciles after installing and verifying its release binary; pending older publications retain their receipts and retry after newer installations with bounded work and successful replay deduplication.
     check: Run scripts/test-install-on-publish.sh. Observe install then matching version check then publication. Start with a failed older publication whose installed notice succeeds, publish a newer release, and require the newer install and verification before both publication retries. A failed install retains the receipt and performs no publication reconciliation; another tick does not repeat successful publication work.
     bug: {task: cas-bca3}
-  FACTORY-TEST-AUTHORING-SKILLS:
-    statement: Every project installs implicitly invocable general and browser authoring skills; worker native listings expose both, while old names are explicit one-release redirects.
-    check: Run test_authoring_skills_install_and_allow_implicit_invocation across real project sync, worker_role_skills_include_test_authors, builtin skill metadata checks and catalog/projection drift checks. Review title against final assertion and meaningful sabotage proof; confirm both healer variants are absent.
   FACTORY-DIRTY-REVIEW-RESUME:
     statement: An unchanged task, assignee, target and source branch can resume its own tracked and untracked edits from its validated start base without a commit or stash; changed source or ownership and foreign dirty trees remain refused.
     check: Run blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7 through the public MCP boundary, including target advancement during review and changed source/assignee refusals; run task_start and task_attribution named filters and reused_factory_branch_tests for fresh-tree and delivery-ownership guards.
@@ -1422,6 +1438,25 @@ invariants:
     statement: Entity sync runs at its configured cadence independently of indexing and maintenance; quality and knowledge work never own the entity-sync lease, and existing team scope and task lifecycle guards remain authoritative.
     check: "Run cloud_pull_ticks_while_indexing_is_held_cas_154b through the real daemon loop with a channel-held index mutex and fake scheduling time; require a subsequent pull and an available entity lease during quality HTTP. Run hub_idle_sync_test::a_store_whose_lease_is_held_is_not_synced_twice against the real CLI binary: a held store must return Busy without any cloud request or queue drain, including discovery and registration. Retain existing daemon store-lease exclusion and team-only cycle regressions. On the delivered binary, measure creation or parking visibility between prowl and soundwave without forced sync, state the bound and publish the timing receipt."
     bug: {task: cas-154b}
+  FACTORY-ESCAPED-CALLER-SHAPE:
+    statement: A positive Python substring assertion of exact HTML or Markdown escaping of an immutable supplied fixture value is data integrity; escaped prose without that provenance remains rejected.
+    check: Run test_escaped_python_caller_payload_cas_8447 in scripts/test-check-test-shape.py through both message and text-pin passes, including changed-line mode; replay the accounting account field case and retain unrelated, unsupplied, reassigned, cross-scope and negative-assertion refusals. Run the changed-lane CLI with the reported account payload and an unrelated generated-prose control.
+    bug: {task: cas-8447}
+  FACTORY-FRESH-WORKER-CAPACITY:
+    statement: Peer placement uses a fresh native worker count within factory.max_workers and fresh host pressure; unsent asks yield to recovered local capacity and accepted or in-flight asks retain one delivery per task.
+    check: Run the three cas_a92f regressions in factory_build_routing through the real directory, route and durable outbox seam; verify full peers receive zero asks, local recovery abandons unsent asks and directory outages retain accepted deliveries without another lookup or send.
+    bug: {task: cas-a92f}
+  FACTORY-STRUCTURED-PEER-HOLD:
+    statement: Only a kind=ask first-content-line CAS_MERGE_HOLD JSON declaration for an exact task_id or PR grants merge-hold authority; incidental body mentions and legacy prose-only asks do not.
+    check: Run peer_ask_gate::tests at the delivered tip. Replay Not yours task context, in-my-merge context, plain review prose, task/PR scoped holds and mismatches, quoted metadata, invalid/empty scope, and unresolved raw PR scope. Preserve explicit-kind, override/operator notice, linked and unambiguous answer, sibling answer and branch/bare PR resolution cases.
+    bug: {task: cas-5d65}
+  FACTORY-TEST-AUTHORING-SKILLS:
+    statement: Every project installs implicitly invocable general and browser authoring skills; worker native listings expose both, while old names are explicit one-release redirects.
+    check: Run test_authoring_skills_install_and_allow_implicit_invocation across real project sync, worker_role_skills_include_test_authors, builtin skill metadata checks and catalog/projection drift checks. Review title against final assertion and meaningful sabotage proof; confirm both healer variants are absent.
+  HUB-J13-QUALITY-PALETTE:
+    statement: The Quality journey focuses the visible desktop search or phone composer, sends one palette shortcut and waits for the palette; the selected project's trend factor and chart remain visible in both schemes.
+    check: Run the original HUB-J13 quality trend identity headlessly on locked Playwright with retries zero; keep a red focus-loss control, the passing control, and the final four viewport/scheme captures. The journey must show the trend, not merely issue a quality request.
+    bug: {task: cas-c008}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1466,7 +1501,7 @@ journeys:
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
   - crates/cas-store/src/verification_store.rs
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
+  invariants: [FACTORY-STRUCTURED-PEER-HOLD, FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE
@@ -1476,7 +1511,7 @@ journeys:
   entry: {url: 'mcp:task', trigger: close}
   steps: [Deliver the committed proof, Park the task, Consume the landing verdict]
   owners: [cas-cli/src/factory_worker_check.rs, scripts/worker-proof-guards.py, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/mcp/tools/core/task/rebind.rs, cas-cli/src/qa_evidence.rs, cas-cli/src/deliverable/capture.rs, cas-cli/src/deliverable/capture/journeys.rs, cas-cli/src/deliverable/pairs.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs, cas-cli/src/mcp/tools/core/task/recover_delivery.rs, cas-cli/src/mcp/tools/core/task/update.rs, cas-cli/src/mcp/tools/types/task.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/no_code_close_tests.rs, scripts/check-test-shape.py, scripts/test-check-test-shape.py, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs, cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs, cas-cli/src/mcp/tools/service/server_handler.rs]
-  invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
+  invariants: [FACTORY-SELECTED-TEST-LOG, FACTORY-QUEUED-SOURCE-BOUNDARY, FACTORY-FINDING-PRIORITY, FACTORY-RECOVER-SHIPPED-IDENTITY, FACTORY-CLOSE-PAIR-SCHEMA, FACTORY-REFUSED-CLOSE-CORRECTION, FACTORY-CLI-PAYLOAD-SHAPE, FACTORY-ESCAPED-CALLER-SHAPE, FACTORY-MERGE-QUEUE-CI-IDENTITY, FACTORY-EXACT-TIMEOUT-RECOVERY, FACTORY-COMMIT-DIRECTORY, FACTORY-CLOSE-LATE-PARK, FACTORY-MACHINE-COMMAND-SHAPE]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: CLI-RELEASE
@@ -1495,8 +1530,8 @@ journeys:
   kind: factory
   entry: {url: 'mcp:factory', trigger: spawn_workers}
   steps: [Assign the task and brief, Start the isolated worker, Confirm assignment acceptance]
-  owners: [cas-cli/src/builtins.rs, cas-cli/src/task_assignment.rs, cas-cli/src/qa_pass.rs, crates/cas-pty/src/pty.rs, cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
-  invariants: [FACTORY-TEST-AUTHORING-SKILLS, FACTORY-DIRTY-REVIEW-RESUME, FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
+  owners: [cas-cli/src/factory_build_routing.rs, cas-cli/src/factory_build_guard.rs, cas-cli/src/cloud/peer_mailbox/outbox.rs, cas-cli/src/config/settings.rs, cas-cli/src/config/access/get.rs, cas-cli/src/config/access/set.rs, cas-cli/src/config/access/list.rs, cas-cli/src/config/meta/seed/coordination.rs, cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs, cas-cli/src/mcp/tools/core/task/lifecycle.rs, cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs, cas-cli/src/cli/factory/wedged.rs, crates/cas-store/src/spawn_queue_store.rs, cas-cli/src/cloud/epic_split.rs, cas-cli/src/mcp/tools/core/task/source_claim.rs, cas-cli/src/mcp/tools/service/core.rs, cas-cli/src/mcp/tools/service/coordination_external_work.rs, cas-cli/src/mcp/tools/service/factory_ops.rs, cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs, cas-cli/src/factory_auth_health.rs, cas-cli/src/ui/factory/app/assignment_evidence.rs, cas-cli/src/finding_triage.rs, cas-cli/src/mcp/tools/core/task/lifecycle/epic_lane.rs, cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/task_attribution.rs, cas-cli/src/worktree/git/branch_ops.rs, cas-cli/src/ui/factory/app/render_and_ops/epic_workers.rs]
+  invariants: [FACTORY-FRESH-WORKER-CAPACITY, FACTORY-DIRTY-REVIEW-RESUME, FACTORY-DETACHED-SUCCESSOR, FACTORY-FINDING-PRIORITY, FACTORY-SPAWN-ACCOUNT-PREFERENCE, FACTORY-SOURCE-WORK-DELEGATION, FACTORY-BOOT-DIAGNOSTICS, FACTORY-SPAWN-FETCH-TRACKING]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-QA-RECEIPT
@@ -2605,6 +2640,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-QUALITY-PALETTE
   - HUB-J13-COMPATIBLE-CLAUDE
   - HUB-J13-PROJECT-ACCOUNT-POLICY
   - HUB-J13-ACCOUNT-MANAGEMENT

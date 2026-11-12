@@ -372,7 +372,7 @@ impl CasService {
                 )
             }
             StopOutcome::AlreadyGone => format!(
-                "Server '{}' (id {}) was already gone; the registry entry is now marked dead.",
+                "Server '{}' (id {}) had already exited; the registry entry is now marked stopped.",
                 record.name, record.id
             ),
             StopOutcome::RefusedUnverified(liveness) => format!(

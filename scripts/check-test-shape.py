@@ -14,6 +14,7 @@ by a released-trunk sync merge.
 """
 import argparse
 import ast
+from html import escape
 from pathlib import Path
 import re
 import subprocess
@@ -81,6 +82,51 @@ def python_bindings(scope):
             for element in node.iter.elts:
                 bind(node.target, element)
     return bound
+
+
+def python_escaped_payloads(tree):
+    """Positive substring checks of an exact encoded, supplied local fixture.
+
+    A single immutable literal must reach a fixture field before the assertion.
+    Neither escaped prose alone nor the same name in another scope qualifies.
+    """
+    def local_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                yield from local_nodes(child)
+
+    for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
+        nodes = list(local_nodes(scope))
+        writes = {}
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                writes[node.id] = writes.get(node.id, 0) + 1
+        bindings = {}
+        supplied = {}
+        for node in nodes:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+                continue
+            target = node.targets[0]
+            if (isinstance(target, ast.Name) and writes[target.id] == 1
+                    and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)):
+                bindings[target.id] = (node.value.value, node.lineno)
+            elif isinstance(target, (ast.Subscript, ast.Attribute)) and isinstance(node.value, ast.Name):
+                supplied.setdefault(node.value.id, []).append(node.lineno)
+        for node in nodes:
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'assertIn' and len(node.args) >= 2
+                    and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                continue
+            literal = node.args[0]
+            for name, (raw, line) in bindings.items():
+                if not any(line < used < node.lineno for used in supplied.get(name, [])):
+                    continue
+                encoded = escape(raw)
+                markdown = re.sub(r'([\\`*_{}\[\]()#+.!|~-])', r'\\\1', encoded)
+                if literal.value != raw and literal.value in (encoded, markdown):
+                    yield literal
+                    break
 
 
 def rust_bindings(ts, ps, begin, end):
@@ -269,6 +315,7 @@ def message_assertions(source, path, changed_lines=None):
             tree = ast.parse(source)
         except SyntaxError:
             return []
+        escaped_payloads = set(python_escaped_payloads(tree))
         scopes = {}
         for scope in [tree, *(n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)))]:
             bindings = python_bindings(scope)
@@ -285,6 +332,8 @@ def message_assertions(source, path, changed_lines=None):
         def substring_values(literal):
             """A substring operand's literal value(s): its own, or what a bound name
             holds unless the test also passes that name in (payload preservation)."""
+            if literal in escaped_payloads:
+                return []
             if isinstance(literal, ast.Name):
                 if (id(scopes.get(literal)), literal.id) in supplied:
                     return []
@@ -650,7 +699,7 @@ def js_assertion_diagnostics(source, path):
 
 
 def python_runtime_inputs(source):
-    """Path literals consumed by file reads are inputs, not returned-text pins."""
+    """File-read paths and proven encoded fixture operands are not prose pins."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -664,6 +713,8 @@ def python_runtime_inputs(source):
         # AST columns count UTF-8 bytes; text_literals uses character offsets.
         return starts[line - 1] + len(lines[line - 1].encode('utf-8')[:byte_column].decode('utf-8'))
 
+    for node in python_escaped_payloads(tree):
+        yield offset(node.lineno, node.col_offset), offset(node.end_lineno, node.end_col_offset)
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ('read_text', 'read_bytes')):

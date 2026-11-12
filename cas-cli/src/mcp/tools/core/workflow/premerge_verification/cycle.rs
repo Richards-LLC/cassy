@@ -273,6 +273,20 @@ pub(crate) fn approved(
                 }
             }
             None => {
+                // cas-bd17: a task that never minted a delivery cycle (an
+                // explicit no-code report, cas-2ecc) has no cycle to bind; its
+                // receipt-less dispatch approves the head it reviewed, as
+                // before c8b54ca9fd. Cycle-bound tasks never take this path.
+                if cycle.is_none()
+                    && dispatch.repository.as_ref().is_some_and(|r| {
+                        r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
+                    })
+                {
+                    return Ok(Some(ApprovalMatch {
+                        legacy: true,
+                        registry_version: None,
+                    }));
+                }
                 // Compatibility has one binding: validated candidate source
                 // plus a reviewed tree actually present in published history.
                 if let Some(candidate) = candidate_for_dispatch(root, &dispatch)? {

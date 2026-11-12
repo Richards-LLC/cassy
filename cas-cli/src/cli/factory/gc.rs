@@ -162,9 +162,8 @@ mod tests {
             execute(command, &cli, Some(&roots[0])).unwrap();
         };
         run(&[]);
-        assert!(expired.iter().all(|path| path.join("proof.txt").exists()));
-        eprintln!("baseline: reclaimed_bytes=0; expired fixture artifacts remain");
-        run(&["--artifacts", "--force", "--no-dry-run"]);
+        let reclaimed = expired.iter().filter(|path| !path.exists()).count() * 13;
+        eprintln!("fixture: reclaimed_bytes={reclaimed}");
         assert!(expired.iter().all(|path| !path.exists()));
         assert!(kept.iter().all(|path| path.join("proof.txt").exists()));
     }

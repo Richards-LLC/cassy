@@ -130,7 +130,7 @@ pub fn execute(args: &LedgerArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
             let release = release_scope.as_deref()
                 .map(|scope| super::release_adapters::review_blocks_for_scope(cas_root, scope)).transpose()?;
             let revision = match (release.as_ref(), source) {
-                (Some((inventory, _)), _) => inventory.scope.reviewed_sha.clone(),
+                (Some((inventory, _)), _) => inventory.scope.final_release_sha.clone(),
                 (None, Some(branch)) => {
                     // A local source remains authoritative for ongoing work.
                     // After branch cleanup, use the same immutable delivery

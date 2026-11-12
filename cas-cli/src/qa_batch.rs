@@ -33,6 +33,20 @@ pub(crate) struct ReleaseScope {
     pub proof_refs: Vec<ReleaseProofRef>,
 }
 
+impl ReleaseScope {
+    pub(crate) fn bind_reports(&mut self, root: &Path) -> Result<(), String> {
+        let tasks = release_close::read_tasks(root)?;
+        self.no_code_members.clear();
+        for id in &self.included_task_ids {
+            let Ok(task) = tasks.get(id) else { continue; };
+            if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
+                self.no_code_members.insert(id.clone(), no_code_proofs(root, self, &task)?);
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReleaseProofKind {

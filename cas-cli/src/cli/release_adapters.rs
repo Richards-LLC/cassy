@@ -282,14 +282,7 @@ pub(super) fn tag_scope(
         no_code_members: BTreeMap::new(),
         proof_refs,
     };
-    let tasks = crate::store::open_task_store(root)?;
-    for id in &scope.included_task_ids {
-        let task = tasks.get(id)?;
-        if crate::qa_pass::is_no_code(&task) || task.deliverables.evidence_only.is_some() {
-            let proofs = crate::qa_batch::no_code_proofs(root, &scope, &task).map_err(anyhow::Error::msg)?;
-            scope.no_code_members.insert(id.clone(), proofs);
-        }
-    }
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
     Ok(scope)
 }
 
@@ -420,7 +413,7 @@ fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn R
             "release input audit does not identify this promotion");
         Ok(inputs)
     }).transpose()?.unwrap_or_default();
-    let scope = ReleaseScope {
+    let mut scope = ReleaseScope {
         project_id,
         repository: slug,
         release_id: format!("pr-{pr}"),
@@ -433,6 +426,7 @@ fn promoted_with(root: &Path, pr: u64, inputs: Option<&Path>, reconciler: &dyn R
         no_code_members: BTreeMap::new(),
         proof_refs,
     };
+    scope.bind_reports(root).map_err(anyhow::Error::msg)?;
     let report = reconcile_once(root, &repo, &scope, ReconcileTrigger::Promotion { pr, merge_sha }, reconciler)?;
     match fs::remove_file(pending_promotion_path(root, pr)) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),

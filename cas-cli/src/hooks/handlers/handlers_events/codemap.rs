@@ -1039,35 +1039,8 @@ mod tests {
             failures.push(format!("non-Git subdirectory must retain project root/store: {:?}, {:?}",
                 plain_measurement.root, plain_measurement.store));
         }
-        // Target advances while the worker also has an independent commit.
-        git(&["checkout", "-q", "epic/{a,b}!e"]);
-        for n in 0..10 {
-            std::fs::write(repo.join(format!("src/remote_{n}.rs")), "pub fn added() {}\n").unwrap();
-        }
-        git(&["add", "src"]);
-        git(&["commit", "-qm", "remote structural drift"]);
-        git(&["update-ref", "refs/remotes/origin/epic/{a,b}!e", "HEAD"]);
-        std::fs::write(worker.join("local.md"), "worker change\n").unwrap();
-        git(&["-C", worker.to_str().unwrap(), "add", "local.md"]);
-        git(&["-C", worker.to_str().unwrap(), "commit", "-qm", "worker diverges"]);
-        env.set("CAS_AGENT_ROLE", "supervisor");
-        env.set("CAS_FACTORY_MODE", "1");
-        let input = HookInput {
-            cwd: worker.to_string_lossy().into_owned(),
-            hook_event_name: "PreToolUse".into(),
-            tool_name: Some(format!("{}task", crate::harness_policy::own_tool_prefix())),
-            tool_input: Some(serde_json::json!({"action": "create", "title": "Next task"})),
-            agent_role: Some("supervisor".into()),
-            ..Default::default()
-        };
-        let output = super::super::pre_tool::handle_pre_tool_use(&input, Some(&cas_root)).unwrap();
-        let output = serde_json::to_value(output).unwrap();
-        let reason = output["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("");
-        if output["hookSpecificOutput"]["permissionDecision"] != "deny"
-            || !reason.contains("git merge 'origin/epic/{a,b}!e'") || !reason.contains("git rebase 'origin/epic/{a,b}!e'")
-        {
-            failures.push(format!("diverged checkout denial must name target sync: {output}"));
-        }
+        // The stale-map PreToolUse denial (cas-dc98) was removed with the codemap
+        // gate in cas-4b33 (5e5df4d02d); freshness is measured, not enforced.
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 

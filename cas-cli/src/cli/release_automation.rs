@@ -97,7 +97,8 @@ impl ReleasePreview {
 
     fn allow_cut(&self) -> Result<()> {
         ensure!(self.members == 0 || self.would_close > 0 || (self.would_hold == 0 && self.not_eligible == 0),
-            "release cut refused: {} members, zero would-close; inspect by_reason and review_missing in the preview", self.members);
+            "release cut refused: {} members, zero would-close; by_reason {:?}; review_missing {:?}",
+            self.members, self.by_reason, self.review_missing);
         Ok(())
     }
 }

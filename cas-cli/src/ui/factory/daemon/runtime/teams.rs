@@ -5513,8 +5513,9 @@ mod tests {
         }
     }
 
-    /// Scope guard: the factory block deliberately carries only the four
-    /// factory-critical events. `cli/hook/config_gen.rs` installs many more;
+    /// Scope guard: the factory block deliberately carries only the five
+    /// factory-critical events (cas-f1d6 added SubagentStart, the native child
+    /// ownership evidence for worker SendMessage). `cli/hook/config_gen.rs` installs many more;
     /// auditing that difference is separate work, and silently widening this
     /// block would change factory behaviour beyond the named seams.
     #[test]
@@ -5533,9 +5534,10 @@ mod tests {
                 "PermissionRequest",
                 "PreToolUse",
                 "SessionStart",
+                "SubagentStart",
                 "UserPromptSubmit",
             ],
-            "the factory hooks block must not drift beyond the four wired events"
+            "the factory hooks block must not drift beyond the five wired events"
         );
     }
 }

@@ -126,6 +126,8 @@ struct TestReceipt {
     harness: Option<String>,
     count: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    selected_log: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     host_path_opt_out: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     supervisor_recorded: Option<SupervisorRecordedProof>,
@@ -166,6 +168,9 @@ impl TestReceipt {
                 " [supervisor-recorded by {} for {}; log sha256={}]",
                 proof.supervisor_id, proof.task_id, proof.log_sha256
             ));
+        }
+        if let Some(log) = &self.selected_log {
+            note.push_str(&format!(" [selected log: {}]", log.display()));
         }
         note
     }
@@ -491,6 +496,7 @@ pub(crate) fn record_supervisor_test(
             filter: test.filter,
             harness: test.harness,
             count,
+            selected_log: Some(provenance.log_path.clone()),
             host_path_opt_out: None,
             supervisor_recorded: Some(provenance),
         }),
@@ -1506,6 +1512,7 @@ pub(crate) fn record_passing_test_for_tests(
             filter: filter.to_string(),
             harness: None,
             count: 1,
+            selected_log: None,
             host_path_opt_out: None,
             supervisor_recorded: None,
         }),
@@ -2137,6 +2144,21 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
     #[cfg(unix)]
     discard_shared_fingerprints(&target_dir)?;
     let count_file = slots.join(format!("count-{lane_key}"));
+    let selected_log = if test.is_some() {
+        // Each attempt keeps its own untouched Cargo output. Keep it beside
+        // redirected raw guard evidence, or with receipts for foreground runs.
+        let directory = receipt.parent().context("receipt directory")?.join("logs");
+        #[cfg(unix)]
+        let directory = detached_log_path()
+            .and_then(|log| log.parent().map(Path::to_path_buf))
+            .unwrap_or(directory);
+        std::fs::create_dir_all(&directory)?;
+        let (_, path) = tempfile::Builder::new()
+            .prefix("selected-tests-").suffix(".log")
+            .tempfile_in(directory)?.keep()?;
+        println!("Selected test log: {}", path.display());
+        Some(path)
+    } else { None };
     if let Some(reason) = &host_path_opt_out {
         println!("Worker test PATH: host opt-out: {reason}");
     }
@@ -2171,7 +2193,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         command
             .env("VERIFIED_TEST_REPO_ROOT", &repo)
             .env("VERIFIED_TEST_COUNT_FILE", &count_file)
-            .env_remove("VERIFIED_TEST_LOG")
+            .env("VERIFIED_TEST_LOG", selected_log.as_ref().expect("test log"))
             .env("CARGO", cargo);
         command.env("CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS", "120");
         command
@@ -2295,6 +2317,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
                 filter: test.filter,
                 harness: test.harness,
                 count,
+                selected_log,
                 host_path_opt_out,
                 supervisor_recorded: None,
             })
@@ -2774,7 +2797,7 @@ exec "$@" > target/raw.log 2>&1"#);
         core.set_agent_id_for_testing("supervisor-id".into());
         let mut evidence = serde_json::json!({"head": head, "repo": repo.canonicalize().unwrap(), "cargo_args": args, "log_path": raw, "exit_code": 0});
         assert!(record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).is_err(), "combined guard evidence must remain inadmissible");
-        evidence["log_path"] = serde_json::json!(selected);
+        evidence["log_path"] = serde_json::json!(&selected);
         record_supervisor_test(&core, "cas-70b8", &evidence.to_string()).unwrap();
         assert_eq!(passing_test_packages(&root, &repo, &head), vec!["cas"]);
         fake_cargo(&fake, r#"case "$*" in
@@ -2786,6 +2809,7 @@ esac"#);
         fake_cargo(&fake, r#"printf '%s\n' "$*" > target/failed-guard
 printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
+        assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n", "failed retries must preserve earlier capture bytes");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));
     }
@@ -3237,7 +3261,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
             "{selected_path}"
         );
         assert!(
-            passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].ends_with("test(selected) 1")
+            passing_test_receipts(&root, &repo, &fixture_head(&repo))[0].split(" [").next().unwrap().ends_with("test(selected) 1")
         );
     }
 
@@ -3736,7 +3760,7 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'"#);
         execute_at_with_scope(&root, &args, &repo, &cargo, Some(&scope), None).unwrap();
         let receipts = passing_test_receipts(&root, &repo, &fixture_head(&repo));
         assert_eq!(receipts.len(), 1);
-        assert!(receipts[0].ends_with("test(worker) 2"), "{receipts:?}");
+        assert!(receipts[0].split(" [").next().unwrap().ends_with("test(worker) 2"), "{receipts:?}");
         assert!(crate::factory_target_cache::owner::for_retirement(&root, &repo).unwrap().is_some());
     }
 

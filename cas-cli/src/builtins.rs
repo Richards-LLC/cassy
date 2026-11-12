@@ -7433,6 +7433,34 @@ This is the body content."#;
     }
 
     #[test]
+    fn test_authoring_skills_install_and_allow_implicit_invocation() {
+        for (harness, dir) in [
+            (SupervisorCli::Claude, ".claude"),
+            (SupervisorCli::Codex, ".codex"),
+            (SupervisorCli::Grok, ".grok"),
+            (SupervisorCli::OpenCode, ".opencode"),
+        ] {
+            let project = tempfile::tempdir().unwrap();
+            sync_all_builtins_for_project(harness, project.path()).unwrap();
+            for name in ["cas-writing-tests", "cas-playwright-tests"] {
+                let skill_dir = project.path().join(dir).join("skills").join(name);
+                let body = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+                let frontmatter = body.strip_prefix("---\n").unwrap().split("\n---").next().unwrap();
+                let metadata: serde_yaml::Value = serde_yaml::from_str(frontmatter).unwrap();
+                assert_eq!(metadata["name"].as_str(), Some(name));
+                assert_ne!(metadata["disable-model-invocation"].as_bool(), Some(true));
+                let policy_path = skill_dir.join("agents/openai.yaml");
+                if policy_path.exists() {
+                    let policy: serde_yaml::Value = serde_yaml::from_str(
+                        &std::fs::read_to_string(policy_path).unwrap(),
+                    ).unwrap();
+                    assert_ne!(policy["policy"]["allow_implicit_invocation"].as_bool(), Some(false));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_builtin_skills_contains_cas_nuxt_playwright() {
         let expected = [
             "skills/cas-nuxt-playwright/SKILL.md",

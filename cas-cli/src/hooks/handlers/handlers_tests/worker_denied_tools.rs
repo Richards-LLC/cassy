@@ -278,6 +278,32 @@ PY"#;
 }
 
 #[test]
+fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
+    let (_env, cwd) = role_env("worker");
+    let project = tempfile::tempdir().unwrap();
+    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+    // GH #1838 and GH #1700: names only, no file is opened.
+    for command in [
+        "rg --files /Applications/Postgres.app /opt /usr/local ~/.local/share ~/Library/pnpm 2>/dev/null | rg '/(pnpm|psql|postgres|docker|node|initdb|pg_ctl)$'",
+        "find ~ -path '*cas-worker/references/discipline.md' 2>/dev/null | head -3",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        let reason = denial(output);
+        assert!(reason.is_none(), "{command}: {reason:?}");
+    }
+    // A listed name that reaches a reader is still a credential read.
+    for command in [
+        "find ~ -name credentials.json | xargs cat",
+        "find ~ -name auth.json -exec cat {} +",
+        "cat $(rg --files ~ | rg credentials.json)",
+        "find ~ -name credentials.json | while read -r f; do cat \"$f\"; done",
+    ] {
+        let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
+        assert_operator_credential_refusal(output, command);
+    }
+}
+
+#[test]
 fn worker_wrapped_shell_reads_cannot_reach_operator_credentials_cas_da9a() {
     let (_env, cwd) = role_env("worker");
     let project = tempfile::tempdir().unwrap();

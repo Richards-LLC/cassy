@@ -99,6 +99,9 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     }
     let mut cwd = initial_cwd.to_path_buf();
     let mut directory_stack = Vec::new();
+    // Nested shells are not listings or filters, so their payloads never
+    // reach here with inert names.
+    let names_inert = depth == 0 && listed_names_stay_inert(command);
     for words in super::pre_tool::shell_statement_words(command) {
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
@@ -150,7 +153,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             continue;
         }
 
-        if statement_references_store(&words, &cwd, depth) {
+        if statement_references_store(&words, &cwd, depth, names_inert) {
             return true;
         }
     }
@@ -160,7 +163,12 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         .any(|body| script_constructs_store_path(body, &cwd))
 }
 
-fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> bool {
+fn statement_references_store(
+    words: &[String],
+    cwd: &Path,
+    depth: usize,
+    names_inert: bool,
+) -> bool {
     if depth > 3 {
         return false;
     }
@@ -186,7 +194,10 @@ fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> boo
     }
     let cwd = &wrapper_cwd(&words[..command_index], cwd);
 
-    let recursive = invocation_recursively_reads_directories(&executable, args);
+    // A listing descends into a store's parent but opens no file. An operand
+    // that names a store itself is still refused below.
+    let recursive = invocation_recursively_reads_directories(&executable, args)
+        && !(names_inert && lists_names_only(&executable, args));
     let recursive_operands = recursive_path_operand_indices(&executable, args);
     let store_parent_cwd = recursive && cwd_is_store_or_parent(cwd);
     for (index, arg) in args.iter().enumerate() {
@@ -248,6 +259,48 @@ fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
         }
     }
     cwd
+}
+
+/// `rg --files` and a `find` that runs no command print names without
+/// opening files (GH #1838, #1700).
+fn lists_names_only(name: &str, args: &[String]) -> bool {
+    match name {
+        "rg" => {
+            args.iter().any(|arg| arg == "--files")
+                && !args.iter().any(|arg| {
+                    matches!(arg.as_str(), "--pre" | "-z" | "--search-zip")
+                        || arg.starts_with("--pre=")
+                })
+        }
+        "find" => !args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")),
+        _ => false,
+    }
+}
+
+/// Listed names stay names only while nothing can turn one into a file
+/// read: every statement runs a listing or a stdin text filter, and no
+/// substitution can splice a name into another command's argv. `xargs`,
+/// `read` loops, interpreters and nested shells all keep the old refusal.
+fn listed_names_stay_inert(command: &str) -> bool {
+    if command.contains("$(") || command.contains('`') || command.contains("<(") {
+        return false;
+    }
+    super::pre_tool::shell_statement_words(command).iter().all(|words| {
+        let Some(index) = super::pre_tool::executable_word_index(words) else {
+            return true;
+        };
+        let name = Path::new(&words[index])
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&words[index]);
+        matches!(
+            name,
+            "cd" | "rg" | "find" | "grep" | "egrep" | "fgrep" | "head" | "tail" | "sort"
+                | "uniq" | "wc" | "cut" | "tr"
+        )
+    })
 }
 
 fn cwd_is_store_or_parent(cwd: &Path) -> bool {

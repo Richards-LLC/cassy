@@ -471,11 +471,12 @@ mod tests {
         git(repo, &["commit", "-qm", "release inputs"]);
         git(repo, &["checkout", "-q", "main"]);
         let tip = git(repo, &["rev-parse", &lane]);
+        let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
         let service = CasService::new(core, None);
         let request = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut"});
         let refusal = service.factory(Parameters(serde_json::from_value(request.clone()).unwrap())).await.unwrap_err();
         assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), serde_json::to_value(&epic).unwrap());
+        assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         // The last line is a replayable MCP payload, not pinned human prose.
         let remedy: Value = serde_json::from_str(refusal.message.lines().last().unwrap()).unwrap();
         assert_eq!(remedy, serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"}));

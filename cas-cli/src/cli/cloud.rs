@@ -489,20 +489,6 @@ pub fn execute(cmd: &CloudCommands, cli: &Cli, cas_root: &Path) -> anyhow::Resul
         CloudCommands::Conflicts(args) => execute_conflicts(args, cli, cas_root),
         CloudCommands::Push(args) => execute_push(args, cli, cas_root).map(|_| ()),
         CloudCommands::Pull(args) => execute_pull(args, cli, cas_root).map(|_| ()),
-        CloudCommands::Sync(args) if args.background => {
-            let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire(cas_root)
-                .map_err(|error| {
-                    anyhow::anyhow!("open the cloud sync lease in {}: {error}", cas_root.display())
-                })?
-            else {
-                eprintln!(
-                    "cloud sync skipped: another sync holds {}",
-                    crate::cloud::sync_lease::sync_lease_path(cas_root).display()
-                );
-                std::process::exit(crate::cloud::sync_lease::SYNC_LEASE_BUSY_EXIT);
-            };
-            execute_sync(args, cli, cas_root)
-        }
         CloudCommands::Sync(args) => execute_sync(args, cli, cas_root),
         CloudCommands::Team(cmd) => execute_team(cmd, cli, cas_root),
         CloudCommands::Project(args) => {
@@ -2094,6 +2080,11 @@ fn sync_project_knowledge_with_output(
     if !config.is_logged_in() {
         return Ok(KnowledgeSyncSummary::default());
     }
+
+    let Some(_lease) = crate::cloud::sync_lease::SyncLease::try_acquire_knowledge(cas_root)? else {
+        tracing::debug!("knowledge sync deferred: another round is active");
+        return Ok(KnowledgeSyncSummary::default());
+    };
 
     let store = match SqliteKnowledgeStore::open(cas_root) {
         Ok(store) => store,
@@ -4581,6 +4572,18 @@ fn execute_sync_with_output(
         )?;
     }
 
+    // Team discovery/registration can wait on the network; only queue push
+    // and pull/apply own the entity lease.
+    let entity_lease = if args.background {
+        let Some(lease) = crate::cloud::sync_lease::SyncLease::try_acquire(cas_root)
+            .map_err(|error| anyhow::anyhow!("open the cloud sync lease in {}: {error}", cas_root.display()))?
+        else {
+            eprintln!("cloud sync skipped: another sync holds {}", crate::cloud::sync_lease::sync_lease_path(cas_root).display());
+            std::process::exit(crate::cloud::sync_lease::SYNC_LEASE_BUSY_EXIT);
+        };
+        Some(lease)
+    } else { None };
+
     let operation_output = emit_output && args.dry_run;
     // cas-421e: decided after the team-scope adoption above, which can turn a
     // personal project into a team-linked one within this same sync.
@@ -4662,6 +4665,10 @@ fn execute_sync_with_output(
                 operation_output,
             )?
         };
+
+        // Entity queues and pull watermarks are settled. Optional knowledge,
+        // embeddings and quality events use their own leases below.
+        drop(entity_lease);
 
         // T5: distilled knowledge rides the same sync. Kept last and
         // non-fatal — entries and tasks have already landed by here, and a

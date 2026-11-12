@@ -1215,6 +1215,21 @@ impl EmbeddedDaemon {
             }
         }
 
+        // Own this task so cancelling the daemon also cancels its scheduler.
+        // The per-store entity lease still excludes competing serve/hub jobs.
+        let mut cloud_worker = tokio::task::JoinSet::new();
+        let daemon = Arc::clone(&self);
+        let cloud_shutdown = shutdown_rx.clone();
+        cloud_worker.spawn(async move {
+            daemon.run_cloud_sync_worker(cloud_sync_interval, cloud_shutdown).await;
+        });
+        let period = Duration::from_secs(self.config.cloud_sync_interval_secs.max(1));
+        let mut quality_sync_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + period, period,
+        );
+        quality_sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        self.run_cloud_quality_sync().await;
+
         loop {
             tokio::select! {
                 // Shutdown signal
@@ -1224,29 +1239,10 @@ impl EmbeddedDaemon {
                     }
                 }
 
-                // Cloud sync is a bounded background push/pull. Unlike full
-                // maintenance, it must not require an idle window: a busy
-                // factory keeps receiving MCP requests often enough to reset
-                // ActivityTracker forever, which used to leave its local
-                // queue wedged despite the configured 60-second cadence.
-                _ = cloud_sync_interval.tick() => {
-                    if self.fresh_cloud_syncer().is_some() {
-                        match self.run_cloud_sync().await {
-                            Ok(result) => {
-                                let mut status = self.status.write().await;
-                                status.cloud_items_pushed += result.total_pushed();
-                                status.cloud_items_pulled += result.total_pulled();
-                                status.last_cloud_sync = Some(Utc::now());
-                                if result.has_errors() {
-                                    status.last_error = result.errors.first().cloned();
-                                }
-                            }
-                            Err(e) => {
-                                let mut status = self.status.write().await;
-                                status.last_error = Some(format!("Cloud sync failed: {e}"));
-                            }
-                        }
-                    }
+                // Quality telemetry is best-effort maintenance. Its network
+                // work must not delay the independent entity-sync worker.
+                _ = quality_sync_interval.tick() => {
+                    self.run_cloud_quality_sync().await;
                 }
 
                 // Full maintenance - only when idle
@@ -1448,10 +1444,12 @@ impl EmbeddedDaemon {
             }
         }
 
+        cloud_worker.shutdown().await;
+
         // Final cloud sync: drain any pending items before shutdown
         if self.fresh_cloud_syncer().is_some() {
             eprintln!("[Cassy] Running final cloud sync before shutdown...");
-            match tokio::time::timeout(Duration::from_secs(10), self.run_cloud_sync()).await {
+            match tokio::time::timeout(Duration::from_secs(10), self.trigger_cloud_sync()).await {
                 Ok(Ok(result)) => {
                     let pushed = result.total_pushed();
                     let pulled = result.total_pulled();
@@ -2475,6 +2473,48 @@ impl EmbeddedDaemon {
         self.kick_cloud_presence(presence_id).await;
     }
 
+    /// Entity sync has its own scheduler: indexing, maintenance and telemetry
+    /// may await slow work without consuming its timer. One cycle at a time.
+    async fn run_cloud_sync_worker(
+        self: Arc<Self>,
+        mut interval: tokio::time::Interval,
+        mut shutdown: tokio::sync::watch::Receiver<bool>,
+    ) {
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    if *shutdown.borrow() { break; }
+                }
+                _ = interval.tick() => {
+                    if self.fresh_cloud_syncer().is_none() { continue; }
+                    match self.run_cloud_sync().await {
+                        Ok(result) => {
+                            let mut status = self.status.write().await;
+                            status.cloud_items_pushed += result.total_pushed();
+                            status.cloud_items_pulled += result.total_pulled();
+                            status.last_cloud_sync = Some(Utc::now());
+                            if result.has_errors() { status.last_error = result.errors.first().cloned(); }
+                        }
+                        Err(error) => {
+                            self.status.write().await.last_error = Some(format!("Cloud sync failed: {error}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_cloud_quality_sync(&self) {
+        let Some(syncer) = self.fresh_cloud_syncer() else { return; };
+        match tokio::task::spawn_blocking(move || syncer.sync_quality_events(false)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)"),
+            Err(error) => tracing::warn!(target: "cas::sync", %error, "quality events worker failed (non-fatal)"),
+        }
+    }
+
     /// Run cloud sync cycle
     async fn run_cloud_sync(&self) -> Result<SyncResult, CasError> {
         let syncer = self
@@ -2535,7 +2575,7 @@ impl EmbeddedDaemon {
             // Get sessions to sync (sessions are stored directly, not queued)
             let sessions = get_sessions_for_sync(&cas_root, syncer.queue());
 
-            let result = syncer.sync_with_sessions(
+            syncer.sync_with_sessions(
                 store.as_ref(),
                 task_store.as_ref(),
                 rule_store.as_ref(),
@@ -2546,13 +2586,7 @@ impl EmbeddedDaemon {
                 file_change_store.as_ref(),
                 commit_link_store.as_ref(),
                 &sessions,
-            );
-            // Paced inside: at most one bounded round per interval. The ledger
-            // is an enhancement, so its failure never fails entity sync.
-            if let Err(error) = syncer.sync_quality_events(false) {
-                tracing::warn!(target: "cas::sync", %error, "quality events sync failed (non-fatal)");
-            }
-            result
+            )
         })
         .await
         .map_err(|e| CasError::Other(format!("Task join error: {e}")))?
@@ -2560,7 +2594,9 @@ impl EmbeddedDaemon {
 
     /// Trigger immediate cloud sync (ignores idle check)
     pub async fn trigger_cloud_sync(&self) -> Result<SyncResult, CasError> {
-        self.run_cloud_sync().await
+        let result = self.run_cloud_sync().await;
+        self.run_cloud_quality_sync().await;
+        result
     }
 }
 

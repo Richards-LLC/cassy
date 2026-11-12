@@ -9,7 +9,9 @@
 //! The lease is an advisory `flock` on `<cas_root>/cloud-sync.lock`. The
 //! kernel releases it when the holder exits, so a killed or crashed syncer
 //! never leaves a stale lock behind. A manual `cas cloud sync` without
-//! `--background` does not take the lease; its behaviour is unchanged.
+//! `--background` does not take the entity lease; its behaviour is unchanged.
+//! Knowledge and quality-event cursors use separate leases so optional network
+//! work cannot prevent another process from pulling current tasks.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -39,12 +41,26 @@ impl SyncLease {
     /// Take the lease without waiting. `Ok(None)` means another syncer holds
     /// it now.
     pub fn try_acquire(cas_root: &Path) -> io::Result<Option<Self>> {
+        Self::try_acquire_path(sync_lease_path(cas_root))
+    }
+
+    /// Quality-event cursors do not exclude entity pull/apply.
+    pub(crate) fn try_acquire_quality(cas_root: &Path) -> io::Result<Option<Self>> {
+        Self::try_acquire_path(cas_root.join("cloud-quality-sync.lock"))
+    }
+
+    /// CLI knowledge maintenance may take longer than an entity-sync interval.
+    pub(crate) fn try_acquire_knowledge(cas_root: &Path) -> io::Result<Option<Self>> {
+        Self::try_acquire_path(cas_root.join("cloud-knowledge-sync.lock"))
+    }
+
+    fn try_acquire_path(path: PathBuf) -> io::Result<Option<Self>> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(sync_lease_path(cas_root))?;
+            .open(path)?;
         match FileExt::try_lock_exclusive(&file) {
             Ok(()) => Ok(Some(Self { file })),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => Ok(None),

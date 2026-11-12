@@ -575,6 +575,18 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report
 }
 
+/// The task a canonical ledger was written for: the id in its
+/// `# QA evidence: <id>` title, unless its `covers:` header names `task_id`.
+/// `None` when the ledger does not name another task.
+pub fn foreign_owner(body: &str, task_id: &str) -> Option<String> {
+    let owner = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# QA evidence:"))?
+        .trim();
+    let covered = coverage(body).covers.is_some_and(|ids| ids.iter().any(|id| id == task_id));
+    (!owner.is_empty() && owner != task_id && !covered).then(|| owner.to_string())
+}
+
 /// True when `body` declares itself a canonical QA evidence ledger: the
 /// scaffold's `# QA evidence:` title, a `schema:` header or the matrix header.
 /// Any other `LEDGER.md` (a no-code audit report) is ordinary prose and tables.

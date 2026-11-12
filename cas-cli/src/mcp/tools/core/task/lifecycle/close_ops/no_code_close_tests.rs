@@ -1159,21 +1159,34 @@ async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
         &f.cas_dir(), config.factory().artifacts_root.as_deref(),
     ).task_dirs(id)[0];
     std::fs::create_dir_all(dir).unwrap();
-    let audit = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n\
+    // The two original report shapes: #1766's cost tables with source links
+    // and #1817's id-keyed audit rows (`L2`).
+    let cost_report = "# Test audit\n\n| item | cost |\n|---|---|\n| [a.rs:1](https://example.test/a.rs) | 3m |\n";
+    let value_report = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n\
         | id | item | verdict | tests | evidence | fix | covering | confidence |\n\
         |---|---|---|---|---|---|---|---|\n| L2 | a.rs:1 | dup | t | e | f | none | high |\n";
+    let foreign = crate::qa_ledger::scaffold(&no_code_spike("cas-other", "main"), &[], "deadbeef");
     let request = serde_json::json!({
         "action": "close", "id": id, "reason": "Audit report published",
         "execution_note": "no-code", "external_ref": "art-c766",
     });
-    std::fs::write(dir.join("LEDGER.md"), format!("schema: 2\n{audit}")).unwrap();
-    let refused = call(&f.worker, request.clone()).await;
-    assert!(refused.contains("QA LEDGER REJECTED"), "{refused}");
-    assert_ne!(f.task(id).status, TaskStatus::Closed);
-    std::fs::write(dir.join("LEDGER.md"), audit).unwrap();
-    let response = call(&f.worker, request).await;
-    assert!(!response.contains("QA LEDGER REJECTED"), "{response}");
-    assert!(response.contains("VERIFICATION"), "the report reaches ordinary verification: {response}");
+    // Canonical declarations stay validated: a declared-but-invalid ledger,
+    // and a well-formed canonical ledger written for another task.
+    for (case, body) in [
+        ("declared and invalid", format!("schema: 2\n{value_report}")),
+        ("foreign canonical", foreign),
+    ] {
+        std::fs::write(dir.join("LEDGER.md"), body).unwrap();
+        let refused = call(&f.worker, request.clone()).await;
+        assert!(refused.contains("QA LEDGER REJECTED"), "{case}: {refused}");
+        assert_ne!(f.task(id).status, TaskStatus::Closed, "{case}");
+    }
+    for report in [cost_report, value_report] {
+        std::fs::write(dir.join("LEDGER.md"), report).unwrap();
+        let response = call(&f.worker, request.clone()).await;
+        assert!(!response.contains("QA LEDGER REJECTED"), "{response}");
+        assert!(response.contains("VERIFICATION"), "the report reaches ordinary verification: {response}");
+    }
 }
 
 /// GH #1167 (2): the supervisor's evidence_only close of an artifact-only

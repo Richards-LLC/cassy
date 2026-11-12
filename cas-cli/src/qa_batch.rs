@@ -1309,5 +1309,11 @@ mod tests {
         // A ledger the command accepts is not refused by the ledger gate (later gates may still apply).
         let later = receipt(&valid).err().unwrap_or_default();
         assert!(!later.contains(&expected.refusal()), "{later}");
+        // GH #1713: a structurally valid ledger with a FAIL cell never backs a PASS receipt.
+        let failing = format!("schema: 2\ncells=1; PASS=0; FAIL=1; NOT EXERCISED=0\nlabels: fixture=1\n{}\n| M07 | walk | shown | missing | FAIL | fixture | capture.txt | cas-defect |\n", crate::qa_ledger::HEADER);
+        std::fs::write(&ledger, &failing).unwrap();
+        assert!(crate::cli::qa_ledger::check(&ledger, Some(&owner)).ok);
+        let refused = receipt(&failing).unwrap_err();
+        assert!(refused.contains("M07") && refused != later, "{refused}");
     }
 }

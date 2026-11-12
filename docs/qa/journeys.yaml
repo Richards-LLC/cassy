@@ -595,7 +595,7 @@ bug_families:
     invariants: [FACTORY-PEER-PULL-CADENCE]
   selected-test-receipt-log:
     title: Capped runs expose untouched selected output separately from automatic guards for direct supervisor receipt recording
-    tasks: [cas-70b8]
+    tasks: [cas-70b8, cas-7b2d]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-SELECTED-TEST-LOG]
 ignore:

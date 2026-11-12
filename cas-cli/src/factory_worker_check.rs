@@ -4212,6 +4212,18 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         head
     }
 
+    fn passing_test_identities(
+        root: &Path,
+        repo: &Path,
+        head: &str,
+    ) -> Vec<(String, String, String, u64)> {
+        // cas-7b2d: inspect receipt data independently of display provenance.
+        passing_test_records(root, repo, head, None)
+            .into_iter()
+            .map(|(head, package, test)| (head, package, test.filter, test.count))
+            .collect()
+    }
+
     fn fixture_commit(repo: &Path) {
         std::fs::create_dir_all(repo).unwrap();
         git(repo, &["init", "-q"]).unwrap();
@@ -5079,8 +5091,9 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'
         assert_eq!(std::env::var_os("HOME"), inherited_home);
         assert_eq!(std::env::var("CAS_SESSION_ID").unwrap(), "worker-home-fixture");
         assert_eq!(std::env::var("GIT_AUTHOR_NAME").unwrap(), "inherited author");
-        assert_eq!(passing_test_receipts(&root, &repo, &fixture_head(&repo)),
-            [format!("test: PASS {} cas test(worker) 1", fixture_head(&repo))]);
+        let head = fixture_head(&repo);
+        assert_eq!(passing_test_identities(&root, &repo, &head),
+            [(head, "cas".into(), "test(worker)".into(), 1)]);
         let named = ["nextest", "run", "-p", "cas", "--lib", "-E", "test(worker)"].map(str::to_string);
         for spec in ["CAS_SESSION_ID=other", "-CAS_SESSION_ID", "CAS_AGENT_ROLE=supervisor",
             "CARGO_BUILD_JOBS=64", "CARGO_TARGET_DIR=/tmp", "PATH=/tmp", "RUSTC=/tmp/rustc"] {
@@ -5184,8 +5197,8 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
         assert_eq!(std::env::var_os("XDG_CONFIG_HOME"), Some(dir.path().join("inherited-xdg").into_os_string()));
         fake_cargo(&fake, "printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\\n'");
         assert_eq!(
-            passing_test_receipts(&root, &repo, &head),
-            [format!("test: PASS {head} cas test(worker) 2")]
+            passing_test_identities(&root, &repo, &head),
+            [(head.clone(), "cas".into(), "test(worker)".into(), 2)]
         );
         assert!(passing_receipt(&root, &repo, &head).is_none());
         assert!(passing_test_receipts(&root, &repo, &"b".repeat(40)).is_empty());
@@ -5203,8 +5216,8 @@ printf '     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\n'
         );
         assert!(execute_at(&root, &args, &repo, &fake).is_err());
         assert_eq!(
-            passing_test_receipts(&root, &repo, &head),
-            [format!("test: PASS {head} cas test(other) 2")]
+            passing_test_identities(&root, &repo, &head),
+            [(head.clone(), "cas".into(), "test(other)".into(), 2)]
         );
         fake_cargo(&fake, "printf 'no summary\\n'");
         assert!(execute_at(&root, &args, &repo, &fake).is_err());

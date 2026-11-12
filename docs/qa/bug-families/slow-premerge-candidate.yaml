@@ -1,0 +1,3 @@
+title: Concurrent exact receipts share a completed candidate while slow preparation retains a bounded hold and completion notice
+tasks: [cas-352b, cas-2ba8]
+journeys: [FACTORY-MERGE, FACTORY-CLOSE]

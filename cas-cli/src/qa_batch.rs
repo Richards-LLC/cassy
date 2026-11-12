@@ -161,7 +161,15 @@ pub(crate) fn resolve_release_inventory(
                     .to_path_buf(),
             )
             .canonical_repo_key()
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+            .or_else(|_| {
+                // A replay store may be copied outside Git. Its original
+                // repository is still the caller's cwd, as in release preview.
+                let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                crate::worktree::GitOperations::new(cwd)
+                    .canonical_repo_key()
+                    .map_err(|e| e.to_string())
+            })?
     {
         return Err("release repository does not match project scope".into());
     }

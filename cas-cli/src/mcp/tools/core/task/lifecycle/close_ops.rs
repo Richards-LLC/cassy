@@ -9138,9 +9138,6 @@ impl CasCore {
         let mut fast_lane_receipt_passed = false;
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
-            // Renew the explicit review before handing this delivery to merge.
-            // The next close still runs the ordinary integration/QA gates.
-            && renew_expired_task_dispatch.is_none()
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())
@@ -9329,6 +9326,9 @@ impl CasCore {
 
         if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
+            // Renew the explicit review before handing this delivery to merge.
+            // QA and content gates above still run before requesting it.
+            && renew_expired_task_dispatch.is_none()
             && (has_delivery_to_measure(&task) || req.commit_receipt.is_some())
             && !empty_delivery
             && (close_repo_verified || worker_worktree_path.is_some())

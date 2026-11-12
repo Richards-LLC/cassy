@@ -45,6 +45,7 @@ pub(crate) mod release_report;
 mod release_precheck;
 pub(crate) mod release_adapters;
 mod release_automation;
+pub(crate) use release_automation::plan_train_tip;
 mod release_notice_failure;
 pub mod deliverable;
 mod sweep;

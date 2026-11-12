@@ -172,7 +172,7 @@ pub(crate) fn check_staffing(root: &Path, task_id: &str) -> Result<()> {
 
 /// Median minutes of each release stage still ahead, from the friction
 /// ledger: the merge queue and publication. `None` names the stage that has no measurement.
-pub(crate) fn remaining_minutes(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<f64, &'static str> {
+pub(crate) fn remaining_minutes(root: &Path, now: DateTime<Utc>) -> Result<f64, &'static str> {
     use cas_store::QualityPayload;
     let events = cas_store::quality_events_between(root, Some(now - chrono::Duration::days(60)), Some(now))
         .unwrap_or_default();
@@ -210,7 +210,7 @@ pub(crate) fn remaining_minutes(root: &Path, train: &Task, now: DateTime<Utc>) -
 
 /// "Frozen 2:05 PM ET · ETA 2:50 PM ET", or the stage that is unmeasured.
 pub(crate) fn summary(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<Utc>) -> String {
-    let eta = match remaining_minutes(root, train, now) {
+    let eta = match remaining_minutes(root, now) {
         Ok(minutes) => format!("ETA {}", eastern(now + chrono::Duration::seconds((minutes * 60.0) as i64))),
         Err(stage) => format!("ETA unmeasured: no {stage} timing"),
     };
@@ -221,7 +221,7 @@ pub(crate) fn summary(root: &Path, train: &Task, freeze: &Freeze, now: DateTime<
 pub(crate) fn card(root: &Path, train: &Task) -> Option<Value> {
     let freeze = active(root, train)?;
     let now = Utc::now();
-    let eta = remaining_minutes(root, train, now).ok().map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
+    let eta = remaining_minutes(root, now).ok().map(|minutes| (now + chrono::Duration::seconds((minutes * 60.0) as i64)).to_rfc3339());
     Some(serde_json::json!({
         "frozen_at": freeze.at.to_rfc3339(),
         "tip": freeze.tip,
@@ -453,10 +453,8 @@ mod tests {
     fn eta_adds_measured_stage_medians() {
         let _env = TestEnvGuard::temp_home();
         let (_temp, root) = fixture();
-        let store = crate::store::open_task_store(&root).unwrap();
-        let train = store.get("cas-tr").unwrap();
         let now = Utc::now();
-        assert_eq!(remaining_minutes(&root, &train, now), Err("merge queue"));
+        assert_eq!(remaining_minutes(&root, now), Err("merge queue"));
         for (key, payload) in [
             ("d", cas_store::QualityPayload::CheckRun { check_id: "merge_queue".into(), stage: cas_store::CheckStage::Queue, outcome: cas_store::CheckOutcome::Pass, sha: None, minutes: Some(10.0) }),
             ("e", cas_store::QualityPayload::Release { commit_to_main_minutes: None, main_to_published_minutes: Some(5.0), ejections: 0, rescues: 0 }),
@@ -465,6 +463,6 @@ mod tests {
             event.occurred_at = now - chrono::Duration::hours(1);
             cas_store::record_quality_event(&root, &event).unwrap();
         }
-        assert_eq!(remaining_minutes(&root, &train, now), Ok(15.0));
+        assert_eq!(remaining_minutes(&root, now), Ok(15.0));
     }
 }

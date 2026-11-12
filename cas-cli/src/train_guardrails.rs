@@ -358,7 +358,7 @@ pub(crate) fn notify_train_cuts(
     for epic in tasks.list(None)?.into_iter().filter(|task| !task.is_terminal()) {
         let Some(train) = train_lane(&epic).map(str::to_string) else { continue };
         let Some(tip) = eligible_tip(cas_dir, &epic, &train) else { continue };
-        crate::cli::release_automation::plan_train_tip(cas_dir, &epic, &tip)?;
+        crate::cli::plan_train_tip(cas_dir, &epic, &tip)?;
         if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }

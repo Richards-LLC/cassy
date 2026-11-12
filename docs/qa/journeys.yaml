@@ -436,7 +436,7 @@ bug_families:
     journeys: [FACTORY-SPAWN]
   worker-commit-directory-identity:
     title: Worker commit guards follow the commit directory through relative cd and literal variable bindings and report unresolved identity truthfully
-    tasks: [cas-84ea]
+    tasks: [cas-84ea, cas-e06a]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-COMMIT-DIRECTORY]
   published-release-staffing-gap:
@@ -670,8 +670,8 @@ invariants:
     check: Run server_handler::tests::late_close_outcome_prefers_own_park_receipt_cas_fd21 through the real late-outcome recorder and stores with the 55s budget/142.5s elapsed replay; also run close_deadline_before_any_write_records_the_late_outcome_cas_3b81 through the deadline handler. Verify exact caller machine payloads and task status, without human-wording assertions.
     bug: {task: cas-fd21}
   FACTORY-COMMIT-DIRECTORY:
-    statement: Worker Git guards inspect the actual commit directory, support prior literal path bindings, distinguish unresolved identity from detached HEAD, and preserve foreign/protected branch refusals.
-    check: Run pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree through PreToolUse for nested relative directories, quoted W and braced variables, paths with spaces, protected targets and unknown or mutated bindings; require unchanged reflog. Retain cas-7584 replay and per-invocation -C tests plus detached, sibling and paused-rebase cases.
+    statement: Worker Git guards inspect the actual Git directory and support literal path bindings; non-committing HEAD transitions remain usable from detached HEAD while ref rewrites, path restores and commits retain branch and containment checks.
+    check: "Run pre_tool_allows_commit_when_hook_cwd_is_linked_factory_worktree through PreToolUse for nested relative directories, quoted W and braced variables, paths with spaces, protected targets and unknown or mutated bindings; require unchanged reflog. Retain cas-7584 replay and per-invocation -C tests plus detached, sibling and paused-rebase cases. Run detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600's cas-e06a row table through the real hook and native Git for checkout/switch aliases, previous branch, existing tip, detach/create/orphan, remote tracking/guess and global target flags; require an unchanged commit graph and refused detached commits, force-ref rewrites and path restores."
     bug: {task: cas-84ea}
   FACTORY-EXACT-TIMEOUT-RECOVERY:
     statement: An expired epic dispatch names executable supervisor-direct verdict and ordinary-close commands; verdicts retain their exact dispatch and type, and an unshipped receipt cannot bypass review.

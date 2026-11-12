@@ -6,7 +6,7 @@
 
 pub(crate) mod estimates;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -740,6 +740,63 @@ pub(crate) fn handoff_saved(
     recorded
 }
 
+/// Live rebinds and retained structured audits identify the same action.
+pub(crate) fn rebind_key(task: &str, branch: &str, tip: &str) -> String {
+    format!("rebind|{task}|{branch}|{tip}")
+}
+
+fn retained_rebind_key(task: &str, line: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Start { branch: String }
+    #[derive(serde::Deserialize)]
+    struct Audit { start: Start, tip: String }
+    let (_, json) = line.split_once("DELIVERY BRANCH REBOUND:")?;
+    let audit: Audit = serde_json::from_str(json.trim()).ok()?;
+    if audit.start.branch.is_empty() || audit.tip.len() != 40
+        || !audit.tip.bytes().all(|byte| byte.is_ascii_hexdigit()) { return None; }
+    Some(rebind_key(task, &audit.start.branch, &audit.tip))
+}
+
+fn retained_rebind_aliases(task: &cas_types::Task) -> HashMap<String, Vec<String>> {
+    let mut aliases = HashMap::<String, Vec<String>>::new();
+    for line in task.notes.lines() {
+        if note_time(line).is_some()
+            && let Some(key) = retained_rebind_key(&task.id, line) {
+            let keys = aliases.entry(key).or_default();
+            let alias = format!("backfill|rebind|{}|{}", task.id, line_digest(line));
+            if !keys.contains(&alias) { keys.push(alias); }
+        }
+    }
+    aliases
+}
+
+/// Suppress exact old backfill aliases of a retained rebind, preserving every
+/// stored row. Prefer the live identity even when its timestamp is outside the
+/// report window; unrelated same-minute actions and foreign projects stay apart.
+pub(crate) fn duplicate_rebind_ids(root: &Path, history: &[cas_store::QualityEvent]) -> anyhow::Result<HashSet<String>> {
+    let present: HashSet<_> = history.iter().filter(|event| event.project_id.is_empty())
+        .map(|event| event.id.as_str()).collect();
+    let mut duplicates = HashSet::new();
+    let scope = project_scope(root);
+    for task in crate::store::open_task_store(root)?.list(None)? {
+        for (key, aliases) in retained_rebind_aliases(&task) {
+            let mut event = NewQualityEvent::new(key, QualityPayload::Intervention {
+                intervention: InterventionKind::Rebind, minutes: None,
+            });
+            event.scope = scope.clone();
+            let mut counted = present.contains(event.id().as_str());
+            for alias in aliases {
+                event.natural_key = alias;
+                let id = event.id();
+                if present.contains(id.as_str()) {
+                    if counted { duplicates.insert(id); } else { counted = true; }
+                }
+            }
+        }
+    }
+    Ok(duplicates)
+}
+
 /// History already on disk, as events: nobody types seed data. Natural keys match
 /// nothing a live emitter writes twice, and a rerun inserts nothing new.
 /// Lifetime retrieval totals have no recoverable time scope; only session end
@@ -772,6 +829,7 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
     cas_store::backfill_delivery_cycles(cas_root, &project_scope(cas_root))?;
     for task in &tasks {
         inserted += attested_interventions(cas_root, &task.notes, since)?;
+        let rebind_aliases = retained_rebind_aliases(task);
         for line in task.notes.lines() {
             let Some(at) = note_time(line).filter(|at| *at >= since) else { continue };
             let kind = if line.contains("DELIVERY BRANCH REBOUND:") {
@@ -788,6 +846,14 @@ pub(crate) fn backfill(cas_root: &Path, since: DateTime<Utc>) -> anyhow::Result<
             event.occurred_at = at;
             event.task_id = Some(task.id.clone());
             event.title = Some(task.title.clone());
+            if kind == InterventionKind::Rebind
+                && let Some(key) = retained_rebind_key(&task.id, line) {
+                event.natural_key = key.clone();
+                event.scope = project_scope(cas_root);
+                if cas_store::quality_event_recorded(cas_root, &event, &rebind_aliases[&key])? {
+                    continue;
+                }
+            }
             inserted += usize::from(emit(cas_root, &event));
         }
     }

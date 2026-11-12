@@ -748,6 +748,8 @@ fn build_report(cas_root: &Path, repo: &Path, release: Option<&str>) -> Result<L
         && e.release_version.as_deref() == Some(name.as_str())) {
         if !events.iter().any(|e| e.id == event.id && e.project_id == event.project_id) { events.push(event.clone()); }
     }
+    let duplicate_rebinds = crate::quality_ledger::duplicate_rebind_ids(cas_root, &history)?;
+    events.retain(|event| !event.project_id.is_empty() || !duplicate_rebinds.contains(&event.id));
     let mut report = aggregate(name, published, from, to, &events);
     // Review is the delivery's history, not merely checks that happened between
     // tag timestamps. Keep later/earlier rounds visible with their own dates.

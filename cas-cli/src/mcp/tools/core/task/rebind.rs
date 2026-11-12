@@ -70,6 +70,29 @@ mod ledger_tests {
             assert_eq!(rows(), historical);
             assert_eq!(count(), 2);
         }
+
+        // Recovery also recognizes a legacy-only identity, or creates the live
+        // identity when only the audit survived. Repeated identical notes are
+        // the same fact, while each task remains a separate intervention.
+        let retained = tasks.get(&task.id).unwrap();
+        let line = retained.notes.lines().last().unwrap();
+        for (index, legacy) in [true, false].into_iter().enumerate() {
+            let mut recovered = cas_types::Task::new(format!("cas-history-{index}"), "Retained rebind".into());
+            recovered.notes = format!("{line}\n{line}");
+            tasks.add(&recovered).unwrap();
+            if legacy {
+                let mut digest = std::collections::hash_map::DefaultHasher::new();
+                line.hash(&mut digest);
+                crate::quality_ledger::intervention(&root, cas_store::InterventionKind::Rebind,
+                    format!("backfill|rebind|{}|{:016x}", recovered.id, digest.finish()),
+                    Some(&recovered.id), None, None);
+            }
+            for _ in 0..2 {
+                crate::quality_ledger::backfill(&root, since).unwrap();
+                assert_eq!(cas_store::quality_events_for_task(&root, &recovered.id).unwrap().len(), 1);
+                assert_eq!(count(), 3 + index as u64);
+            }
+        }
     }
 }
 
@@ -186,7 +209,7 @@ impl BranchRebindAudit {
         crate::quality_ledger::intervention(
             cas_root,
             cas_store::InterventionKind::Rebind,
-            format!("rebind|{}|{branch}|{}", rebound.id, self.tip),
+            crate::quality_ledger::rebind_key(&rebound.id, &branch, &self.tip),
             Some(&rebound.id),
             Some(&self.actor),
             Some(&self.reason),

@@ -171,10 +171,16 @@ Rows:
 
 ## False-deny measurement (14 days, base and candidate)
 
-- **Source:** Claude harness transcripts under
-  `~/.cas/claude-base/projects/*/*.jsonl`; 915 files changed in the last 14
-  days. Each Bash `tool_use` input from a worker session is a command. No guard
-  log stores command text, so transcripts are the only full record.
+- **Source:**
+  - Claude harness transcripts under `~/.cas/claude-base/projects/*/*.jsonl`
+    (915 files changed in the last 14 days);
+  - Codex session logs under `~/.codex*/sessions`.
+
+  Each worker shell command is one input. No guard log stores command text, so
+  these logs are the only full record. Results are reported per harness.
+- **Secrets:** receipts never copy raw command text that may hold secrets.
+  Tokens and env values are redacted. Any secret-shaped command keeps only a
+  SHA-256 hash with its decision and rule.
 - **Replay:** a one-off script (not shipped) feeds each command, as a worker
   PreToolUse request, to the base binary (`7f6b77429`) and to the candidate.
   It records decision and rule.
@@ -211,5 +217,5 @@ Rows:
 | Reviewer | Verdict | Date | Notes |
 | --- | --- | --- | --- |
 | Supervisor (prowl, quick-hawk-35) | APPROVE | 2026-11-12 2:49 PM ET | 1: keep literal scripts admitted as opaque effect units; the write-root check still applies to the path. 2: refuse coproc outright. 3: depth 6 accepted; report the depth distribution from the replay, and raise it before merge if a real command needs more. 4: label rule accepted; the rule-based reviewer labels every deny and the operator spot-checks a random 20 rows. |
-| Supervisor (soundwave) | pending | | |
+| Supervisor (soundwave) | APPROVE | 2026-11-12 2:50 PM ET | Q1 keep literal scripts opaque: yes. Q2 refuse coproc: yes. Q3 depth 6: yes. Q4 rule-labelled false denies with operator spot-check: yes. Required changes (prowl accepts both): A, the measurement includes Codex session logs and reports per harness; B, replay receipts never copy raw secret-shaped command text. Both are folded into the measurement section. |
 | Operator | pending | | |

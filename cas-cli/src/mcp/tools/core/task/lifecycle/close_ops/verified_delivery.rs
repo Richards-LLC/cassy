@@ -216,12 +216,9 @@ impl ReviewedDelivery {
                 first
             }
         };
-        // The verifier reviewed the merged candidate, including target edits
-        // beside source hunks. Its exact tree at the first landing is stronger
-        // evidence than reverse-applying the source's older patch context.
-        if resolve_branch_sha(repo, &format!("{landing}^{{tree}}")).as_deref()
-            == Some(candidate.tree.as_str())
-        {
+        // Consume the same projection publication checked, including sibling
+        // upkeep whose delivered hunks and context remain unchanged (cas-6c21).
+        if candidate.verify_landing(&landing).is_ok() {
             return true;
         }
         // A later unrelated target advance can change the full landing tree.

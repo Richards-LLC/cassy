@@ -2150,6 +2150,7 @@ fn execute_at_with_scope_and_environment(cas_root: &Path, args: &[String], cwd: 
         let directory = receipt.parent().context("receipt directory")?.join("logs");
         #[cfg(unix)]
         let directory = detached_log_path()
+            .filter(|log| log.is_absolute() && log.is_file())
             .and_then(|log| log.parent().map(Path::to_path_buf))
             .unwrap_or(directory);
         std::fs::create_dir_all(&directory)?;
@@ -2806,9 +2807,16 @@ exec "$@" > target/raw.log 2>&1"#);
 esac"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "passing guards cannot hide an empty requested selection");
         assert!(passing_test_receipts(&root, &repo, &fixture_head(&repo)).is_empty());
+        let captures = || std::fs::read_dir(selected.parent().unwrap()).unwrap()
+            .map(|entry| entry.unwrap().path()).collect::<BTreeSet<_>>();
+        let before_guard_failure = captures();
         fake_cargo(&fake, r#"printf '%s\n' "$*" > target/failed-guard
 printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         assert!(execute_at(&root, &args, &repo, &fake).is_err(), "guard execution itself must be nonzero");
+        let after_guard_failure = captures();
+        let new_captures = after_guard_failure.difference(&before_guard_failure).collect::<Vec<_>>();
+        assert_eq!(new_captures.len(), 1, "every attempt needs a separate capture");
+        assert!(std::fs::read(new_captures[0]).unwrap().is_empty(), "a refused guard must not populate selected output");
         assert_eq!(std::fs::read(&selected).unwrap(), b"\x1b[32m     Summary [ 0.01s] 2 tests run: 2 passed, 0 skipped\x1b[0m\n", "failed retries must preserve earlier capture bytes");
         // pin: the failing external invocation must be the fixed guard selection.
         assert!(std::fs::read_to_string(repo.join("target/failed-guard")).unwrap().contains("test_support::"));

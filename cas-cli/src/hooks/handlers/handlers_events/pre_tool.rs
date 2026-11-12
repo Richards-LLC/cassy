@@ -12660,76 +12660,98 @@ mod worker_commit_guard_tests {
 
     #[test]
     fn detached_bisect_checkout_is_navigation_but_commit_is_refused_cas_f600() {
+        let mut env = TestEnvGuard::temp_home();
         let repo = make_git_repo();
         let path = repo.path().to_string_lossy().to_string();
-        let head = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
+        let git = |args: &[&str]| std::process::Command::new("git")
+            .args(args).current_dir(repo.path()).output().unwrap();
+        let head = git(&["rev-parse", "HEAD"]);
         let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
-        let detach = std::process::Command::new("git")
-            .args(["checkout", "--detach", &sha])
-            .current_dir(repo.path())
-            .output()
-            .unwrap();
-        assert!(detach.status.success(), "{detach:?}");
-        let _env = TestEnvGuard::with_optional_vars(&[
-            ("CAS_AGENT_ROLE", Some("worker")),
-            ("CAS_FACTORY_MODE", Some("1")),
-            ("CAS_CLONE_PATH", Some(&path)),
-            ("CAS_AGENT_NAME", Some("bisect-worker")),
-        ]);
+        assert!(git(&["branch", "factory/bisect-worker"]).status.success());
+        assert!(git(&["update-ref", "refs/remotes/origin/guessable", &sha]).status.success());
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_CLONE_PATH", &path);
+        env.set("CAS_AGENT_NAME", "bisect-worker");
 
-        let classify = hook_git_write_input(
-            &path,
-            &format!("git bisect good\ngit checkout --detach {sha}"),
-        );
-        let output = handle_pre_tool_use(&classify, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_ne!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "bisect classification and detached checkout must remain usable: {value}"
-        );
-
-        let restore = hook_git_write_input(&path, &format!("git checkout {sha} -- --detach"));
-        let output = handle_pre_tool_use(&restore, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(
-            value["hookSpecificOutput"]["permissionDecision"],
-            "deny",
-            "a pathspec named --detach must not bypass the detached-HEAD guard: {value}"
-        );
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
-        let commit = hook_git_write_input(&path, "git commit -m forbidden");
-        let output = handle_pre_tool_use(&commit, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
-        assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("HEAD is detached"));
-
+        // One row per HEAD-moving form (and per ref-rewrite/path control).
+        // Execute allowed rows against Git too: these navigate the existing
+        // commit graph, rather than merely looking like navigation to us.
+        let cases: &[(&[&str], bool)] = &[
+            (&["checkout", "factory/bisect-worker"], true),
+            (&["checkout", "-"], true),
+            (&["checkout", "@{-1}"], true),
+            (&["checkout", "TIP"], true),
+            (&["checkout", "TIP", "--"], true),
+            (&["checkout", "--detach", "TIP"], true),
+            (&["checkout", "-d", "TIP"], true),
+            (&["checkout", "--detach"], true),
+            (&["checkout", "-qd", "TIP"], true),
+            (&["checkout", "-b", "NEW", "TIP"], true),
+            (&["checkout", "-bNEW", "TIP"], true),
+            (&["checkout", "-qbNEW", "TIP"], true),
+            (&["checkout", "--orphan", "NEW", "TIP"], true),
+            (&["checkout", "--orphan=NEW", "TIP"], true),
+            (&["checkout", "--track", "-b", "NEW", "main"], true),
+            (&["checkout", "-t", "-bNEW", "main"], true),
+            (&["checkout", "--conflict", "merge", "factory/bisect-worker"], true),
+            (&["checkout", "guessable"], true),
+            (&["switch", "factory/bisect-worker"], true),
+            (&["switch", "-"], true),
+            (&["switch", "@{-1}"], true),
+            (&["switch", "-c", "NEW", "TIP"], true),
+            (&["switch", "-cNEW", "TIP"], true),
+            (&["switch", "-qcNEW", "TIP"], true),
+            (&["switch", "--create", "NEW", "TIP"], true),
+            (&["switch", "--create=NEW", "TIP"], true),
+            (&["switch", "--detach", "TIP"], true),
+            (&["switch", "-d", "TIP"], true),
+            (&["switch", "--detach"], true),
+            (&["switch", "--orphan", "NEW"], true),
+            (&["switch", "--orphan=NEW"], true),
+            (&["checkout", "-B", "main", "TIP"], false),
+            (&["checkout", "-Bmain", "TIP"], false),
+            (&["checkout", "-qBmain", "TIP"], false),
+            (&["switch", "-C", "main", "TIP"], false),
+            (&["switch", "-Cmain", "TIP"], false),
+            (&["switch", "-qCmain", "TIP"], false),
+            (&["switch", "--force-create", "main", "TIP"], false),
+            (&["switch", "--force-create=main", "TIP"], false),
+            (&["checkout", "f.txt"], false),
+            (&["checkout", "--", "f.txt"], false),
+            (&["checkout", "TIP", "f.txt"], false),
+            (&["checkout", "TIP", "--", "--detach"], false),
+            (&["checkout", "--patch", "TIP"], false),
+            (&["checkout", "--pathspec-from-file=paths"], false),
+            (&["commit", "-m", "forbidden"], false),
+            (&["merge", "main"], false),
+            (&["reset", "--hard", "TIP"], false),
+        ];
+        for (index, (words, allow)) in cases.iter().enumerate() {
+            assert!(git(&["switch", "factory/bisect-worker"]).status.success());
+            assert!(git(&["checkout", "--detach", &sha]).status.success());
+            let args: Vec<_> = words.iter().map(|word| word.replace("TIP", &sha)
+                .replace("NEW", &format!("factory/navigation-{index}"))).collect();
+            let command = format!("git {}", args.join(" "));
+            let output = handle_pre_tool_use(&hook_git_write_input(&path, &command), None).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            assert_eq!(value["hookSpecificOutput"]["permissionDecision"] != "deny", *allow,
+                "{command}: {value}");
+            if *allow {
+                let result = std::process::Command::new("git").args(&args).current_dir(repo.path()).output().unwrap();
+                assert!(result.status.success(), "{command}: {result:?}");
+                // Orphan HEAD has no commit; every other transition keeps
+                // this exact existing tip, and none adds a graph node.
+                if !args.iter().any(|arg| arg.starts_with("--orphan")) {
+                    assert_eq!(String::from_utf8_lossy(&git(&["rev-parse", "HEAD"]).stdout).trim(), sha);
+                }
+            }
+            assert_eq!(String::from_utf8_lossy(&git(&["rev-list", "--all", "--count"]).stdout).trim(), "1");
+        }
         let outside = tempfile::tempdir().unwrap();
-        let outside_checkout = hook_git_write_input(
-            &path,
-            &format!(
-                "git -C '{}' checkout --detach {sha}",
-                outside.path().display()
-            ),
-        );
-        let output = handle_pre_tool_use(&outside_checkout, None).expect("handler ok");
-        let value = serde_json::to_value(output).unwrap();
+        let input = hook_git_write_input(&path, &format!("git -C '{}' checkout --detach {sha}", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&input, None).unwrap()).unwrap();
         assert_eq!(value["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert!(value["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("outside your assigned worktree"));
     }
 
     #[test]

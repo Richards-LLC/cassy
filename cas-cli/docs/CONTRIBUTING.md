@@ -113,6 +113,30 @@ move Git refs. Publication comes from the target repository's Release ledger;
 a tag alone is not publication evidence. Missing receipts or unavailable refs
 produce no warning. An origin-only epic tip is usable; when both refs exist, a fresher descendant origin tip is considered before warning.
 
+## Explicit peer merge holds
+
+A peer question is advisory unless the sender deliberately gives it merge-hold scope.
+For `coordination action=message target=<peer> kind=ask`, put this structured line first in
+`message`, followed by the review request:
+
+```text
+CAS_MERGE_HOLD {"task_id":"cas-example","pr":4249}
+Please review the delivery before it merges.
+```
+
+Either `task_id` or a positive integer `pr` is sufficient; both may be present. Task IDs and
+PR numbers match exactly. The first content line is the only hold declaration: ordinary body
+mentions, quoted examples, work orders and statements such as “Not yours: cas-example” never
+create a hold. Legacy prose-only review asks also remain advisory. Invalid JSON, unknown keys
+or an empty scope grant no hold authority. `task_id` on an unrelated coordination operation
+is not a declaration on the peer ask; use the explicit message header above.
+
+The hold applies to the sender's `worktree_merge`, protected PR arming and raw `gh pr merge`.
+If a raw PR merge cannot resolve its PR number, a valid explicit hold still fails closed;
+an unscoped question does not block it. Existing linked or unambiguous typed peer answers
+clear scoped asks. Ambiguous answers remain visible with their reply ID for linking; a
+`PEER ASK OVERRIDE <ask-id>: <reason>` task note permits an audited override as before.
+
 ## Worker contracts across machines
 
 `coordination action=message target=<worker>@<machine>` can carry an advisory

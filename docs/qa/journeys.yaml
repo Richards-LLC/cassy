@@ -12,11 +12,6 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
-  escaped-caller-account-data:
-    title: Exact encoded caller account names remain data-integrity assertions while unrelated prose stays rejected
-    tasks: [cas-8447]
-    journeys: [FACTORY-CLOSE]
-    invariants: [FACTORY-ESCAPED-CALLER-SHAPE]
   same-task-uncommitted-review-resume:
     title: Blocked and reopened tasks retain their original same-worker source boundary before the first commit
     tasks: [cas-d4c7]
@@ -194,10 +189,10 @@ bug_families:
     invariants: [HUB-J26-REGISTERED-RUN-STALL]
     journeys: [HUB-J26]
   peer-ask-merge-scope:
-    title: Only explicit asks hold related merges and correlated typed answers clear them
-    tasks: [cas-5ec1]
-    invariants: [HUB-J5-NO-ACTION-WAKES]
-    journeys: [HUB-J5]
+    title: Only explicitly scoped asks hold related merges; contextual mentions grant no hold and correlated typed answers clear holds
+    tasks: [cas-5ec1, cas-5d65]
+    invariants: [HUB-J5-NO-ACTION-WAKES, FACTORY-STRUCTURED-PEER-HOLD]
+    journeys: [HUB-J5, FACTORY-MERGE]
   image-viewer-reload-readiness:
     title: Image-viewer recovery waits for the restored turn after reload without racing the transient conversation list
     tasks: [cas-4acf]
@@ -608,6 +603,11 @@ bug_families:
     tasks: [cas-154b]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-PULL-CADENCE]
+  escaped-caller-account-data:
+    title: Exact encoded caller account names remain data-integrity assertions while unrelated prose stays rejected
+    tasks: [cas-8447]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-ESCAPED-CALLER-SHAPE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -735,10 +735,6 @@ invariants:
     statement: Exact structured executable-command redirects are admitted as machine identifiers while equivalent rendered error narrative remains refused.
     check: Run test_human_message_assertions_use_behavior_or_machine_ids in scripts/test-check-test-shape.py; accept redirect_command equality for cas cloud project set and reject the equivalent error.message sentence.
     bug: {task: cas-8edf}
-  FACTORY-ESCAPED-CALLER-SHAPE:
-    statement: A positive Python substring assertion of exact HTML or Markdown escaping of an immutable supplied fixture value is data integrity; escaped prose without that provenance remains rejected.
-    check: Run test_escaped_python_caller_payload_cas_8447 in scripts/test-check-test-shape.py through both message and text-pin passes, including changed-line mode; replay the accounting account field case and retain unrelated, unsupplied, reassigned, cross-scope and negative-assertion refusals. Run the changed-lane CLI with the reported account payload and an unrelated generated-prose control.
-    bug: {task: cas-8447}
   FACTORY-CLI-PAYLOAD-SHAPE:
     statement: Exact CLI flag payload round trips are data-integrity checks; generated prose and unrelated fields remain rejected by the test-shape gate.
     check: Run scripts/test-check-test-shape.py, including test_cli_parser_payload_round_trip_cas_5442; pass exact parser argv values through immutable let-else command routing in both equality orders and changed-line mode, while rejecting different values, unrelated fields, unknown transformations, expired inner bindings, inequalities and substrings. Replay the changed-lane guard with a caller payload and a generated-prose control.
@@ -1025,7 +1021,7 @@ invariants:
     check: Run a_merge_waits_on_the_supervisors_unanswered_peer_ask_cas_bddf9 through merge override and operator adoption, and project-navigation.test.ts through history and the Needs-you DOM. In batch QA inspect the same override row on desktop and phone, including a retained code-only summary.
     bug: {task: cas-ef6e}
   HUB-J5-NO-ACTION-WAKES:
-    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicit asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
+    statement: Idle supervisor acknowledgements produce no Commander bubble; untyped peer mail renders as an ask and wakes without creating a merge hold (cas-5ec1); explicitly scoped CAS_MERGE_HOLD asks require linked or unambiguous typed answers (cas-7435) while explicit receipts and wake=false stay quiet, replies and legacy mail wake, and status polls are refused while deadlines and work retries remain valid.
     check: 'Run peer_ask_gate::tests for explicit asks, correlated typed answers, retained ambiguous holds and task scoping. Run the Commander mirror, factory reminder and peer mailbox regressions plus the local and distributed message-handler tests. On the release candidate, leave a supervisor idle for 15 minutes and require no "no new messages" bubbles; verify an untyped reply to a peer ask, kind=answer, legacy mail, an actual deadline and a capped-build retry still work; unknown peer kinds must be refused.'
     bug: {task: cas-1791}
   HUB-J5-QUIET-MERGE-HEADS-UP:
@@ -1428,6 +1424,14 @@ invariants:
     statement: Entity sync runs at its configured cadence independently of indexing and maintenance; quality and knowledge work never own the entity-sync lease, and existing team scope and task lifecycle guards remain authoritative.
     check: "Run cloud_pull_ticks_while_indexing_is_held_cas_154b through the real daemon loop with a channel-held index mutex and fake scheduling time; require a subsequent pull and an available entity lease during quality HTTP. Run hub_idle_sync_test::a_store_whose_lease_is_held_is_not_synced_twice against the real CLI binary: a held store must return Busy without any cloud request or queue drain, including discovery and registration. Retain existing daemon store-lease exclusion and team-only cycle regressions. On the delivered binary, measure creation or parking visibility between prowl and soundwave without forced sync, state the bound and publish the timing receipt."
     bug: {task: cas-154b}
+  FACTORY-ESCAPED-CALLER-SHAPE:
+    statement: A positive Python substring assertion of exact HTML or Markdown escaping of an immutable supplied fixture value is data integrity; escaped prose without that provenance remains rejected.
+    check: Run test_escaped_python_caller_payload_cas_8447 in scripts/test-check-test-shape.py through both message and text-pin passes, including changed-line mode; replay the accounting account field case and retain unrelated, unsupplied, reassigned, cross-scope and negative-assertion refusals. Run the changed-lane CLI with the reported account payload and an unrelated generated-prose control.
+    bug: {task: cas-8447}
+  FACTORY-STRUCTURED-PEER-HOLD:
+    statement: Only a kind=ask first-content-line CAS_MERGE_HOLD JSON declaration for an exact task_id or PR grants merge-hold authority; incidental body mentions and legacy prose-only asks do not.
+    check: Run peer_ask_gate::tests at the delivered tip. Replay Not yours task context, in-my-merge context, plain review prose, task/PR scoped holds and mismatches, quoted metadata, invalid/empty scope, and unresolved raw PR scope. Preserve explicit-kind, override/operator notice, linked and unambiguous answer, sibling answer and branch/bare PR resolution cases.
+    bug: {task: cas-5d65}
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS
@@ -1472,7 +1476,7 @@ journeys:
   - cas-cli/src/builtins/agents/task-verifier.body.md
   - cas-cli/src/finding_triage.rs
   - crates/cas-store/src/verification_store.rs
-  invariants: [FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
+  invariants: [FACTORY-STRUCTURED-PEER-HOLD, FACTORY-FINDING-PRIORITY, FACTORY-VERIFIER-CRASH-RETRY, FACTORY-VERIFIER-QUESTION, FACTORY-CANDIDATE-CONFLICT-RETURN]
   spec: cas-cli/tests/mcp_tools_test/task_tools/independent_qa.rs
   traffic: {share_pct: null, basis: No per-workflow usage instrumentation.}
 - id: FACTORY-CLOSE

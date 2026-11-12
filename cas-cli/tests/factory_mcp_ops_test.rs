@@ -12955,6 +12955,10 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let env = FactoryTestEnv::new();
         let worker = "gh1006-parked-worker";
         let worker_path = init_sync_repo(&env, worker);
+        // cas-2e1b: task start publishes its recorded base for lane CI.
+        let origin = home.path().join("origin.git");
+        git_stdout(home.path(), &["init", "-q", "--bare", origin.to_str().unwrap()]);
+        git_stdout(&worker_path, &["remote", "add", "origin", origin.to_str().unwrap()]);
         let branch = if per_task {
             format!("factory/{worker}-cas-pk01")
         } else {
@@ -13030,6 +13034,26 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
         let start = store.get(&task_b).unwrap().deliverables.factory_branch_start.unwrap();
         assert_eq!(start.branch, own, "close must retain the new task's branch");
         assert_eq!(start.base_sha, git_stdout(&worker_path, &["rev-parse", "HEAD"]));
+
+        let record = format!("refs/cas/delivery-base/{own}");
+        let published = git_stdout(&worker_path, &["ls-remote", "origin", &record]);
+        assert_eq!(published.split_whitespace().next(), Some(start.base_sha.as_str()));
+        git_stdout(&worker_path, &["fetch", "-q", "origin", &format!("+{record}:{record}")]);
+        let plan = std::process::Command::new("python3")
+            .arg(cas::test_paths::workspace_root().join("scripts/ci-test-impact.py"))
+            .args(["lane", "--phase", "plan", "--base-sha", "HEAD", "--recorded-base-ref", &record])
+            .arg("--history")
+            .arg(home.path().join("no-history.json"))
+            .arg("--out")
+            .arg(home.path().join("lane.json"))
+            .current_dir(&worker_path)
+            .output()
+            .expect("run the lane plan");
+        assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
+        let lane: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
+        assert_eq!(lane["plan"]["base"], start.base_sha.as_str());
+        assert_eq!(lane["plan"]["base_source"], "recorded start base");
     }
 }
 

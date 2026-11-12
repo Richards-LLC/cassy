@@ -53,6 +53,24 @@ pub(crate) mod epic_lane;
 mod epic_overlap;
 mod recall_terms;
 pub(crate) mod merge_close;
+
+/// Publish a newly recorded delivery start base as
+/// `refs/cas/delivery-base/<branch>` on origin, where lane CI reads it
+/// (cas-2e1b). Best effort: a missing remote or a failed push leaves lane CI
+/// on its inferred base, which it logs.
+fn publish_delivery_base(repo: &std::path::Path, branch: &str, base_sha: &str) {
+    let refspec = format!("+{base_sha}:refs/cas/delivery-base/{branch}");
+    let pushed = std::process::Command::new("git")
+        .args(["push", "--quiet", "--no-verify", "origin", &refspec])
+        .current_dir(repo)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .output();
+    if !pushed.as_ref().is_ok_and(|output| output.status.success()) {
+        tracing::debug!(branch, "delivery start base not published; lane CI will use its inferred base");
+    }
+}
+
 #[cfg(test)]
 mod gate_error_tests;
 pub(crate) mod proof_scope;
@@ -2750,6 +2768,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut delivery_base_repo = None;
         let mut reassigned_branch = None;
         let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
@@ -3019,6 +3038,7 @@ impl CasCore {
                                 worker_checkout.to_path_buf(), worker.clone(), worker_branch,
                             ));
                         } else if task.deliverables.factory_branch_start.is_none() || reset_start_base {
+                            delivery_base_repo = Some(worker_repo_root.clone());
                             let base_sha = GitOperations::new(worker_repo_root)
                                 .ref_sha(&worker_branch)
                                 .map_err(|error| {
@@ -3705,6 +3725,14 @@ impl CasCore {
                 return Err(Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to update: {error}")));
             }
         };
+        // cas-2e1b: lane CI binds its impact selection to this newly recorded
+        // start base. A repeated start without a new record leaves the ref.
+        if let (Some(repo), Some(start)) = (
+            delivery_base_repo.as_deref(),
+            task.deliverables.factory_branch_start.as_ref(),
+        ) {
+            publish_delivery_base(repo, &start.branch, &start.base_sha);
+        }
         // cas-b269 review 2: clear urgent-stop halt ONLY after start fully
         // succeeds, and only if halt gen is not newer than this start's
         // ceiling (concurrent urgent stop must win).

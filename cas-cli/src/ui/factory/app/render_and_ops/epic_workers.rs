@@ -1878,6 +1878,18 @@ pub(crate) fn assign_task_to_new_worker(
     assign_unassigned_task(&*store, task, task_id, worker_name)
 }
 
+/// A block belongs to the worker that made it. Once its task is reopened for
+/// someone else, the hold (with its timestamp) and any answer to it are the
+/// departed worker's and must not outlive the binding (cas-a706).
+fn clear_departed_block(store: &dyn cas_store::TaskStore, task_id: &str) {
+    if let Err(error) = store.patch_execution_state(
+        task_id,
+        &serde_json::json!({"blocked_hold": null, "answered_blocker": null}),
+    ) {
+        tracing::warn!(task_id, %error, "cas-a706: could not clear the departed worker's block");
+    }
+}
+
 fn assign_unassigned_task(
     store: &dyn cas_store::TaskStore,
     task: cas_types::Task,
@@ -1961,6 +1973,7 @@ fn reset_stale_preassign_holder(
     reset.updated_at = chrono::Utc::now();
     store.update(&reset)
         .map_err(|e| format!("could not persist stale-holder reset: {e}"))?;
+    clear_departed_block(&*store, &task.id);
     // Reset settles only the retired identities captured above. A replacement
     // that wins between persistence and this cloud call must keep its claim.
     let retired_ids: std::collections::HashSet<_> = registered_agents.iter()
@@ -2372,6 +2385,7 @@ fn release_worker_task_bindings_tasks_only(
         t.updated_at = chrono::Utc::now();
         match task_store.update(&t) {
             Ok(_) => {
+                clear_departed_block(task_store, &t.id);
                 released += 1;
                 tracing::info!(
                     task_id = %t.id,
@@ -2439,6 +2453,7 @@ pub(crate) fn release_preassign_if_bound(
             "cas-7a94: failed to release pre-assign after aborted spawn"
         );
     } else {
+        clear_departed_block(&*store, task_id);
         tracing::info!(
             task_id,
             worker_name,

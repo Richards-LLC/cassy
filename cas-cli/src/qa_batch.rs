@@ -440,13 +440,14 @@ pub(crate) fn commit(repo: &Path, rev: &str) -> Option<String> {
 /// Recovery retires the active merge authority, but retains delivery identity.
 /// QA may attest that same immutable delivery after an evidence-only restart.
 /// Prefer an active anchor; otherwise use only the latest recorded history.
-/// An unresolvable newer anchor must never resurrect an older reviewed tip.
+/// An unresolvable newer anchor must never resurrect an older reviewed tip,
+/// and a recorded anchor is a commit id, never a ref name.
 pub(crate) fn delivery_anchor(repo: &Path, task: &Task) -> Option<String> {
     task.deliverables
         .factory_branch_anchor
         .as_ref()
         .or_else(|| task.deliverables.historical_factory_branch_anchors.last())
-        .and_then(|head| commit(repo, head))
+        .and_then(|head| commit(repo, head).filter(|resolved| resolved.eq_ignore_ascii_case(head)))
 }
 
 /// GH #1641: a task merged through a GitHub PR has no recorded anchor. Resolve

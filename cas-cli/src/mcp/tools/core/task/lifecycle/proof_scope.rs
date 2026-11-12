@@ -930,6 +930,7 @@ mod tests {
 
     #[test]
     fn rejected_resolved_task_proof_does_not_strand_rework() {
+        for receipt_id in [None, Some("dc-rework")] {
         let root = TempDir::new().unwrap();
         let task = Task::new("cas-rejected-proof".into(), "rejected proof".into());
         let dispatch = cas_store::create_verification_dispatch_bound(
@@ -937,7 +938,7 @@ mod tests {
             &task.id,
             "requester",
             FIXTURE_SUPERVISOR_ID,
-            &VerificationProofBoundary::task(),
+            &VerificationProofBoundary { receipt_id: receipt_id.map(str::to_string), ..VerificationProofBoundary::task() },
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -965,6 +966,7 @@ mod tests {
             .is_ok(),
             "a rejected verdict cannot authorize close and must not permanently lock rework"
         );
+        }
     }
 
     #[test]

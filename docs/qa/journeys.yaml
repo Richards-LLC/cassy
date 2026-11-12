@@ -402,8 +402,8 @@ bug_families:
     tasks: [cas-c55fa]
     journeys: [FACTORY-CLOSE, FACTORY-SPAWN, HUB-J26]
   advancing-owned-child-work:
-    title: Owned child CPU and output advancement prevent false recovery while silent or exited children still escalate
-    tasks: [cas-8a87]
+    title: Owned child CPU and output advancement prevent false recovery through the cas serve frontend while silent or exited children still escalate
+    tasks: [cas-8a87, cas-8ea3]
     journeys: [HUB-J26, FACTORY-SUPERVISE]
   narrow-refspec-spawn-freshness:
     title: Branch fetches refresh the requested origin tracking ref under a main-only fetch mapping before worker checkout
@@ -603,6 +603,10 @@ bug_families:
     tasks: [cas-154b]
     journeys: [FACTORY-SUPERVISE]
     invariants: [FACTORY-PEER-PULL-CADENCE]
+  authenticated-recycle-fixtures:
+    title: Hermetic reset and dead-worker recovery fixtures satisfy account and execution-host admission while preserving refusal and work-retention checks
+    tasks: [cas-613e]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   escaped-caller-account-data:
     title: Exact encoded caller account names remain data-integrity assertions while unrelated prose stays rejected
     tasks: [cas-8447]
@@ -618,10 +622,6 @@ bug_families:
     tasks: [cas-c008]
     journeys: [HUB-J13]
     invariants: [HUB-J13-QUALITY-PALETTE]
-  authenticated-recycle-fixtures:
-    title: Hermetic reset and dead-worker recovery fixtures satisfy account and execution-host admission while preserving refusal and work-retention checks
-    tasks: [cas-613e]
-    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts
@@ -1446,6 +1446,9 @@ invariants:
     statement: Peer placement uses a fresh native worker count within factory.max_workers and fresh host pressure; unsent asks yield to recovered local capacity and accepted or in-flight asks retain one delivery per task.
     check: Run the three cas_a92f regressions in factory_build_routing through the real directory, route and durable outbox seam; verify full peers receive zero asks, local recovery abandons unsent asks and directory outages retain accepted deliveries without another lookup or send.
     bug: {task: cas-a92f}
+  FACTORY-ISOLATED-PLAYWRIGHT:
+    statement: Locked headless MCP clients use isolated contexts and optional explicit storage state; worker HOME remains host-valid without a shared profile, and bundled MCP sidecars do not hide real Playwright test activity.
+    check: Run worker_home_is_an_existing_host_home, factory_pane_configs_codex_worker_home_is_existing_host_home and known_mcp_sidecars_do_not_count_as_worker_background_jobs. Launch both repository registrations concurrently and verify separate cookie contexts, explicit state loading and the lockfile server version.
   FACTORY-STRUCTURED-PEER-HOLD:
     statement: Only a kind=ask first-content-line CAS_MERGE_HOLD JSON declaration for an exact task_id or PR grants merge-hold authority; incidental body mentions and legacy prose-only asks do not.
     check: Run peer_ask_gate::tests at the delivered tip. Replay Not yours task context, in-my-merge context, plain review prose, task/PR scoped holds and mismatches, quoted metadata, invalid/empty scope, and unresolved raw PR scope. Preserve explicit-kind, override/operator notice, linked and unambiguous answer, sibling answer and branch/bare PR resolution cases.
@@ -1454,9 +1457,6 @@ invariants:
     statement: The Quality journey focuses the visible desktop search or phone composer, sends one palette shortcut and waits for the palette; the selected project's trend factor and chart remain visible in both schemes.
     check: Run the original HUB-J13 quality trend identity headlessly on locked Playwright with retries zero; keep a red focus-loss control, the passing control, and the final four viewport/scheme captures. The journey must show the trend, not merely issue a quality request.
     bug: {task: cas-c008}
-  FACTORY-ISOLATED-PLAYWRIGHT:
-    statement: Locked headless MCP clients use isolated contexts and optional explicit storage state; worker HOME remains host-valid without a shared profile, and bundled MCP sidecars do not hide real Playwright test activity.
-    check: Run worker_home_is_an_existing_host_home, factory_pane_configs_codex_worker_home_is_existing_host_home and known_mcp_sidecars_do_not_count_as_worker_background_jobs. Launch both repository registrations concurrently and verify separate cookie contexts, explicit state loading and the lockfile server version.
 # Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: FACTORY-SOURCE-REACTIONS

@@ -36,13 +36,56 @@ enum CandidatePreparation {
     Pending(Option<std::thread::JoinHandle<()>>),
 }
 
+fn candidate_preparations() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ACTIVE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    ACTIVE.get_or_init(Default::default)
+}
+
+struct CandidatePreparationClaim(String);
+
+impl Drop for CandidatePreparationClaim {
+    fn drop(&mut self) {
+        candidate_preparations().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
 fn bounded_candidate_preparation(
-    _key: String,
-    _wait: std::time::Duration,
+    key: String,
+    wait: std::time::Duration,
     prepare: impl FnOnce() -> Result<Candidate, McpError> + Send + 'static,
-    _detached: impl FnOnce(&Result<Candidate, McpError>) + Send + 'static,
+    detached: impl FnOnce(&Result<Candidate, McpError>) + Send + 'static,
 ) -> CandidatePreparation {
-    CandidatePreparation::Ready(prepare())
+    if !candidate_preparations().lock().unwrap_or_else(|e| e.into_inner()).insert(key.clone()) {
+        return CandidatePreparation::Pending(None);
+    }
+    let claim = CandidatePreparationClaim(key);
+    let phase = crate::mcp::tools::service::mutation_receipt::phase("candidate_preparation");
+    let (send, receive) = std::sync::mpsc::channel();
+    // Receipt acknowledgement closes the timeout/send race: a completed result
+    // that missed the response still produces its existing supervisor notice.
+    let (acknowledge, acknowledged) = std::sync::mpsc::channel();
+    let job = std::thread::Builder::new().name("premerge-candidate".into()).spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(prepare))
+            .unwrap_or_else(|_| Err(fail("candidate preparation worker panicked; retry the merge")));
+        drop(phase);
+        drop(claim);
+        if send.send(result.clone()).is_err() || acknowledged.recv().is_err() {
+            detached(&result);
+        }
+    });
+    let job = match job {
+        Ok(job) => job,
+        Err(error) => return CandidatePreparation::Ready(Err(fail(error))),
+    };
+    match receive.recv_timeout(wait) {
+        Ok(result) => {
+            let _ = acknowledge.send(());
+            CandidatePreparation::Ready(result)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => CandidatePreparation::Pending(Some(job)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => CandidatePreparation::Ready(Err(
+            fail("candidate preparation worker stopped before returning its result; retry the merge"))),
+    }
 }
 
 fn candidate_preparation_notice(
@@ -52,7 +95,7 @@ fn candidate_preparation_notice(
     let notify = || -> Result<(), String> {
         let current = core.open_task_store().map_err(|e| e.to_string())?
             .get(&task.id).map_err(|e| e.to_string())?;
-        if current.status != task.status
+        if current.is_terminal() || current.status != task.status
             || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
             || current.deliverables.work_target != task.deliverables.work_target
         { return Ok(()); }
@@ -1423,6 +1466,8 @@ impl CasCore {
         digest: String,
         inherited_supervisor_call: Option<InheritedSupervisorCall>,
     ) -> Result<Candidate, McpError> {
+        // Coalescing only schedules work. The unchanged builder's resolved
+        // source/target/context key and file lock still own immutable authority.
         let identity = serde_json::to_vec(&(&self.cas_root, &task.id,
             &task.deliverables.factory_branch_anchor, repo, source, target,
             &digest, &inherited_supervisor_call)).map_err(fail)?;

@@ -1,0 +1,3 @@
+title: Slow immutable candidate preparation returns a bounded hold and a supervisor completion notice
+tasks: [cas-352b]
+journeys: [FACTORY-MERGE]

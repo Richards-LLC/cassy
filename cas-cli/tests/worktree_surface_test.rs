@@ -2694,8 +2694,8 @@ async fn cas_e051_required_verification_precedes_publication_without_blocking_ex
             cas_store::timeout_verification_dispatch(&fixture.cas_root, &task.id,
                 dispatch.deadline_at + chrono::Duration::seconds(1)).unwrap().unwrap();
             let held = fixture.service.factory(Parameters(merge)).await.unwrap_err().message.to_string();
-            // pin: expired candidate guidance must name registered-supervisor re-dispatch and the merge continuation command, not ask the worker to finish an expired verdict.
-            assert!(held.contains("supervisor") && held.contains("Re-dispatch")
+            // pin: expired candidate guidance must name the registered supervisor's verdict call and the merge continuation command, not ask the worker to finish an expired verdict.
+            assert!(held.contains("supervisor") && held.contains("verification action=add")
                 && held.contains("factory action=worktree_merge") && held.contains(&dispatch.id), "{held}");
             assert_eq!(git_stdout(fixture.origin.path(), &["rev-parse", "refs/heads/epic/rebound"]), before);
             continue;

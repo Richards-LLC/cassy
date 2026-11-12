@@ -10124,7 +10124,8 @@ impl CasCore {
                                 )
                             } else {
                                 format!(
-                                    "To fix: Address the issues and run the {verifier_agent} agent again."
+                                    "To fix: address the issues, then retry {caller_task} action=close id={}; Cassy's daemon-owned verifier reviews the new dispatch.",
+                                    req.id
                                 )
                             },
                             close_reason_note,
@@ -10133,8 +10134,8 @@ impl CasCore {
                                 String::new()
                             } else {
                                 format!(
-                                    "To verify: Task(subagent_type=\"{}\", prompt=\"Verify task {}\")",
-                                    verifier_agent, req.id
+                                    "{} A native Task/Agent verifier shares your MCP caller and cannot record a verdict.",
+                                    gate_text::SUPERVISOR_CLOSE_RECOVERY
                                 )
                             }
                         )));
@@ -10180,8 +10181,8 @@ impl CasCore {
                             "Verification timed out after {elapsed_mins} minutes — \
                              task-verifier subagent never recorded a verdict. \
                              Auto-escalated by cas_task_close: pending_verification cleared, \
-                             lease released. Supervisor must re-dispatch verifier or record \
-                             verdict manually."
+                             lease released. A registered supervisor retries the close to start \
+                             Cassy's daemon-owned verifier, or records the verdict directly."
                         );
                         timeout_row.created_at = chrono::Utc::now();
                         if let Err(e) =
@@ -10734,15 +10735,14 @@ impl CasCore {
                             format!(
                                 "Task {} close is pending verification dispatch {} owned by {} \
                                      until {}.{bound_head}\n\n\
-                                     Use the Task tool to spawn a task-verifier subagent: \
-                                     Task(subagent_type=\"{}\", prompt=\"Verify task {}; dispatch_id={}\")",
+                                     Cassy's daemon-owned verifier did not start for this dispatch \
+                                     (epics and daemon-less sessions have none). A native Task/Agent \
+                                     verifier shares your MCP caller and cannot record it; use the \
+                                     supervisor recovery below.",
                                 req.id,
                                 dispatch.id,
                                 dispatch.owner_agent_id,
                                 dispatch.deadline_at,
-                                verifier_agent,
-                                req.id,
-                                dispatch.id
                             )
                         };
                         let sup_ver = format!(

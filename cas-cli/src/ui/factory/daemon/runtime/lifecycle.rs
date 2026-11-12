@@ -263,7 +263,7 @@ pub(super) fn escalate_expired_verification_dispatches(
         .take(RELAYS_PER_SWEEP)
         .filter(|dispatch| {
             let detail = format!(
-                "Verification dispatch {} for {} passed its deadline {} with no verdict. Re-dispatch the verifier (or verify directly), then finish the close.",
+                "Verification dispatch {} for {} passed its deadline {} with no verdict. Retry the close or merge that opened it to start Cassy's daemon-owned verifier, or record the verdict directly on mechanical evidence, then finish the close.",
                 dispatch.id,
                 dispatch.task_id,
                 dispatch.deadline_at.to_rfc3339()

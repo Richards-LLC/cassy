@@ -124,8 +124,8 @@ pub(crate) fn verification_timeout_message(
              verification was cleared and its lease released.\n\n\
              Recovery:\n\
              1. Retry {retry} to mint a verification dispatch.\n\
-             2. Re-dispatch the task-verifier for task {task_id}, or record the verdict \
-             directly: `{supervisor_prefix}verification action=add task_id={task_id} \
+             2. Cassy's daemon-owned verifier takes that dispatch; for mechanical evidence \
+             a registered supervisor may instead record the verdict directly: `{supervisor_prefix}verification action=add task_id={task_id} \
              dispatch_id=<dispatch id named in that response> verification_type={verification_type} \
              status=approved summary=\"...\"`\n\
              3. Then retry {retry}."
@@ -384,22 +384,22 @@ pub(crate) fn verifier_spawn_denial(
     let (problem, next) = match denial {
         VerifierSpawnDenial::RegistryUnavailable => (
             "Cannot establish verifier authority: the agent registry is unavailable.".to_string(),
-            "run `cas doctor`, then retry the spawn.".to_string(),
+            format!("run `cas doctor`, then retry {close}."),
         ),
         VerifierSpawnDenial::UnregisteredParent => (
             "Cannot establish verifier authority for an anonymous or orphan session.".to_string(),
             format!(
                 "run `{prefix}coordination action=whoami`; only a registered session that owns \
-                 the task's dispatch can spawn its verifier."
+                 the task's dispatch can recover it with {close}."
             ),
         ),
         VerifierSpawnDenial::InactiveParent => (
             "Cannot establish verifier authority for an inactive parent session.".to_string(),
-            format!("run `{prefix}coordination action=heartbeat`, then retry the spawn."),
+            format!("run `{prefix}coordination action=heartbeat`, then retry {close}."),
         ),
         VerifierSpawnDenial::MissingPrompt | VerifierSpawnDenial::NoUniqueTask => (
             "The task-verifier prompt must name exactly one existing Cassy task ID.".to_string(),
-            "retry the spawn with prompt=\"Verify task <task-id>\".".to_string(),
+            format!("retry {close}; Cassy's daemon-owned verifier takes its dispatch."),
         ),
         VerifierSpawnDenial::DispatchOwnedElsewhere => (
             "This task's verification dispatch is owned by another registered session.".to_string(),
@@ -418,32 +418,32 @@ pub(crate) fn verifier_spawn_denial(
         VerifierSpawnDenial::NoActiveDispatch => (
             "No active verification dispatch owned by this session exists for this task."
                 .to_string(),
-            format!("retry {close} to mint the dispatch, then spawn the verifier."),
+            format!("retry {close} to mint the dispatch; Cassy's daemon-owned verifier reviews it."),
         ),
         VerifierSpawnDenial::DispatchUnreadable => (
             "Could not validate task-scoped verification dispatch authority.".to_string(),
-            "retry the spawn; if it fails again, run `cas doctor`.".to_string(),
+            format!("retry {close}; if it fails again, run `cas doctor`."),
         ),
         VerifierSpawnDenial::MissingToolUseId => (
             "Cannot establish verifier authority: PreToolUse did not provide tool_use_id \
              correlation."
                 .to_string(),
-            "retry the spawn from the Task/Agent tool of the session that owns the dispatch."
-                .to_string(),
+            format!("retry {close}; Cassy's daemon-owned verifier reviews the dispatch."),
         ),
         VerifierSpawnDenial::SpawnAlreadyPending => (
             "Another task-verifier spawn is already awaiting SubagentStart for this parent."
                 .to_string(),
-            "wait for it to bind, or retry after the failed spawn is cleaned up or expires."
-                .to_string(),
+            format!("spawn no other verifier; retry {close} after it settles."),
         ),
         VerifierSpawnDenial::HandoffFailed => (
             "Could not establish server-side task-verifier authority for the exact dispatch."
                 .to_string(),
-            format!("retry {close} to refresh the dispatch, then spawn the verifier again."),
+            format!("retry {close} to refresh the dispatch; Cassy's daemon-owned verifier reviews it."),
         ),
     };
-    format!("{problem} Next: {next}")
+    format!(
+        "{problem} Next: {next} A native Task/Agent verifier shares the parent's MCP caller and cannot record a verdict."
+    )
 }
 
 #[cfg(test)]

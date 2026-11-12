@@ -11,7 +11,7 @@
 //!    (cas-790e): owned epics and tasks, operator approvals from task decision
 //!    notes, pending asks, and workers. It also writes the full JSON receipt.
 //! 2. The supervisor gets one turn to save its judgement lines as a handoff.
-//!    Cassy merges them under the facts.
+//!    Cassy stores them whole, ahead of the facts.
 //! 3. At the end of that turn, Cassy queues the existing context-reset control
 //!    (cas-dffe) to the supervisor pane. Workers keep running. SessionStart
 //!    injects the current handoff, and once the new transcript appears
@@ -35,6 +35,14 @@ const FRESH_MINUTES: i64 = 30;
 const LANDING_MINUTES: i64 = 15;
 const SECTION_CHARS: usize = 1_400;
 const RECEIPT_ROWS: usize = 100;
+/// Idle and lifecycle notices this old are history; they collapse to one count.
+const STALE_NOTICE_MINUTES: i64 = 60;
+const STALE_NOTICE_KINDS: [&str; 2] = ["worker_idle", "task_lifecycle"];
+
+fn is_stale_notice(row: &Value) -> bool {
+    STALE_NOTICE_KINDS.contains(&row["kind"].as_str().unwrap_or_default())
+        && row["age_minutes"].as_i64().is_some_and(|age| age >= STALE_NOTICE_MINUTES)
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
@@ -218,7 +226,9 @@ fn section(out: &mut String, label: &str, lines: &[String]) {
 }
 
 /// Keep auto-clear receipts bounded without changing retirement/recovery evidence.
-fn compact_snapshot(snapshot: &mut cas_store::SupervisorLaneSnapshot, now: DateTime<Utc>) {
+/// Returns how many stale idle/lifecycle notices were pending; they sort after
+/// live rows so truncation drops them first.
+fn compact_snapshot(snapshot: &mut cas_store::SupervisorLaneSnapshot, now: DateTime<Utc>) -> usize {
     let dead_owners: BTreeSet<String> = snapshot.workers.iter()
         .filter(|worker| !matches!(worker["status"].as_str(), Some("active" | "idle")))
         .flat_map(|worker| ["id", "name"].into_iter().filter_map(|key| worker[key].as_str().map(str::to_owned)))
@@ -269,6 +279,8 @@ fn compact_snapshot(snapshot: &mut cas_store::SupervisorLaneSnapshot, now: DateT
         *row = serde_json::json!({"id":row["id"], "actor":clip(actor, 60), "kind":clip(kind, 60),
             "task_id":clip(task, 80), "age_minutes":age_minutes, "summary":summary});
     }
+    let stale_notices = snapshot.pending.iter().filter(|row| is_stale_notice(row)).count();
+    snapshot.pending.sort_by_key(is_stale_notice);
     let omitted = [snapshot.tasks.len().saturating_sub(RECEIPT_ROWS),
         snapshot.workers.len().saturating_sub(RECEIPT_ROWS), snapshot.pending.len().saturating_sub(RECEIPT_ROWS)];
     snapshot.tasks.truncate(RECEIPT_ROWS);
@@ -277,11 +289,26 @@ fn compact_snapshot(snapshot: &mut cas_store::SupervisorLaneSnapshot, now: DateT
     if omitted.iter().any(|count| *count > 0) {
         snapshot.reason.push_str(&format!("; additional tasks/workers/pending in stores: {}/{}/{}", omitted[0], omitted[1], omitted[2]));
     }
+    stale_notices
+}
+
+/// Report each worker's execution liveness as `worker_status` does, instead of
+/// the registry row's status.
+fn annotate_liveness(root: &Path, agent: &Agent, snapshot: &mut cas_store::SupervisorLaneSnapshot) {
+    let rows = crate::store::open_agent_store(root).map_err(|e| e.to_string()).and_then(|store| {
+        crate::mcp::tools::service::factory_ops::worker_liveness_rows(root, store.as_ref(), agent.factory_session.as_deref(), Utc::now())
+    });
+    let Ok(rows) = rows else { return };
+    for worker in &mut snapshot.workers {
+        if let Some((_, observation)) = rows.iter().find(|(name, _)| worker["name"].as_str() == Some(name.as_str())) {
+            worker["liveness"] = Value::String(observation.state.as_str().into());
+        }
+    }
 }
 
 /// Render the lane snapshot. Approvals come first so a truncated injection
 /// keeps them.
-fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: &Path) -> String {
+fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: &Path, stale_notices: usize) -> String {
     let field = |row: &Value, key: &str| row[key].as_str().unwrap_or_default().to_string();
     let mut approvals = Vec::new();
     for task in &snapshot.tasks {
@@ -291,14 +318,19 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
             }
         }
     }
-    let pending: Vec<String> = snapshot
+    let collapsed = (stale_notices > 0).then(|| format!(
+        "- {stale_notices} {} notices older than {STALE_NOTICE_MINUTES}m collapsed; rows in the receipt\n",
+        STALE_NOTICE_KINDS.join("/"),
+    ));
+    let pending: Vec<String> = collapsed.into_iter().chain(snapshot
         .pending
         .iter()
+        .filter(|row| !is_stale_notice(row))
         .map(|row| {
             let age = row["age_minutes"].as_i64().map(|age| format!("{age}m")).unwrap_or_else(|| "unknown".into());
             format!("- #{} {}: {}; task {}; age {}; {}\n", row["id"],
                 field(row, "actor"), field(row, "kind"), field(row, "task_id"), age, field(row, "summary"))
-        })
+        }))
         .collect();
     let tasks: Vec<String> = snapshot
         .tasks
@@ -318,11 +350,15 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
     let workers: Vec<String> = snapshot
         .workers
         .iter()
-        .map(|worker| format!("- {}: {}\n", field(worker, "name"), field(worker, "status")))
+        .map(|worker| {
+            let liveness = worker["liveness"].as_str().map(str::to_string)
+                .unwrap_or_else(|| format!("registry {}", field(worker, "status")));
+            format!("- {}: {liveness}\n", field(worker, "name"))
+        })
         .collect();
     let mut out = format!(
         "Automatic context clear: latest call at {} used {} input tokens; the context threshold is {}. \
-         Cassy wrote these facts. Your own judgement lines follow them when you saved any.\n\
+         Cassy wrote these facts. Your own judgement, when saved, comes first and is kept whole.\n\
          Snapshot: {}\nHandoff receipt: {}\n",
         crate::cli::release_report::eastern_time(state.triggered_at),
         tokens(state.trigger_tokens),
@@ -333,7 +369,7 @@ fn render(snapshot: &cas_store::SupervisorLaneSnapshot, state: &State, receipt: 
     section(&mut out, "Operator approvals (task decision notes)", &approvals);
     section(&mut out, "Pending operator decisions, peer asks and reminders", &pending);
     section(&mut out, "Owned epics and tasks", &tasks);
-    section(&mut out, "Workers (still running; do not respawn them)", &workers);
+    section(&mut out, "Workers (liveness as worker_status reports it)", &workers);
     out
 }
 
@@ -360,7 +396,8 @@ fn save_handoff(root: &Path, agent: &Agent, state: &State) -> anyhow::Result<Str
     let mut snapshot = cas_store::SqliteAgentStore::open(root)?
         .supervisor_lane_snapshot(&agent.id, "automatic context clear")?
         .context("supervisor row missing")?;
-    compact_snapshot(&mut snapshot, Utc::now());
+    let stale_notices = compact_snapshot(&mut snapshot, Utc::now());
+    annotate_liveness(root, agent, &mut snapshot);
     let dir = root.join("supervisor-handoffs");
     std::fs::create_dir_all(&dir)?;
     let receipt = dir.join(format!("auto-clear-{}-{}.json", agent.name, state.triggered_at.timestamp()));
@@ -370,10 +407,11 @@ fn save_handoff(root: &Path, agent: &Agent, state: &State) -> anyhow::Result<Str
         agent.name,
         crate::cli::release_report::eastern_time(state.triggered_at)
     );
-    Ok(add_handoff(root, &title, render(&snapshot, state, &receipt), agent)?.id)
+    Ok(add_handoff(root, &title, render(&snapshot, state, &receipt, stale_notices), agent)?.id)
 }
 
-/// Merge a handoff the supervisor saved after Cassy's facts under those facts.
+/// Merge a handoff the supervisor saved after Cassy's facts with those facts.
+/// The judgement is stored whole and first; only injections may shorten it.
 fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>, agent: &Agent) -> anyhow::Result<String> {
     use cas_core::memory::handoff;
     let store = crate::store::open_store(root)?;
@@ -383,7 +421,7 @@ fn merge_judgement(root: &Path, handoff_id: &str, saved_at: DateTime<Utc>, agent
     };
     let facts = entries.iter().find(|e| e.id == handoff_id).map(|e| e.content.clone()).unwrap_or_default();
     let title = current.title.clone().unwrap_or_else(|| "Supervisor handoff before automatic context clear".into());
-    let content = format!("{facts}\nSupervisor judgement (saved before the clear):\n{}\n", clip_block(current.content.trim(), SECTION_CHARS));
+    let content = format!("Supervisor judgement (saved before the clear):\n{}\n\n{facts}", current.content.trim());
     Ok(add_handoff(root, &title, content, agent)?.id)
 }
 

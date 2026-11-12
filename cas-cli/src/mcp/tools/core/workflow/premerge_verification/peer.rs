@@ -7,7 +7,9 @@ use cas_types::{
     VerificationDispatchState, VerificationProvenance,
 };
 
-const TAG: &str = "CAS_PEER_PREMERGE_V1 ";
+/// Body prefix of a published landing approval; the mailbox renders it as a
+/// waking status that asks for no reply (cas-9cda).
+pub(crate) const TAG: &str = "CAS_PEER_PREMERGE_V1 ";
 
 impl Approval {
     /// Publication is already confirmed when this is called. Retrying a

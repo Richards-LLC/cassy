@@ -5,6 +5,7 @@
 //! count; measured owned child CPU/output does. Neither do the daemon's own rows (relays, fired reminders).
 //! A delivery parked for a frozen release train waits on the operator's
 //! lift, not on anyone here: it is reported once per freeze, never chased.
+//! Dependency-blocked tasks and held workers likewise have no local next step.
 //! A current gate-refused close is reported with its code and remedy instead
 //! of starting an operator-page clock, unless the gate explicitly needs the operator.
 
@@ -48,8 +49,19 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     }
     tasks.retain(|task| task.assignee.as_ref()
         .is_some_and(|who| agents.iter().any(|agent| &agent.name == who || &agent.id == who)));
+    let held_workers = if crate::ui::factory::session::metadata_path(session).exists() {
+        crate::ui::factory::worker_holds_from_session_metadata_named(session)?
+    } else {
+        HashSet::new()
+    };
+    let held_assignees: HashSet<_> = agents.iter().filter(|agent| agent.role == AgentRole::Worker
+        && held_workers.contains(&agent.name)).flat_map(|agent| [&agent.name, &agent.id]).collect();
+    let mut dependency_held = HashSet::new();
     let mut refusals = CloseHeld::new();
     for task in &tasks {
+        if task.status == TaskStatus::Blocked && !store.get_blockers(&task.id).ok()?.is_empty() {
+            dependency_held.insert(task.id.clone());
+        }
         // An unreadable receipt is uncertainty, never proof of a stall.
         if let Some(refusal) = crate::mcp::tools::core::task::close_refusal::current(store.as_ref(), task).ok()? {
             refusals.insert(task.id.clone(), refusal);
@@ -66,6 +78,13 @@ fn observe(cas_dir: &Path, session: &str, now: DateTime<Utc>) -> Option<(String,
     let mut freeze_held = FreezeHeld::new();
     let mut close_held = CloseHeld::new();
     tasks.retain(|task| {
+        // Like a frozen-train park, these intentional waits have no local
+        // next step. Removing them also resets any previous stall episode.
+        if dependency_held.contains(&task.id)
+            || task.assignee.as_ref().is_some_and(|who| held_assignees.contains(who))
+        {
+            return false;
+        }
         // Applies to every close path and status, including finished epics.
         // Only explicit machine metadata can make a gate an operator action.
         if let Some(refusal) = refusals.get(&task.id)
@@ -264,6 +283,92 @@ pub(crate) fn sweep(cas_dir: &Path, session: &str, now: DateTime<Utc>) {
 #[cfg(test)]
 mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
+
+    #[test]
+    fn dependency_wait_does_not_stall_cas_74d3() {
+        const SESSION: &str = "dependency-wait-74d3";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+        let mut supervisor = Agent::new("supervisor-74d3-dep".into(), "supervisor".into());
+        (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(SESSION.into()));
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut waiting = Task::new("cas-74d3-waiting".into(), "Finished work waiting for the next cut".into());
+        (waiting.status, waiting.assignee) = (TaskStatus::Blocked, Some(supervisor.name.clone()));
+        tasks.add(&waiting).unwrap();
+        let mut cut = Task::new("cas-74d3-cut".into(), "Morning cut decision".into());
+        tasks.add(&cut).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(
+            waiting.id.clone(), cut.id.clone(), cas_types::DependencyType::Blocks,
+        )).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 180] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert!(queue.peek_all(50).unwrap().is_empty());
+
+        // Resolving the dependency makes unfinished local work actionable again.
+        cut.status = TaskStatus::Closed;
+        tasks.update(&cut).unwrap();
+        waiting.status = TaskStatus::InProgress;
+        tasks.update(&waiting).unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+    }
+
+    #[test]
+    fn held_worker_does_not_stall_cas_74d3() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for by_id in [false, true] {
+            let session = format!("held-worker-74d3-{by_id}");
+            env.set("CAS_FACTORY_SESSION", &session);
+            let project = env.home().join(&session);
+            std::fs::create_dir_all(&project).unwrap();
+            let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut supervisor = Agent::new("supervisor-74d3-hold".into(), "supervisor".into());
+            (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(session.clone()));
+            agents.register(&supervisor).unwrap();
+            let mut worker = Agent::new("worker-74d3".into(), "held-worker".into());
+            (worker.role, worker.factory_session) = (AgentRole::Worker, Some(session.clone()));
+            agents.register(&worker).unwrap();
+            let path = crate::ui::factory::session::metadata_path(&session);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let metadata = crate::ui::factory::session::create_metadata(
+                &session, 1, &supervisor.name, &[worker.name.clone()], None, None, None,
+            );
+            std::fs::write(&path, serde_json::to_string(&metadata).unwrap()).unwrap();
+            crate::ui::factory::persist_session_metadata_worker_hold_at(&path, &worker.name, true).unwrap();
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = Task::new("cas-74d3-held".into(), "Intentionally paused worker".into());
+            (task.status, task.assignee) = (TaskStatus::InProgress,
+                Some(if by_id { worker.id.clone() } else { worker.name.clone() }));
+            tasks.add(&task).unwrap();
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let now = chrono::Utc::now();
+            for minutes in [0, 45, 90, 180] {
+                super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
+            }
+            assert!(queue.peek_all(50).unwrap().is_empty(), "assignee by id: {by_id}");
+
+            // Releasing a hold without changing the task restores ordinary escalation.
+            crate::ui::factory::persist_session_metadata_worker_hold_at(&path, &worker.name, false).unwrap();
+            for minutes in [181, 226, 271] {
+                super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
+            }
+            let rows = queue.peek_all(50).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+            assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+        }
+    }
 
     #[test]
     fn operator_blocked_epic_does_not_stall_cas_e239() {

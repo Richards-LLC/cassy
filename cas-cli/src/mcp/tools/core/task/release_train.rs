@@ -15,9 +15,6 @@ use fs2::FileExt;
 use rmcp::ErrorData as McpError;
 
 use crate::mcp::server::CasCore;
-use crate::mcp::tools::core::task::lifecycle::close_ops::{
-    BranchContentDirection, branch_content_direction,
-};
 use crate::mcp::tools::types::TaskCreateRequest;
 use crate::types::{Task, TaskStatus, TaskType};
 
@@ -112,36 +109,104 @@ fn publish_train_branch(repo: &Path, lane: &str, integration: &str) -> Result<()
     Err(last)
 }
 
-/// A train has landed when it carried at least one delivered child, none is
-/// still in flight, and every copy of its lane is on the integration branch
-/// (by ancestry, or byte-identical content after a squash).
-fn landed(store: &dyn cas_store::TaskStore, repo: &Path, train: &Task, integration: &str) -> bool {
-    let children = store.get_subtasks(&train.id).unwrap_or_default();
-    if children.iter().any(|child| !child.is_terminal())
-        || !children.iter().any(|child| child.status == TaskStatus::Closed)
-    {
-        return false;
-    }
-    train.effective_epic_branch().is_some_and(|lane| lane_landed(repo, lane, integration))
+/// Prefer shared origin history over a machine's possibly stale local branch.
+fn branch_tip(repo: &Path, branch: &str) -> Option<String> {
+    [format!("refs/remotes/origin/{branch}"), format!("refs/heads/{branch}")]
+        .iter()
+        .find_map(|reference| {
+            let output = std::process::Command::new("git")
+                .arg("-C").arg(repo)
+                .args(["rev-parse", "--verify", "--quiet", &format!("{reference}^{{commit}}")])
+                .output().ok()?;
+            output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
 }
 
-fn lane_landed(repo: &Path, lane: &str, integration: &str) -> bool {
-    let lane_refs: Vec<String> = [lane.to_string(), format!("origin/{lane}")]
-        .into_iter()
-        .filter(|candidate| ref_exists(repo, candidate))
-        .collect();
-    let targets: Vec<String> = [integration.to_string(), format!("origin/{integration}")]
-        .into_iter()
-        .filter(|candidate| ref_exists(repo, candidate))
-        .collect();
-    !lane_refs.is_empty()
-        && lane_refs.iter().all(|lane_ref| {
-            targets.iter().any(|target| is_ancestor(repo, lane_ref, target))
-                || matches!(
-                    branch_content_direction(repo, lane_ref, integration),
-                    BranchContentDirection::ContentPresent { .. }
+fn delivered_idle(store: &dyn cas_store::TaskStore, train: &Task) -> bool {
+    let children = store.get_subtasks(&train.id).unwrap_or_default();
+    children.iter().all(Task::is_terminal)
+        && children.iter().any(|child| child.status == TaskStatus::Closed)
+}
+
+/// The same repository election serves task creation and release CLI fallback.
+/// Contained tips lose to their live successor; only divergent live tips refuse.
+pub(crate) fn select_train(
+    store: &dyn cas_store::TaskStore,
+    repo: &Path,
+    integration: &str,
+) -> Result<Option<Task>, String> {
+    let base = branch_tip(repo, integration)
+        .ok_or_else(|| format!("Cannot resolve release integration branch `{integration}`."))?;
+    let mut candidates = Vec::new();
+    for train in open_trains(store, integration).into_iter().filter(|t| !accepts_no_work(t)) {
+        let lane = train.effective_epic_branch()
+            .ok_or_else(|| format!("Release train {} has no lane.", train.id))?;
+        let tip = branch_tip(repo, lane)
+            .ok_or_else(|| format!("Release train {} lane `{lane}` is unavailable; fetch origin before creating work.", train.id))?;
+        if (tip != base && is_ancestor(repo, &tip, &base))
+            || (tip == base && delivered_idle(store, &train))
+        {
+            continue;
+        }
+        candidates.push((train, tip));
+    }
+    // A live lane carrying work takes precedence over a fresh empty lane,
+    // even when main advanced independently since that live lane forked.
+    if candidates.iter().any(|(_, tip)| tip != &base) {
+        candidates.retain(|(_, tip)| tip != &base);
+    }
+    let survivors: Vec<_> = candidates.iter().filter(|(_, tip)| {
+        !candidates.iter().any(|(_, other)| tip != other && is_ancestor(repo, tip, other))
+    }).collect();
+    let mut distinct: Vec<_> = survivors.iter().map(|(_, tip)| tip.as_str()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    if distinct.len() > 1 {
+        let mut ids: Vec<_> = survivors.iter().map(|(train, _)| train.id.as_str()).collect();
+        ids.sort_unstable();
+        return Err(format!(
+            "Divergent release trains: {}. Choose an explicit epic or reconcile their lanes before creating work.",
+            ids.join(", ")
+        ));
+    }
+    Ok(survivors.into_iter()
+        .max_by_key(|(train, _)| (train.created_at, &train.id))
+        .map(|(train, _)| train.clone()))
+}
+
+/// The cut boundary retires admission only. Reconciliation owns terminal state.
+/// Fresh equal-main siblings survive, including a just-opened rollover train.
+pub(crate) fn mark_cut_trains(
+    cas_root: &Path,
+    repo: &Path,
+    store: &dyn cas_store::TaskStore,
+    cut_id: &str,
+    cut_tip: &str,
+    integration: &str,
+) -> Result<(), String> {
+    let _lock = lock_trains_blocking(cas_root).map_err(|error| error.to_string())?;
+    let cut = store.get(cut_id).map_err(|error| error.to_string())?;
+    let base = branch_tip(repo, integration)
+        .ok_or_else(|| format!("Cannot resolve release integration branch `{integration}`."))?;
+    for mut train in active_trains(store, integration) {
+        if is_cut_train(&train) {
+            continue;
+        }
+        let retire = train.id == cut_id || train.effective_epic_branch()
+            .and_then(|lane| branch_tip(repo, lane)).is_some_and(|tip| {
+                tip != base && (
+                    is_ancestor(repo, &tip, &base)
+                    || (tip != cut_tip && is_ancestor(repo, &tip, cut_tip))
+                    || (tip == cut_tip && (train.created_at, &train.id) < (cut.created_at, &cut.id))
                 )
-        })
+            });
+        if retire {
+            train.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
+            train.updated_at = chrono::Utc::now();
+            store.update(&train).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 /// Checked at target resolution and again under the delivery-target lock.
@@ -261,7 +326,7 @@ pub(crate) fn retire_disabled_trains(cas_root: &Path, store: &dyn cas_store::Tas
 /// Exclusive lock over train lookup, landing and opening (the
 /// `worker_task_queue` pattern): blocks off the runtime until the holder,
 /// in this or another process, releases it by dropping the file.
-async fn lock_trains(cas_root: &Path) -> std::io::Result<File> {
+fn lock_trains_blocking(cas_root: &Path) -> std::io::Result<File> {
     let dir = cas_root.join("locks");
     std::fs::create_dir_all(&dir)?;
     let file = std::fs::OpenOptions::new()
@@ -269,9 +334,14 @@ async fn lock_trains(cas_root: &Path) -> std::io::Result<File> {
         .truncate(false)
         .write(true)
         .open(dir.join("release-train.lock"))?;
-    tokio::task::spawn_blocking(move || file.lock_exclusive().map(|()| file))
-        .await
-        .map_err(std::io::Error::other)?
+    file.lock_exclusive()?;
+    Ok(file)
+}
+
+async fn lock_trains(cas_root: &Path) -> std::io::Result<File> {
+    let cas_root = cas_root.to_path_buf();
+    tokio::task::spawn_blocking(move || lock_trains_blocking(&cas_root))
+        .await.map_err(std::io::Error::other)?
 }
 
 impl CasCore {
@@ -283,52 +353,30 @@ impl CasCore {
     pub(crate) async fn release_train_for_new_task(
         &self,
         store: &dyn cas_store::TaskStore,
-    ) -> (Option<String>, String) {
-        let Some((repo, integration)) =
-            super::repo_context::integration_branch(&self.cas_root)
-        else {
-            return (None, String::new());
+    ) -> Result<(Option<String>, String), McpError> {
+        let Some((repo, integration)) = super::repo_context::integration_branch(&self.cas_root) else {
+            return Ok((None, String::new()));
         };
         if enabled(&repo) != Some(true) {
-            return (None, String::new());
+            return Ok((None, String::new()));
         }
-        // Find-or-open is one critical section across MCP requests and
-        // processes, so concurrent creates share a single train.
+        // Find-or-open and cut retirement share this cross-process lock.
         let _lock = match lock_trains(&self.cas_root).await {
             Ok(lock) => lock,
-            Err(error) => {
-                return (
-                    None,
-                    format!(
-                        "\n\nRELEASE TRAIN UNAVAILABLE: train lock: {error}. This task targets `{integration}` directly."
-                    ),
-                );
-            }
+            Err(error) => return Ok((None, format!(
+                "\n\nRELEASE TRAIN UNAVAILABLE: train lock: {error}. This task targets `{integration}` directly."
+            ))),
         };
-        let mut receipt = String::new();
-        for train in active_trains(store, &integration) {
-            if !landed(store, &repo, &train, &integration) {
-                if is_cut_train(&train) || accepts_no_work(&train) {
-                    continue;
-                }
-                let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
-                if lane != integration {
-                    let _ = publish_train_branch(&repo, lane, &integration);
-                }
-                return (
-                    Some(train.id.clone()),
-                    format!(
-                        "{receipt}\n\nRELEASE TRAIN: joined {} ({}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.",
-                        train.id,
-                        train.effective_epic_branch().unwrap_or(integration.as_str()),
-                    ),
-                );
-            }
-            receipt.push_str(&format!(
-                "\n\nRELEASE TRAIN: {} landed on `{integration}`; its terminal lifecycle belongs to release reconciliation.", train.id
-            ));
+        if let Some(train) = select_train(store, &repo, &integration)
+            .map_err(|error| McpError::invalid_params(error, None))?
+        {
+            let lane = train.effective_epic_branch().unwrap_or(&integration);
+            let _ = publish_train_branch(&repo, lane, &integration);
+            return Ok((Some(train.id.clone()), format!(
+                "\n\nRELEASE TRAIN: joined {} ({lane}); its delivery merges into the train, which reaches `{integration}` once per release. For a one-item hotfix train, run `scripts/release.sh --hotfix` from its lane.", train.id
+            )));
         }
-        let request: TaskCreateRequest = match serde_json::from_value(serde_json::json!({
+        let request: TaskCreateRequest = serde_json::from_value(serde_json::json!({
             "title": RELEASE_TRAIN_TITLE,
             "task_type": "epic",
             "priority": 1,
@@ -336,52 +384,33 @@ impl CasCore {
             "description": format!(
                 "Default target for tasks created without an epic. Children merge into this lane; the release goes to `{integration}` once."
             ),
-        })) {
-            Ok(request) => request,
-            Err(error) => return (None, format!("{receipt}\n\nRELEASE TRAIN UNAVAILABLE: {error}")),
-        };
+        })).map_err(|error| McpError::internal_error(error.to_string(), None))?;
         let repo_arg = repo.to_string_lossy().to_string();
         let created = Box::pin(self.cas_task_create_with_delivery_mode(
-            request,
-            Some(&repo_arg),
-            Some(&integration),
-            true,
-            None,
-        ))
-        .await;
+            request, Some(&repo_arg), Some(&integration), true, None,
+        )).await;
         if let Err(McpError { message, .. }) = created {
-            return (
-                None,
-                format!(
-                    "{receipt}\n\nRELEASE TRAIN UNAVAILABLE: {message}. This task targets `{integration}` directly."
-                ),
-            );
+            return Ok((None, format!(
+                "\n\nRELEASE TRAIN UNAVAILABLE: {message}. This task targets `{integration}` directly."
+            )));
         }
-        match open_trains(store, &integration)
-            .into_iter()
-            .find(|train| !accepts_no_work(train) && !landed(store, &repo, train, &integration))
-        {
+        let train = select_train(store, &repo, &integration)
+            .map_err(|error| McpError::invalid_params(error, None))?;
+        match train {
             Some(train) => {
-                let lane = train.effective_epic_branch().unwrap_or(integration.as_str());
-                let published = if lane == integration {
-                    String::new()
-                } else {
-                    match publish_train_branch(&repo, lane, &integration) {
-                        Ok(()) => String::new(),
-                        Err(error) => format!(" Publishing `{lane}` to origin failed ({error}); push it before retargeting work there."),
-                    }
+                let lane = train.effective_epic_branch().unwrap_or(&integration);
+                let published = match publish_train_branch(&repo, lane, &integration) {
+                    Ok(()) => String::new(),
+                    Err(error) => format!(" Publishing `{lane}` to origin failed ({error}); push it before retargeting work there."),
                 };
-                (
-                    Some(train.id.clone()),
-                    format!(
-                        "{receipt}\n\nRELEASE TRAIN: opened {} ({lane}) from `{integration}`; this task joins it.{published}",
-                        train.id,
-                    ),
-                )
+                Ok((Some(train.id.clone()), format!(
+                    "\n\nRELEASE TRAIN: opened {} ({lane}) from `{integration}`; this task joins it.{published}", train.id
+                )))
             }
-            None => (None, receipt),
+            None => Ok((None, String::new())),
         }
     }
+
 }
 
 #[cfg(test)]
@@ -553,49 +582,112 @@ mod tests {
         assert_eq!(store.get(&child.id).unwrap().assignee, None);
     }
 
-    /// A train is not landed while a child is in flight, before any child
-    /// delivered, or while its lane holds work the integration branch lacks.
+    /// Both machines must use shared branch facts, not an older local train
+    /// with unfinished children. The actual task-create handler owns routing.
     #[tokio::test]
-    async fn landed_requires_a_delivered_idle_train_whose_lane_is_on_trunk() {
+    async fn default_train_uses_shared_live_branch_across_machines_cas_7ab6() {
         let _env = TestEnvGuard::temp_home();
-        let temp = repo();
-        let repo = temp.path();
-        git(repo, &["branch", "epic/train"]);
-        let core = CasCore::with_daemon(repo.to_path_buf(), None, None);
-        let store = core.open_task_store().unwrap();
-        let mut train = Task::new("cas-train".into(), RELEASE_TRAIN_TITLE.into());
-        train.task_type = TaskType::Epic;
-        train.labels = vec![RELEASE_TRAIN_LABEL.into()];
-        train.branch = Some("epic/train".into());
-        store.add(&train).unwrap();
-        let child = |id: &str, status: TaskStatus| {
-            let mut task = Task::new(id.into(), id.into());
-            task.status = status;
-            store.add(&task).unwrap();
-            store
-                .add_dependency(&Dependency::new(id.into(), train.id.clone(), DependencyType::ParentChild))
-                .unwrap();
+        crate::store::known_repos::ensure_host_schema().unwrap();
+        let seed = repo();
+        let bare = TempDir::new().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(seed.path(), &["tag", "seed"]);
+        git(seed.path(), &["branch", "epic/stale"]);
+        std::fs::write(seed.path().join("seed.txt"), "published release\n").unwrap();
+        git(seed.path(), &["commit", "-qam", "published release"]);
+        for lane in ["epic/empty-old", "epic/empty-new"] {
+            git(seed.path(), &["branch", lane]);
+        }
+        git(seed.path(), &["checkout", "-qb", "epic/live"]);
+        std::fs::write(seed.path().join("work.txt"), "unreleased work\n").unwrap();
+        git(seed.path(), &["add", "work.txt"]);
+        git(seed.path(), &["commit", "-qm", "unreleased work"]);
+        git(seed.path(), &["branch", "epic/contained"]);
+        std::fs::write(seed.path().join("work.txt"), "more unreleased work\n").unwrap();
+        git(seed.path(), &["commit", "-qam", "more work"]);
+        git(seed.path(), &["checkout", "-qb", "epic/other", "main"]);
+        std::fs::write(seed.path().join("other.txt"), "divergent work\n").unwrap();
+        git(seed.path(), &["add", "other.txt"]);
+        git(seed.path(), &["commit", "-qm", "divergent work"]);
+        git(seed.path(), &["config", &format!("url.{}.insteadOf", bare.path().display()),
+            "https://github.com/example/train-test.git"]);
+        git(seed.path(), &["push", "-q", "origin", "--all"]);
+        git(seed.path(), &["push", "-q", "origin", "--tags"]);
+        let train = |id: &str, lane: &str, age: i64| {
+            let mut task = Task::new(id.into(), RELEASE_TRAIN_TITLE.into());
+            task.task_type = TaskType::Epic;
+            task.labels = vec![RELEASE_TRAIN_LABEL.into()];
+            task.branch = Some(lane.into());
+            task.created_at -= chrono::Duration::seconds(age);
+            task.deliverables.work_target = Some(cas_types::WorkTarget {
+                repo_selector: "project:train-fixture".into(), target_branch: "main".into(),
+            });
+            task
         };
-        child("cas-cancelled", TaskStatus::Cancelled);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "no delivered child");
-        child("cas-open", TaskStatus::Open);
-        child("cas-done", TaskStatus::Closed);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "child in flight");
-        let mut open = store.get("cas-open").unwrap();
-        open.status = TaskStatus::Closed;
-        store.update(&open).unwrap();
-        git(repo, &["checkout", "-q", "epic/train"]);
-        std::fs::write(repo.join("fix.txt"), "fix\n").unwrap();
-        git(repo, &["add", "fix.txt"]);
-        git(repo, &["commit", "-q", "-m", "fix"]);
-        git(repo, &["checkout", "-q", "main"]);
-        assert!(!landed(store.as_ref(), repo, &train, "main"), "lane ahead of main");
-        git(repo, &["merge", "-q", "--no-ff", "epic/train"]);
-        assert!(landed(store.as_ref(), repo, &train, "main"));
-        std::fs::create_dir_all(repo.join(".cas")).unwrap();
-        std::fs::write(repo.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
-        let (next, _) = core.release_train_for_new_task(store.as_ref()).await;
-        assert_ne!(next.as_deref(), Some(train.id.as_str()));
-        assert_ne!(store.get(&train.id).unwrap().status, TaskStatus::Closed);
+        let stale = train("cas-a111", "epic/stale", 600);
+        let live = train("cas-a222", "epic/live", 300);
+        let copies = TempDir::new().unwrap();
+        for machine in ["one", "two"] {
+            let repo = copies.path().join(machine);
+            git(bare.path(), &["clone", "-q", bare.path().to_str().unwrap(), repo.to_str().unwrap()]);
+            git(&repo, &["remote", "set-url", "origin", "https://github.com/example/train-test.git"]);
+            git(&repo, &["config", &format!("url.{}.insteadOf", bare.path().display()),
+                "https://github.com/example/train-test.git"]);
+            if machine == "one" {
+                git(&repo, &["checkout", "-q", "--detach"]);
+                git(&repo, &["branch", "-f", "main", "seed"]);
+            }
+            std::fs::create_dir(repo.join(".cas")).unwrap();
+            std::fs::write(repo.join(".cas/config.toml"),
+                "[project]\ncanonical_id='train-fixture'\n[factory]\nrelease_train=true\nepic_base_branch='main'\n").unwrap();
+            let core = CasCore::with_daemon(repo.clone(), None, None);
+            let store = core.open_task_store().unwrap();
+            for row in [&stale, &live] { store.add(row).unwrap(); }
+            let fresh = train("cas-a888", "epic/empty-old", 0);
+            store.add(&fresh).unwrap();
+            let unfinished = Task::new("cas-a000".into(), "Unfinished old work".into());
+            store.create_atomic(&unfinished, &[], Some(&stale.id), None).unwrap();
+            core.cas_task_create(Parameters(request("New repair"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "New repair").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, live.id, "{machine}");
+
+            let contained = train("cas-a666", "epic/contained", 200);
+            store.add(&contained).unwrap();
+            core.cas_task_create(Parameters(request("Contained sibling repair"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Contained sibling repair").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, live.id);
+
+            let mut alias = train("cas-a777", "epic/live", 0);
+            alias.created_at = live.created_at; // Equal-tip and timestamp tie uses the stable ID.
+            store.add(&alias).unwrap();
+            core.cas_task_create(Parameters(request("Equivalent lane repair"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Equivalent lane repair").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, alias.id);
+
+            let other = train("cas-a333", "epic/other", 100);
+            store.add(&other).unwrap();
+            let before = store.list(None).unwrap().len();
+            let refusal = core.cas_task_create(Parameters(request("Ambiguous repair"))).await.unwrap_err();
+            assert_eq!(refusal.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            for id in [&live.id, &other.id] { assert!(refusal.message.contains(id)); }
+            assert_eq!(store.list(None).unwrap().len(), before);
+
+            for mut row in [live.clone(), other, contained, alias] {
+                row.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
+                store.update(&row).unwrap();
+            }
+            let mut fresh = store.get("cas-a888").unwrap();
+            fresh.labels.push(RELEASE_TRAIN_CUT_LABEL.into());
+            store.update(&fresh).unwrap();
+            let older = train("cas-a444", "epic/empty-old", 60);
+            let newer = train("cas-a555", "epic/empty-new", 0);
+            // Reverse insertion order on the other machine must not affect election.
+            let empty = if machine == "one" { [&older, &newer] } else { [&newer, &older] };
+            for row in empty { store.add(row).unwrap(); }
+            core.cas_task_create(Parameters(request("Fresh train work"))).await.unwrap();
+            let created = store.list(None).unwrap().into_iter().find(|t| t.title == "Fresh train work").unwrap();
+            assert_eq!(store.get_parent_epic(&created.id).unwrap().unwrap().id, newer.id);
+            for id in [&stale.id, &live.id] { assert_eq!(store.get(id).unwrap().status, TaskStatus::Open); }
+        }
     }
 }

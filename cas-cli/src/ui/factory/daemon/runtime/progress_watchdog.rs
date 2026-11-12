@@ -266,6 +266,92 @@ mod tests {
     use cas_types::{Agent, AgentRole, AgentStatus, Task, TaskStatus};
 
     #[test]
+    fn dependency_wait_does_not_stall_cas_74d3() {
+        const SESSION: &str = "dependency-wait-74d3";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", SESSION);
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+        let mut supervisor = Agent::new("supervisor-74d3-dep".into(), "supervisor".into());
+        (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(SESSION.into()));
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut waiting = Task::new("cas-74d3-waiting".into(), "Finished work waiting for the next cut".into());
+        (waiting.status, waiting.assignee) = (TaskStatus::Blocked, Some(supervisor.name.clone()));
+        tasks.add(&waiting).unwrap();
+        let mut cut = Task::new("cas-74d3-cut".into(), "Morning cut decision".into());
+        tasks.add(&cut).unwrap();
+        tasks.add_dependency(&cas_types::Dependency::new(
+            waiting.id.clone(), cut.id.clone(), cas_types::DependencyType::Blocks,
+        )).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let now = chrono::Utc::now();
+        for minutes in [0, 45, 90, 180] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        assert!(queue.peek_all(50).unwrap().is_empty());
+
+        // Resolving the dependency makes unfinished local work actionable again.
+        cut.status = TaskStatus::Closed;
+        tasks.update(&cut).unwrap();
+        waiting.status = TaskStatus::InProgress;
+        tasks.update(&waiting).unwrap();
+        for minutes in [181, 226, 271] {
+            super::sweep(&cas_dir, SESSION, now + chrono::Duration::minutes(minutes));
+        }
+        let rows = queue.peek_all(50).unwrap();
+        assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+        assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+    }
+
+    #[test]
+    fn held_worker_does_not_stall_cas_74d3() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for by_id in [false, true] {
+            let session = format!("held-worker-74d3-{by_id}");
+            env.set("CAS_FACTORY_SESSION", &session);
+            let project = env.home().join(&session);
+            std::fs::create_dir_all(&project).unwrap();
+            let cas_dir = crate::store::init_cas_dir(&project).unwrap();
+            let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+            let mut supervisor = Agent::new("supervisor-74d3-hold".into(), "supervisor".into());
+            (supervisor.role, supervisor.factory_session) = (AgentRole::Supervisor, Some(session.clone()));
+            agents.register(&supervisor).unwrap();
+            let mut worker = Agent::new("worker-74d3".into(), "held-worker".into());
+            (worker.role, worker.factory_session) = (AgentRole::Worker, Some(session.clone()));
+            agents.register(&worker).unwrap();
+            let path = crate::ui::factory::session::metadata_path(&session);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let metadata = crate::ui::factory::session::create_metadata(
+                &session, 1, &supervisor.name, &[worker.name.clone()], None, None, None,
+            );
+            std::fs::write(&path, serde_json::to_string(&metadata).unwrap()).unwrap();
+            crate::ui::factory::persist_session_metadata_worker_hold_at(&path, &worker.name, true).unwrap();
+            let tasks = crate::store::open_task_store_local(&cas_dir).unwrap();
+            let mut task = Task::new("cas-74d3-held".into(), "Intentionally paused worker".into());
+            (task.status, task.assignee) = (TaskStatus::InProgress,
+                Some(if by_id { worker.id.clone() } else { worker.name.clone() }));
+            tasks.add(&task).unwrap();
+            let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+            let now = chrono::Utc::now();
+            for minutes in [0, 45, 90, 180] {
+                super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
+            }
+            assert!(queue.peek_all(50).unwrap().is_empty(), "assignee by id: {by_id}");
+
+            // Releasing a hold without changing the task restores ordinary escalation.
+            crate::ui::factory::persist_session_metadata_worker_hold_at(&path, &worker.name, false).unwrap();
+            for minutes in [181, 226, 271] {
+                super::sweep(&cas_dir, &session, now + chrono::Duration::minutes(minutes));
+            }
+            let rows = queue.peek_all(50).unwrap();
+            assert_eq!(rows.iter().filter(|row| row.target == "supervisor").count(), 1, "{rows:?}");
+            assert_eq!(rows.iter().filter(|row| row.target == "operator").count(), 1, "{rows:?}");
+        }
+    }
+
+    #[test]
     fn operator_blocked_epic_does_not_stall_cas_e239() {
         const SESSION: &str = "operator-blocked-epic-e239";
         let _env = crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", SESSION)]);

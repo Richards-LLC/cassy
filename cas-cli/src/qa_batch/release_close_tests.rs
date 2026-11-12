@@ -41,6 +41,10 @@ fn unregistered_reconcile_queues_parent_review_cas_d47d() {
     child.origin_project = parent.origin_project.clone();
     child.status = TaskStatus::Closed;
     child.deliverables.factory_branch_anchor = Some(published.clone());
+    child.deliverables.factory_branch_start = Some(FactoryBranchStart {
+        work_target: WorkTarget { repo_selector: "project:parent-fixture".into(), target_branch: "main".into() },
+        branch: "factory/worker".into(), assignee: "worker".into(), base_sha: published.clone(),
+    });
     tasks.add(&child).unwrap();
     tasks.add_dependency(&cas_types::Dependency::new(
         child.id.clone(), parent.id.clone(), cas_types::DependencyType::ParentChild,

@@ -182,7 +182,11 @@ export class SlashCommands {
     const returnTo = this.anchor ?? this.input;
     try {
       await this.options.run(command, confirmed);
-      if (this.input.value === original && original.trim() === `/${command}`) { this.input.value = ""; this.input.dispatchEvent(new Event("input", { bubbles: true })); }
+      // An autocomplete choice consumes its prefix as well as an exact token.
+      // Header commands and text edited while the request waits keep their draft.
+      if (!this.anchor && this.input.value === original && original.startsWith("/") && `/${command}`.startsWith(original.trimEnd())) {
+        this.input.value = ""; this.input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
       this.close(); returnTo.focus();
     } catch (error) {
       this.panel.replaceChildren(); this.notice(error instanceof Error ? error.message : "The command could not be sent. Try again once connected.");
@@ -253,6 +257,13 @@ interface SessionOptions {
   settled?(receipt: CommandReceipt): void;
 }
 const COMMAND_OUTCOME_WINDOW_MS = 95_000;
+// Finish can outlast the short confirmation window. Keep read-only recovery
+// within the daemon's ten-minute receipt retention; never resubmit the command.
+const FINISH_OUTCOME_WINDOW_MS = 10 * 60_000;
+function awaitsCommandOutcome(receipt: CommandReceipt): boolean {
+  return receipt.phase === "queued" || receipt.phase === "submitted"
+    || receipt.command === "finish" && receipt.phase === "unconfirmed";
+}
 /** The daemon's prefix on an error it answers a supervisor command with (`CommanderControl::error_prefix`). */
 export const COMMAND_ERROR_PREFIX = "supervisor command failed:";
 /** A finished command needs no card: its one-line outcome clears itself (cas-95ea).
@@ -331,7 +342,7 @@ export class SupervisorCommandSession {
     if (receipt.phase !== "refused") this.clearRefusals(receipt.command);
     const ended = this.endedCommands.get(receipt.client_ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
-    if (receipt.phase !== "queued" && receipt.phase !== "submitted") this.stopPoll(receipt.client_ref);
+    if (!awaitsCommandOutcome(receipt)) this.stopPoll(receipt.client_ref);
     this.options.changed();
   }
   /** Only the authenticated catalog's ended receipt may settle a vanished pane. */
@@ -375,7 +386,8 @@ export class SupervisorCommandSession {
     receipt.phase = "unconfirmed"; receipt.interactive = false; receipt.detail = detail;
     const ended = this.endedCommands.get(ref);
     if (ended !== undefined) this.settleEnded(receipt, ended);
-    this.stopPoll(ref); this.options.changed(); return true;
+    if (!awaitsCommandOutcome(receipt)) this.stopPoll(ref);
+    this.options.changed(); return true;
   }
   /** The daemon wrote nothing: one row per command stands for every refused attempt. */
   private refuse(receipt: CommandReceipt, reason: string): void {
@@ -409,14 +421,17 @@ export class SupervisorCommandSession {
     const read = () => {
       const receipt = this.receipts.get(ref);
       const cancelling = this.cancelling.has(ref);
-      if (!receipt || (!cancelling && receipt.phase !== "queued" && receipt.phase !== "submitted")) { this.stopPoll(ref); return; }
+      if (!receipt || (!cancelling && !awaitsCommandOutcome(receipt))) { this.stopPoll(ref); return; }
       if (receipt.phase === "queued" && !cancelling) queued = true;
       else if (queued) { started = Date.now(); queued = false; }
-      if ((cancelling || receipt.phase !== "queued") && Date.now() - started > COMMAND_OUTCOME_WINDOW_MS) {
-        this.reject(ref, "Harness execution was not observed. Check Raw output before running another command."); return;
+      const elapsed = Date.now() - started;
+      if ((cancelling || receipt.phase !== "queued") && elapsed > COMMAND_OUTCOME_WINDOW_MS) {
+        if (cancelling) { this.reject(ref, "Cancellation was not confirmed; reading the command outcome."); return; }
+        if (receipt.phase !== "unconfirmed") this.reject(ref, "Harness execution was not observed. Check Raw output before running another command.");
+        if (receipt.command !== "finish" || elapsed > FINISH_OUTCOME_WINDOW_MS) { this.stopPoll(ref); return; }
       }
       this.options.send({ SupervisorCommandStatus: { client_ref: ref } });
-      this.polls.set(ref, setTimeout(read, 1_000));
+      this.polls.set(ref, setTimeout(read, receipt.phase === "unconfirmed" ? 5_000 : 1_000));
     };
     this.polls.set(ref, setTimeout(read, 1_000));
   }

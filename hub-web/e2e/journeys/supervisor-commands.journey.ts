@@ -50,6 +50,12 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await expect.poll(() => mutations().length).toBe(1);
         const request = mutations()[0].body as { client_ref: string; command: string };
         expect(request.command).toBe("finish");
+        const receipt = page.locator(".supervisor-command-receipt");
+        await expect(receipt).toHaveAttribute("data-phase", "submitted");
+        if (!phone) {
+          const [status, transcript] = await Promise.all([receipt.boundingBox(), page.locator('.thread [role="log"]').boundingBox()]);
+          expect(status!.width).toBeLessThan(transcript!.width * 0.9);
+        }
         await captureReload(page, "finish-menu-requested", viewport.width);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
         await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
@@ -65,8 +71,16 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         await captureReload(page, "finish-autocomplete-requested", viewport.width);
         await expect(input).toHaveValue("");
         await expect(page.locator("#supervisor-command-palette")).toBeHidden();
+        const statusReads = () => hub.frames.filter(frame => frame.kind === "SupervisorCommandStatus" && (frame.body as { client_ref: string }).client_ref === request.client_ref).length;
+        // Replay the daemon's short timeout before the incident's 103-second completion.
+        hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "unconfirmed", detail: "Outcome not observed yet", output: "", interactive: false } } });
+        await expect(page.locator(".supervisor-command-receipt")).toHaveAttribute("data-phase", "unconfirmed");
+        const before = statusReads();
+        await expect.poll(statusReads).toBeGreaterThan(before);
         hub.send(PELICAN, { SupervisorCommandReceipt: { receipt: { client_ref: request.client_ref, command: "finish", phase: "observed", detail: "Completed", output: "", interactive: false } } });
         await expect(page.locator(".supervisor-command-receipt")).toHaveCount(0);
+        expect(mutations()).toHaveLength(2);
+        await captureReload(page, "finish-autocomplete-completed", viewport.width);
       });
     });
     test("HUB-J27 completed Claude turn accepts commands once and shows a compact native command receipt (cas-99e7)", journeyPart, async ({ page, journey }) => {

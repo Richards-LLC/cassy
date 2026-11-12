@@ -587,7 +587,9 @@ impl FactoryDaemon {
             record.receipt.detail = "Selection submitted; awaiting the harness's response.".into();
         }
         if record.receipt.phase == Phase::Submitted || record.receipt.interactive
-            || record.receipt.phase == Phase::Unconfirmed && record.receipt.command == Command::Usage {
+            // Finish may complete after the short confirmation deadline. A
+            // caller-owned Status can still observe it without typing again.
+            || record.receipt.phase == Phase::Unconfirmed && matches!(record.receipt.command, Command::Usage | Command::Finish) {
             let current = screen(pane);
             if pane.has_exited() && matches!(record.receipt.command, Command::Exit | Command::Finish) {
                 record.receipt.phase = Phase::Observed;

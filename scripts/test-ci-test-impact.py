@@ -346,7 +346,8 @@ path="tests/builtin_archive_portability_test.rs"
         calls = self.root / "output/cargo.calls"
         fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
                         'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
-                        '*"binary(beta_test)"*) echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
+                        '*binary_id*) if [ -n "$BASE_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
+                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
                         '*) echo "Summary [ 0.01s] 1 test run: 1 passed" ;; esac\n')
         fake.chmod(0o755)
         env = dict(os.environ, CARGO=str(fake), CALLS=str(calls))
@@ -362,8 +363,9 @@ path="tests/builtin_archive_portability_test.rs"
         own_run = next(line for line in calls.read_text().splitlines() if "nextest run" in line)
         self.assertIn("test(/^alpha::/)", own_run)
         self.assertNotIn("binary(beta_test)", own_run)
-        ring = phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1")
-        self.assertNotEqual(ring.returncode, 0, "a consumer suite failure outside the module fails the ring")
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+        self.assertEqual(values["failed"], "true", "a parsed failure waits for base attribution")
         ring_run = calls.read_text().splitlines()[-1]
         self.assertIn("--archive-file suite.tar.zst", ring_run)
         own = json.loads(state.read_text())["split"]["own"]
@@ -371,6 +373,10 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertIn(f"and not ({own})", ring_run)
         self.assertIn("binary(beta_test)", ring_run)
         self.assertIn("--partition count:1/1", ring_run)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "passes at the base: this delivery broke it")
+        env["BASE_FAILS"] = "1"
+        self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
+        del env["BASE_FAILS"]
         self.select("scripts/release.sh")
         self.assertEqual(phase("plan").returncode, 0)
         split = json.loads(state.read_text())["split"]

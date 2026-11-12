@@ -8,3 +8,5 @@
   own tests first and the remaining selected tests in up to three shards only
   after those pass. When the selector cannot narrow a change (build policy,
   scripts or workflow edits), the lane runs the whole suite in the same order.
+  A test that already fails on the branch the delivery started from is named
+  as inherited and does not block that delivery.

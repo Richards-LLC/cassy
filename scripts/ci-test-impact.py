@@ -280,17 +280,54 @@ def lane_count(root, source, expression):
 
 
 def lane_run(root, selection, source, expression, extra, destination, role):
+    """Run one phase. Parsed test failures wait for base attribution; a
+    failure without a parsed failed test fails the phase at once."""
     log = Path(destination).parent / f"{role}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
-    record(selection, [str(log)], status, time.monotonic() - started, destination, role)
-    return status
+    receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
+    return status, bool(status and receipt["failures"])
+
+
+def lane_attribute(root, base, failures, destination):
+    """Rerun the failed tests at the delivery's base. Only tests that do not
+    fail there fail the lane; base failures are reported as inherited."""
+    work = Path(os.environ.get("RUNNER_TEMP") or root / "target") / "lane-impact-base"
+    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
+    subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root)
+    subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work)
+    packages = sorted({failure["package"] for failure in failures})
+    build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
+    if len(packages) == 1:
+        targets = sorted({failure["binary"] for failure in failures})
+        build += [arg for target in targets for arg in (["--lib"] if target == packages[0] else ["--test", target])]
+    identity = lambda failure: failure["package"] if failure["binary"] == failure["package"] else f"{failure['package']}::{failure['binary']}"
+    expression = " or ".join(f"(binary_id({identity(failure)}) and test(={failure['test']}))" for failure in failures)
+    env = dict(os.environ, CARGO_TARGET_DIR=str(root / "target"))
+    run = subprocess.run([os.environ.get("CARGO", "cargo"), "nextest", "run", *build, "-E", expression, "--no-fail-fast", "--no-tests=pass"], cwd=work, env=env, capture_output=True, text=True)
+    Path(destination).with_suffix(".log").write_text(run.stdout + run.stderr)
+    at_base = {(f["package"], f["binary"], f["test"]) for f in parse_failures(strip_ansi(run.stdout + run.stderr))}
+    if run.returncode and not at_base:
+        at_base = set()
+        print("Lane impact: the base run failed without a test result; no failure is attributed to the base", file=sys.stderr)
+    inherited = [f for f in failures if (f["package"], f["binary"], f["test"]) in at_base]
+    caused = [f for f in failures if f not in inherited]
+    write(destination, {"base": base, "inherited": inherited, "caused": caused})
+    lines = [f"Lane impact: inherited from base {base[:12]} (fails there too): {f['binary']} {f['test']}" for f in inherited]
+    lines += [f"Lane impact: caused by this delivery (passes or is absent at base): {f['binary']} {f['test']}" for f in caused]
+    print("\n".join(lines))
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as handle:
+            handle.write("\n" + "\n".join(f"- {line}" for line in lines) + "\n")
+    subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
+    return 1 if caused else 0
 
 
 def lane(root, args):
-    """Lane CI phases: plan, own (builds and runs own tests), ring shards."""
+    """Lane CI phases: plan, own (builds and runs own tests), ring shards and
+    attribute (rerun a phase's failures at the base)."""
     out = Path(args.out)
     outputs = {}
     if args.phase == "plan":
@@ -303,19 +340,25 @@ def lane(root, args):
     else:
         saved = json.loads(out.read_text())
         selection, split = saved["plan"], saved["split"]
+        if args.phase == "attribute":
+            failures = json.loads(out.with_name(f"{args.receipt}-receipt.json").read_text())["failures"]
+            return lane_attribute(root, selection["base"], failures, out.with_name(f"{args.receipt}-attribution.json"))
         source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
         receipt = out.with_name(f"{args.phase}-receipt.json")
+        status, failed = 0, False
         if args.phase == "ring":
-            status = lane_run(root, selection, source, split["ring"], ["--partition", f"count:{args.shard}"], receipt, "lane-ring")
+            status, failed = lane_run(root, selection, source, split["ring"], ["--partition", f"count:{args.shard}"], receipt, "lane-ring")
+        elif split["own"] and lane_count(root, source, split["own"]):
+            status, failed = lane_run(root, selection, source, split["own"], [], receipt, "lane-own")
         else:
-            status = 0
-            if split["own"] and lane_count(root, source, split["own"]):
-                status = lane_run(root, selection, source, split["own"], [], receipt, "lane-own")
-            else:
-                print("Lane impact: no own tests; the ring follows")
-            ring = lane_count(root, source, split["ring"]) if status == 0 else 0
+            print("Lane impact: no own tests; the ring follows")
+        outputs = {"failed": str(failed).lower()}
+        if args.phase == "own" and (status == 0 or failed):
+            ring = lane_count(root, source, split["ring"])
             shards = min(3, -(-ring // 1500))
-            outputs = {"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)}
+            outputs.update({"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)})
+        if failed:
+            status = 0
     if args.github_output:
         with open(args.github_output, "a") as handle:
             handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
@@ -426,7 +469,8 @@ def record(plan, logs, status, elapsed, destination, role):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
-    parser.add_argument("--phase", choices=["plan", "own", "ring"], default="plan")
+    parser.add_argument("--phase", choices=["plan", "own", "ring", "attribute"], default="plan")
+    parser.add_argument("--receipt", choices=["own", "ring"], default="own")
     parser.add_argument("--archive", default="lane-impact.tar.zst")
     parser.add_argument("--shard", default="1/1")
     parser.add_argument("--github-output", default="")

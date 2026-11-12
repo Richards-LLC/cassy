@@ -325,7 +325,7 @@ jobs:
     needs: ci-diff
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    env:
+    env: &lane-impact-env
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
       RUSTC_WRAPPER: sccache
@@ -397,6 +397,13 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+      # A red own test fails the job only if it passes at the delivery's base;
+      # a base failure is reported as inherited, by name. Runs after the
+      # archive because the base build replaces target/debug/cas.
+      - name: Attribute own failures at the base
+        if: steps.own.outputs.failed == 'true'
+        run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt own --out target/ci-impact/lane.json
+
       # Not named ci-test-impact-*: a delivery's own red must not widen every
       # other plan through failure history.
       - name: Publish lane impact evidence
@@ -416,14 +423,12 @@ jobs:
     if: needs.lane-impact.outputs.ring-shards != '' && needs.lane-impact.outputs.ring-shards != '[]'
     needs: lane-impact
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.lane-impact.outputs.ring-shards) }}
-    env:
-      CARGO_TERM_COLOR: always
-      INSTA_WORKSPACE_ROOT: ${{ github.workspace }}
+    env: *lane-impact-env
     steps:
       - uses: actions/checkout@v4
         with:
@@ -439,20 +444,34 @@ jobs:
           name: lane-impact-archive
           path: .
 
-      - name: Run ring shard ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
+      # Results live outside target/, which the attribution cache restore replaces.
+      - id: ring
+        name: Run ring shard ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
         env:
           SHARD: ${{ matrix.shard }}/${{ needs.lane-impact.outputs.ring-total }}
         run: |
           if [[ -f lane-impact-runner.tar.gz ]]; then
             tar -xzf lane-impact-runner.tar.gz
           fi
+          mkdir -p lane-impact && cp target/ci-impact/lane.json lane-impact/
           python3 scripts/ci-test-impact.py lane --phase ring --shard "$SHARD" \
-            --archive lane-impact.tar.zst --out target/ci-impact/lane.json
+            --archive lane-impact.tar.zst --out lane-impact/lane.json --github-output "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust-linux
+        if: steps.ring.outputs.failed == 'true'
+        with:
+          cache-key: fast-validation-suite-archive
+          shared-key: fast-validation-suite-build
+          cache-save-if: "false"
+
+      - name: Attribute ring failures at the base
+        if: steps.ring.outputs.failed == 'true'
+        run: python3 scripts/ci-test-impact.py lane --phase attribute --receipt ring --out lane-impact/lane.json
 
       - name: Publish lane impact evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lane-impact-${{ github.run_id }}-ring-${{ matrix.shard }}
-          path: target/ci-impact/
+          path: lane-impact/
           if-no-files-found: ignore

@@ -1014,7 +1014,7 @@ pub(crate) fn release_supersedes_stale_dispatch(
         .map_err(|e| e.to_string())? else { return Ok(None) };
     if !matches!(dispatch.state, TimedOut | Pending | Claimed)
         || (dispatch.state != TimedOut && dispatch.deadline_at > chrono::Utc::now())
-        || dispatch.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref())?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || dispatch.delivery_transaction_id.is_some()
         || task.deliverables.factory_branch_start.is_none()
         || task.deliverables.factory_branch_anchor.is_none()

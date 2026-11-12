@@ -597,6 +597,7 @@ pub fn import_peer_premerge_verification(
     expected_task: &Task,
     dispatch: &VerificationDispatch,
     verification: &Verification,
+    approval_event: &Event,
 ) -> Result<bool> {
     let fail = || StoreError::Parse("peer pre-merge proof does not match the current delivery cycle".into());
     let attestation = dispatch.repository.as_ref()
@@ -665,15 +666,16 @@ pub fn import_peer_premerge_verification(
     if has_verdict && superseded.is_none() { return Err(fail()); }
     tx.execute(
         "INSERT INTO verification_dispatches
-         (id,task_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
-         VALUES (?1,?2,?3,?4,?5,'resolved',?6,?7,?8,?9)",
+         (id,task_id,receipt_id,repository_proof,requester_agent_id,owner_agent_id,state,requested_at,deadline_at,resolved_at,recovery_action)
+         VALUES (?1,?2,?10,?3,?4,?5,'resolved',?6,?7,?8,?9)",
         params![dispatch.id,dispatch.task_id,
             serde_json::to_string(&dispatch.repository).map_err(|_| fail())?,
             dispatch.requester_agent_id,dispatch.owner_agent_id,
             dispatch.requested_at.to_rfc3339(),dispatch.deadline_at.to_rfc3339(),
-            dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string()],
+            dispatch.resolved_at.map(|at| at.to_rfc3339()),dispatch.recovery_action.to_string(),dispatch.receipt_id],
     )?;
     insert_verification_with_conn(&tx, verification)?;
+    record_event_with_conn(&tx, approval_event)?;
     if let Some(prior) = superseded {
         let event = Event::new(EventType::VerificationAdded, EventEntityType::Task, &expected_task.id,
             "Peer approval replaced after source review of repaired delivery")
@@ -1080,9 +1082,9 @@ pub fn resolve_verification_dispatch_for_add_with_conn(
     else {
         return Ok(requested);
     };
-    let same_task_only_proof = requested.receipt_id.is_none()
+    let same_task_only_proof = requested.receipt_id == current.receipt_id
+        && !matches!(cas_types::VerificationReceipt::parse(requested.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
         && requested.delivery_transaction_id.is_none()
-        && current.receipt_id.is_none()
         && current.delivery_transaction_id.is_none()
         && requested.repository.is_some()
         && requested.repository == current.repository;
@@ -1641,6 +1643,7 @@ pub fn rebind_approved_verification_dispatch(
     owner_agent_id: &str,
     boundary: &VerificationProofBoundary,
     receipt: &str,
+    approved_anchor: &str,
 ) -> Result<(VerificationDispatch, Verification)> {
     let store = SqliteVerificationStore::open(cas_dir)?;
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
@@ -1655,11 +1658,12 @@ pub fn rebind_approved_verification_dispatch(
         )
         .optional()?;
     if latest.as_ref().map(|latest| latest.id.as_str()) != Some(prior.id.as_str())
+        || prior.receipt_id != boundary.receipt_id
         || prior.state != VerificationDispatchState::Resolved
-        || prior.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(prior.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || prior.delivery_transaction_id.is_some()
         || prior.repository.is_none()
-        || boundary.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(boundary.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || boundary.delivery_transaction_id.is_some()
         || boundary.repository.is_none()
         || verdict.as_ref().map(|(id, status)| (id.as_str(), status.as_str()))
@@ -1699,6 +1703,22 @@ pub fn rebind_approved_verification_dispatch(
     verification.summary = receipt.to_string();
     verification.created_at = now;
     insert_verification_with_conn(&tx, &verification)?;
+    // Carry the original approval stamp, including a legacy missing version.
+    // No new registry snapshot is taken when the same approval carries.
+    let metadata: Option<String> = if tx.table_exists(None, "events")? {
+        tx.query_row("SELECT metadata FROM events WHERE event_type='verification_added'
+            AND entity_type='verification' AND entity_id=?1 ORDER BY id LIMIT 1",
+            [prior_verdict_id], |r| r.get(0)).optional()?.flatten()
+    } else { None };
+    if let Some(metadata) = metadata {
+        let mut metadata: serde_json::Value = serde_json::from_str(&metadata)?;
+        metadata["approved_anchor"] = approved_anchor.into();
+        metadata["verdict_id"] = verification.id.clone().into();
+        metadata["dispatch_id"] = dispatch.id.clone().into();
+        let event = Event::new(EventType::VerificationAdded, EventEntityType::Verification,
+            &verification.id, "Carried approval").with_metadata(metadata);
+        record_event_with_conn(&tx, &event)?;
+    }
     tx.commit()?;
     Ok((dispatch, verification))
 }
@@ -1798,7 +1818,7 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
     let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
         .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
     if latest.id != dispatch.id
-        || dispatch.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || dispatch.delivery_transaction_id.is_some()
         || dispatch.repository.is_none()
     {
@@ -2031,7 +2051,7 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     if selected.task_id != task.id
-        || selected.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(selected.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || selected.delivery_transaction_id.is_some()
         || selected.state != VerificationDispatchState::Resolved
     {
@@ -5060,6 +5080,7 @@ mod tests {
 
     #[test]
     fn superseded_task_dispatch_resolves_to_current_cycle_when_proof_is_unchanged() {
+        for receipt_id in [None, Some("dc-cycle"), Some("wcr-receipt")] {
         let (_store, dir) = create_test_store();
         let repository = cas_types::RepositoryProofBoundary {
         peer_premerge: None,
@@ -5070,7 +5091,8 @@ mod tests {
             target_branch: None,
             anchor_commits: vec!["delivered-a".to_string()],
         };
-        let boundary = cas_types::VerificationProofBoundary::task_at(repository);
+        let mut boundary = cas_types::VerificationProofBoundary::task_at(repository);
+        boundary.receipt_id = receipt_id.map(str::to_string);
         let first = create_verification_dispatch_bound(
             dir.path(),
             "cas-superseded-add",
@@ -5102,7 +5124,9 @@ mod tests {
         let conn = Connection::open(dir.path().join("cas.db")).expect("db");
         let effective = resolve_verification_dispatch_for_add_with_conn(&conn, &first.id)
             .expect("superseded dispatch should resolve");
-        assert_eq!(effective.id, replacement.id);
+        assert_eq!(effective.id, if receipt_id==Some("wcr-receipt") { first.id } else { replacement.id });
+        }
+
     }
 
     #[test]

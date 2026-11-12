@@ -128,6 +128,7 @@ struct Promotion {
 
 mod peer;
 mod automatic;
+pub(crate) mod cycle;
 pub(crate) use peer::{PeerReceiptIngested, ingest_peer_receipt};
 
 const CANDIDATE_COMMIT_PREFIX: &str = "CAS_PREMERGE_CANDIDATE_V1 ";
@@ -1245,7 +1246,7 @@ impl CasCore {
             &task.id,
             &requester,
             &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &cycle::boundary(&self.cas_root, task, candidate.proof.clone()).map_err(fail)?,
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -1291,7 +1292,7 @@ impl CasCore {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
-            || dispatch.receipt_id.is_some()
+            || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref()).map_err(fail)?, cas_types::VerificationReceipt::TransactionReceipt(_))
             || prior.context_digest != digest
             || prior.repository != repository
             || prior.source_branch != source
@@ -1349,8 +1350,10 @@ impl CasCore {
             &verdict.id,
             &requester,
             &owner,
-            &cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()),
+            &cas_types::VerificationProofBoundary { receipt_id: dispatch.receipt_id.clone(),
+                ..cas_types::VerificationProofBoundary::task_at(candidate.proof.clone()) },
             &receipt,
+            &candidate.source_sha,
         )
         .map_err(fail)?;
         let store = self.open_task_store()?;

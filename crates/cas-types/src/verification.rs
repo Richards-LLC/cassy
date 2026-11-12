@@ -615,6 +615,26 @@ pub struct RepositoryProofBoundary {
     pub anchor_commits: Vec<String>,
 }
 
+/// The existing receipt field names either a delivery cycle or a transaction's
+/// immutable worker receipt. Unknown namespaces never become legacy authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerificationReceipt<'a> {
+    DeliveryCycle(&'a str),
+    TransactionReceipt(&'a str),
+    None,
+}
+
+impl<'a> VerificationReceipt<'a> {
+    pub fn parse(receipt: Option<&'a str>) -> Result<Self, String> {
+        match receipt {
+            None => Ok(Self::None),
+            Some(id) if id.strip_prefix("dc-").is_some_and(|s| !s.is_empty()) => Ok(Self::DeliveryCycle(id)),
+            Some(id) if id.strip_prefix("wcr-").is_some_and(|s| !s.is_empty()) => Ok(Self::TransactionReceipt(id)),
+            Some(_) => Err("UNKNOWN_VERIFICATION_RECEIPT".into()),
+        }
+    }
+}
+
 /// Immutable external identity attached to a verification proof cycle.
 ///
 /// A task-only close has neither delivery field; the dispatch ID itself is
@@ -658,7 +678,7 @@ impl VerificationProofBoundary {
 pub struct VerificationDispatch {
     pub id: String,
     pub task_id: String,
-    /// Exact immutable delivery receipt, when this dispatch verifies delivery.
+    /// Delivery cycle (`dc-`) or immutable transactional worker receipt (`wcr-`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt_id: Option<String>,
     /// Exact delivery transaction advanced by this dispatch's verdict.
@@ -1279,6 +1299,16 @@ impl Default for Verification {
 #[cfg(test)]
 mod tests {
     use crate::verification::*;
+
+    #[test]
+    fn verification_receipt_identity_cas_e01f() {
+        for (raw, expected) in [
+            (None, VerificationReceipt::None),
+            (Some("dc-cycle"), VerificationReceipt::DeliveryCycle("dc-cycle")),
+            (Some("wcr-receipt"), VerificationReceipt::TransactionReceipt("wcr-receipt")),
+        ] { assert_eq!(VerificationReceipt::parse(raw).unwrap(), expected); }
+        for raw in ["unknown", "dc-", "wcr-"] { assert!(VerificationReceipt::parse(Some(raw)).is_err()); }
+    }
 
     #[test]
     fn finding_triage_defaults_to_theoretical_and_is_persisted() {

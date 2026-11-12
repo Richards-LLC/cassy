@@ -391,7 +391,7 @@ fn import_receipt(
     let dispatch = VerificationDispatch {
         id: receipt.dispatch_id.clone(),
         task_id: task.id.clone(),
-        receipt_id: None,
+        receipt_id: super::cycle::boundary(root, &task, proof.clone()).map_err(ReceiptFailure::retry)?.receipt_id,
         delivery_transaction_id: None,
         repository: Some(proof),
         requester_agent_id: receipt.supervisor_id.clone(),
@@ -412,7 +412,10 @@ fn import_receipt(
     verdict.agent_id = Some(receipt.supervisor_id);
     verdict.created_at = at;
     verdict.summary = format!("Peer-attested published approval via {}", message.id);
-    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict).map_err(
+    let connection = crate::qa_batch::release_close::read_connection(root).map_err(ReceiptFailure::retry)?;
+    let approval_event = super::cycle::event(&connection, root, &task, &dispatch, &verdict).map_err(ReceiptFailure::retry)?;
+    drop(connection);
+    cas_store::import_peer_premerge_verification(root, &task, &dispatch, &verdict, &approval_event).map_err(
         |error| {
             // Ownership conflicts are permanent. A store Parse here can be
             // its updated_at compare losing a race;

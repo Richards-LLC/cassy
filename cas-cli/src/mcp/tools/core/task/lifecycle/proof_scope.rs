@@ -132,7 +132,7 @@ pub(crate) fn close_authoritative_task_proof_dispatch(
         return Ok(None);
     };
     if dispatch.task_id != task_id
-        || dispatch.receipt_id.is_some()
+        || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref())?, cas_types::VerificationReceipt::TransactionReceipt(_))
         || dispatch.delivery_transaction_id.is_some()
         || dispatch.state != VerificationDispatchState::Resolved
     {

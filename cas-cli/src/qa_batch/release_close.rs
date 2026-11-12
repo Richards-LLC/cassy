@@ -618,46 +618,6 @@ pub(crate) fn read_artifact(root: &Path, id: &str) -> Result<cas_store::Publishe
     found.ok_or_else(|| "ARTIFACT_METADATA_MISSING".into())
 }
 
-/// Recorded verdicts already validated their ledger and author. Publication
-/// consumes that immutable fact and never grants approval by itself.
-fn approved_at(root: &Path, repo: &Path, task: &Task, anchor: &str, published: &str, receipts: &[QaBatchReceipt]) -> Result<bool, String> {
-    use rusqlite::OptionalExtension;
-    let conn = read_connection(root)?;
-    if conn.table_exists(None, "verification_dispatches").map_err(|e| e.to_string())? {
-        if let Some(dispatch) = cas_store::get_latest_verification_dispatch_with_conn(&conn, &task.id).map_err(|e| e.to_string())? {
-            // Peer admission records the landed head and binds the approved
-            // source in anchor_commits; that immutable source is the delivery.
-            let head_matches = dispatch.repository.as_ref().is_some_and(|r| {
-                r.head_commit == anchor || r.anchor_commits.iter().any(|head| head == anchor)
-            });
-            let status: Option<String> = conn.query_row(
-                "SELECT status FROM verifications WHERE dispatch_id=? AND task_id=? ORDER BY created_at DESC, id DESC LIMIT 1",
-                rusqlite::params![dispatch.id, task.id], |row| row.get(0),
-            ).optional().map_err(|e| e.to_string())?;
-            if dispatch.state == cas_types::VerificationDispatchState::Resolved && status.as_deref() == Some("approved") {
-                if head_matches { return Ok(true); }
-                // Local premerge verdicts review a synthetic commit. Its
-                // immutable manifest binds the delivery source and tree;
-                // only a reviewed tree in the published history grants close.
-                if let Some(candidate) = crate::mcp::tools::core::workflow::premerge_verification::candidate_for_dispatch(root, &dispatch)?
-                    && candidate.source_sha == anchor
-                {
-                    let trees = Command::new("git").current_dir(repo)
-                        .args(["log", "--format=%T", published, "--"])
-                        .output().map_err(|e| e.to_string())?;
-                    if trees.status.success() && String::from_utf8_lossy(&trees.stdout).lines().any(|tree| tree == candidate.tree) {
-                        return Ok(true);
-                    }
-                }
-            }
-        }
-    }
-    Ok(receipts.iter().any(|receipt| {
-        matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
-            && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
-    }))
-}
-
 /// Preview and apply share every decision; only the guarded close write differs.
 pub(crate) fn reconcile_members(
     root: &Path, repo: &Path, inventory: &ReleaseInventory, write: bool,
@@ -673,8 +633,9 @@ pub(crate) fn reconcile_members(
         .chain(inventory.scope.included_task_ids.iter().cloned())
         .chain(inventory.scope.no_code_members.keys().cloned()).collect();
     let mut outcomes = BTreeMap::new();
+    let mut legacy_approvals = 0usize;
     for id in ids {
-        let evaluate = || -> Result<CassyMergeClose, String> {
+        let mut evaluate = || -> Result<CassyMergeClose, String> {
             let task = match tasks.get(&id) { Ok(task) => task, Err(_) => return Ok(CassyMergeClose::NotEligible) };
             if task.status == TaskStatus::Closed { return Ok(CassyMergeClose::AlreadyClosed); }
             if task.is_terminal() { return Ok(CassyMergeClose::NotEligible); }
@@ -704,7 +665,19 @@ pub(crate) fn reconcile_members(
                 if ancestor(repo, anchor, &inventory.scope.final_release_sha) != Some(true) {
                     return Err("RELEASE_ANCHOR_NOT_SHIPPED".into());
                 }
-                approved &= tier_zero || approved_at(root, repo, &task, anchor, &inventory.scope.final_release_sha, &receipts)?;
+                let dispatch_approval = if tier_zero { None } else {
+                    crate::mcp::tools::core::workflow::premerge_verification::cycle::approved(
+                        root, repo, &task, anchor, &inventory.scope.final_release_sha)?
+                };
+                if let Some(approval) = &dispatch_approval {
+                    legacy_approvals += usize::from(approval.legacy);
+                    // The stamp is read only after the exact verdict resolves.
+                    let _registry_version = &approval.registry_version;
+                }
+                approved &= tier_zero || dispatch_approval.is_some() || receipts.iter().any(|receipt| {
+                    matches!(receipt.schema_version, cas_store::QA_BATCH_RECEIPT_SCHEMA | cas_store::RELEASE_VERDICT_SCHEMA)
+                        && receipt.task_heads.get(&task.id).is_some_and(|head| head == anchor)
+                });
             }
             if !approved { return Err("REVIEW_MISSING".into()); }
             if write {
@@ -723,6 +696,10 @@ pub(crate) fn reconcile_members(
         let outcome = evaluate().unwrap_or_else(CassyMergeClose::Held);
         checkpoint(&id, outcome.clone())?;
         outcomes.insert(id, outcome);
+    }
+    if !write {
+        // Portable replay receipt: preview bypasses logging to preserve its no-write contract.
+        eprintln!("approval_lookup: legacy_candidate_approvals={legacy_approvals}");
     }
     Ok(outcomes)
 }

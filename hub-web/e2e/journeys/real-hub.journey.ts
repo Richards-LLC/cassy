@@ -677,8 +677,11 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     // cas-ef33: the same pairing must remain authoritative after a real
     // daemon adoption rotates its private hub relay token.
     const before = welcomes;
-    await command("daemon-reexec");
+    const adoption = await command("daemon-reexec");
     await expect.poll(() => welcomes).toBeGreaterThan(before);
+    // Adopted panes retain the native startup injection grace (pane/mod.rs:1424).
+    // Wait on the real adoption timestamp; browser fake time cannot advance it.
+    await expect.poll(() => Date.now() - Date.parse(adoption.receipt.at)).toBeGreaterThan(5_000);
     await expect(page.locator("#conversation-connection")).toHaveAttribute("data-phase", "live");
     const input = page.getByRole("textbox", { name: "Your message", exact: true });
     await input.fill("/compact");
@@ -725,6 +728,7 @@ test("HUB-J24 real hub composer decodes a local raster preview and stores the pi
     await expect.poll(() => sentImage.evaluate((image: HTMLImageElement) => image.naturalWidth)).toBe(1);
     expect(imageViolations).toEqual([]);
   } finally {
+    await writeFile(info.outputPath("native-evidence.json"), JSON.stringify(await command("evidence").catch(() => null), null, 2));
     if (RECORD) await page.screencast.stop().catch(() => undefined);
     await command("cleanup");
   }

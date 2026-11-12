@@ -317,9 +317,13 @@ impl CasCore {
     }
 }
 
-fn published(queue: &Queue, entry: &Entry) -> Result<bool> {
+/// Publication, rather than a local-only merge, advances the queue. The merge's
+/// origin read and push refresh the tracking ref; ask origin only if it lacks one.
+fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     let git = GitOperations::new(queue.repo.clone());
-    // Publication, rather than a local-only merge, advances the queue.
+    let tracked = git.resolve_commit(&format!("refs/remotes/origin/{}", queue.target))
+        .is_some_and(|tip| git.is_ancestor(&entry.sha, &tip));
+    if tracked || (!merged && git.has_origin_remote()) { return Ok(tracked); }
     let target = git
         .fetch_merge_target(&queue.target)?
         .or_else(|| git.resolve_commit(&queue.target))
@@ -384,7 +388,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 break;
             }
             let entry = &queue.entries[queue.next];
-            if published(&queue, entry)? {
+            if published(&queue, entry, false)? {
                 queue
                     .outcomes
                     .push(format!("{} merged {}", entry.task, entry.sha));
@@ -435,7 +439,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             };
             let result = core.worktree_merge_queued(&expected, &queue.id).await;
             let current = tasks.get(&entry.task)?;
-            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry)? {
+            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry, true)? {
                 // Re-read the durable result at the top, including a conflict
                 // return or a merge committed just before a previous crash.
                 continue;
@@ -514,6 +518,11 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::build(true)
+        }
+
+        /// `conflict`: the first two deliveries edit the same file.
+        fn build(conflict: bool) -> Self {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             for key in [
                 "CAS_ROOT",
@@ -579,11 +588,13 @@ mod tests {
                         "epic/train",
                     ],
                 );
-                shas[index] = if index < 2 {
-                    commit(&checkout, "shared.md", &format!("delivery {}\n", index + 1))
-                } else {
-                    commit(&checkout, "third.md", "third delivery\n")
+                let file = match index {
+                    0 => "shared.md",
+                    1 if conflict => "shared.md",
+                    1 => "second.md",
+                    _ => "third.md",
                 };
+                shas[index] = commit(&checkout, file, &format!("delivery {}\n", index + 1));
                 git(&checkout, &["push", "origin", &branch]);
                 let mut agent = Agent::new(worker.clone(), worker.clone());
                 agent.role = AgentRole::Worker;
@@ -856,5 +867,35 @@ mod tests {
             before,
             "completed queue is idempotent"
         );
+    }
+
+    /// A train asks origin about its target once per entry: under the merge
+    /// lock, shared by containment, the target sync, publication and the
+    /// close's integration proof.
+    #[tokio::test]
+    async fn train_merge_reads_origin_once_per_entry() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        let reads = fixture.root.join("origin-reads.log");
+        let counter = fixture.root.join("count-upload-pack");
+        std::fs::write(&counter, format!(
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$(cut -d' ' -f4 /proc/$PPID/stat)/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
+            reads.display(), reads.display(),
+        )).unwrap();
+        std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        for sha in &fixture.shas {
+            assert!(operations.is_ancestor(sha, "origin/epic/train"), "{:?}", queue.outcomes);
+        }
+        let reads = std::fs::read_to_string(&reads).unwrap_or_default();
+        assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
     }
 }

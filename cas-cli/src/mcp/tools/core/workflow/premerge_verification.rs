@@ -758,12 +758,13 @@ impl Approval {
         }
         let candidate = &self.candidate;
         // A local merge whose push failed is not a landed mapping. With an
-        // origin, only fetched remote history can repair an interrupted write.
+        // origin, only its tracking ref (refreshed by push and merge) can repair.
         let operations = crate::worktree::GitOperations::new(candidate.repository.clone());
-        let target = operations
+        let tracked = format!("refs/remotes/origin/{}", candidate.target_branch);
+        let target = if operations.resolve_commit(&tracked).is_some() { tracked } else { operations
             .fetch_merge_target(&candidate.target_branch)
             .map_err(|error| format!("publication could not be confirmed: {error}"))?
-            .unwrap_or_else(|| candidate.target_branch.clone());
+            .unwrap_or_else(|| candidate.target_branch.clone()) };
         let commits = git(
             &candidate.repository,
             &[
@@ -803,10 +804,7 @@ impl Approval {
         &self,
         operations: &crate::worktree::GitOperations,
     ) -> Result<Option<(String, String)>, String> {
-        if !self.reconcile_promotion()? {
-            return Ok(None);
-        }
-        let record = self.promotion()?.ok_or("published mapping missing")?;
+        // One origin read, before reconciliation reads its tracking ref.
         let target = operations
             .fetch_merge_target(&self.candidate.target_branch)
             .map_err(|error| error.to_string())?
@@ -814,6 +812,10 @@ impl Approval {
                 &self.candidate.repository,
                 &["rev-parse", &self.candidate.target_branch],
             )?);
+        if !self.reconcile_promotion()? {
+            return Ok(None);
+        }
+        let record = self.promotion()?.ok_or("published mapping missing")?;
         git(
             &self.candidate.repository,
             &["merge-base", "--is-ancestor", &record.landed_sha, &target],
@@ -1106,7 +1108,6 @@ impl CasCore {
         {
             return Ok(None);
         }
-        refresh_review_target(repo, target).map_err(fail)?;
         let digest = context_digest(&self.cas_root, task).map_err(fail)?;
         let repository = repo.canonicalize().map_err(|error| {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
@@ -1212,6 +1213,8 @@ impl CasCore {
             true,
         )
         .map_err(fail)?;
+        // Only a new review reads origin before the merge lock.
+        refresh_review_target(repo, target).map_err(fail)?;
         let candidate = self.build_verification_candidate(
             task,
             repo,

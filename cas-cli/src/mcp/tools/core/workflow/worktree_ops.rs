@@ -2106,20 +2106,18 @@ enum Containment {
     NotContained,
 }
 
+/// `refreshed` is the merge's one origin read (`Ok(None)`: the local target is
+/// the authority). A failed refresh cannot let stale history claim publication;
+/// local target advancement remains behind CI unless no merge is needed.
 fn contained_merge_receipt(
     git: &crate::worktree::GitOperations,
     source: &str,
     target: &str,
-    local_merge: bool,
+    refreshed: Result<Option<String>, crate::worktree::GitError>,
 ) -> Containment {
     let Some(source_tip) = git.resolve_commit(source) else {
         return Containment::NotContained;
     };
-    // LocalMerge's declared local target is authoritative. For pushed
-    // deliveries, a failed refresh cannot let stale history claim publication.
-    // Tracking refs refresh here; local target advancement remains behind CI,
-    // unless this source is already integrated and no merge is needed.
-    let refreshed = if local_merge { Ok(None) } else { git.fetch_merge_target(target) };
     let (target_tip, authority, origin_verified) = match refreshed {
         Ok(Some(sha)) => (sha, format!("origin/{target}"), true),
         Ok(None) => match git.resolve_commit(target) {
@@ -4501,32 +4499,8 @@ impl CasCore {
             None
         };
         let task_id = task_id.or(inferred_task_id.as_deref());
-        // cas-bebc (GH #1023 finding 9): never integrate another live factory
-        // session's worker branch or task from this session.
         let mut scoped_task =
             task_id.and_then(|task_id| self.open_task_store().ok()?.get(task_id).ok()).map(Box::new);
-        // gate[G-93 merge-admission integrity]: Foreign factory-session owner
-        if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
-            &cas_root,
-            |agents, caller, now| {
-                crate::factory_session_scope::foreign_owner_of_merge(
-                    agents,
-                    caller,
-                    id,
-                    scoped_task.as_deref(),
-                    now,
-                )
-            },
-        ) {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(crate::gates::tag("G-93", owner.refusal(
-                    &format!("worktree_merge of {id}"),
-                    &caller,
-                ))),
-                data: None,
-            });
-        }
         let worktree_store = open_worktree_store(&cas_root).map_err(|e| McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(format!("Failed to open worktree store: {e}")),
@@ -4574,31 +4548,33 @@ impl CasCore {
                 worktree.epic_id.is_none() || worktree.branch.starts_with("factory/")
             })
         {
-            Some(self.parked_delivery_for_worker(id)?)
+            Some(self.parked_delivery_for_worker(id))
         } else {
             None
         };
-        let task_id = task_id.or_else(|| implicit_delivery.as_ref().map(|(task, _)| task.id.as_str()));
-        if let Some((task, _)) = implicit_delivery.as_ref() {
+        if let Some(Ok((task, _))) = implicit_delivery.as_ref() {
             scoped_task = Some(task.clone());
-            // The inferred receipt can reveal a foreign owner that the bare
-            // input could not identify. Keep session authority ahead of effects.
-            if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
-                &cas_root,
-                |agents, caller, now| crate::factory_session_scope::foreign_owner_of_merge(
-                    agents, caller, id, scoped_task.as_deref(), now,
-                ),
-            ) {
-                return Err(McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from(crate::gates::tag("G-93", owner.refusal(
-                        &format!("worktree_merge of {id}"),
-                        &caller,
-                    ))),
-                    data: None,
-                });
-            }
         }
+        // cas-bebc (GH #1023 finding 9): never integrate another live factory
+        // session's worker or task. Asked once, after inference, before effects.
+        // gate[G-93 merge-admission integrity]: Foreign factory-session owner
+        if let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
+            &cas_root,
+            |agents, caller, now| crate::factory_session_scope::foreign_owner_of_merge(
+                agents, caller, id, scoped_task.as_deref(), now,
+            ),
+        ) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(crate::gates::tag("G-93", owner.refusal(
+                    &format!("worktree_merge of {id}"),
+                    &caller,
+                ))),
+                data: None,
+            });
+        }
+        let implicit_delivery = implicit_delivery.transpose()?;
+        let task_id = task_id.or_else(|| implicit_delivery.as_ref().map(|(task, _)| task.id.as_str()));
 
         if let Some(task_id) = task_id {
             let tasks = crate::store::open_task_store(&cas_root)
@@ -5074,22 +5050,15 @@ impl CasCore {
         // Return conflicting deliveries before candidate preparation can hide
         // merge-tree's exit 1 behind a verification refusal (cas-225b). A
         // train reservation keeps its strict probe. A single task-scoped merge
-        // probes advisorily (cas-e1db): no extra fetch (the cached origin
-        // ref stands in), and a missing target, an unresolvable source or a
-        // diverged origin leave the ordinary merge path to report them.
+        // probes advisorily (cas-e1db). Both use the cached origin ref; a
+        // missing target, an unresolvable source or a diverged origin leave
+        // the ordinary merge path to report them.
         let strict = train_queue.is_some();
         // gate[G-103 train-merge integrity]: Queued train conflict preflight and target diverged
         if strict || scoped_task.is_some() {
             let probe = (|| -> Result<Option<(String, Vec<String>)>, McpError> {
                 let remote = if scoped_task.as_deref().is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge) {
                     None
-                } else if strict {
-                    // This advisory conflict probe also serves offline/local-only
-                    // deliveries. Publication still has its own freshness gates.
-                    manager.git().fetch_merge_target(&worktree.parent_branch).unwrap_or_else(|error| {
-                        tracing::debug!(%error, "conflict precheck uses local target: origin unavailable");
-                        None
-                    })
                 } else {
                     manager.git().resolve_commit(&format!("refs/remotes/origin/{}", worktree.parent_branch))
                 };
@@ -5200,11 +5169,14 @@ impl CasCore {
 
         // LocalMerge uses its local target. Pushed deliveries need fresh
         // origin containment, or the existing fallback when origin is absent.
+        // gate[G-110 merge-admission integrity]: Fresh target from the merge's one origin read (containment, prepare, diverged)
+        let mut target_fetched = false;
         if transactional_delivery.is_none() {
-            let local_merge = scoped_task.as_deref()
-                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge);
-            // gate[G-105 merge-admission integrity]: Fresh target containment unverified
-            match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, local_merge) {
+            let refreshed = if scoped_task.as_deref()
+                .is_some_and(|task| task.delivery_mode == cas_types::DeliveryMode::LocalMerge)
+            { Ok(None) } else { manager.git().fetch_merge_target(&worktree.parent_branch) };
+            target_fetched = matches!(refreshed, Ok(Some(_)));
+            match contained_merge_receipt(manager.git(), &worktree.branch, &worktree.parent_branch, refreshed) {
                 Containment::Contained { receipt, origin_verified } => {
                     // Preserve the existing behind-local checkout repair, but only
                     // after origin has proved that this source needs no CI/merge.
@@ -5215,13 +5187,13 @@ impl CasCore {
                         return Ok(Self::success(receipt));
                     }
                     if !pending_observation_recovery {
-                        let refreshed = manager.git().reconcile_target_with_origin(&worktree.parent_branch);
+                        let refreshed = manager.git().reconcile_target_with_fetched_origin(&worktree.parent_branch);
                         return Ok(Self::success(format!("{receipt}{}", describe_target_reconcile(&worktree.parent_branch, &refreshed))));
                     }
                 }
-                Containment::Unverified(message) => return Ok(Self::tool_error(crate::gates::tag("G-105", message))),
+                Containment::Unverified(message) => return Ok(Self::tool_error(crate::gates::tag("G-110", message))),
                 Containment::NotContained if deferred_contained_review => {
-                    return Ok(Self::tool_error(crate::gates::tag("G-105", "The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation.")));
+                    return Ok(Self::tool_error(crate::gates::tag("G-110", "The fresh target no longer contains this source. Retry worktree_merge to prepare its candidate review before any mutation.")));
                 }
                 Containment::NotContained => {}
             }
@@ -5690,10 +5662,8 @@ impl CasCore {
             // operator is then left holding a merge commit they did not ask
             // for on a branch they must now unpick. Refusing here costs
             // nothing; refusing after the merge costs a recovery.
-            let reconcile = manager
-                .git()
-                .reconcile_target_with_origin(&worktree.parent_branch);
-            // gate[G-110 merge-admission integrity]: Target prepare and target diverged from origin
+            let reconcile = if target_fetched { manager.git().reconcile_target_with_fetched_origin(&worktree.parent_branch) }
+                else { manager.git().reconcile_target_with_origin(&worktree.parent_branch) };
             if let crate::worktree::git::TargetReconcile::PreparationFailed { reason } = &reconcile
             {
                 return Err(McpError {
@@ -6248,7 +6218,10 @@ impl CasCore {
                         | crate::mcp::tools::core::task::lifecycle::close_ops::DeliveryContentPresence::Superseded { .. }
                     )
                 });
-            if reconciled_publication.is_none() && let Some(approval) = premerge_approval.as_ref() {
+            // An early publication was checked before its push and at promotion.
+            if reconciled_publication.is_none() && early_target_push.is_none()
+                && let Some(approval) = premerge_approval.as_ref()
+            {
                 approval.verify_landing(&target_tip)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
                         manager.git(), &receipt.target_branch, unpublished_merge_base.as_deref(), Some(&target_tip), error,
@@ -6423,10 +6396,12 @@ impl CasCore {
         let reviewed_attempt = if target_push.is_none() && let Some(approval) = premerge_approval.as_ref() {
             let landed = manager.git().resolve_commit(&worktree.parent_branch)
                 .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "Reviewed target no longer resolves"))?;
-            approval.verify_landing(&landed)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
-                    manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
-                )))?;
+            if early_target_push.is_none() {
+                approval.verify_landing(&landed)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, restore_refused_landing(
+                        manager.git(), &worktree.parent_branch, unpublished_merge_base.as_deref(), merge_commit.as_deref(), error,
+                    )))?;
+            }
             Some(landed)
         } else { None };
         let (push_branch, push_outcome) = target_push.unwrap_or_else(|| {

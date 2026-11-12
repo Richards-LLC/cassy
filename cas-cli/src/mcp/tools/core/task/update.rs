@@ -4004,6 +4004,9 @@ mod epic_move_work_target_tests {
         assert_eq!(branch_of(&store, &trunk.id), "epic/f29b");
 
         // Retargeting unfinished work is also a move out of its frozen train.
+        let mut frozen = store.get(&lane_epic.id).unwrap();
+        frozen.labels.push("release-train".into()); store.update(&frozen).unwrap();
+        crate::mcp::tools::core::workflow::release_freeze::freeze(&cas_dir, &frozen.id, "fixture", None).unwrap();
         git(&["branch", "epic/next"]);
         let mut successor = lane_epic.clone();
         successor.id = "cas-next".into();
@@ -4015,6 +4018,7 @@ mod epic_move_work_target_tests {
             false, None, None, None, None, false).await.unwrap();
         assert_eq!(branch_of(&store, &trunk.id), "epic/next");
         assert_eq!(parent_of(&store, &trunk.id), vec![successor.id]);
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&cas_dir, &trunk.id).is_ok());
     }
 
     #[tokio::test]

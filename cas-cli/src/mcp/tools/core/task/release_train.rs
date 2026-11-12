@@ -75,23 +75,27 @@ pub(crate) fn check_published_base(root: &Path, store: &dyn cas_store::TaskStore
         && (target.target_branch.trim_start_matches("origin/") != branch
             || !super::repo_context::repo_answers_to(&repo, &target.repo_selector)) { return Ok(()); }
     let Ok(release_root) = crate::store::find_cas_root_ignoring_env(&repo) else { return Ok(()); };
-    let mut releases: Vec<_> = latest_published(&release_root, &repo).into_iter().collect();
+    let mut releases: Vec<_> = latest_published(&release_root, &repo).into_iter().map(|(tag, sha)| (tag, sha, false)).collect();
     // The publication adapter can discover a conflict before the asset ledger arrives.
     // Its repair carries the required tag, so that gap cannot admit new staffing.
     for repair in store.get_subtasks(&epic.id).map_err(|e| e.to_string())?.into_iter().filter(|t| !t.is_terminal()) {
         for tag in repair.labels.iter().filter_map(|l| l.strip_prefix("release-sync:")) {
-            releases.push((tag.to_string(), format!("refs/tags/{tag}")));
+            releases.push((tag.to_string(), format!("refs/tags/{tag}"), true));
         }
     }
     let git = crate::worktree::GitOperations::new(repo);
     let local = git.ref_sha(branch).ok();
     let remote = git.ref_sha(&format!("origin/{branch}")).ok();
+    let origin_tip = remote.clone();
     let tip = match (local, remote) {
         (Some(local), Some(remote)) => if git.is_ancestor(&local, &remote) { remote } else { local },
         (Some(tip), None) | (None, Some(tip)) => tip,
         _ => return Ok(()),
     };
-    let Some((tag, _)) = releases.into_iter().find(|(_, release)| !git.is_ancestor(release, &tip)) else { return Ok(()); };
+    let Some((tag, _, _)) = releases.into_iter().find(|(_, release, repair)| {
+        let target = if *repair && git.has_origin_remote() { origin_tip.as_deref() } else { Some(tip.as_str()) };
+        !target.is_some_and(|tip| git.is_ancestor(release, tip))
+    }) else { return Ok(()); };
     let _lock = lock_trains_blocking(root).map_err(|e| e.to_string())?;
     let repair = sync_repair(store, &epic, &tag, "target lacks the published release")?;
     Err(format!("RELEASE_SYNC_REQUIRED: {} ({branch}) lacks {tag}; complete {repair} before staffing this train.", epic.id))
@@ -103,7 +107,7 @@ pub(crate) fn synchronize_open_trains(root: &Path, repo: &Path, tag: &str) -> an
     let store = crate::store::open_task_store(root)?;
     let git = crate::worktree::GitOperations::new(repo.to_path_buf());
     for train in store.list(None)?.into_iter().filter(|t| is_release_train(t) && !t.is_terminal() && !is_cut_train(t)) {
-        if crate::train_guardrails::train_repo_root(root, &train).ok().as_deref() != Some(repo) { continue; }
+        if crate::train_guardrails::train_repo_root(root, &train).ok().and_then(|p| p.canonicalize().ok()) != repo.canonicalize().ok() { continue; }
         let result = (|| -> anyhow::Result<()> {
             let lane = train.effective_epic_branch().ok_or_else(|| anyhow::anyhow!("train has no lane"))?;
             let _target = crate::worktree::target_lock::lock_delivery_target(root, repo, lane)?;
@@ -149,21 +153,11 @@ pub(crate) fn open_trains(store: &dyn cas_store::TaskStore, integration: &str) -
 }
 
 fn ref_exists(repo: &Path, refname: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["rev-parse", "--verify", "--quiet", &format!("{refname}^{{commit}}")])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    crate::worktree::GitOperations::new(repo.to_path_buf()).ref_sha(&format!("{refname}^{{commit}}")).is_ok()
 }
 
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["merge-base", "--is-ancestor", ancestor, descendant])
-        .status()
-        .is_ok_and(|status| status.success())
+    crate::worktree::GitOperations::new(repo.to_path_buf()).is_ancestor(ancestor, descendant)
 }
 
 /// cas-25f1: a train's lane must exist on origin the moment it opens, or a

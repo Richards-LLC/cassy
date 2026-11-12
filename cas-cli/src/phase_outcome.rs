@@ -285,15 +285,6 @@ pub(crate) fn record_override(
 /// Walk a task's ancestors to inherit their prerequisites. Once a prerequisite
 /// edge is crossed, evaluate its outcome and its ancestors' outcomes too. An
 /// epic's own implementation children remain free to work toward its target.
-pub(crate) fn refusal(
-    root: &Path,
-    store: &dyn cas_store::TaskStore,
-    id: &str,
-    include_self: bool,
-) -> Result<Option<String>> {
-    refusal_with_parent(root, store, id, include_self, None)
-}
-
 fn refusal_with_parent(root: &Path, store: &dyn cas_store::TaskStore, id: &str, include_self: bool, parent: Option<Option<&str>>) -> Result<Option<String>> {
     let origin = id;
     let dependencies = |id: &str| -> cas_store::Result<Vec<cas_types::Dependency>> {

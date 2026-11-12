@@ -752,6 +752,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn publication_syncs_all_trains_or_names_one_repair_cas_4845() {
         use cas_types::{Task, TaskType};
@@ -770,6 +771,7 @@ mod tests {
         for (id, branch, path, body) in [
             ("cas-b001", "epic/custom-cleanup", "train.txt", "work\n"),
             ("cas-b002", "epic/conflicting", "shared.txt", "train\n"),
+            ("cas-b003", "epic/push-held", "pending.txt", "work\n"),
         ] {
             git(repo, &["checkout", "-qb", branch, &base]).unwrap();
             fs::write(repo.join(path), body).unwrap();
@@ -785,6 +787,10 @@ mod tests {
             tasks.add(&train).unwrap();
             git(repo, &["push", "-q", "origin", branch]).unwrap();
         }
+        use std::os::unix::fs::PermissionsExt;
+        let hook = bare.path().join("hooks/pre-receive");
+        fs::write(&hook, "#!/bin/sh\nwhile read old new ref; do [ \"$ref\" != refs/heads/epic/push-held ] || exit 1; done\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
         git(repo, &["checkout", "-q", "main"]).unwrap();
         fs::write(repo.join("shared.txt"), "release\n").unwrap();
         fs::write(repo.join("released-fix.txt"), "required gate repair\n").unwrap();
@@ -811,10 +817,16 @@ mod tests {
         let repair = repairs().pop().expect("one publication conflict repair");
         assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b002").is_err());
         assert!(crate::epic_design_review::ensure_staffing_allowed(&root, &repair.id).is_ok());
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b003").is_err());
+        let held = git(repo, &["rev-parse", "epic/push-held"]).unwrap();
         reconcile_once(&root, repo, &scope, trigger, &reconciler).unwrap();
         assert_eq!(git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap(), tip);
         assert_eq!(repairs().len(), 1);
         assert_eq!(git(repo, &["status", "--porcelain", "--untracked-files=no"]).unwrap(), "");
+        fs::remove_file(hook).unwrap();
+        reconcile_once(&root, repo, &scope, ReconcileTrigger::Publish { tag: "v9.99.7".into() }, &reconciler).unwrap();
+        assert_eq!(git(repo, &["rev-parse", "epic/push-held"]).unwrap(), held);
+        assert!(crate::epic_design_review::ensure_staffing_allowed(&root, "cas-b003").is_ok());
         git(repo, &["checkout", "-q", "epic/conflicting"]).unwrap();
         assert!(git(repo, &["merge", "--no-ff", "--no-commit", "v9.99.7"]).is_err());
         fs::write(repo.join("shared.txt"), "train\nrelease\n").unwrap();

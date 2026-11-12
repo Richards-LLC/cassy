@@ -1297,7 +1297,7 @@ impl GitOperations {
         no_ff: bool,
     ) -> Result<Option<String>> {
         let repo_root = self.repo_root.clone();
-        self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff, true)
+        self.merge_branch_in_dir(&repo_root, Some(target_branch), source_branch, no_ff)
     }
 
     /// Refuse an in-place merge unless `dir`'s symbolic HEAD is exactly the
@@ -1329,7 +1329,11 @@ impl GitOperations {
     /// detached worktree for [`Self::merge_branch_via_temp_worktree`]
     /// (cas-4702 / GH #68) — the merge mechanics, conflict detection and
     /// abort-on-failure guarantees are identical either way.
-    fn merge_branch_in_dir(
+    fn merge_branch_in_dir(&self, dir: &Path, expected_target: Option<&str>, branch: &str, no_ff: bool) -> Result<Option<String>> {
+        self.merge_branch_in_dir_with_regeneration(dir, expected_target, branch, no_ff, true)
+    }
+
+    fn merge_branch_in_dir_with_regeneration(
         &self,
         dir: &Path,
         expected_target: Option<&str>,
@@ -1553,7 +1557,7 @@ impl GitOperations {
         no_ff: bool,
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
-            self.merge_branch_in_dir(dir, None, source_branch, no_ff, true)
+            self.merge_branch_in_dir(dir, None, source_branch, no_ff)
         }, None)
     }
 
@@ -1564,7 +1568,7 @@ impl GitOperations {
             if !output.status.success() {
                 return Err(GitError::CommandFailed(String::from_utf8_lossy(&output.stderr).into_owned()));
             }
-            self.merge_branch_in_dir(dir, None, tag, true, false)
+            self.merge_branch_in_dir_with_regeneration(dir, None, tag, true, false)
         }, None)
     }
 
@@ -1578,7 +1582,7 @@ impl GitOperations {
         publication: &mut MergePublication<'_>,
     ) -> Result<Option<String>> {
         self.advance_via_temp_worktree(target_branch, |dir| {
-            self.merge_branch_in_dir(dir, None, source_branch, true, true)
+            self.merge_branch_in_dir(dir, None, source_branch, true)
         }, Some(publication))
     }
 

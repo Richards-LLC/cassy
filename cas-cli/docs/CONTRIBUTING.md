@@ -4402,6 +4402,12 @@ the same grant before the first park. This preserves the task's status, assignee
 branch anchor and proof. The grant applies to that exact merge parent in the
 task's declared work target. Close checks every other side parent and measures
 the approved merge's delivered diff against the ordinary pushed-tip proof gates.
+The same grant adopts a commit that reached the lane by fast-forward, together
+with its ancestors, even when its subject names another task: commit subjects
+are never delivery identity over an explicit grant. Commits stacked after the
+granted SHA are still judged by their own subjects. Use it when a follow-up task
+takes over a commit made under the original task, instead of cancelling and
+recreating the task or rewriting a pushed lane.
 
 Re-parking a rejected QA delivery opens the next round automatically within the
 configured round limit. Cassy reuses the prior reviewer only when its current

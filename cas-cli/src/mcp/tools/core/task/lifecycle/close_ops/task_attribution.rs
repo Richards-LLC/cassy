@@ -259,7 +259,7 @@ pub(super) fn validated_started_delivery(
         {
             continue;
         }
-        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, &identity) {
+        if claims_another_task(repo, sha, message, &identity) {
             // cas-aa98: a no-code task delivers no commits, so the worker's
             // next task committing on this lane is that task's work, not
             // foreign work inside this delivery.
@@ -268,7 +268,9 @@ pub(super) fn validated_started_delivery(
             }
             let subject = message.trim().lines().next().unwrap_or("");
             return Err(refuse(&format!(
-                "foreign commit {sha} ({subject}) follows the base"
+                "foreign commit {sha} ({subject}) follows the base. If this task should deliver \
+                 that commit, a supervisor adopts it with `task action=request_changes` and \
+                 `merge_source={sha}` in the reason"
             )));
         }
         if on_lane
@@ -412,9 +414,23 @@ pub(super) fn commit_claims_another_task(
     identity: &TaskCommitIdentity,
 ) -> bool {
     is_safe_git_refname(commit)
-        && !identity.matches_superseded_commit(commit)
         && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
-            .is_some_and(|message| subject_claims_another_task(&message, identity))
+            .is_some_and(|message| claims_another_task(repo, commit, &message, identity))
+}
+
+/// The subject rule yields to explicit authority: a cancelled predecessor's
+/// successor link (cas-aacc) or a supervisor's `merge_source` grant. cas-8144:
+/// the grant adopts the named commit and its ancestors whether they arrived by
+/// merge or by fast-forward, so a lane moved onto a commit whose subject names
+/// another task needs no rewrite or cancel-and-recreate. Descendants of the
+/// grant are still judged by the subject rule.
+fn claims_another_task(repo: &Path, sha: &str, message: &str, identity: &TaskCommitIdentity) -> bool {
+    !identity.matches_superseded_commit(sha)
+        && subject_claims_another_task(message, identity)
+        && !identity
+            .approved_merge_parents
+            .iter()
+            .any(|source| git_commit_is_ancestor(repo, sha, source))
 }
 
 /// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
@@ -467,8 +483,7 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     Some(records.iter().all(|record| {
         record
             .split_once('\u{1f}')
-            .is_some_and(|(sha, message)| !identity.matches_superseded_commit(sha)
-                && subject_claims_another_task(message, identity))
+            .is_some_and(|(sha, message)| claims_another_task(repo, sha, message, identity))
     }))
 }
 
@@ -501,7 +516,7 @@ pub(crate) fn branch_task_claims(
         let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
             continue;
         };
-        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, identity) {
+        if claims_another_task(repo, sha, message, identity) {
             if foreign.is_none() {
                 let subject = message.trim().lines().next().unwrap_or("").trim();
                 foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));
@@ -4011,6 +4026,48 @@ mod tests {
                 assert_eq!(identity.matches_known_commit(&port), !integrated);
             }
             assert_eq!(serde_json::to_value(store.get(&previous.id).unwrap()).unwrap(), previous_snapshot);
+        }
+    }
+
+    /// cas-8144: a follow-up task's lane fast-forwarded onto a commit whose
+    /// subject names the original task refused close and merge, and only
+    /// cancel-and-recreate escaped. The supervisor's merge_source grant adopts
+    /// that commit; work stacked on it is still judged by its own subject.
+    #[test]
+    fn merge_source_adopts_fast_forwarded_foreign_named_commit_cas_8144() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        for (granted, foreign_tail, allowed) in
+            [(false, false, false), (true, false, true), (true, true, false)]
+        {
+            let dir = fixture();
+            let repo = dir.path();
+            std::fs::write(repo.join(".git/info/exclude"), ".cas/\n").unwrap();
+            let root = crate::store::init_cas_dir(repo).unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id='wedge'\n").unwrap();
+            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+            let base = git(repo, &["rev-parse", "main"]);
+            let moved = commit(repo, "fix.rs", "fix\n", "fix(commander): repair the board (cas-e1db)");
+            if foreign_tail {
+                commit(repo, "other.rs", "other\n", "fix(cas-dddd): unrelated delivery");
+            }
+            let target = cas_types::WorkTarget { repo_selector: "project:wedge".into(), target_branch: "main".into() };
+            let mut task = Task::new("cas-f19b".into(), "Follow-up fix".into());
+            task.assignee = Some("worker".into());
+            task.deliverables.work_target = Some(target.clone());
+            task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+                work_target: target.clone(), assignee: "worker".into(), branch: "factory/worker".into(), base_sha: base,
+            });
+            if granted {
+                task.deliverables.authorized_merge_sources.push(cas_types::AuthorizedMergeSource {
+                    commit: moved.clone(), supervisor_id: "supervisor".into(), work_target: target,
+                });
+            }
+            let result = task_commit_identity_in_repo(repo, &task, None);
+            assert_eq!(result.is_ok(), allowed, "granted={granted}, foreign={foreign_tail}: {result:?}");
+            if let Ok(identity) = result {
+                assert!(identity.matches_known_commit(&moved));
+                assert!(!commit_claims_another_task(repo, &moved, &identity));
+            }
         }
     }
 

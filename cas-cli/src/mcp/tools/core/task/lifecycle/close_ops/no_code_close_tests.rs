@@ -3064,10 +3064,11 @@ async fn bug_family_statement_extension_parks_through_close_cas_f63f() {
         "version: 1\nupdated: '2026-11-12'\ninvariants:\n  am-payment-to-qbo-2: {{statement: Arrived, check: Read state}}\nbug_families:\n  paid-invoice-duplicated-by-manual-sync:\n    title: Paid invoice duplicated by manual sync\n    statement: {statement}\n{extra}    tasks: [cas-f63f]\n    invariants: [am-payment-to-qbo-2]\n    journeys: [FLOW]\njourneys:\n  - id: FLOW\n    status: live\n    entry: {{url: /flow, trigger: Open}}\n    steps: [Arrive]\n    owners: ['src/flow.ts']\n    invariants: [am-payment-to-qbo-2]\n"
     );
     let base = "Manual sync never duplicates a paid invoice";
-    let extended = format!("{base}, including linked off-platform PENDING bitcoin webhook evidence");
+    let extended = format!("{base}, including linked off-platform PENDING bitcoin webhook evidence and typed-discount exclusion");
     for (registry, parks, code) in [
         (family(&extended, ""), true, None),
         (family(base, ""), false, Some("G3")),
+        (family(&extended, "").replace("tasks: [cas-f63f]", "tasks: [cas-other]"), false, Some("G3")),
         (family(base, "    note: changed\n"), false, Some("unsupported_bug_family_field")),
     ] {
         let mut env = TestEnvGuard::temp_home();

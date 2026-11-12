@@ -608,6 +608,10 @@ bug_families:
     tasks: [cas-8447]
     journeys: [FACTORY-CLOSE]
     invariants: [FACTORY-ESCAPED-CALLER-SHAPE]
+  authenticated-recycle-fixtures:
+    title: Hermetic reset and dead-worker recovery fixtures satisfy account and execution-host admission while preserving refusal and work-retention checks
+    tasks: [cas-613e]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   fresh-machine-worker-capacity:
     title: Spawn routing honors native live worker caps, recovered local capacity and existing task deliveries
     tasks: [cas-a92f]
@@ -1438,14 +1442,14 @@ invariants:
     statement: A positive Python substring assertion of exact HTML or Markdown escaping of an immutable supplied fixture value is data integrity; escaped prose without that provenance remains rejected.
     check: Run test_escaped_python_caller_payload_cas_8447 in scripts/test-check-test-shape.py through both message and text-pin passes, including changed-line mode; replay the accounting account field case and retain unrelated, unsupplied, reassigned, cross-scope and negative-assertion refusals. Run the changed-lane CLI with the reported account payload and an unrelated generated-prose control.
     bug: {task: cas-8447}
-  FACTORY-FRESH-WORKER-CAPACITY:
-    statement: Peer placement uses a fresh native worker count within factory.max_workers and fresh host pressure; unsent asks yield to recovered local capacity and accepted or in-flight asks retain one delivery per task.
-    check: Run the three cas_a92f regressions in factory_build_routing through the real directory, route and durable outbox seam; verify full peers receive zero asks, local recovery abandons unsent asks and directory outages retain accepted deliveries without another lookup or send.
-    bug: {task: cas-a92f}
   FACTORY-STRUCTURED-PEER-HOLD:
     statement: Only a kind=ask first-content-line CAS_MERGE_HOLD JSON declaration for an exact task_id or PR grants merge-hold authority; incidental body mentions and legacy prose-only asks do not.
     check: Run peer_ask_gate::tests at the delivered tip. Replay Not yours task context, in-my-merge context, plain review prose, task/PR scoped holds and mismatches, quoted metadata, invalid/empty scope, and unresolved raw PR scope. Preserve explicit-kind, override/operator notice, linked and unambiguous answer, sibling answer and branch/bare PR resolution cases.
     bug: {task: cas-5d65}
+  FACTORY-FRESH-WORKER-CAPACITY:
+    statement: Peer placement uses a fresh native worker count within factory.max_workers and fresh host pressure; unsent asks yield to recovered local capacity and accepted or in-flight asks retain one delivery per task.
+    check: Run the three cas_a92f regressions in factory_build_routing through the real directory, route and durable outbox seam; verify full peers receive zero asks, local recovery abandons unsent asks and directory outages retain accepted deliveries without another lookup or send.
+    bug: {task: cas-a92f}
   HUB-J13-QUALITY-PALETTE:
     statement: The Quality journey focuses the visible desktop search or phone composer, sends one palette shortcut and waits for the palette; the selected project's trend factor and chart remain visible in both schemes.
     check: Run the original HUB-J13 quality trend identity headlessly on locked Playwright with retries zero; keep a red focus-loss control, the passing control, and the final four viewport/scheme captures. The journey must show the trend, not merely issue a quality request.

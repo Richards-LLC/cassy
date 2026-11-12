@@ -8715,7 +8715,7 @@ while True:
                     "blocked_hold": {"reason": "needs input", "who": "raven-old-session",
                         "when": "2026-11-12T18:11:16.986803Z"},
                     "answered_blocker": {"worker": "raven-old-session", "supervisor": "lead",
-                        "reason": "needs input", "ask": null},
+                        "reason": "needs input", "ask": null, "message_id": 1},
                 }),
             )
             .unwrap();

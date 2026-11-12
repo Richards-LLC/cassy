@@ -436,6 +436,7 @@ impl CasService {
                 "update" => this.task_update(req).await,
                 "start" => this.task_start(req).await,
                 "close" => {
+                    // gate-audit[supervisor_override]: Selects manual-intervention attribution only; override authority is enforced by the delegated close handler.
                     let manual = if req.supervisor_override.unwrap_or(false) { None }
                         else { this.inner.resolve_live_supervisor_authority().ok() };
                     let was_closed = this.inner.open_task_store().ok().and_then(|s| s.get(&event_task_id).ok())

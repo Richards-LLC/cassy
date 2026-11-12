@@ -205,8 +205,30 @@ pub(super) fn authority_value(signature: &syn::Signature, block: &syn::Block) ->
 }
 
 fn canonical(expr: &syn::Expr) -> String {
+    fn normalize(stream: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+        stream.into_iter().map(|token| match token {
+            proc_macro2::TokenTree::Group(group) => proc_macro2::TokenTree::Group(
+                proc_macro2::Group::new(group.delimiter(), normalize(group.stream()))),
+            proc_macro2::TokenTree::Literal(lit) => {
+                match syn::parse_str::<syn::LitStr>(&lit.to_string()) {
+                    Ok(text) => {
+                        let value = text.value();
+                        // These are role wire values/environment keys. Other
+                        // strings include diagnostic labels passed to guards;
+                        // rewording them must never create a new policy site.
+                        let value = if identity_env(&value) || matches!(value.as_str(),
+                            "worker" | "supervisor" | "operator" | "sub_agent" | "task-verifier" | "ci")
+                        { value.as_str() } else { "<text>" };
+                        proc_macro2::TokenTree::Literal(proc_macro2::Literal::string(value))
+                    }
+                    Err(_) => proc_macro2::TokenTree::Literal(lit),
+                }
+            }
+            token => token,
+        }).collect()
+    }
     let source = expr.span().source_text().unwrap_or_default();
-    source.parse::<proc_macro2::TokenStream>().map(|tokens| tokens.to_string()).unwrap_or(source)
+    source.parse::<proc_macro2::TokenStream>().map(|tokens| normalize(tokens).to_string()).unwrap_or(source)
 }
 
 

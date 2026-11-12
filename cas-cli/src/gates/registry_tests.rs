@@ -120,7 +120,7 @@ fn every_registered_refusal_site_emits_its_code() {
     let legacy = r#"fn probe() {
         let role = std::env::var("CAS_AGENT_ROLE");
         tag("G-01", "unrelated");
-        if role == Worker { anyhow::bail!("old diagnostic"); }
+        if role == Worker && diagnostic_label("old label") { anyhow::bail!("old diagnostic"); }
     }"#;
     let probe = policy_dir.join("gates_cmd.rs");
     std::fs::write(&probe, legacy).unwrap();
@@ -133,7 +133,7 @@ fn every_registered_refusal_site_emits_its_code() {
         std::fs::write(&baseline, serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"sites":sites})).unwrap()).unwrap();
     };
     write_baseline(&seed);
-    std::fs::write(&probe, legacy.replace("old diagnostic", "reworded diagnostic")).unwrap();
+    std::fs::write(&probe, legacy.replace("old diagnostic", "reworded diagnostic").replace("old label", "new label")).unwrap();
     assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
     std::fs::write(&probe, legacy.replace("old diagnostic", "first").replace(
         "if role == Worker", "if role == Supervisor")).unwrap();

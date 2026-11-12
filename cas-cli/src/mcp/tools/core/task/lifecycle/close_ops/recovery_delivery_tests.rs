@@ -1998,6 +1998,10 @@ fn evolved_recovery_fixture(env: &mut TestEnvGuard) -> (Recovery, String) {
     let mut f = fixture(env);
     let repo = f.dir.path();
     git(repo, &["merge", "-q", "--ff-only", &f.final_tip]);
+    // Retire the old implementation before rebuilding it. A direct edit has
+    // automatic line-evolution proof and would never need reviewed-drop.
+    git(repo, &["rm", "footer.css"]);
+    git(repo, &["commit", "-qm", "retire old footer implementation"]);
     std::fs::write(repo.join("footer.css"), ".footer { display: grid; }\n").unwrap();
     git(repo, &["add", "footer.css"]);
     git(repo, &["commit", "-qm", "fix(cas-sibling): intentionally evolve footer"]);

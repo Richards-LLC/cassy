@@ -173,6 +173,12 @@ preserved content and containment on the configured target. A known source's
 tree-equivalent integrated squash can also establish attribution. An unrelated
 target commit cannot. Recovery refuses active task leases, replacement of a
 resolvable active anchor and identities owned by immutable delivery transactions.
+For deliberately evolved content, supply `supervisor_override=true` and
+`reason="reviewed-drop: <descendant SHA>[,<SHA>...] -- <why>"`. Every named commit
+must descend from the recovered delivery and be reachable on its target. The
+reviewed commits must change every dropped path and preserve its final target
+state. Recovery records the resolved review in its audit; missing or invalid
+review still refuses.
 It retains previous anchors, records the supervisor and reason, and binds the
 full integrated SHA using a guarded task write. Replaying that binding is a no-op.
 Assignment and task status stay unchanged; existing lease, branch and receipt

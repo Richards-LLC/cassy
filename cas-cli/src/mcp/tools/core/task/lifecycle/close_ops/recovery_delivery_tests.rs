@@ -2076,6 +2076,7 @@ async fn recover_delivery_refuses_unproven_evolution_cas_372b() {
         })).unwrap();
         let error = service.task(Parameters(request)).await.unwrap_err();
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-        assert_eq!(tasks.get(TASK).unwrap(), before);
+        assert_eq!(serde_json::to_value(tasks.get(TASK).unwrap()).unwrap(),
+            serde_json::to_value(&before).unwrap());
     }
 }

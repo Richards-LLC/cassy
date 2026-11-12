@@ -3499,6 +3499,9 @@ impl VerificationStore for SqliteVerificationStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             conn.execute_batch(VERIFICATION_SCHEMA)?;
+            // Approval stamps use the existing event table in the verdict's
+            // transaction, including stores opened without the task/event UI.
+            conn.execute_batch(crate::event_store::EVENT_SCHEMA)?;
             crate::shared_db::ensure_column(
                 &conn,
                 "verification_issues",

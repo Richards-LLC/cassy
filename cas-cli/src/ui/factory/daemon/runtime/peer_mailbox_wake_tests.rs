@@ -210,6 +210,7 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
     // cas-35563: rows 4234550/551 carried a confirmed published landing,
     // but the renderer silently converted their untyped protocol to receipt.
     let landing = format!("CAS_PEER_PREMERGE_V1 {}", serde_json::to_string(&cas_types::PeerPremergeReceipt {
+            registry_version: None,
         status: cas_types::VerificationStatus::Approved,
         project_id: "github.com/acme/widgets".into(),
         supervisor_id: "remote-sup".into(),

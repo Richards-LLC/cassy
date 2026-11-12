@@ -175,7 +175,20 @@ pub(crate) fn event(
                 approved_anchor: anchor,
                 dispatch_id: dispatch.id.clone(),
                 verdict_id: verdict.id.clone(),
-                registry_version: Some(crate::gates::registry_version_in_force()),
+                registry_version: if let Some(peer) = dispatch
+                    .repository
+                    .as_ref()
+                    .and_then(|r| r.peer_premerge.as_ref())
+                {
+                    peer.receipt
+                        .registry_version
+                        .clone()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|e| e.to_string())?
+                } else {
+                    Some(crate::gates::registry_version_in_force())
+                },
             };
             metadata.as_object_mut().unwrap().extend(
                 serde_json::to_value(stamp)

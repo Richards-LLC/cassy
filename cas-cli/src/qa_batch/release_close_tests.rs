@@ -86,6 +86,7 @@ fn published_train_closes_members_independently_cas_734b() {
     bound.peer_premerge = Some(cas_types::PeerPremergeAttestation {
         message_id: "peer-message".into(), sender_machine_id: "peer".into(), sender_session: "peer-session".into(),
         receipt: cas_types::PeerPremergeReceipt {
+            registry_version: None,
             status: cas_types::VerificationStatus::Approved, project_id: "close-fixture".into(),
             supervisor_id: "supervisor".into(), task_id: "cas-approved".into(),
             source_branch: "factory/cas-approved".into(), source_sha: anchor.clone(), target_branch: "main".into(),

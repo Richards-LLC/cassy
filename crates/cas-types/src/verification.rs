@@ -555,6 +555,10 @@ impl FromStr for VerificationRecoveryAction {
 /// verifier capabilities deliberately never cross the mailbox boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerPremergeReceipt {
+    /// Portable serde RegistryVersion, owned and validated by the gate registry.
+    /// Old peers have no stamp; receiving one must never invent today's version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_version: Option<serde_json::Value>,
     /// Explicit verdict; missing and unknown status must never grant authority.
     pub status: VerificationStatus,
     pub project_id: String,

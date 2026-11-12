@@ -514,6 +514,11 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::build(true)
+        }
+
+        /// `conflict`: the first two deliveries edit the same file.
+        fn build(conflict: bool) -> Self {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             for key in [
                 "CAS_ROOT",
@@ -579,11 +584,13 @@ mod tests {
                         "epic/train",
                     ],
                 );
-                shas[index] = if index < 2 {
-                    commit(&checkout, "shared.md", &format!("delivery {}\n", index + 1))
-                } else {
-                    commit(&checkout, "third.md", "third delivery\n")
+                let file = match index {
+                    0 => "shared.md",
+                    1 if conflict => "shared.md",
+                    1 => "second.md",
+                    _ => "third.md",
                 };
+                shas[index] = commit(&checkout, file, &format!("delivery {}\n", index + 1));
                 git(&checkout, &["push", "origin", &branch]);
                 let mut agent = Agent::new(worker.clone(), worker.clone());
                 agent.role = AgentRole::Worker;
@@ -806,18 +813,10 @@ mod tests {
         red["outcome"] = "PASS".into();
         red.as_object_mut().unwrap().remove("red_since");
         std::fs::write(ci_dir.join("state.json"), red.to_string()).unwrap();
-        // Count origin reads: merge admission asks origin once per entry.
-        let reads = fixture.root.join("origin-reads.log");
-        let counter = fixture.root.join("count-upload-pack");
-        std::fs::write(&counter, format!("#!/bin/sh\necho read >> '{}'\nexec git upload-pack \"$@\"\n", reads.display())).unwrap();
-        std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
         // Reconstruct the consumer from durable state, as after daemon restart.
         resume_pending(&fixture.root, "queue-session")
             .await
             .unwrap();
-        let reads = std::fs::read_to_string(&reads).unwrap_or_default().lines().count();
-        assert_eq!(reads, fixture.ids.len(), "origin reads for {} train entries", fixture.ids.len());
         let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
             .unwrap()
             .unwrap();
@@ -864,5 +863,34 @@ mod tests {
             before,
             "completed queue is idempotent"
         );
+    }
+
+    /// A train asks origin about its target once per entry: under the merge
+    /// lock, where containment, reconciliation and publication share it.
+    #[tokio::test]
+    async fn train_merge_reads_origin_once_per_entry() {
+        let fixture = Fixture::build(false);
+        fixture.start().await;
+        let reads = fixture.root.join("origin-reads.log");
+        let counter = fixture.root.join("count-upload-pack");
+        std::fs::write(&counter, format!(
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$PPID/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
+            reads.display(), reads.display(),
+        )).unwrap();
+        std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        git(fixture._repo.path(), &["config", "remote.origin.uploadpack", counter.to_str().unwrap()]);
+
+        resume_pending(&fixture.root, "queue-session").await.unwrap();
+
+        let queue = read(&path(&fixture.root, fixture._repo.path(), "epic/train").unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(!queue.active(), "{}", queue.render());
+        let operations = GitOperations::new(fixture._repo.path().to_path_buf());
+        for sha in &fixture.shas {
+            assert!(operations.is_ancestor(sha, "origin/epic/train"), "{:?}", queue.outcomes);
+        }
+        let reads = std::fs::read_to_string(&reads).unwrap_or_default();
+        assert_eq!(reads.lines().count(), fixture.ids.len(), "origin reads:\n{reads}");
     }
 }

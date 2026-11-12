@@ -5725,19 +5725,24 @@ async fn personal_pull_of_a_team_owned_project_stages_nothing_cas_abad() {
 /// on cas-98d2 and cas-e50f, deliveries parked on prowl. request_changes
 /// commits through cas-store directly, so nothing was queued for Cloud and
 /// prowl kept both tasks AwaitingMerge until a supervisor mirrored the verdict.
+/// Reopen shares the direct-write path; the discovery note rides the same row.
 #[tokio::test]
-async fn peer_request_changes_reopens_the_owning_store_cas_a836() {
+async fn peer_verdicts_reopen_the_owning_store_cas_a836() {
     use rmcp::handler::server::wrapper::Parameters;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mut env = crate::test_support::TestEnvGuard::temp_home();
     let server = MockServer::start().await;
-    let mut parked = Task::new("cas-a836-parked".into(), "Parked delivery".into());
-    parked.origin_project = Some("review-project".into());
-    parked.status = TaskStatus::AwaitingMerge;
-    parked.assignee = Some("owner-worker".into());
-    parked.updated_at -= chrono::Duration::hours(1);
+    let row = |id: &str, status: TaskStatus| {
+        let mut task = Task::new(id.into(), "Peer-owned delivery".into());
+        task.origin_project = Some("review-project".into());
+        task.status = status;
+        task.assignee = Some("owner-worker".into());
+        task.updated_at -= chrono::Duration::hours(1);
+        task
+    };
+    let (parked, closed) = (row("cas-a836-parked", TaskStatus::AwaitingMerge), row("cas-a836-closed", TaskStatus::Closed));
     let machine = |logged_in: bool| {
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
@@ -5748,7 +5753,9 @@ async fn peer_request_changes_reopens_the_owning_store_cas_a836() {
                 team_id: Some("review-team".into()), ..Default::default()
             }.save_to_cas_dir(&root).unwrap();
         }
-        crate::store::open_task_store_local(&root).unwrap().add(&parked).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        tasks.add(&parked).unwrap();
+        tasks.add(&closed).unwrap();
         (dir, root)
     };
     let (_reviewer_dir, reviewer) = machine(true);
@@ -5761,15 +5768,23 @@ async fn peer_request_changes_reopens_the_owning_store_cas_a836() {
         id: parked.id.clone(),
         reason: "Verifier rejected the delivery; add the missing guard.".into(),
     })).await.unwrap();
+    core.cas_task_notes(Parameters(crate::mcp::tools::TaskNotesRequest {
+        id: parked.id.clone(), note_type: "discovery".into(),
+        note: "Peer verifier found the guard missing on the retry path.".into(),
+        supervisor_override: None, reason: None,
+    })).await.unwrap();
+    core.cas_task_reopen(Parameters(crate::mcp::tools::TaskReopenRequest {
+        id: closed.id.clone(), reason: Some("Regression found after release.".into()),
+    })).await.unwrap();
 
     let queued = SyncQueue::open(&reviewer).unwrap().pending_for_team("review-team", 10, 5).unwrap();
-    let verdict = queued.iter().find(|item| item.entity_id == parked.id)
-        .and_then(|item| item.payload.as_deref())
-        .expect("request_changes queued nothing for the peer");
-    let verdict: serde_json::Value = serde_json::from_str(verdict).unwrap();
+    let rows: Vec<serde_json::Value> = queued.iter()
+        .filter_map(|item| item.payload.as_deref())
+        .map(|payload| serde_json::from_str(payload).unwrap())
+        .collect();
     Mock::given(method("GET")).and(path("/api/teams/review-team/sync/pull"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tasks": [verdict], "pulled_at": "2026-11-12T19:34:00Z",
+            "tasks": rows, "pulled_at": "2026-11-12T19:34:00Z",
             "team_id": "review-team", "status": "ok"
         }))).mount(&server).await;
     let queue = Arc::new(SyncQueue::open(&owner).unwrap());
@@ -5786,5 +5801,8 @@ async fn peer_request_changes_reopens_the_owning_store_cas_a836() {
     ).unwrap();
 
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(tasks.get(&parked.id).unwrap().status, TaskStatus::Open);
+    let returned = tasks.get(&parked.id).unwrap();
+    assert_eq!(returned.status, TaskStatus::Open, "request_changes never reached the owner");
+    assert!(returned.notes.contains("guard missing on the retry path"), "discovery note lost");
+    assert_eq!(tasks.get(&closed.id).unwrap().status, TaskStatus::Open, "reopen never reached the owner");
 }

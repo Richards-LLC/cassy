@@ -632,9 +632,25 @@ mod tests {
         use cas_types::{Agent, AgentRole};
         use rmcp::handler::server::wrapper::Parameters;
         let _env = TestEnvGuard::temp_home();
-        let (_temp, root) = fixture();
+        let (temp, root) = fixture();
         freeze(&root, "cas-tr", "operator", None).unwrap();
         let store = crate::store::open_task_store(&root).unwrap();
+        let lane = "epic/release-train-vnext-cas-tr";
+        let mut cut = store.get("cas-tr").unwrap();
+        cut.labels.push("release-train-cut".into());
+        store.update(&cut).unwrap();
+        let tip = git(temp.path(), &["rev-parse", lane]);
+        let dir = crate::train_ci::directory(&root, "cas-tr").unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("state.json"), serde_json::json!({
+            "branch": lane, "red_since": "2026-11-12T22:00:00Z", "red_head": tip, "run_id": "421",
+        }).to_string()).unwrap();
+        git(temp.path(), &["checkout", "-qb", "factory/repair", lane]);
+        std::fs::write(temp.path().join("repair.txt"), "one-commit repair\n").unwrap();
+        git(temp.path(), &["add", "repair.txt"]);
+        git(temp.path(), &["commit", "-qm", "repair the red train"]);
+        let repair_tip = git(temp.path(), &["rev-parse", "HEAD"]);
+        assert!(crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).is_err());
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
         let request = |reason: Option<&str>| serde_json::from_value(serde_json::json!({
             "action":"train_freeze", "id":"cas-tr", "decision":"lift", "reason":reason,
@@ -668,7 +684,11 @@ mod tests {
         assert_ne!(result.is_error, Some(true));
         let train = store.get("cas-tr").unwrap();
         assert!(freeze_of(&train).is_none(), "real MCP lift must clear the gate");
-        check_merge(&root, "epic/release-train-vnext-cas-tr", Some("cas-feat")).unwrap();
+        assert!(!is_cut_train(&train));
+        crate::mcp::tools::core::task::release_train::check_cut_merge(&root, lane, Some("cas-fix")).unwrap();
+        git(temp.path(), &["checkout", "-q", lane]);
+        git(temp.path(), &["merge", "--ff-only", "factory/repair"]);
+        assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), repair_tip);
         let decision = train.notes.lines().find_map(|line| line.split_once("RELEASE FREEZE LIFTED: ")
             .and_then(|(_, payload)| serde_json::from_str::<Value>(payload).ok())).unwrap();
         assert_eq!(decision["actor"], actor.name);

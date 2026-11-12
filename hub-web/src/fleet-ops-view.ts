@@ -29,7 +29,7 @@ import {
   type UndoOffer,
 } from "./fleet-ops";
 import { releaseHeader, type TrainActivity } from "./progress-view";
-import { epicTitle, focusEpicChoices, type ReleaseEpic } from "./progress-model";
+import { epicTitle, focusEpicChoices, isLiveEpic, type ReleaseEpic } from "./progress-model";
 import { fleetControlGate, type FleetControlGate } from "./fleet-permissions";
 import { labelled, writeAccessPanel, type WriteAccessContext } from "./write-grant-view";
 import type { Scope } from "./types";
@@ -289,7 +289,7 @@ export function trainControls(document: Document, context: FleetOpsViewContext, 
 
 /** Frozen release cards stay reachable even when the supervisor focuses elsewhere. */
 export function releaseCards(document: Document, context: FleetOpsViewContext | undefined, primary: ReleaseEpic | undefined, epics: readonly ReleaseEpic[], activity?: TrainActivity): HTMLElement[] {
-  const trains = [...(primary ? [primary] : []), ...epics.filter(epic => epic.freeze && epic.id !== primary?.id)];
+  const trains = [...(primary ? [primary] : []), ...epics.filter(epic => (epic.freeze || (epic.freeze_lift && isLiveEpic(epic))) && epic.id !== primary?.id)];
   if (!trains.length) return [releaseHeader(document, undefined)];
   return trains.map(train => {
     const header = releaseHeader(document, train, train.id === primary?.id ? activity : undefined);

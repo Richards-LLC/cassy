@@ -694,22 +694,24 @@ mod tests {
         let request = |reason: Option<&str>| serde_json::from_value(serde_json::json!({
             "action":"train_freeze", "id":"cas-tr", "decision":"lift", "reason":reason,
         })).unwrap();
-        for role in [None, Some(AgentRole::Worker), Some(AgentRole::Standard), Some(AgentRole::Director), Some(AgentRole::Supervisor)] {
+        for (index, role) in [None, Some(AgentRole::Worker), Some(AgentRole::Standard), Some(AgentRole::Director), Some(AgentRole::Supervisor)].into_iter().enumerate() {
+            let caller_id = format!("denied-{index}");
             let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-            core.set_agent_id_for_testing("caller".into());
+            core.set_agent_id_for_testing(caller_id.clone());
             if let Some(role) = role {
-                let mut actor = Agent::new_with_role("caller".into(), "release-lead".into(), role);
+                let mut actor = Agent::new_with_role(caller_id.clone(), "release-lead".into(), role);
                 if role == AgentRole::Supervisor {
                     actor.status = cas_types::AgentStatus::Shutdown;
                 }
                 core.open_agent_store().unwrap().register(&actor).unwrap();
+                assert_eq!(core.open_agent_store().unwrap().get(&caller_id).unwrap().role, role);
             }
             let service = CasService::new(core, None);
             assert!(service.factory(Parameters(request(Some("repair the cut")))).await.is_err());
             assert_eq!(serde_json::to_value(store.get("cas-tr").unwrap()).unwrap(), before);
         }
         let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-        let mut actor = Agent::new_with_role("caller".into(), "release-lead".into(), AgentRole::Supervisor);
+        let mut actor = Agent::new_with_role("live-caller".into(), "release-lead".into(), AgentRole::Supervisor);
         actor.factory_session = Some("release-session".into());
         core.open_agent_store().unwrap().register(&actor).unwrap();
         core.set_agent_id_for_testing(actor.id.clone());

@@ -205,7 +205,7 @@ describe("the rail's controls draw that state (cas-a474)", () => {
   it("keeps every frozen train actionable outside supervisor focus (cas-0e54)", () => {
     const choose = vi.fn();
     const frozen = (id: string) => ({ id, title: id, freeze: { frozen_at: "2026-11-12T22:00:00Z", summary: id } });
-    const primary = { id: "focused", title: "Current work" };
+    const primary = { id: "focused", title: "Current work", status: "open" };
     const epics = [primary, frozen("release-one"), frozen("release-two")];
     const cards = releaseCards(document, context(["machine-read"], new FleetOpsState(), { choose }), primary, epics);
     expect(cards).toHaveLength(3);
@@ -217,6 +217,8 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     expect(releaseCards(document, undefined, epics[1], epics)).toHaveLength(2);
     const lifted = { ...primary, freeze_lift: { actor: "release-lead", at: "2026-11-12T22:00:00Z", reason: "repair the cut", summary: "lift receipt" } };
     expect(releaseHeader(document, lifted).querySelector(".release-freeze")?.textContent).toBe(lifted.freeze_lift.summary);
+    expect(releaseCards(document, undefined, undefined, [lifted])[0]?.querySelector(".release-freeze")?.textContent).toBe(lifted.freeze_lift.summary);
+    expect(releaseCards(document, undefined, undefined, [{ ...lifted, status: "closed" }])[0]?.querySelector(".release-freeze")).toBeNull();
   });
 
   it("gates each menu item: a control pairing can pause but sees Stop disabled with the command that adds factory:manage", () => {

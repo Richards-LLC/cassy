@@ -591,7 +591,8 @@ const MAINTAINED_VIEWS: [(&str, &str); 3] = [
 /// `cas qa ledger init --release-scope` writes them into the review ledger,
 /// so the published RELEASE_VERDICT bytes carry them.
 pub(crate) fn review_blocks_for_scope(root: &Path, scope_path: &Path) -> Result<(ReleaseInventory, String)> {
-    let scope: ReleaseScope = serde_json::from_slice(&fs::read(scope_path)?)?;
+    let mut scope: ReleaseScope = serde_json::from_slice(&fs::read(scope_path)?)?;
+    scope.reviewed_sha = scope.final_release_sha.clone();
     let (repo, _) = crate::mcp::tools::core::task::repo_context::integration_branch(root)
         .context("project checkout unavailable")?;
     let inventory = crate::qa_batch::resolve_release_inventory(root, &repo, &scope)
@@ -864,7 +865,7 @@ mod tests {
             project_id: "release-fixture".into(),
             repository: "Example/Repo".into(),
             release_id: "v9.99.2".into(),
-            reviewed_sha: base.clone(),
+            reviewed_sha: git(repo, &["rev-parse", &format!("{base}^1")]).unwrap(),
             final_release_sha: base.clone(),
             promotion_pr: None,
             release_tag: None,
@@ -878,6 +879,7 @@ mod tests {
 
         let (_, ledger) = review_blocks_for_scope(&root, &scope_path).unwrap();
         let transformations = crate::qa_batch::release_close::parse_manifest(&ledger).unwrap().unwrap();
+        assert_eq!(transformations.reviewed_sha, base);
         assert_eq!((transformations.release_id.as_str(), transformations.final_release_sha.as_str()), ("v9.99.2", base.as_str()));
         let json = ledger.split("```cassy-release-epics\n").nth(1).unwrap().split("\n```").next().unwrap();
         let epics: EpicManifest = serde_json::from_str(json).unwrap();

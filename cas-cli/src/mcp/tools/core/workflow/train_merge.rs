@@ -317,9 +317,16 @@ impl CasCore {
     }
 }
 
-fn published(queue: &Queue, entry: &Entry) -> Result<bool> {
+/// Publication, rather than a local-only merge, advances the queue. Merge
+/// admission's one origin read and its push refresh the tracking ref, so
+/// origin is asked again only after a merge whose result the ref lacks.
+fn published(queue: &Queue, entry: &Entry, merged: bool) -> Result<bool> {
     let git = GitOperations::new(queue.repo.clone());
-    // Publication, rather than a local-only merge, advances the queue.
+    let tracked = git.resolve_commit(&format!("refs/remotes/origin/{}", queue.target))
+        .is_some_and(|tip| git.is_ancestor(&entry.sha, &tip));
+    if tracked || (!merged && git.has_origin_remote()) {
+        return Ok(tracked);
+    }
     let target = git
         .fetch_merge_target(&queue.target)?
         .or_else(|| git.resolve_commit(&queue.target))
@@ -384,7 +391,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
                 break;
             }
             let entry = &queue.entries[queue.next];
-            if published(&queue, entry)? {
+            if published(&queue, entry, false)? {
                 queue
                     .outcomes
                     .push(format!("{} merged {}", entry.task, entry.sha));
@@ -435,7 +442,7 @@ pub(crate) async fn resume_pending(root: &Path, session: &str) -> Result<()> {
             };
             let result = core.worktree_merge_queued(&expected, &queue.id).await;
             let current = tasks.get(&entry.task)?;
-            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry)? {
+            if current.status != TaskStatus::AwaitingMerge || published(&queue, entry, true)? {
                 // Re-read the durable result at the top, including a conflict
                 // return or a merge committed just before a previous crash.
                 continue;
@@ -874,7 +881,7 @@ mod tests {
         let reads = fixture.root.join("origin-reads.log");
         let counter = fixture.root.join("count-upload-pack");
         std::fs::write(&counter, format!(
-            "#!/bin/sh\ntr '\\0' ' ' < /proc/$PPID/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
+            "#!/bin/sh\ntr '\\0' ' ' < /proc/$(cut -d' ' -f4 /proc/$PPID/stat)/cmdline >> '{}'\necho >> '{}'\nexec git upload-pack \"$@\"\n",
             reads.display(), reads.display(),
         )).unwrap();
         std::fs::set_permissions(&counter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();

@@ -259,7 +259,7 @@ pub(super) fn validated_started_delivery(
         {
             continue;
         }
-        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, &identity) {
+        if claims_another_task(repo, sha, message, &identity) {
             // cas-aa98: a no-code task delivers no commits, so the worker's
             // next task committing on this lane is that task's work, not
             // foreign work inside this delivery.
@@ -268,7 +268,9 @@ pub(super) fn validated_started_delivery(
             }
             let subject = message.trim().lines().next().unwrap_or("");
             return Err(refuse(&format!(
-                "foreign commit {sha} ({subject}) follows the base"
+                "foreign commit {sha} ({subject}) follows the base. If this task should deliver \
+                 that commit, a supervisor adopts it with `task action=request_changes` and \
+                 `merge_source={sha}` in the reason"
             )));
         }
         if on_lane
@@ -412,9 +414,23 @@ pub(super) fn commit_claims_another_task(
     identity: &TaskCommitIdentity,
 ) -> bool {
     is_safe_git_refname(commit)
-        && !identity.matches_superseded_commit(commit)
         && git_text(repo, &["log", "-1", "--format=%B", commit, "--"])
-            .is_some_and(|message| subject_claims_another_task(&message, identity))
+            .is_some_and(|message| claims_another_task(repo, commit, &message, identity))
+}
+
+/// The subject rule yields to explicit authority: a cancelled predecessor's
+/// successor link (cas-aacc) or a supervisor's `merge_source` grant. cas-8144:
+/// the grant adopts the named commit and its ancestors whether they arrived by
+/// merge or by fast-forward, so a lane moved onto a commit whose subject names
+/// another task needs no rewrite or cancel-and-recreate. Descendants of the
+/// grant are still judged by the subject rule.
+fn claims_another_task(repo: &Path, sha: &str, message: &str, identity: &TaskCommitIdentity) -> bool {
+    !identity.matches_superseded_commit(sha)
+        && subject_claims_another_task(message, identity)
+        && !identity
+            .approved_merge_parents
+            .iter()
+            .any(|source| git_commit_is_ancestor(repo, sha, source))
 }
 
 /// GH #1133, #1151: whether every commit `lane` holds beyond `target` (and
@@ -467,8 +483,7 @@ pub(super) fn lane_commits_all_claim_other_tasks(
     Some(records.iter().all(|record| {
         record
             .split_once('\u{1f}')
-            .is_some_and(|(sha, message)| !identity.matches_superseded_commit(sha)
-                && subject_claims_another_task(message, identity))
+            .is_some_and(|(sha, message)| claims_another_task(repo, sha, message, identity))
     }))
 }
 
@@ -501,7 +516,7 @@ pub(crate) fn branch_task_claims(
         let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
             continue;
         };
-        if !identity.matches_superseded_commit(sha) && subject_claims_another_task(message, identity) {
+        if claims_another_task(repo, sha, message, identity) {
             if foreign.is_none() {
                 let subject = message.trim().lines().next().unwrap_or("").trim();
                 foreign = Some(format!("{} {subject}", &sha[..sha.len().min(9)]));

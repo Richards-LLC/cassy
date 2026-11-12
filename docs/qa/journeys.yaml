@@ -12,6 +12,11 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  reviewed-delivery-evolution-recovery:
+    title: Audited supervisor recovery accepts deliberate descendant evolution and refuses unproven dropped content
+    tasks: [cas-372b]
+    journeys: [FACTORY-CLOSE]
+    invariants: [FACTORY-RECOVER-REVIEWED-EVOLUTION]
   selected-test-receipt-log:
     title: Capped runs expose untouched selected output separately from automatic guards for direct supervisor receipt recording
     tasks: [cas-70b8, cas-7b2d]

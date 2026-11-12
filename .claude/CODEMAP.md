@@ -111,7 +111,7 @@
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/peer.rs`, `crates/cas-types/src/verification.rs`, `crates/cas-store/src/verification_store.rs` - peer approvals, durable portable proof boundaries and bounded host-path span sanitization preserving verifier questions.
 - `cas-cli/src/mcp/tools/core/workflow/worktree_ops.rs`, `cas-cli/src/mcp/tools/core/workflow/protected_pr.rs` - single/queued candidate conflict recovery, guarded delivery publication, unpublished-merge restoration and exact-source protected default-branch PR routing.
 - `cas-cli/src/mcp/tools/core/workflow/train_merge.rs`, `cas-cli/src/mcp/tools/core/workflow/release_freeze.rs`, `cas-cli/src/mcp/tools/core/workflow/release_auto_cut.rs` - ordered train merges, explicit MCP freeze confirmation and automatic cut admission.
-- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` - audited branch/delivery recovery and empty retargeted-lane replacement.
+- `cas-cli/src/mcp/tools/core/task/rebind.rs`, `cas-cli/src/mcp/tools/core/task/recover_delivery.rs` - audited branch/delivery recovery, reviewed descendant supersession and empty retargeted-lane replacement.
 - `cas-cli/src/mcp/tools/core/task/block_hold.rs`, `cas-cli/src/mcp/tools/core/task/notes.rs` - task-scoped blocker answers, supervisor decision receipts and fresh-question deadlines.
 - `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - directed replies, blocker receipt ownership and revalidated batch-notice inbox reads.
 - `cas-cli/src/mcp/tools/core/task/source_claim.rs`, `cas-cli/src/cloud/peer_claims.rs` - stakeholder source admission, same-task peer staffing transfer, heartbeat retirement and fenced release.

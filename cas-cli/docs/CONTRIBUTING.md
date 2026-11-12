@@ -4844,8 +4844,12 @@ handoff. A deadline alone remains sufficient for ordinary time-limited memories.
 `factory action=train_freeze id=<train> reason="release-freeze: <reason>"`
 needs a live registered supervisor and a nonempty reason after that explicit
 confirmation prefix. Without it the call refuses before freezing. This is a
-release freeze, not a temporary CI hold: only the operator can lift it in
-Commander, or a published release covering its tip ends it.
+release freeze, not a temporary CI hold. A live registered supervisor can lift
+it with `factory action=train_freeze id=<train> decision="lift" reason="<reason>"`.
+The required reason, actor and time are recorded as a decision on the train,
+sent to the operator in Commander and shown on its release card. Lifting clears
+both the freeze and the cut marker so repairs can merge. The operator can also
+lift it in Commander, or a published release covering its tip ends the freeze.
 For an open epic that is not yet a release train, the refusal returns the exact
 `factory action=train_freeze id=<epic> decision="promote"
 reason="release-freeze: <reason>"` retry payload. This single call validates
@@ -4867,8 +4871,8 @@ covering spawn, assignment and start of tasks that are still open). A
 admission is noted on the train. Task create retargets new work aimed at a
 frozen train to the next train. The freeze ends when a published release covers its tip (the
 `Release` ledger event that `release-published-receipt.sh` records, whose version tag
-contains the frozen tip), or through the operator-only Commander
-`lift_train_freeze` operation. There is no supervisor lift.
+contains the frozen tip), or through Commander
+`lift_train_freeze` or the audited supervisor lift above.
 
 ### Temporary CI merge hold follow-up
 

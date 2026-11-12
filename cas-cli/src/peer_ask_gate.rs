@@ -471,12 +471,24 @@ mod tests {
     }
 
     #[test]
-    fn an_ask_about_another_task_does_not_hold_a_merge_cas_5ec1() {
+    fn only_structured_peer_holds_block_merges_cas_5d65() {
         let (_env, _temp, root, conn) = fixture();
-        sent_ask(&conn, "ask-task", "Please review cas-task-x before merging it");
-        for (task, holds) in [("cas-task-x", true), ("cas-task-y", false), ("cas-task-xy", false)] {
-            assert_eq!(merge_refusal(&root, "sup-soundwave", "cosmic-shark-29", None,
-                &MergeSubject { task_id: Some(task.into()), ..Default::default() }).is_some(), holds, "task={task}");
+        let cases = [
+            ("Not yours: cas-dc36", None, false),
+            ("Publish cas-325c evidence. cas-dc36 is in my merge now.", None, false),
+            ("Please review cas-dc36 and PR #4249 before merging.", None, false),
+            ("CAS_MERGE_HOLD {\"task_id\":\"cas-dc36\"}\nPlease review the delivery.", None, true),
+            ("CAS_MERGE_HOLD {\"task_id\":\"cas-dc360\"}\nContext: cas-dc36", None, false),
+            ("CAS_MERGE_HOLD {\"pr\":4249}\nReview requested.", Some(4249), true),
+            ("CAS_MERGE_HOLD {\"pr\":4250}\nContext: PR #4249", Some(4249), false),
+            ("Example only:\nCAS_MERGE_HOLD {\"task_id\":\"cas-dc36\"}", None, false),
+        ];
+        for (index, (body, pr, holds)) in cases.into_iter().enumerate() {
+            let sender = format!("scope-supervisor-{index}");
+            sent_ask_from(&conn, &sender, &format!("scope-ask-{index}"), body);
+            let refusal = merge_refusal(&root, &sender, "cosmic-shark-29", None,
+                &MergeSubject { task_id: Some("cas-dc36".into()), pr, any_pr: false });
+            assert_eq!(refusal.is_some(), holds, "case={index}, refusal={refusal:?}");
         }
     }
 

@@ -1,8 +1,7 @@
 # Worker shell admission: one grammar, deny by default
 
-Status: DRAFT for review (cas-24f2). Implementation waits for reviews from both
-supervisors and the operator. Reviewers record a verdict in the Reviews section
-at the end.
+Status: APPROVED (cas-24f2) by both supervisors and the operator on
+2026-11-12; see Reviews.
 
 ## Problem
 
@@ -218,4 +217,4 @@ Rows:
 | --- | --- | --- | --- |
 | Supervisor (prowl, quick-hawk-35) | APPROVE | 2026-11-12 2:49 PM ET | 1: keep literal scripts admitted as opaque effect units; the write-root check still applies to the path. 2: refuse coproc outright. 3: depth 6 accepted; report the depth distribution from the replay, and raise it before merge if a real command needs more. 4: label rule accepted; the rule-based reviewer labels every deny and the operator spot-checks a random 20 rows. |
 | Supervisor (soundwave) | APPROVE | 2026-11-12 2:50 PM ET | Q1 keep literal scripts opaque: yes. Q2 refuse coproc: yes. Q3 depth 6: yes. Q4 rule-labelled false denies with operator spot-check: yes. Required changes (prowl accepts both): A, the measurement includes Codex session logs and reports per harness; B, replay receipts never copy raw secret-shaped command text. Both are folded into the measurement section. |
-| Operator | pending | | |
+| Operator | APPROVE | 2026-11-12 2:51 PM ET | Approved with soundwave's changes A and B (recorded on cas-24f2 by the prowl supervisor). |

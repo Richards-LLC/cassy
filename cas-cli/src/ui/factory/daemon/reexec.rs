@@ -1,7 +1,7 @@
 //! Same-PID daemon replacement. Inherited originals keep custody until every
 //! pane has been staged; errors before that point exec the pinned old image.
 use super::*;
-use crate::ui::factory::app::handoff::AppHandoff;
+use crate::ui::factory::app::handoff::{AppHandoff, reexec_job_blocker};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -110,11 +110,59 @@ impl FactoryDaemon {
         // This must be first: an unsupported candidate cannot change input,
         // readers, queues, files, socket flags, metadata or the running image.
         preflight(binary).await?;
+        let now = std::time::Instant::now();
+        let mut blockers = Vec::new();
+        if let Some((worker, request_id, _, _, _)) = &self.spawn_task {
+            let occurrence = request_id
+                .map(|id| format!("spawn_request:{id}"))
+                .unwrap_or_else(|| "untracked".into());
+            blockers.push(reexec_job_blocker(
+                "active_spawn",
+                worker,
+                &occurrence,
+                self.spawn_started_at,
+                now,
+            ));
+        }
+        for pending in &self.pending_spawns {
+            let (kind, workers, request_id) = match pending {
+                PendingSpawn::Anonymous { request_id, .. } => {
+                    ("queued_spawn", vec!["unassigned"], *request_id)
+                }
+                PendingSpawn::Named {
+                    request_id, name, ..
+                } => ("queued_spawn", vec![name.as_str()], *request_id),
+                PendingSpawn::Shutdown {
+                    request_id, names, ..
+                } => (
+                    "queued_shutdown",
+                    if names.is_empty() {
+                        vec!["unselected"]
+                    } else {
+                        names.iter().map(String::as_str).collect()
+                    },
+                    *request_id,
+                ),
+                PendingSpawn::Respawn(name) => ("queued_respawn", vec![name.as_str()], None),
+                PendingSpawn::Recycle {
+                    request_id, name, ..
+                } => ("queued_recycle", vec![name.as_str()], Some(*request_id)),
+                PendingSpawn::Shell { name, .. } => ("queued_shell", vec![name.as_str()], None),
+                PendingSpawn::KillShell { name } => {
+                    ("queued_shell_removal", vec![name.as_str()], None)
+                }
+            };
+            let occurrence = request_id
+                .map(|id| format!("spawn_request:{id}"))
+                .unwrap_or_else(|| "untracked".into());
+            for worker in workers {
+                blockers.push(reexec_job_blocker(kind, worker, &occurrence, None, now));
+            }
+        }
+        self.app.ensure_reexec_jobs_idle(blockers)?;
         ensure!(
-            self.spawn_task.is_none()
-                && self.pending_spawns.is_empty()
-                && self.app.mux.handoff_ready(),
-            "Worker provisioning or pane injection is still active; retry reexec"
+            self.app.mux.handoff_ready(),
+            "Pane injection is still active; retry reexec"
         );
         self.queue_jobs
             .flush_for_reexec(self.app.cas_dir(), Duration::from_secs(5))

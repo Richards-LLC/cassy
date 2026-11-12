@@ -7017,47 +7017,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let mut app = FactoryApp::for_test_at(env.home().join("project/.cas"));
-        app.set_factory_session("held-session".into());
-        let (release, held) = std::sync::mpsc::channel::<()>();
-        let handle = std::thread::spawn(move || {
-            let _ = held.recv();
-            CrashCleanupOutcome { worktree: None }
-        });
-        let mut job = WorkerCleanupJob::new("held-worker".into(), handle);
-        let occurrence = job.occurrence.clone();
-        job.started = Instant::now() - WORKER_CLEANUP_WARN_AFTER;
-        app.register_worker_cleanup(job);
-        app.warn_worker_cleanups_at(Instant::now(), |_, _, _| true);
-        assert!(app.worktree_cleanup_jobs[0].warned);
-        app.pending_workers.push(super::super::super::PendingWorkerState {
-            name: "booting-worker".into(), started_at: Instant::now(), isolate: true,
-        });
-        app.crash_cleanups_pending.insert("crashed-worker".into(), 1);
-
-        let error = app.prepare_handoff().await.err().expect("active cleanup must refuse reexec").to_string();
-        // Caller identities are data, independent of the diagnostic wording.
-        for identity in ["held-worker", occurrence.as_str(), "booting-worker", "crashed-worker"] {
-            assert!(error.contains(identity), "missing blocker {identity}: {error}");
-        }
-        assert_eq!(app.worktree_cleanup_jobs.len(), 1);
-        assert!(!app.worktree_cleanup_jobs[0].handle.is_finished());
-        assert!(app.crash_cleanup_pending("held-worker"));
-        assert!(app.crash_cleanup_pending("crashed-worker"));
-        assert_eq!(app.pending_workers.len(), 1);
-
-        // Ordinary completion still permits handoff; refusal never detached
-        // the held job or released its name underneath ongoing cleanup.
-        drop(release);
-        app.join_worker_worktree_cleanups();
-        app.abandon_crash_cleanup("crashed-worker");
-        app.pending_workers.clear();
-        assert!(app.prepare_handoff().await.is_ok());
-    }
-
-    #[tokio::test]
     async fn staged_cleanup_adoption_waits_for_file_commit_cas_c35a() {
         for legacy in [false, true] {
             let env = crate::test_support::TestEnvGuard::temp_home();

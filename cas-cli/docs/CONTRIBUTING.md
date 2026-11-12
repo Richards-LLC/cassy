@@ -3087,7 +3087,10 @@ queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
 Slim lanes omit broad Rust tests for factory pushes, but run the train's
 impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
-range on hosted runners (cas-2e1b). `Scoped Validation — impact own tests`
+range on hosted runners (cas-2e1b). The range starts at the delivery's
+recorded start base when `refs/cas/delivery-base/<branch>` exists and is an
+ancestor of the pushed head; otherwise it uses the classifier's inferred
+comparison base. The plan step logs which one it used. `Scoped Validation — impact own tests`
 builds the selection and runs the changed modules' unit tests, edited
 integration suites and directly changed crates first; up to three `impact ring`
 shards then run the rest of the selection from its archive, only after the own

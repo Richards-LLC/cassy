@@ -325,16 +325,36 @@ def lane_attribute(root, base, failures, destination):
     return 1 if caused else 0
 
 
+def lane_base(root, recorded_ref, inferred):
+    """Prefer the delivery's recorded start base over the ref-inferred fork.
+
+    A record that is missing or not an ancestor of HEAD falls back to the
+    inferred base; the returned source names which one was used.
+    """
+    if not recorded_ref:
+        return inferred, "inferred: no record requested"
+    found = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{recorded_ref}^{{commit}}"], cwd=root, capture_output=True, text=True)
+    if found.returncode:
+        return inferred, f"inferred: no record at {recorded_ref}"
+    recorded = found.stdout.strip()
+    if subprocess.run(["git", "merge-base", "--is-ancestor", recorded, "HEAD"], cwd=root).returncode:
+        return inferred, f"inferred: recorded start base {recorded[:12]} is not an ancestor of HEAD"
+    return recorded, "recorded start base"
+
+
 def lane(root, args):
     """Lane CI phases: plan, own (builds and runs own tests), ring shards and
     attribute (rerun a phase's failures at the base)."""
     out = Path(args.out)
     outputs = {}
     if args.phase == "plan":
-        selection = plan(root, args.base_sha, args.zero_base_ref, args.history)
+        base, source = lane_base(root, args.recorded_base_ref, args.base_sha)
+        print(f"Lane impact base: {base or args.zero_base_ref} ({source})")
+        selection = plan(root, base, args.zero_base_ref, args.history)
+        selection["base_source"] = source
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
-        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"])}
+        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"]), "base-source": source}
         print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
         status = 0
     else:
@@ -474,6 +494,7 @@ def main():
     parser.add_argument("--archive", default="lane-impact.tar.zst")
     parser.add_argument("--shard", default="1/1")
     parser.add_argument("--github-output", default="")
+    parser.add_argument("--recorded-base-ref", default="")
     parser.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
     parser.add_argument("--zero-base-ref", default=os.environ.get("ZERO_BASE_REF", ""))
     parser.add_argument("--history", default="target/ci-impact/history.json")

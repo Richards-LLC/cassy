@@ -382,6 +382,26 @@ path="tests/builtin_archive_portability_test.rs"
         split = json.loads(state.read_text())["split"]
         self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
 
+    def test_lane_binds_to_the_recorded_start_base_and_logs_a_fallback(self):
+        self.select("cas-cli/src/alpha.rs")
+        recorded = self.git("rev-parse", "HEAD")
+        self.select("cas-cli/src/gamma.rs")
+        state = self.root / "output/lane.json"
+        def plan_with(ref):
+            command = [str(HERE / "ci-test-impact.py"), "lane", "--phase", "plan", "--base-sha", self.base, "--history", str(self.history),
+                       "--out", str(state), "--recorded-base-ref", ref]
+            self.assertEqual(subprocess.run(command, cwd=self.root, capture_output=True).returncode, 0)
+            return json.loads(state.read_text())["plan"]
+        self.git("update-ref", "refs/cas/delivery-base/lane", recorded)
+        bound = plan_with("refs/cas/delivery-base/lane")
+        self.assertEqual((bound["base"], bound["base_source"]), (recorded, "recorded start base"))
+        self.assertEqual(bound["paths"], ["cas-cli/src/gamma.rs"], "the start base excludes work merged before it")
+        unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "unrelated root")
+        self.git("update-ref", "refs/cas/delivery-base/lane", unrelated)
+        fallback = plan_with("refs/cas/delivery-base/lane")
+        self.assertEqual(fallback["base"], self.base)
+        self.assertTrue(fallback["base_source"].startswith("inferred"), fallback["base_source"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -364,10 +364,15 @@ jobs:
           BASE_SHA: ${{ needs.ci-diff.outputs.comparison-base }}
           ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
+        # The delivery's recorded start base binds the selection when its
+        # record ref exists and is an ancestor of HEAD; otherwise the inferred
+        # comparison base is used. The step log names which one ran.
         run: |
+          record="refs/cas/delivery-base/$GITHUB_REF_NAME"
+          git fetch --no-tags --quiet origin "+$record:$record" 2>/dev/null || true
           python3 scripts/ci-test-impact.py history
           python3 scripts/ci-test-impact.py lane --phase plan --out target/ci-impact/lane.json \
-            --github-output "$GITHUB_OUTPUT"
+            --recorded-base-ref "$record" --github-output "$GITHUB_OUTPUT"
 
       - id: own
         name: Build the selection and run own tests

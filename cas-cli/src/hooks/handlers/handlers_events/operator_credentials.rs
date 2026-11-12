@@ -210,6 +210,17 @@ fn statement_references_store(
             return true;
         }
     }
+    // `zip -R` matches its patterns under the working directory.
+    if store_parent_cwd
+        && executable == "zip"
+        && args.iter().any(|arg| {
+            arg == "--recurse-patterns"
+                || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('R'))
+        })
+        && path_references_store(".", cwd, true)
+    {
+        return true;
+    }
     if recursive
         && store_parent_cwd
         && matches!(executable.as_str(), "rg" | "grep" | "egrep" | "fgrep")
@@ -263,21 +274,83 @@ fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
 }
 
 /// `rg --files` and a `find` that runs no command print names without
-/// opening files (GH #1838, #1700).
+/// opening files (GH #1838, #1700). The argv is parsed, never searched for a
+/// token: every option must be one the listing grammar knows, so an option
+/// value (`-e --files`, `--regexp=--files`, `-name -exec`) or a word after
+/// `--` cannot stand in for the listing form. Anything else is a read.
 fn lists_names_only(name: &str, args: &[String]) -> bool {
     match name {
-        "rg" => {
-            args.iter().any(|arg| arg == "--files")
-                && !args.iter().any(|arg| {
-                    matches!(arg.as_str(), "--pre" | "-z" | "--search-zip")
-                        || arg.starts_with("--pre=")
-                })
-        }
-        "find" => !args
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "-exec" | "-execdir" | "-ok" | "-okdir")),
+        "rg" => rg_lists_names_only(args),
+        "find" => find_lists_names_only(args),
         _ => false,
     }
+}
+
+fn rg_lists_names_only(args: &[String]) -> bool {
+    const FLAGS: &[&str] = &[
+        "--files", "--hidden", "-.", "--no-ignore", "--no-ignore-vcs", "--no-ignore-parent",
+        "--no-ignore-dot", "-u", "-uu", "-uuu", "--follow", "-L", "--null", "-0",
+        "--no-messages", "--one-file-system",
+    ];
+    const VALUES: &[&str] = &[
+        "-g", "--glob", "--iglob", "-t", "--type", "-T", "--type-not", "-d", "--max-depth",
+        "--sort", "--sortr", "--color",
+    ];
+    let mut files = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if VALUES.contains(&arg) {
+            index += 2;
+            continue;
+        }
+        let known_value = arg
+            .split_once('=')
+            .is_some_and(|(name, _)| name.starts_with("--") && VALUES.contains(&name));
+        if arg.starts_with('-') && !FLAGS.contains(&arg) && !known_value {
+            return false;
+        }
+        files |= arg == "--files";
+        index += 1;
+    }
+    files
+}
+
+fn find_lists_names_only(args: &[String]) -> bool {
+    const TESTS: &[&str] = &[
+        "-print", "-print0", "-prune", "-o", "-or", "-a", "-and", "-not", "!", "(", ")",
+        "-empty", "-xdev", "-mount", "-follow", "-depth", "-readable", "-writable",
+        "-executable", "-true", "-false", "-nouser", "-nogroup",
+    ];
+    const VALUED: &[&str] = &[
+        "-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename", "-type", "-xtype",
+        "-maxdepth", "-mindepth", "-size", "-mtime", "-mmin", "-atime", "-amin", "-ctime",
+        "-cmin", "-perm", "-regex", "-iregex", "-regextype", "-user", "-group", "-uid", "-gid",
+        "-links", "-inum", "-newer", "-samefile",
+    ];
+    let mut index = 0;
+    while args.get(index).is_some_and(|arg| matches!(arg.as_str(), "-H" | "-L" | "-P")) {
+        index += 1;
+    }
+    while args
+        .get(index)
+        .is_some_and(|arg| !arg.starts_with('-') && !matches!(arg.as_str(), "!" | "(" | ")"))
+    {
+        index += 1;
+    }
+    while let Some(arg) = args.get(index) {
+        index += if VALUED.contains(&arg.as_str()) {
+            2
+        } else if TESTS.contains(&arg.as_str()) {
+            1
+        } else {
+            return false;
+        };
+    }
+    true
 }
 
 /// Listed names stay names only while nothing can turn one into a file
@@ -321,17 +394,21 @@ fn path_operand_is_bare_relative(argument: &str) -> bool {
         && !normalized.contains(['*', '?', '['])
 }
 
+/// Every non-option word after the command flag may be the command string:
+/// other options take their own values (`bash -oc pipefail '<cmd>'`).
 fn shell_command_payloads(args: &[String]) -> Vec<&str> {
-    let mut payloads = Vec::new();
-    for (index, arg) in args.iter().enumerate() {
-        let is_command_flag = arg == "--command"
+    let Some(flag) = args.iter().position(|arg| {
+        arg == "--command"
             || arg == "-c"
-            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'));
-        if is_command_flag && let Some(payload) = args.get(index + 1) {
-            payloads.push(payload.as_str());
-        }
-    }
-    payloads
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))
+    }) else {
+        return Vec::new();
+    };
+    args[flag + 1..]
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .map(String::as_str)
+        .collect()
 }
 
 fn cd_target(args: &[String]) -> Option<&str> {
@@ -351,10 +428,19 @@ fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool
     };
     match name {
         "rg" | "find" => true,
-        "grep" | "egrep" | "fgrep" => has_flag("--recursive", &['r', 'R']),
+        "grep" | "egrep" | "fgrep" => {
+            has_flag("--recursive", &['r', 'R'])
+                || args.iter().enumerate().any(|(index, arg)| {
+                    matches!(arg.as_str(), "--directories=recurse" | "-drecurse")
+                        || (matches!(arg.as_str(), "-d" | "--directories")
+                            && args.get(index + 1).is_some_and(|value| value == "recurse"))
+                })
+        }
         "cp" => has_flag("--recursive", &['a', 'r', 'R']) || has_flag("--archive", &[]),
-        "tar" => !args.iter().any(|arg| arg == "--no-recursion"),
-        "zip" => has_flag("--recurse-paths", &['r']),
+        // `--no-recursion` can be another option's value (`--exclude
+        // --no-recursion`); tar is treated as recursive.
+        "tar" => true,
+        "zip" => has_flag("--recurse-paths", &['r', 'R']) || has_flag("--recurse-patterns", &[]),
         "rsync" => has_flag("--archive", &['a']) || has_flag("--recursive", &['r']),
         _ => false,
     }
@@ -363,18 +449,9 @@ fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool
 fn recursive_path_operand_indices(command: &str, args: &[String]) -> Vec<usize> {
     let positionals = positional_argument_indices(command, args);
     match command {
-        "rg" | "grep" | "egrep" | "fgrep" => {
-            let pattern_from_option = args.iter().any(|arg| {
-                matches!(arg.as_str(), "-e" | "--regexp" | "-f" | "--file")
-                    || arg.starts_with("--regexp=")
-                    || (arg.starts_with("-e") && arg.len() > 2)
-                    || (arg.starts_with("-f") && arg.len() > 2)
-            });
-            positionals
-                .into_iter()
-                .skip(usize::from(!pattern_from_option))
-                .collect()
-        }
+        // Whether the first positional is the pattern depends on options
+        // (`-ie token`, `--glob -e`); every positional may be an operand.
+        "rg" | "grep" | "egrep" | "fgrep" => positionals,
         "find" => args
             .iter()
             .enumerate()

@@ -300,6 +300,15 @@ fn worker_filename_discovery_under_home_is_not_a_credential_read_cas_47e1() {
         "find ~ -name auth.json -exec cat {} +",
         "cat $(rg --files ~ | rg credentials.json)",
         "find ~ -name credentials.json | while read -r f; do cat \"$f\"; done",
+        // `--files` as an option value or after `--` is not the listing form.
+        "rg -uuu -e --files -e . ~/.config",
+        "rg -uuu --regexp=--files -e . ~/.config",
+        "rg -uuu -- --files ~/.config",
+        // The same audit, for recursion and payload flags that were matched
+        // by presence (each allowed by v4.20).
+        "tar czf x.tgz --exclude --no-recursion ~/.config",
+        "grep -d recurse token ~/.config",
+        "cd ~/.config && zip -R x.zip '*.json'",
     ] {
         let output = handle_pre_tool_use(&bash(command, cwd.path()), Some(&cas_root)).unwrap();
         assert_operator_credential_refusal(output, command);

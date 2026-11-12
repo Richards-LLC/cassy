@@ -229,6 +229,14 @@ fn foreign_task_branch_start_refusal(
 
 /// A parked ref may back an open PR. Switch the new task to its own lane
 /// without moving that ref or publishing a replacement for the parked task.
+/// A worker joins published target history. A supervisor's shared local epic
+/// may contain an unpublished cut commit that must not become its start base.
+/// Keep the resolved SHA immutable across branch preparation and checkout.
+fn worker_start_target_base(git: &GitOperations, target: &str) -> Result<String, String> {
+    let fresh = git.resolve_fresh_base(target).map_err(|error| error.to_string())?;
+    Ok(git.resolve_commit(&format!("refs/remotes/origin/{target}")).unwrap_or(fresh.sha))
+}
+
 fn checkout_task_beside_parked_delivery(
     checkout: &std::path::Path,
     worker: &str,
@@ -247,9 +255,9 @@ fn checkout_task_beside_parked_delivery(
     }
     let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
     if require_fresh_base {
-        let base = git.resolve_fresh_base(target)
+        let base = worker_start_target_base(&git, target)
             .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?;
-        let expected = git.resolve_commit(&base.branch_ref);
+        let expected = git.resolve_commit(&base);
         if crate::factory_isolation::branch_at(checkout).is_none()
             && (expected.is_none() || git.resolve_commit("HEAD") != expected)
         {
@@ -269,9 +277,8 @@ fn checkout_task_beside_parked_delivery(
         let base = if git.resolve_commit(&remote).is_some() {
             remote
         } else {
-            git.resolve_fresh_base(target)
+            worker_start_target_base(&git, target)
                 .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?
-                .branch_ref
         };
         git.create_branch_from(&branch, &base)
             .map_err(|error| format!("Cannot create task branch {branch}: {error}"))?;
@@ -388,10 +395,7 @@ fn reconcile_reused_factory_branch(
     // cas-21db: another merge can land after assignment or the worker's
     // manual sync. Resolve the current target before deciding to reset,
     // using the existing bounded fetch and local-only/offline fallback.
-    let target = git.resolve_fresh_base(target_branch).map_err(|error| {
-        format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
-    })?;
-    let target_tip = git.ref_sha(&target.branch_ref).map_err(|error| {
+    let target_tip = worker_start_target_base(&git, target_branch).map_err(|error| {
         format!("Cannot start task: target base `{target_branch}` could not be resolved: {error}")
     })?;
 

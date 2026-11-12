@@ -1,4 +1,4 @@
-# Read the entry in one pass.
+# Read the entry in one pass
 
 The same amounts, laid out as entries a CPA can scan. Both examples are hypothetical illustrations.
 
@@ -15,7 +15,7 @@ This Before reproduces the failure described in the issue, not a client screensh
 
 ### After — validated illustration
 
-### 2026-10-31 · Invoice INV-17 · Example Customer
+### 2026\-10\-31 · Invoice INV\-17 · Example Customer
 
 Illustration — hypothetical amounts · USD
 
@@ -25,7 +25,7 @@ Illustration — hypothetical amounts · USD
 | &emsp;Hosting Income |  | 2,250.00 |
 | **Total** | **2,250.00** | **2,250.00** |
 
-Illustrative hosting invoice.
+Illustrative hosting invoice\.
 
 Source: Hypothetical illustration
 
@@ -41,7 +41,7 @@ This counterexample demonstrates the failure; it is not a historical client entr
 
 ### After — validated illustration
 
-### 2026-11-01 · Payment PAY-17 · Example Customer
+### 2026\-11\-01 · Payment PAY\-17 · Example Customer
 
 Illustration — hypothetical amounts · USD
 
@@ -52,7 +52,7 @@ Illustration — hypothetical amounts · USD
 | &emsp;Accounts Receivable |  | 2,250.00 |
 | **Total** | **2,250.00** | **2,250.00** |
 
-Illustrative receipt after a processing fee.
+Illustrative receipt after a processing fee\.
 
 Source: Hypothetical illustration
 

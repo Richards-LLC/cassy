@@ -8,10 +8,10 @@ Viewports: desktop (1280×800), phone (390×844)
 
 ## Surface readiness
 
-- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · light · desktop: ready; text nodes: 65, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
-- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · light · phone: ready; text nodes: 65, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
-- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · dark · desktop: ready; text nodes: 65, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
-- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · dark · phone: ready; text nodes: 65, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
+- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · light · desktop: ready; text nodes: 63, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
+- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · light · phone: ready; text nodes: 63, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
+- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · dark · desktop: ready; text nodes: 63, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
+- cas-cli/src/builtins/skills/cas-html-reports/references/examples/accounting-journals.html · dark · phone: ready; text nodes: 63, characters: 1770, main landmarks: 1, content elements: 1, loading indicators: 0
 
 ## Findings
 

@@ -832,7 +832,8 @@
       "fe64b0e033a2ce8896907907a62602cb4d30129046202d8c4e53d58bceea38b1"
     ],
     "skills/cas-html-reports/references/accounting-entries.md": [
-      "52b5fbf99ee609fee1a420a858b98e233d3cd56a5ae244739a74e0d302f13e82"
+      "52b5fbf99ee609fee1a420a858b98e233d3cd56a5ae244739a74e0d302f13e82",
+      "61c68c5488f678c2fc2fff3bf0944fc276ca7e14eeb9e57b8ffd6f6bab91b631"
     ],
     "skills/cas-html-reports/references/examples/accounting-chart.json": [
       "da9432b101ade10f78f99ece29985a5a920ba2870f6f2dcd473601b2847e192c"
@@ -842,16 +843,19 @@
       "2554bc46fa48f81cde4be437b1a123a2b02f91f2728ec0a27d267a7ac95e1c0a",
       "4551c8b629f44edd3951087c754097f7b0576bd1ed0ee0177092b576a3230d98",
       "a1e6ab716e951f8ae354d33eca9e602d2f99d8039c86b5a13e066c8db002d77c",
-      "bc3bff4e90c93ec61f92c9a0fabf2ee435d3c9bee5f6bb1bca2dd3017da22631"
+      "bc3bff4e90c93ec61f92c9a0fabf2ee435d3c9bee5f6bb1bca2dd3017da22631",
+      "c824a8bc5396c1ed5dce9892474a7afa3067f3c789906509b133b5c7970b314e"
     ],
     "skills/cas-html-reports/references/examples/accounting-journals.json": [
       "095f8f6bd2195ef8440640f04fe162c58c07dda7aebbdc3ac21f2a1b025cd282"
     ],
     "skills/cas-html-reports/references/examples/accounting-journals.md": [
+      "2bbad891ddcd43ab2a8d789d17f41f064d375e6b05ee621d9f299122e2946a47",
       "d7682d6ddfeab32e589b59c55e69c95050bc9239bef7b9976030c66cddc145d6"
     ],
     "skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md": [
-      "04c944ad09442d4e779c640bc451b96e44b87bde816ca22b645472db797494bf"
+      "04c944ad09442d4e779c640bc451b96e44b87bde816ca22b645472db797494bf",
+      "b6d47e6dca1f45a8f1691a9842feecf10d21ef88e643841f83c360225589a8a0"
     ],
     "skills/cas-html-reports/references/examples/accounting-journals.why.md": [
       "a821a3bda6a47063ab1aece1bc3e03d37fd1d66fc50ebcc4b9142f115dbf9318"
@@ -956,7 +960,8 @@
       "f0731b4fc55a1436241cb526179f396987e961e29a0b801123433b220aea4dda"
     ],
     "skills/cas-html-reports/scripts/accounting-journals.py": [
-      "1a2cf3975c02061350f6b3694c1c282083a1b8a3c409c3f0cdca1ab39fd5e522"
+      "1a2cf3975c02061350f6b3694c1c282083a1b8a3c409c3f0cdca1ab39fd5e522",
+      "70ebc38b98011eeeaa2ba420cef67dfb2a0179d5adb03b0764339b20ab766b11"
     ],
     "skills/cas-ideate/SKILL.md": [
       "233c1beb408d6f14a8d77f9c4e0f7129bd4d2883423ff4ded7530183b4b5baf5",

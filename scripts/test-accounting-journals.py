@@ -70,6 +70,14 @@ class Journals(unittest.TestCase):
         self.assertEqual(html.stdout.count('<tfoot>'), 2)
         self.assertIn('2,190.00', html.stdout)  # caller amount, not human-facing wording
         self.assertNotIn('4000', html.stdout)
+        name = 'Bank *operating* | R&D'
+        self.chart['accounts'][2]['Name'] = name
+        self.save('chart.json', self.chart)
+        self.model['entries'][1]['lines'][1]['account'] = name
+        markdown = self.run_cli(fmt='markdown')
+        self.assertEqual(markdown.returncode, 0, markdown.stderr)
+        escaped = name.replace('&', '&amp;').replace('*', r'\*').replace('|', r'\|')
+        self.assertIn(escaped, markdown.stdout)
         packaged = subprocess.run([sys.executable, str(SCRIPT),
             str(SCRIPT.parent.parent/'references/examples/accounting-journals.json'), '--format', 'json'],
             capture_output=True, text=True)

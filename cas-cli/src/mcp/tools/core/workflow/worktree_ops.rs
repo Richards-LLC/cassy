@@ -4304,6 +4304,7 @@ impl CasCore {
             }
             cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
                 .map_err(|error| error.to_string())?;
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let returned = store.get(&task.id).map_err(|error| error.to_string())?;
             let notice = crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_merge_conflict_reopen_notice(
                 &self.cas_root, &returned, source_tip, target_tip, &reason,

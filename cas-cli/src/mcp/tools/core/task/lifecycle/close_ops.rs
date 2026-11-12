@@ -13209,6 +13209,8 @@ impl CasCore {
             None
         };
 
+        let direct_write = (fresh_scope_dispatch.is_some() && old_status != TaskStatus::Closed)
+            || matches!(old_status, TaskStatus::Closed | TaskStatus::Cancelled);
         if let Some(dispatch) = fresh_scope_dispatch
             .as_ref()
             .filter(|_| old_status != TaskStatus::Closed)
@@ -13252,6 +13254,12 @@ impl CasCore {
             })?;
             occurrence = super::supervisor_push::occurrence_from_updated_at(task.updated_at);
         }
+
+        let sync = direct_write
+            .then(|| crate::store::publish_direct_task_write(&self.cas_root, &req.id).err())
+            .flatten()
+            .map(|error| format!("\nCloud sync of this reopen failed ({error}); peer machines will not see it until the task's next write."))
+            .unwrap_or_default();
 
         if clear_blocked_hold {
             task_store
@@ -13302,7 +13310,7 @@ impl CasCore {
             ""
         };
         Ok(Self::success(format!(
-            "Reopened task: {} - {}{}",
+            "Reopened task: {} - {}{}{sync}",
             req.id, task.title, suffix
         )))
     }
@@ -13441,6 +13449,10 @@ impl CasCore {
                 format!("task request_changes rejected: {error}"),
             )
         })?;
+        let sync = crate::store::publish_direct_task_write(&self.cas_root, &task.id)
+            .err()
+            .map(|error| format!(" Cloud sync of this verdict failed ({error}); peer machines will not see it until the task's next write."))
+            .unwrap_or_default();
 
         // cas-cff4: tell the assignee, and report what was actually sent.
         let assignee = task.assignee.as_deref().unwrap_or("unassigned");
@@ -13463,7 +13475,7 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
+            "Changes requested for task: {} - {}\n\nThe task is Open with assignee {} preserved. {notice}{sync} Branch handling: {} The declined delivery anchor and proof were invalidated, so re-close requires a fresh cycle.\n\nDecision: {}",
             task.id,
             task.title,
             assignee,

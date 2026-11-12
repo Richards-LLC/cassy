@@ -285,6 +285,7 @@ pub(crate) fn return_merged_delivery_for_source_fix(
             .map_err(|error| error.to_string())?;
         cas_store::request_changes_for_parked_delivery(cas_root, &task.id, actor, &reason)
             .map_err(|error| error.to_string())?;
+        let _ = crate::store::publish_direct_task_write(cas_root, &task.id);
         let returned = store.get(&task.id).map_err(|error| error.to_string())?;
         let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
             cas_root, &returned, anchor, merge, &reason,
@@ -1071,6 +1072,7 @@ impl CasCore {
                 "\nCassy could not return task {task_id} to its worker ({error}); run task action=request_changes id={task_id}."
             );
         }
+        let _ = crate::store::publish_direct_task_write(&self.cas_root, task_id);
         let notice = self
             .open_task_store()
             .ok()

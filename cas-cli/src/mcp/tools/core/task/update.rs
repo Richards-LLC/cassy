@@ -1379,6 +1379,7 @@ impl CasCore {
                 message: Cow::from(format!("PROOF-SCOPE FIX REJECTED: {error}")),
                 data: None,
             })?;
+            let _ = crate::store::publish_direct_task_write(&self.cas_root, &task.id);
             let result_target = if methodology_fix {
                 format!("Execution methodology corrected to {}. Ordinary delivery and close proofs still apply.", task.execution_note.as_deref().unwrap_or("<cleared>"))
             } else if risk_fix {

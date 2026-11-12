@@ -3085,7 +3085,16 @@ fast rows once in `lane.yml`'s classification job, for both docs and code;
 non-slim lanes retain their existing fast-row steps in `ci.yml`. The merge
 queue does not add another fast-row run. CI is authoritative for these checks;
 local PASS receipts are reusable pre-push feedback, never a park requirement.
-Slim lanes omit broad Rust tests for factory pushes. Release-train pushes and
+Slim lanes omit broad Rust tests for factory pushes, but run the train's
+impact selection (`scripts/ci-test-impact.py`, unchanged) for the delivery's
+range on hosted runners (cas-2e1b). `Scoped Validation — impact own tests`
+builds the selection and runs the changed modules' unit tests, edited
+integration suites and directly changed crates first; up to three `impact ring`
+shards then run the rest of the selection from its archive, only after the own
+tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
+unmappable path) has no provable scope and stays with the train suite, so no
+suite runs twice. Lane receipts are published as `lane-impact-*`, outside the
+selector's failure history. Release-train pushes and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,
 cumulative changed-web journeys, doctests and the exhaustive Rust archive/shards.
@@ -3124,7 +3133,8 @@ follow from this, unset `CAS_LANE_SLIM`: that one setting is the D1 rollback.
 
 Factory pushes start in `.github/workflows/lane.yml` (cas-32e9), also named
 `CI`. With `CAS_LANE_SLIM=true` it runs only Classify CI diff, the two Scoped
-Validation checks (Docs Lint for a docs-only diff) under their usual names, so a
+Validation checks (Docs Lint for a docs-only diff) and the hosted impact jobs
+above under their usual names, so a
 lane is not held up by dozens of skipped `ci.yml` jobs. Unset, it calls `ci.yml`
 and the lane runs exactly as before. When the repository variable
 `CASSY_LANE_SELF_HOSTED` is `enabled` (cas-14e0), those slim jobs run on the

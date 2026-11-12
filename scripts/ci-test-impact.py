@@ -228,6 +228,99 @@ def plan(root, base, zero, history):
         return full(result, "uncertain graph/diff/history: " + str(error))
 
 
+def lane_split(root, selection):
+    """Order the unchanged selection for lane CI, fail-fast (cas-2e1b).
+
+    Own tests come first: unit tests of the directly changed top-level modules,
+    edited integration suites, and directly changed crates. The ring follows:
+    everything else this plan selected for them. A workspace plan has no
+    provable scope; it returns None and the train suite keeps that run.
+    """
+    if selection["mode"] != "scoped":
+        return None
+    crates, _ = workspace(root)
+    paths = selection["paths"]
+    direct = {name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths)}
+    multiple = len(selection["commands"]) > 1
+    build, selected, own = [], [], []
+    for command in selection["commands"]:
+        packages = command.get("packages", [command["package"]])
+        if command["stems"] is None:
+            build += [arg for package in packages for arg in ("-p", package)]
+            selected += [f"package({package})" for package in packages]
+            own += [f"package({package})" for package in packages if package in direct]
+            continue
+        args = command["args"]
+        expression = args[args.index("-E") + 1]
+        build += ["-p", "cas"] if multiple else args[:args.index("-E")]
+        mapping = inventory(root, crates["cas"][1])
+        changed = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
+        parts = []
+        if "--lib" in args and changed and all(SAFE.fullmatch(name) for name in changed):
+            parts.append("(binary(cas) and (" + " or ".join(f"test(/^{name}::/)" for name in changed) + "))")
+        for stem in command["stems"]:
+            if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
+                target = mapping[stem]
+                parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
+        guard = (lambda text: f"(package(cas) and ({text}))") if multiple else (lambda text: text)
+        selected.append(guard(expression))
+        if parts:
+            own.append(guard(" or ".join(parts)))
+    selected = " or ".join(selected)
+    own = " or ".join(own) or None
+    return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
+
+
+def lane_count(root, source, expression):
+    """Count the non-ignored tests a filter selects, so no phase runs empty."""
+    output = subprocess.check_output([os.environ.get("CARGO", "cargo"), "nextest", "list", *source, "-E", expression, "--message-format", "json"], cwd=root, text=True)
+    suites = json.loads(output)["rust-suites"].values()
+    return sum(1 for suite in suites for case in suite["testcases"].values() if case["filter-match"]["status"] == "matches" and not case.get("ignored"))
+
+
+def lane_run(root, selection, source, expression, extra, destination, role):
+    log = Path(destination).parent / f"{role}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
+    status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
+    record(selection, [str(log)], status, time.monotonic() - started, destination, role)
+    return status
+
+
+def lane(root, args):
+    """Lane CI phases: plan, own (builds and runs own tests), ring shards."""
+    out = Path(args.out)
+    outputs = {}
+    if args.phase == "plan":
+        selection = plan(root, args.base_sha, args.zero_base_ref, args.history)
+        split = lane_split(root, selection)
+        write(out, {"plan": selection, "split": split})
+        outputs = {"scoped": str(split is not None).lower(), "build-args": " ".join(split["build"]) if split else "", "reason": "; ".join(selection["reasons"])}
+        print(f"Lane impact: {selection['mode']}" + (f" ({outputs['reason']}); the train suite owns this delivery's Rust tests" if split is None else f"; own: {split['own']}; ring: {split['ring']}"))
+        status = 0
+    else:
+        saved = json.loads(out.read_text())
+        selection, split = saved["plan"], saved["split"]
+        source = ["--archive-file", args.archive, "--workspace-remap", str(root)] if args.phase == "ring" else split["build"]
+        receipt = out.with_name(f"{args.phase}-receipt.json")
+        if args.phase == "ring":
+            status = lane_run(root, selection, source, split["ring"], ["--partition", f"count:{args.shard}"], receipt, "lane-ring")
+        else:
+            status = 0
+            if split["own"] and lane_count(root, source, split["own"]):
+                status = lane_run(root, selection, source, split["own"], [], receipt, "lane-own")
+            else:
+                print("Lane impact: no own tests; the ring follows")
+            ring = lane_count(root, source, split["ring"]) if status == 0 else 0
+            shards = min(3, -(-ring // 1500))
+            outputs = {"ring-shards": json.dumps(list(range(1, shards + 1))), "ring-total": str(shards), "ring-tests": str(ring)}
+    if args.github_output:
+        with open(args.github_output, "a") as handle:
+            handle.writelines(f"{key}={value}\n" for key, value in outputs.items())
+    return status
+
+
 def collect_history(destination):
     """Read bounded recent artifacts. History only adds tests or widens scope."""
     records = []
@@ -331,7 +424,11 @@ def record(plan, logs, status, elapsed, destination, role):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize"])
+    parser.add_argument("mode", choices=["plan", "run", "history", "record", "summarize", "lane"])
+    parser.add_argument("--phase", choices=["plan", "own", "ring"], default="plan")
+    parser.add_argument("--archive", default="lane-impact.tar.zst")
+    parser.add_argument("--shard", default="1/1")
+    parser.add_argument("--github-output", default="")
     parser.add_argument("--base-sha", default=os.environ.get("BASE_SHA", ""))
     parser.add_argument("--zero-base-ref", default=os.environ.get("ZERO_BASE_REF", ""))
     parser.add_argument("--history", default="target/ci-impact/history.json")
@@ -354,6 +451,8 @@ def main():
         collect_history(args.history)
         return 0
     root = Path(git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    if args.mode == "lane":
+        return lane(root, args)
     selection = plan(root, args.base_sha, args.zero_base_ref, args.history)
     if args.mode == "plan":
         write(args.out, selection)

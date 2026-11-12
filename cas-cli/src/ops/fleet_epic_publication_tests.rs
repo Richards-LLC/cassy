@@ -486,12 +486,12 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                 "sup".into(), "sup".into(), cas_types::AgentRole::Supervisor,
             );
             agents.register(&supervisor).unwrap();
-            core.set_agent_id_for_testing(supervisor.id);
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let worker = cas_types::Agent::new_with_role(
                 "spawned-worker-id".into(), "spawned-worker".into(), cas_types::AgentRole::Worker,
             );
             agents.register(&worker).unwrap();
+            core.set_agent_id_for_testing(if entry == "start" { worker.id } else { supervisor.id });
             if entry != "create" {
                 let tasks = crate::store::open_task_store(root).unwrap();
                 tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
@@ -511,7 +511,6 @@ fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
                         .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
                         .unwrap();
                 } else {
-                    core.set_agent_id_for_testing(worker.id);
                     runtime
                         .block_on(core.cas_task_start(rmcp::handler::server::wrapper::Parameters(
                             crate::mcp::tools::IdRequest { id: "cas-child".into() },

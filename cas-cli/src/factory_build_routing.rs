@@ -547,8 +547,12 @@ mod tests {
         assert!(retry_route(&root, &sender).await.unwrap().is_some());
         assert!(server.received_requests().await.unwrap().is_empty());
         let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
-        let count: usize = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM peer_message_outbox", [], |r| r.get(0)).unwrap();
         assert_eq!(count, 1);
+        // A send holding its transport lease also cannot be recalled into a local duplicate.
+        conn.execute("UPDATE peer_message_outbox SET cloud_id=NULL,state='retrying',last_error=NULL,next_attempt_at=?1", [Utc::now().timestamp() + 120]).unwrap();
+        assert!(retry_route(&root, &sender).await.unwrap().is_some());
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

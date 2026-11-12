@@ -4460,6 +4460,25 @@ fn execute_sync_with_output(
     cas_root: &Path,
     emit_output: bool,
 ) -> anyhow::Result<Vec<SyncSummary>> {
+    // A busy background sync must do no cloud work, including discovery and
+    // registration. Release this lease before optional sidecars below.
+    let entity_lease = if args.background {
+        let Some(lease) = crate::cloud::sync_lease::SyncLease::try_acquire(cas_root)
+            .map_err(|error| {
+                anyhow::anyhow!("open the cloud sync lease in {}: {error}", cas_root.display())
+            })?
+        else {
+            eprintln!(
+                "cloud sync skipped: another sync holds {}",
+                crate::cloud::sync_lease::sync_lease_path(cas_root).display()
+            );
+            std::process::exit(crate::cloud::sync_lease::SYNC_LEASE_BUSY_EXIT);
+        };
+        Some(lease)
+    } else {
+        None
+    };
+
     let mut summaries = Vec::new();
     let initial_config = CloudConfig::load_from_cas_dir_inheriting_user_credentials(cas_root)?;
     initial_config
@@ -4571,18 +4590,6 @@ fn execute_sync_with_output(
             emit_output && !cli.json,
         )?;
     }
-
-    // Team discovery/registration can wait on the network; only queue push
-    // and pull/apply own the entity lease.
-    let entity_lease = if args.background {
-        let Some(lease) = crate::cloud::sync_lease::SyncLease::try_acquire(cas_root)
-            .map_err(|error| anyhow::anyhow!("open the cloud sync lease in {}: {error}", cas_root.display()))?
-        else {
-            eprintln!("cloud sync skipped: another sync holds {}", crate::cloud::sync_lease::sync_lease_path(cas_root).display());
-            std::process::exit(crate::cloud::sync_lease::SYNC_LEASE_BUSY_EXIT);
-        };
-        Some(lease)
-    } else { None };
 
     let operation_output = emit_output && args.dry_run;
     // cas-421e: decided after the team-scope adoption above, which can turn a

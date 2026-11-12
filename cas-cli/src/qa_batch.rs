@@ -824,6 +824,15 @@ pub(crate) fn prepare_receipt(
         if !report.ok {
             return Err(format!("ledger fails `cas qa ledger check`:\n{}", report.refusal()));
         }
+        // A structurally valid ledger can still record failures (GH #1713);
+        // those are evidence, never a PASS receipt.
+        let failed: Vec<_> = report.rows.iter()
+            .filter(|row| row.verdict == crate::qa_ledger::Verdict::Fail)
+            .map(|row| format!("{} (line {}, defect {})", row.id, row.line, row.defect_task))
+            .collect();
+        if !failed.is_empty() {
+            return Err(format!("ledger records FAIL cells, so it cannot back a PASS receipt: {}", failed.join(", ")));
+        }
     }
     if schema == cas_store::RELEASE_VERDICT_SCHEMA {
         if let Some(id) = task_ids.iter().find(|id| !report_names(&body, id)) {

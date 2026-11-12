@@ -13035,8 +13035,11 @@ async fn test_assignment_allows_a_worker_parked_for_another_epic_gh_1006() {
             .current_dir(&worker_path)
             .output()
             .expect("run the lane plan");
-        let plan_log = String::from_utf8_lossy(&plan.stdout);
-        assert!(plan.status.success() && plan_log.contains("(recorded start base)"), "{plan_log}");
+        assert!(plan.status.success(), "{}", String::from_utf8_lossy(&plan.stderr));
+        let lane: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.path().join("lane.json")).unwrap()).unwrap();
+        assert_eq!(lane["plan"]["base"], start.base_sha.as_str());
+        assert_eq!(lane["plan"]["base_source"], "recorded start base");
     }
 }
 

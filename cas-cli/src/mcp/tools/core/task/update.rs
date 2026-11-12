@@ -4084,6 +4084,19 @@ mod epic_move_work_target_tests {
 
         add_parent(&core, &trunk.id, &lane_epic.id).await.unwrap();
         assert_eq!(branch_of(&store, &trunk.id), "epic/f29b");
+
+        // Retargeting unfinished work is also a move out of its frozen train.
+        git(&["branch", "epic/next"]);
+        let mut successor = lane_epic.clone();
+        successor.id = "cas-next".into();
+        successor.branch = Some("epic/next".into());
+        successor.deliverables.work_target = Some(at("epic/next"));
+        store.add(&successor).unwrap();
+        let request = serde_json::from_value(serde_json::json!({"id":trunk.id})).unwrap();
+        core.cas_task_update_with_delivery_mode(request, None, Some("epic/next"),
+            false, None, None, None, None, false).await.unwrap();
+        assert_eq!(branch_of(&store, &trunk.id), "epic/next");
+        assert_eq!(parent_of(&store, &trunk.id), vec![successor.id]);
     }
 
     #[tokio::test]

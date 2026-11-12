@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import importlib.util
+import ast
 from pathlib import Path
 import subprocess
 import tempfile
@@ -260,7 +261,8 @@ def test_workflow_command():
             (f'argv = {records}\nassert {payload} not in argv', False),
             (f'captured = shlex.split(calls.read_text())\nself.assertEqual(captured, {payload})', False),
             (f'argv = {records}\nargv = generated\nself.assertIn({payload}, argv)', True),
-            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = generated', True),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = generated', False),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = {records}\nself.assertNotIn({payload}, argv)', False),
             (f'self.assertIn({payload}, argv)\nargv = {records}', True),
             (f'argv = render({records})\nself.assertIn({payload}, argv)', True),
             (f'argv = {records}\nself.assertIn({payload}, other)', True),
@@ -275,6 +277,30 @@ def test_workflow_command():
                     hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
                             + shape.message_assertions(code, 'tests/test_calls.py', changed))
                     self.assertEqual(bool(hits), rejected, hits)
+
+        # Exercise the motivating file itself, including both assignments to
+        # argv in one function, with its actual assertion lines marked changed.
+        path = Path(__file__).with_name('test-fast-release-rows.py')
+        source = path.read_text()
+        function = next(node for node in ast.walk(ast.parse(source)) if isinstance(node, ast.FunctionDef)
+                        and node.name == 'test_legacy_registry_uses_explicit_policy_without_a_store')
+        literals = [node.args[0] for node in ast.walk(function)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ('assertIn', 'assertNotIn') and node.args
+                    and isinstance(node.args[0], ast.List)
+                    and all(isinstance(item, ast.Constant) for item in node.args[0].elts)
+                    and [ast.literal_eval(item) for item in node.args[0].elts]
+                    == ['config', 'get', 'qa.registry.enforce']]
+        self.assertEqual(len(literals), 2)
+        changed = {node.lineno for node in literals}
+        ranges = list(shape.python_runtime_inputs(source))
+        lines = source.splitlines(keepends=True)
+        for operand in literals:
+            for literal in operand.elts:
+                offset = sum(map(len, lines[:literal.lineno - 1])) + literal.col_offset
+                self.assertTrue(any(left <= offset < right for left, right in ranges))
+        self.assertFalse(shape.lint_text_pins(source, str(path), changed_lines=changed))
+        self.assertFalse(shape.message_assertions(source, str(path), changed))
 
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [

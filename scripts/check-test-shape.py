@@ -705,13 +705,16 @@ def python_runtime_inputs(source):
         if function is None:
             return False
         if function not in bindings:
-            writes, assignments = {}, {}
+            writes = {}
             for item in ast.walk(function):
                 if function_of(item) is not function:
                     continue
-                names = []
+                names, assignment = [], None
                 if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
                     names = [item.id]
+                    parent = parents[item]
+                    if isinstance(parent, ast.Assign) and len(parent.targets) == 1 and parent.targets[0] is item:
+                        assignment = parent
                 elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     names = [item.name]
                 elif isinstance(item, (ast.Import, ast.ImportFrom)):
@@ -719,13 +722,13 @@ def python_runtime_inputs(source):
                 elif isinstance(item, ast.ExceptHandler) and item.name:
                     names = [item.name]
                 for name in names:
-                    writes[name] = writes.get(name, 0) + 1
-                if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
-                    assignments[item.targets[0].id] = item
-            bindings[function] = {name: assignment for name, assignment in assignments.items() if writes[name] == 1}
-        assignment = bindings[function].get(node.id)
+                    write = assignment or item
+                    writes.setdefault(name, []).append(((write.end_lineno, write.end_col_offset), assignment))
+            bindings[function] = writes
+        preceding = [write for write in bindings[function].get(node.id, [])
+                     if write[0] < (node.lineno, node.col_offset)]
+        assignment = max(preceding, key=lambda write: write[0], default=(None, None))[1]
         return (assignment is not None
-                and (assignment.end_lineno, assignment.end_col_offset) < (node.lineno, node.col_offset)
                 and recorded_argv(assignment.value, many))
 
     for node in ast.walk(tree):

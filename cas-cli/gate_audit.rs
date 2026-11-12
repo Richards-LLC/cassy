@@ -10,12 +10,16 @@ use syn::{
     visit::{self, Visit},
 };
 
-const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. Ordinary I/O, parse and input-validation errors are excluded. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
+#[path = "gate_audit_refusals.rs"]
+mod refusals;
+
+const DEFINITION: &str = "A factory check is a policy refusal of a request that is otherwise well-formed and executable. A bypass acceptor is any parameter, env var or flag that lets such a refused request proceed. Scope: checks guarding factory tasks, workers, merges, releases, verification, hooks and scripts protecting those; every registered factory check, bypass candidate, MCP/hook/script result producer and false-positive path is inventoried. Non-factory memory data quality, device APIs and execution confirmations are excluded with reasons. The marker-independent scan discovers only refusals controlled by caller identity/authority (roles, registration, ownership, assignee, leases or live-supervisor predicates). Ordinary I/O, parse, input-validation and not-found error conditions are excluded by construction. Workflow C-row fact emission is deferred to step 3 (cas-d777c, decision 10:54 AM ET).";
 
 #[derive(Default)]
 pub struct Audit {
     pub rows: Vec<[String; 6]>,
     pub gaps: Vec<String>,
+    pub authority_uncoded: BTreeMap<String, usize>,
 }
 impl Audit {
     pub fn markdown(&self, total: usize) -> String {
@@ -54,6 +58,7 @@ struct Function {
     flags: BTreeSet<String>,
     conditional: BTreeSet<String>,
     policy: bool,
+    authority_value: Option<refusals::AuthorityValue>,
     annotations: BTreeMap<String, String>,
     script_sink: bool,
     producer: Option<&'static str>,
@@ -386,6 +391,7 @@ impl Functions<'_> {
         let mut body = Body { function: &mut f };
         body.visit_signature(signature);
         body.visit_block(block);
+        f.authority_value = refusals::authority_value(signature, block);
         self.output.push(f);
     }
 }
@@ -487,12 +493,23 @@ fn reaches(functions: &[Function], producer: &Function, target: &str) -> bool {
 /// Scan declarations, AST control-flow candidates, result types and script flags.
 /// Registry tuples are (code, stage, title, source), from the same build scan.
 pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit {
+    let target = std::env::var("BASE_SHA").ok().filter(|value| !value.trim().is_empty() && value.bytes().any(|byte| byte != b'0'))
+        .unwrap_or_else(|| "origin/main".into());
+    scan_against(root, registry, &target)
+}
+
+pub fn scan_against(root: &Path, registry: &[(String, String, String, String)], target: &str) -> Audit {
     let mut paths = Vec::new();
     for dir in ["cas-cli/src", "crates", "scripts"] {
         files(&root.join(dir), &mut paths);
     }
     paths.sort();
     let mut functions = Vec::new();
+    let mut refusal_sites = Vec::new();
+    let policy_files = registry.iter().filter(|(code, _, _, _)|
+        code.starts_with('G') || code.starts_with('H') || code.starts_with('C'))
+        .filter_map(|(_, _, _, site)| site.rsplit_once(':').map(|(path, _)| path.to_owned()))
+        .collect::<BTreeSet<_>>();
     let mut script_rows = Vec::new();
     let mut all_refused = BTreeSet::new();
     let mut all_overridden = BTreeSet::new();
@@ -508,15 +525,21 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         };
         if path.extension().is_some_and(|e| e == "rs") {
             match syn::parse_file(&source) {
-                Ok(file) => Functions {
+                Ok(file) => {
+                    Functions {
                     path: &relative,
                     lines: source.lines().collect(),
                     output: &mut functions,
                 }
-                .visit_file(&file),
+                    .visit_file(&file);
+                    if refusals::policy_module(&relative, &policy_files) {
+                        refusals::rust(&relative, &source, &file, &mut refusal_sites);
+                    }
+                },
                 Err(e) => audit.gaps.push(format!("{relative}: AST scan failed: {e}")),
             }
         } else {
+            refusals::script(&relative, &source, &policy_files, &mut refusal_sites);
             let executable = source.lines().filter(|line| !line.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
             let codes = bracket_codes(&executable, "");
             let test_harness = relative.rsplit('/').next().is_some_and(|name| name.starts_with("test-") || name.starts_with("test_"));
@@ -656,6 +679,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         all_overridden.extend(f.overridden.clone());
     }
     let registered: BTreeSet<_> = registry.iter().map(|r| r.0.clone()).collect();
+    refusals::finish(root, target, refusal_sites, &functions, &registered, &mut audit);
     for f in &functions {
         for code in f.refused.union(&f.overridden) {
             if !registered.contains(code) {

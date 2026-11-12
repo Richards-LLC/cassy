@@ -61,6 +61,74 @@ async fn refused_reexec_preflight_leaves_live_session_untouched() {
     pane.kill_tree_force();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2() {
+    use crate::ui::factory::app::render_and_ops::epic_workers::{
+        CrashCleanupOutcome, WorkerCleanupJob, WORKER_CLEANUP_WARN_AFTER,
+    };
+    use super::super::PendingSpawn;
+    use std::time::Instant;
+
+    let env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let root = crate::store::init_cas_dir(&env.home().join("project")).unwrap();
+    let mut daemon = daemon(&root);
+    daemon.app.set_factory_session("held-session".into());
+    let candidate = root.join("candidate");
+    std::fs::write(&candidate, "#!/bin/sh\nprintf '%s\n' '{\"supported_schemas\":[1]}'\n").unwrap();
+    std::fs::set_permissions(&candidate, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let (finish_spawn, wait_spawn) = tokio::sync::oneshot::channel::<()>();
+    daemon.spawn_task = Some(("booting-worker".into(), Some(4242), None, None,
+        tokio::spawn(async move {
+            let _ = wait_spawn.await;
+            Err(anyhow::anyhow!("fixture provisioning completed"))
+        })));
+    daemon.spawn_started_at = Some(Instant::now());
+    daemon.app.add_pending_worker("booting-worker".into(), true);
+
+    let error = daemon.reexec(&candidate, "next", None, "active-spawn").await.unwrap_err().to_string();
+    assert!(error.contains("booting-worker"), "{error}");
+    assert!(error.contains("4242"), "{error}");
+    assert!(daemon.spawn_task.is_some());
+
+    let (finish_cleanup, wait_cleanup) = std::sync::mpsc::channel::<()>();
+    let mut job = WorkerCleanupJob::new("held-worker".into(), std::thread::spawn(move || {
+        let _ = wait_cleanup.recv();
+        CrashCleanupOutcome { worktree: None }
+    }));
+    let occurrence = job.occurrence.clone();
+    job.started = Instant::now() - WORKER_CLEANUP_WARN_AFTER;
+    daemon.app.register_worker_cleanup(job);
+    daemon.app.warn_worker_cleanups_at(Instant::now(), |_, _, _| true);
+    daemon.app.mark_worker_crashed_in_memory("crashed-worker");
+    daemon.pending_spawns.push_back(PendingSpawn::Named {
+        request_id: Some(4343), name: "queued-worker".into(), isolate: true,
+        spec: None, task_id: None,
+    });
+
+    let error = daemon.reexec(&candidate, "next", None, "mixed").await.unwrap_err().to_string();
+    // These are caller identities, independent of the diagnostic wording.
+    for identity in ["booting-worker", "4242", "held-worker", occurrence.as_str(), "crashed-worker", "queued-worker", "4343"] {
+        assert!(error.contains(identity), "missing blocker {identity}: {error}");
+    }
+    assert!(!daemon.spawn_task.as_ref().unwrap().4.is_finished());
+    assert!(daemon.app.worker_worktree_cleanups_pending());
+    assert!(daemon.app.crash_cleanup_pending("held-worker"));
+    assert!(daemon.app.crash_cleanup_pending("crashed-worker"));
+    assert_eq!(daemon.app.pending_workers.len(), 1);
+    assert_eq!(daemon.pending_spawns.len(), 1);
+
+    drop(finish_spawn);
+    assert!(daemon.spawn_task.take().unwrap().4.await.unwrap().is_err());
+    daemon.pending_spawns.clear();
+    daemon.app.pending_workers.clear();
+    let error = daemon.app.prepare_handoff().await.err().unwrap().to_string();
+    assert!(error.contains(&occurrence), "{error}");
+    drop(finish_cleanup);
+    daemon.app.join_worker_worktree_cleanups();
+    daemon.app.abandon_crash_cleanup("crashed-worker");
+    assert!(daemon.app.prepare_handoff().await.is_ok());
+}
+
 const EXEC_TEST: &str = "ui::factory::daemon::runtime::reexec_tests::reexec_adopts_two_panes_and_rolls_back_failed_candidate";
 
 #[test]

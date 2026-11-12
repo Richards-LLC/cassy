@@ -79,7 +79,7 @@
 - `cas-cli/src/task_assignment.rs`, `cas-cli/src/task_ownership.rs`, `cas-cli/src/worker_task_queue.rs` - binding and ordered backlogs, including pre-registration assignment admission.
 - `cas-cli/src/factory_auth_health.rs`, `cas-cli/src/mcp/tools/service/factory_ops/spawn_names.rs` - authentication/model failure evidence and collision-free worker reservation.
 - `cas-cli/src/factory_candidate_queue.rs`, `cas-cli/src/mcp/tools/service/candidate_ops.rs`, `cas-cli/src/factory_review_scratch.rs` - candidate build ownership and review-checkout creation, reuse and cleanup.
-- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_target_cache/owner.rs` - capped proof admission, target leases, capacity retries, owned scratch and child-only test environments.
+- `cas-cli/src/factory_worker_check.rs`, `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_capacity_wait.rs`, `cas-cli/src/factory_scratch.rs`, `cas-cli/src/factory_target_cache/owner.rs` - capped proof admission, separate selected-test captures, target leases, capacity retries, owned scratch and child-only test environments. `scripts/worker-proof-guards.py` keeps automatic guard output outside the selected capture.
 - `cas-cli/src/factory_worker_runs.rs`, `cas-cli/src/factory_build_routing.rs` - detached command records, completion wakes, pre-recycle producer shutdown and same-account capacity routing.
 - `cas-cli/src/epic_design_review.rs`, `cas-cli/src/cli/factory/queries.rs` - stakeholder defect staffing pauses and explicit message routing.
 - `cas-cli/src/train_guardrails.rs`, `cas-cli/src/train_ci.rs`, `cas-cli/src/factory_ci_retry.rs` - release-train guards, full-set proof and exact-tip retry notices.
@@ -94,7 +94,7 @@
 
 ## MCP, storage and delivery gates
 
-- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement.
+- `cas-cli/src/mcp/daemon.rs`, `cas-cli/src/mcp/server/` - stdio framing, startup, in-flight accounting and compatible backend replacement; `daemon.rs` owns an independent entity-sync scheduler, with entity, knowledge and quality cursor leases in `cloud/sync_lease.rs`.
 - `cas-cli/src/mcp/tools/core/`, `cas-cli/src/mcp/tools/service/` - operations, service dispatch and bounded tool futures.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs` - first-park pushed-tip attribution, exact-dispatch epic timeout recovery and existing parked-anchor protections; `close_ops/gate_text.rs` emits executable typed verdict payloads.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/` - attribution, receipt scope, proof/upkeep gates, rule coverage and reviewed corrections; `no_code_close_tests.rs` replays refused-close correction lineage.
@@ -104,7 +104,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle.rs` - recorded-start graph reconciliation for resumed worker branches and linked-checkout identity.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/proof_claims.rs` - bounded close-reason proof assertions and clause-specific receipt checks.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/qa_dispatch.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/supervisor_push.rs` - review dispatch, read-only backfill admission, target-only parked-anchor recovery, ordinary close and lifecycle outbox.
-- `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable candidates, shared generated-output regeneration with worktree merges, review scratch, plan/evidence binding, overview validation, target-move rebinding, late bound-child verdict admission and landed proof promotion.
+- `cas-cli/src/mcp/tools/core/workflow/premerge_verification.rs` - immutable candidates, coalesced background preparation sharing completed results within bounded response waits and supervisor completion notices, shared generated-output regeneration, review scratch, plan/evidence binding, overview validation, target-move rebinding, late bound-child verdict admission and landed proof promotion.
 - `cas-cli/src/mcp/tools/core/workflow/premerge_verification/automatic.rs` - account-aware automatic verifier launch with background startup after dispatch claim, sealed child authority, exact-child crash recovery, late verdict submission and separate attempt diagnostics.
 - `cas-cli/src/mcp/tools/core/agent_coordination/agent_session.rs`, `cas-cli/src/mcp/tools/core/agent_coordination/agent_management.rs`, `cas-cli/src/mcp/server/mod.rs` - connection-bound identity, same-pane supervisor session rebinding and child registration admission; native Codex reviewer guidance in `cas-cli/src/prompt_revalidation.rs`.
 - `cas-cli/src/mcp/tools/service/server_handler.rs`, `cas-cli/src/mcp/tools/service/mutation_receipt.rs`, `cas-cli/src/supervisor_notices.rs` - response deadlines, request-scoped commits and durable caller notices for registration continuations.
@@ -166,6 +166,6 @@
 
 - **CLI/library:** `cas-cli/src/main.rs` (`cas`), `cas-cli/src/lib.rs`; MCP daemon `cas-cli/src/mcp/daemon.rs` (`cas serve`).
 - **Factory:** `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`; Commander `hub-web/src/main.ts`.
-- **In-place daemon updates:** `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs`, `cas-cli/src/cli/factory/reexec.rs`; real-hub journey HUB-J11.
+- **In-place daemon updates:** `crates/cas-pty/src/adopt.rs`, `crates/cas-mux/src/pane/handoff.rs`, `crates/cas-mux/src/mux/handoff.rs`, `cas-cli/src/ui/factory/daemon/reexec.rs`, `cas-cli/src/cli/factory/reexec.rs`; `app/handoff.rs` shares worker-job diagnostics with the daemon, naming active and queued actions alongside cleanup with idle full-factory restart recovery; `daemon/runtime/reexec_tests.rs` drives mixed blockers through the actual reexec entry; real-hub journey HUB-J11.
 
 - `cas-cli/src/issue_reconcile.rs` - bounded GitHub reconciliation and typed release issue outcomes after delivery closes.

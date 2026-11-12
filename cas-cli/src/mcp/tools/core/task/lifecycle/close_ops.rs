@@ -13380,8 +13380,15 @@ impl CasCore {
                 Ok(source.to_ascii_lowercase())
             }).collect::<Result<Vec<_>, _>>()?;
 
-        let authorize_active = task.status == TaskStatus::InProgress && !source_commits.is_empty();
-        if !authorize_active && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
+        let grant_only = !source_commits.is_empty() && (task.status == TaskStatus::InProgress
+            || (task.status == TaskStatus::Blocked
+                && task.deliverables.parked_branch.is_none()
+                && task.deliverables.factory_branch_anchor.is_none()
+                && cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
+                        format!("merge_source could not inspect delivery boundary: {error}")))?
+                    .is_none()));
+        if !grant_only && !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Blocked) {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,
                 format!(
@@ -13402,8 +13409,8 @@ impl CasCore {
             })?.id
         };
         // First-park integration cannot decline a park that has not happened.
-        // Apply only the typed grant, with the same task revision still active.
-        if authorize_active {
+        // Apply only the typed grant, preserving the current task revision's status.
+        if grant_only {
             let work_target = task.deliverables.work_target.as_ref().ok_or_else(|| {
                 Self::error(ErrorCode::INVALID_PARAMS, "merge_source requires a declared task work target")
             })?;
@@ -13431,13 +13438,13 @@ impl CasCore {
                     work_target.target_branch,
                     req.reason.trim(),
                 ));
-                task_store.update_if_current_with_mutation_receipt(&granted, &task, "")
+                task_store.update_if_current(&granted, &task)
                     .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS,
                         format!("task merge source authorization rejected: {error}")))?;
             }
             return Ok(Self::success(format!(
-                "Authorized merge source for task {} at {}. The task remains InProgress.",
-                task.id, source_commits.join(", ")
+                "Authorized merge source for task {} at {}. The task remains {}.",
+                task.id, source_commits.join(", "), task.status
             )));
         }
 

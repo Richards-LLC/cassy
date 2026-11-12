@@ -1987,9 +1987,10 @@ impl SqlitePromptQueueStore {
                 // news. Keep the persisted body and delivery receipts intact.
                 if (prompt.source.starts_with("lifecycle:")
                     || prompt.source.starts_with("lifecycle-wake:"))
-                    && cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some()
+                    && let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt)
                 {
-                    let age_secs = (now - prompt.created_at).num_seconds().max(0);
+                    // A reconciled occurrence may predate its newly created queue row.
+                    let age_secs = (now - envelope.occurrence.min(prompt.created_at)).num_seconds().max(0);
                     if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
                         let holding = Self::holding_detail_on_conn(tx, prompt.id)?;
                         let cause = holding.as_deref().map(|detail| {
@@ -11391,6 +11392,52 @@ mod tests {
         assert_eq!(store.message_delivery_report(old).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
         assert_eq!(store.recipient_receipt(old, "supervisor").unwrap(), None);
         assert_eq!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![current]);
+    }
+
+    #[test]
+    fn late_blocker_occurrence_is_aged_or_withdrawn_at_recipient_drain_cas_bfb3() {
+        for (age_minutes, current_status) in [
+            (0, TaskStatus::Blocked),
+            (168, TaskStatus::Blocked),
+            (168, TaskStatus::InProgress),
+        ] {
+            for hook in [false, true] {
+                let (temp, store) = create_test_store();
+                let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+                tasks.init().unwrap();
+                let mut task = Task::new("cas-bfb3".into(), "delayed blocker".into());
+                task.status = TaskStatus::Blocked;
+                tasks.add(&task).unwrap();
+                let occurrence = Utc::now() - chrono::Duration::minutes(age_minutes);
+                let body = format!("<task-lifecycle transition=\"task_blocked\" task_id=\"{}\" old=\"in_progress\" new=\"blocked\" actor=\"worker\" notification_id=\"71151\" occurrence=\"{}\">blocker</task-lifecycle>", task.id, occurrence.to_rfc3339());
+                let id = store.enqueue_with_session("lifecycle-wake:71151", "supervisor", &body, "session").unwrap();
+                let original = store.queued_prompt(id).unwrap().unwrap();
+                if current_status != task.status {
+                    task.status = current_status;
+                    tasks.update(&task).unwrap();
+                }
+                let rows = if hook {
+                    store.surface_wake_named_for_recipient("supervisor", Some("session"), &[id]).unwrap()
+                } else {
+                    store.poll_unseen_for_recipient("supervisor", Some("session"), 10).unwrap()
+                };
+                if current_status == TaskStatus::InProgress {
+                    assert!(rows.is_empty());
+                    assert_eq!(store.message_delivery_report(id).unwrap().unwrap().pending_reason,
+                        Some(PendingReason::SupersededStale));
+                    assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), None);
+                } else {
+                    assert_eq!(rows.len(), 1);
+                    assert_eq!(rows[0].id, id);
+                    assert_eq!(rows[0].prompt, body);
+                    assert_eq!(rows[0].created_at, original.created_at);
+                    assert_eq!(rows[0].summary.is_some(), age_minutes > 0);
+                    assert_eq!(store.queued_prompt(id).unwrap().unwrap().summary, original.summary);
+                    assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(),
+                        Some(if hook { SurfacingSource::HookSurfaced } else { SurfacingSource::InboxPoll }));
+                }
+            }
+        }
     }
 
     #[test]

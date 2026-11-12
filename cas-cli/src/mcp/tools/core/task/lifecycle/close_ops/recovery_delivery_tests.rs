@@ -446,6 +446,70 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+#[tokio::test]
+async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commits_cas_ef54() {
+    for shipped_by in [Some("origin/main"), Some("v9.99.0"), None] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture_with_surface(&mut env, "note.txt", false);
+        let repo = f.dir.path();
+        let root = repo.join(".cas");
+        let agents = open_agent_store(&root).unwrap();
+        let mut worker = agents.get("recovery-session").unwrap();
+        worker.metadata.insert("clone_path".into(), f.worker_path.display().to_string());
+        agents.update(&worker).unwrap();
+        git(repo, &["branch", "epic/sync", "main"]);
+        std::fs::write(repo.join("release.txt"), "foreign task delivery\n").unwrap();
+        git(repo, &["add", "release.txt"]);
+        git(repo, &["commit", "-qm", "fix(cas-beef): foreign task delivery"]);
+        let foreign = git(repo, &["rev-parse", "HEAD"]);
+        match shipped_by {
+            Some("origin/main") => { git(repo, &["update-ref", "refs/remotes/origin/main", &foreign]); }
+            Some(tag) => { git(repo, &["tag", tag, &foreign]); }
+            None => {
+                git(repo, &["update-ref", "-d", "refs/remotes/origin/main"]);
+                git(repo, &["tag", "v-scratch", &foreign]);
+            }
+        }
+        git(&f.worker_path, &["merge", "-q", "--no-ff", "main", "-m",
+            &format!("chore({TASK}): synchronize release")]);
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let tasks = open_task_store(&root).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.deliverables.work_target.as_mut().unwrap().target_branch = "epic/sync".into();
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(), branch: BRANCH.into(),
+            base_sha: git(repo, &["rev-parse", "epic/sync"]),
+        });
+        let boundary = task.deliverables.factory_branch_start.clone();
+        task.deliverables.parked_branch = Some(BRANCH.into());
+        task.deliverables.factory_branch_anchor = Some(tip.clone());
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-session".into());
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        supervisor.cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+            id: TASK.into(), reason: "Keep the sync and rerun the named test".into(),
+        })).await.unwrap();
+        env.set("CAS_AGENT_ROLE", "worker");
+        let result = f.core.cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+            id: TASK.into(), brief: Some(true), force: None,
+        })).await;
+        let allowed = shipped_by == Some("origin/main");
+        if allowed {
+            result.unwrap_or_else(|error| panic!("shipped by {shipped_by:?}: {error}"));
+        } else {
+            assert_eq!(result.unwrap_err().code, ErrorCode::INVALID_PARAMS);
+        }
+        let resumed = tasks.get(TASK).unwrap();
+        assert_eq!(resumed.status, if allowed { TaskStatus::InProgress } else { TaskStatus::Open });
+        assert_eq!(resumed.deliverables.factory_branch_start, boundary);
+        assert_eq!(git(&f.worker_path, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(std::fs::read(f.worker_path.join("release.txt")).unwrap(), b"foreign task delivery\n");
+    }
+}
+
 /// GH #1543/#1548: a supervisor-required release import may itself contain
 /// sibling merges that have not reached this task's target yet.
 #[tokio::test]
@@ -555,12 +619,20 @@ async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
 /// GH #1785: the active integration must get its exact parent approval
 /// before the foreign-history gate will let it park for the first time.
 #[tokio::test]
-async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
+async fn first_park_import_grant_uses_syncing_store_cas_a7b5() {
     let mut env = TestEnvGuard::temp_home();
+    for initial_status in [TaskStatus::InProgress, TaskStatus::Blocked] {
     let mut f = fixture_with_surface(&mut env, "note.txt", false);
     let repo = f.dir.path();
     let cas_dir = repo.join(".cas");
+    let server = wiremock::MockServer::start().await;
+    crate::cloud::CloudConfig {
+        endpoint: server.uri(), token: Some("fixture-token".into()), ..Default::default()
+    }.save_to_cas_dir(&cas_dir).unwrap();
+    // Open through the production factory: a logged-in project wraps SQLite
+    // in the real syncing store, rather than testing the raw backend alone.
     let tasks = open_task_store(&cas_dir).unwrap();
+    let queue = crate::cloud::SyncQueue::open(&cas_dir).unwrap();
     git(&f.worker_path, &["reset", "--hard", &f.predecessor]);
     git(repo, &["switch", "-qc", "epic/approved", "main"]);
     std::fs::write(repo.join("child.txt"), "integrated sibling\n").unwrap();
@@ -578,7 +650,10 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
 
     let mut task = tasks.get(TASK).unwrap();
+    task.status = initial_status;
     task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_anchor = None;
+    task.deliverables.historical_factory_branch_anchors.clear();
     task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
         work_target: task.deliverables.work_target.clone().unwrap(),
         assignee: WORKER.into(),
@@ -600,17 +675,27 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     assert!(f.core.cas_task_request_changes(request(&approved)).await.is_err());
     assert!(tasks.get(TASK).unwrap().deliverables.authorized_merge_sources.is_empty());
+    queue.clear().unwrap();
     supervisor.cas_task_request_changes(request(&child)).await.unwrap();
     let wrong = tasks.get(TASK).unwrap();
-    assert_eq!(wrong.status, TaskStatus::InProgress);
+    assert_eq!(wrong.status, initial_status);
     assert_eq!(wrong.deliverables.factory_branch_start, task.deliverables.factory_branch_start);
     assert_eq!(wrong.deliverables.factory_branch_anchor, task.deliverables.factory_branch_anchor);
     assert!(task_attribution::started_delivery(repo, &wrong).is_err());
+    supervisor.cas_task_request_changes(request(&child)).await.unwrap();
+    assert_eq!(tasks.get(TASK).unwrap().updated_at, wrong.updated_at);
 
     supervisor.cas_task_request_changes(request(&approved)).await.unwrap();
     let granted = tasks.get(TASK).unwrap();
-    assert_eq!(granted.status, TaskStatus::InProgress);
+    assert_eq!(granted.status, initial_status);
     assert_eq!(granted.assignee, task.assignee);
+    let pending = queue.pending(10, 5).unwrap();
+    assert_eq!(pending.len(), 1);
+    let outbound: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+    assert_eq!(outbound.deliverables.authorized_merge_sources, granted.deliverables.authorized_merge_sources);
+    assert!(tasks.update_if_current(&task, &task).is_err());
+    assert_eq!(tasks.get(TASK).unwrap().updated_at, granted.updated_at);
+    assert_eq!(queue.pending(10, 5).unwrap()[0].payload, pending[0].payload);
     let delivery = task_attribution::started_delivery(repo, &granted).unwrap().unwrap();
     assert_eq!(delivery.commits, vec![f.final_tip.clone()]);
 
@@ -625,7 +710,7 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
 
     env.set("CAS_AGENT_ROLE", "worker");
     let _ = close_output(&f).await;
-    assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress);
+    assert_eq!(tasks.get(TASK).unwrap().status, initial_status);
     git(&f.worker_path, &["push", "-q", "origin", BRANCH]);
     let parked = close(&f).await;
     assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
@@ -636,6 +721,7 @@ async fn active_epic_import_requires_exact_supervisor_grant_cas_8a0f() {
     );
     let paths = task_attribution::paths(repo, "main", &window, Some(&f.final_tip)).unwrap();
     assert!(paths.iter().any(|path| path == "child.txt"));
+    }
 }
 
 /// GH #1558: an ordinary close after pushing a target merge must bind the

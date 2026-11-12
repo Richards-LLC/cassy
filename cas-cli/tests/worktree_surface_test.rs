@@ -6960,6 +6960,9 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
 
     let owner_service = delivery_service(&cas_root, owner_id);
     let concurrent_owner_service = delivery_service(&cas_root, owner_id);
+    // Multiple followers must observe the same completed candidate, rather
+    // than treating coalescing itself as a reason to hold an exact receipt.
+    let third_owner_service = delivery_service(&cas_root, owner_id);
     let accepted_a = owner_service.task(Parameters(task_req(serde_json::json!({
         "action": "close",
         "id": task.id,
@@ -6972,10 +6975,17 @@ async fn completion_receipt_authority_is_exact_active_lease_session() {
         "reason": "concurrent exact lease owner handoff b",
         "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
     }))));
-    let (accepted_a, accepted_b) = tokio::join!(accepted_a, accepted_b);
+    let accepted_c = third_owner_service.task(Parameters(task_req(serde_json::json!({
+        "action": "close",
+        "id": task.id,
+        "reason": "concurrent exact lease owner handoff c",
+        "completion_receipt": serde_json::to_string(&owner_receipt).unwrap(),
+    }))));
+    let (accepted_a, accepted_b, accepted_c) = tokio::join!(accepted_a, accepted_b, accepted_c);
     let accepted_a = accepted_a.expect("first concurrent exact lease owner receipt");
     let accepted_b = accepted_b.expect("second concurrent exact lease owner receipt");
-    for accepted in [&accepted_a, &accepted_b] {
+    let accepted_c = accepted_c.expect("third concurrent exact lease owner receipt");
+    for accepted in [&accepted_a, &accepted_b, &accepted_c] {
         assert!(
             get_text(accepted).contains("Worker delivery receipt accepted idempotently"),
             "{}",

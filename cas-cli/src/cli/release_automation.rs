@@ -1002,7 +1002,7 @@ pub(super) mod tests {
         }, &path).unwrap().artifact;
         for id in ["cas-e3041", "cas-ef2b", "cas-undeclared"] {
             let mut task = tasks.get(id).unwrap();
-            task.external_ref = Some(artifact.id.clone());
+            task.external_ref = Some(format!("artifact:{}", artifact.id));
             tasks.update(&task).unwrap();
         }
         let proof = ReleaseProofRef {

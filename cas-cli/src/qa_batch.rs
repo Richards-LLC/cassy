@@ -69,6 +69,8 @@ pub(crate) struct ReleaseProofRef {
 /// bytes for the release member instead of asking the caller to type them again.
 pub(crate) fn no_code_proofs(root: &Path, scope: &ReleaseScope, task: &Task) -> Result<Vec<ReleaseProofRef>, String> {
     let reference = task.external_ref.as_deref().ok_or_else(|| format!("RELEASE_NO_CODE_PROOF_MISSING: {}", task.id))?;
+    let reference = reference.trim();
+    let reference = reference.strip_prefix("artifact:").unwrap_or(reference);
     let artifact = release_close::read_artifact(root, reference)
         .map_err(|e| format!("RELEASE_NO_CODE_PROOF_BINDING: {}: {e}", task.id))?;
     let proofs = vec![ReleaseProofRef {

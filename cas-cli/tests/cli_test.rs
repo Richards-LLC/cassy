@@ -110,6 +110,7 @@ fn release_preview_does_not_initialize_tracing_on_success_or_failure() {
 #[test]
 fn release_plan_and_leased_cut_replay_incidents_cas_80df() {
     use cas_types::{Dependency, DependencyType, Task, TaskStatus, TaskType, WorkTarget};
+    use std::io::{BufRead, Write};
     use std::{fs, path::Path, process::Command as Process};
     let capture = cas::test_paths::workspace_root().join("target/cas-80df-real-entry.json");
     let mut env = super::test_env_guard::TestEnvGuard::temp_home();
@@ -188,7 +189,7 @@ case "$1 $2" in
 esac
 "##);
     // The build tool is an external fixture; the CAS binary and release owner are real.
-    cas::test_paths::warm_stub(&bin.join("npm"), "#!/bin/sh\nif [ \"$1\" = run ]; then\n if git symbolic-ref --quiet HEAD; then exit 73; fi\n pwd >> \"$CUT_BUILD_MARKER\"\n mkdir -p dist\n printf 'built\\n' > dist/app.js\nfi\n");
+    cas::test_paths::warm_stub(&bin.join("npm"), "#!/bin/sh\nif [ \"$1\" = run ]; then\n if git symbolic-ref --quiet HEAD; then exit 73; fi\n if [ \"$CUT_HOLD\" = 1 ]; then printf 'CUT_READY\\n' >&2; read -r finish; fi\n pwd >> \"$CUT_BUILD_MARKER\"\n mkdir -p dist\n printf 'built\\n' > dist/app.js\nfi\n");
     env.set("PATH", std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap()))).unwrap());
     env.set("CAS_GH_BIN", &gh);
     env.set("GH_BIN", &gh);
@@ -198,7 +199,7 @@ esac
     env.set("RELEASE_DATE", "2026-01-02");
     let marker = temp.path().join("builds");
     env.set("CUT_BUILD_MARKER", &marker);
-    let notes = temp.path().join("notes.md");
+    let notes = held.join("notes.md");
     fs::write(&notes, "invalid draft\n").unwrap();
     // A stale, lenient linter in the caller must not replace the pinned train linter.
     fs::write(repo.join("scripts/release-train-announce.py"), "raise SystemExit(0)\n").unwrap();
@@ -242,7 +243,9 @@ esac
     tasks.add(&report).unwrap();
     let (ok, unbound) = plan();
     assert!(!ok && unbound["blockers"].get("NO_CODE_PROOF").is_some(), "{unbound}");
-    assert!(!cut(false).status.success());
+    let refused = cut(false);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("cas-bbbb"));
     assert!(!marker.exists());
     evidence.push(serde_json::json!({"phase":"undeclared-report-refusal", "plan":unbound, "builds":0}));
     let artifact_path = root.join("artifacts/cas-bbbb/report.md");
@@ -255,13 +258,27 @@ esac
     artifacts.mark_committed(&artifact.id, None).unwrap();
     let proof = serde_json::json!({"kind":"report", "artifact_id":artifact.id, "sha256":artifact.sha256, "size_bytes":artifact.size_bytes, "reviewed_sha":git(&held, &["rev-parse", "HEAD"])});
     fs::write(&notes, format!("{valid_notes}\n<!-- CAS_RELEASE_INPUTS {} -->\n", serde_json::json!({"no_code_members":{"cas-bbbb":[proof]}}))).unwrap();
+    git(&held, &["add", "notes.md"]);
+    git(&held, &["commit", "-qm", "release input notes"]);
     let (ok, fixed) = plan();
     assert!(ok, "{fixed}");
     assert_eq!(fixed["preview"]["would_close"], 0);
     assert_eq!(fixed["preview"]["already_closed"], 2);
     assert!(!marker.exists());
     let held_tip = git(&held, &["rev-parse", "HEAD"]);
-    let released = cut(false);
+    let mut running = Process::new("bash").current_dir(&held).args(["scripts/release.sh", "--hotfix", "--notes"]).arg(&notes)
+        .env("CUT_HOLD", "1").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    let mut ready = std::io::BufReader::new(running.stderr.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert!(ready.read_line(&mut line).unwrap() > 0, "cut exited before build boundary");
+        if line.trim_end() == "CUT_READY" { break; }
+    }
+    assert_eq!(cut(false).status.code(), Some(71));
+    assert!(!marker.exists());
+    running.stdin.take().unwrap().write_all(b"finish\n").unwrap();
+    running.stderr = Some(ready.into_inner());
+    let released = running.wait_with_output().unwrap();
     assert!(released.status.success(), "{released:?}");
     assert_eq!(fs::read_to_string(&marker).unwrap().lines().count(), 1);
     assert_eq!(git(&held, &["rev-parse", "HEAD"]), held_tip);
@@ -270,7 +287,13 @@ esac
     assert_eq!(git(&repo, &["worktree", "list", "--porcelain"]).matches("worktree ").count(), 2);
     let tracked: serde_json::Value = serde_json::from_slice(&fs::read(root.join("releases/v9.99.1.json")).unwrap()).unwrap();
     assert_eq!(tracked["close_preview"]["already_closed"], 2);
-    evidence.push(serde_json::json!({"phase":"bound-report-held-branch-cut", "plan":fixed, "cut_exit":released.status.code(), "builds":1, "receipt":tracked}));
+    let mut legacy = tracked.clone();
+    legacy["release_scope"] = tracked["close_preview"]["scope"].clone();
+    fs::write(root.join("releases/v9.99.1.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let restored = Process::new(&binary).current_dir(&repo).args(["release", "context", "--version", "9.99.1"]).output().unwrap();
+    assert!(restored.status.success(), "{restored:?}");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&restored.stdout).unwrap()["release_scope"], legacy["release_scope"]);
+    evidence.push(serde_json::json!({"phase":"bound-report-held-branch-cut", "plan":fixed, "cut_exit":released.status.code(), "builds":1, "competing_exit":71, "legacy_scope_preserved":true, "receipt":tracked}));
     fs::create_dir_all(capture.parent().unwrap()).unwrap();
     fs::write(capture, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
 }

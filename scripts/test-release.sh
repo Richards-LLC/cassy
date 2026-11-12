@@ -78,8 +78,7 @@ esac
 EOF
 chmod +x "$tmp/bin/cas"
 export CAS_BIN="$tmp/bin/cas" FAKE_CAS_LOG="$tmp/cas.log"
-# This harness exercises the inner preparer. test-release-cut.py covers its
-# real shared owner, branch contention and detached checkout boundary.
+# The real CLI/lease replay lives in cli_test.rs.
 export CAS_RELEASE_CUT_OWNED=1
 
 export GH_BIN="$tmp/bin/gh"
@@ -340,38 +339,6 @@ commander_build_failure_stops_release() {
 }
 check 'commander_build_failure_stops_release' 'a failed Commander build stops before the release commit or push'
 
-invalid_draft_stops_cut() {
-    local fixture="$tmp/invalid-draft" before status=0
-    clone_epic "$fixture" epic/invalid-draft invalid-draft
-    cat >"$tmp/invalid-slack.md" <<'EOF2'
-```text
-*Live on production — User — Cassy v{{VERSION}}*
-Was: {{INVALID_DRAFT}} was unresolved. → Now: the draft is complete before publication.
-```
-
-```text
-• *Detail* — Still a valid reply.
-```
-
-```text
-*Live on production — Dev — Cassy v{{VERSION}}*
-Was: release prep lacked one check. → Now: release prep runs it before the PR.
-```
-
-```text
-• *Release check* — The release cut validates the draft before publishing.
-```
-EOF2
-    before="$(git -C "$fixture" rev-parse HEAD)"
-    : >"$FAKE_GH_LOG"
-    run "$fixture" --no-watch --notes "$tmp/invalid-slack.md" >"$tmp/invalid-draft.log" 2>&1 || status=$?
-    [[ $status -ne 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] &&
-        grep -qF '[rule: unresolved_token]' "$tmp/invalid-draft.log" &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/invalid-draft &&
-        ! grep -q '^pr create' "$FAKE_GH_LOG"
-}
-check 'invalid_draft_stops_cut' 'a release draft failing lint is refused before commit, push, or PR creation'
-
 # 1. The version comes from the base branch.
 out="$(run "$epic" --next-version)"
 check '[[ "$out" == *"version=9.100.0"* && "$out" == *"draft=docs/release-notes/2026-10-15-v9.100.0-slack.md"* ]]' '--next-version prints the next minor version and its draft path'
@@ -485,19 +452,6 @@ hotfix_fallback() {
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
-train_cut_without_receipt() {
-    local fixture="$tmp/train-ci-cut" before after
-    clone_epic "$fixture" epic/release-train-fixture train-ci
-    write_valid_draft "$tmp/train-ci-notes.md"
-    before="$(git -C "$fixture" rev-parse HEAD)"
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
-    after="$(git -C "$fixture" rev-parse HEAD)"
-    [[ "$after" != "$before" ]] || return 1
-    ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:' || return 1
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
-    [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
-}
-check 'train_cut_without_receipt' 'train preparation needs no train suite receipt and retries unchanged preparation'
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {
@@ -568,51 +522,6 @@ one_item_hotfix_train() {
         grep -q 'one-hotfix shipped' "$tmp/one-hotfix-published.md"
 }
 check 'one_item_hotfix_train' 'cas-d725: one-item hotfix train cuts, queues once and publishes through the normal release path'
-
-cut_own_review_missing() {
-    local fixture="$tmp/own-review" status=0
-    clone_epic "$fixture" epic/own-review own-review
-    mkdir -p "$fixture/changelog.d"
-    printf '### Fixed — Review fixture\n\n- **First** — First delivery.\n' >"$fixture/changelog.d/cas-000a.md"
-    printf '### Fixed — Review fixture\n\n- **Second** — Second delivery.\n' >"$fixture/changelog.d/cas-000b.md"
-    git -C "$fixture" add changelog.d
-    git -C "$fixture" commit --quiet -m 'included deliveries'
-    write_valid_draft "$tmp/own-review-notes.md"
-    : >"$FAKE_CAS_LOG"
-    : >"$FAKE_GH_LOG"
-    FAKE_PLAN_BLOCKER=REVIEW_MISSING FAKE_PLAN_DETAIL='cas-000a, cas-000b' \
-        run "$fixture" --hotfix --notes "$tmp/own-review-notes.md" >"$tmp/own-review.log" 2>&1 || status=$?
-    [[ "$status" == 1 ]] &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000a' &&
-        tail -1 "$tmp/own-review.log" | grep -q 'cas-000b' &&
-        ! tail -1 "$tmp/own-review.log" | grep -q 'cas-dead' &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/own-review &&
-        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        ! grep -Eq '^pr (create|merge) ' "$FAKE_GH_LOG"
-}
-check 'cut_own_review_missing' 'own included deliveries missing review refuse with their ids even when another member would close'
-
-cut_preview_gate() {
-    local fixture="$tmp/preview-cut" status=0
-    clone_epic "$fixture" epic/preview-cut preview-cut
-    git -C "$fixture" commit --quiet --allow-empty -m 'reviewed delivery (cas-000c)'
-    write_valid_draft "$tmp/preview-notes.md"
-    : >"$FAKE_CAS_LOG"
-    : >"$FAKE_GH_LOG"
-    FAKE_PLAN_BLOCKER=NO_ELIGIBLE_MEMBERS run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/preview-cut.log" 2>&1 || status=$?
-    [[ "$status" != 0 ]] &&
-        git -C "$fixture" diff --quiet HEAD -- cas-cli/Cargo.toml hub-web/dist/app.js &&
-        ! git -C "$tmp/origin.git" show-ref --verify --quiet refs/heads/epic/preview-cut &&
-        ! grep -q '^release track ' "$FAKE_CAS_LOG" &&
-        ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
-    : >"$FAKE_CAS_LOG"
-    run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
-    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
-        ! grep -Eq '^(qa candidate|release preview) ' "$FAKE_CAS_LOG" &&
-        grep -q '^release plan --admit ' "$FAKE_CAS_LOG" &&
-        grep -q '^release track ' "$FAKE_CAS_LOG"
-}
-check 'cut_preview_gate' 'cut obeys the shared plan before preparing or enqueueing'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

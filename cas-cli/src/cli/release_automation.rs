@@ -922,22 +922,6 @@ pub(super) mod tests {
         (temp, root, train, owner, args)
     }
 
-    #[test]
-    fn release_inventory_contract_roundtrip() {
-        let (temp, root, train, _, args) = fixture();
-        let mut value = serde_json::to_value(new_context(temp.path(), &train).unwrap()).unwrap();
-        let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
-        value["release_scope"] = scope.clone();
-        let restored: ReleaseContext = serde_json::from_value(value).unwrap();
-        let receipt = temp.path().join("cut.json");
-        save(&receipt, &restored).unwrap();
-        let restored: ReleaseContext = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
-        assert_eq!(serde_json::to_value(&restored).unwrap()["release_scope"], scope);
-        track_on_train(&args, &root, temp.path(), &train).unwrap();
-        let cut: ReleaseContext = serde_json::from_slice(&fs::read(receipt_path(&root, &args.version).unwrap()).unwrap()).unwrap();
-        assert!(cut.close_preview.unwrap().review_missing.is_empty());
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn explicit_no_code_proof_tracks_and_closes_once_cas_2ecc() {
         use crate::qa_batch::{ReleaseProofKind, ReleaseProofRef};

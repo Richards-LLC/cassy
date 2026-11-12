@@ -653,7 +653,7 @@ mod tests {
         for cited in ["notice #102742", "notice #102747", "cas-2b13b"] { assert!(hit.evidence.iter().any(|e| e == cited), "{cited}"); }
     }
 
-    /// v4.19.0, Nov 12: green and verdict-recorded at c249a21b just after
+    /// The Nov 12 train: green and verdict-recorded at c249a21b just after
     /// midnight ET, repair stopped at 12:35 AM, and the train sat until a
     /// repair merge moved its tip at 7:30 AM.
     #[test]

@@ -686,6 +686,48 @@ def python_runtime_inputs(source):
                 and loop.iter.func.attr == 'splitlines' and not loop.iter.args and not loop.iter.keywords
                 and file_read(loop.iter.func.value))
 
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    bindings = {}
+
+    def function_of(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node
+            if isinstance(node, (ast.ClassDef, ast.Lambda)):
+                return None
+        return None
+
+    def recorded_operand(node, many):
+        if not isinstance(node, ast.Name):
+            return recorded_argv(node, many)
+        function = function_of(node)
+        if function is None:
+            return False
+        if function not in bindings:
+            writes, assignments = {}, {}
+            for item in ast.walk(function):
+                if function_of(item) is not function:
+                    continue
+                names = []
+                if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
+                    names = [item.id]
+                elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    names = [item.name]
+                elif isinstance(item, (ast.Import, ast.ImportFrom)):
+                    names = [alias.asname or alias.name.split('.')[0] for alias in item.names]
+                elif isinstance(item, ast.ExceptHandler) and item.name:
+                    names = [item.name]
+                for name in names:
+                    writes[name] = writes.get(name, 0) + 1
+                if isinstance(item, ast.Assign) and len(item.targets) == 1 and isinstance(item.targets[0], ast.Name):
+                    assignments[item.targets[0].id] = item
+            bindings[function] = {name: assignment for name, assignment in assignments.items() if writes[name] == 1}
+        assignment = bindings[function].get(node.id)
+        return (assignment is not None
+                and (assignment.end_lineno, assignment.end_col_offset) < (node.lineno, node.col_offset)
+                and recorded_argv(assignment.value, many))
+
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                 and node.func.attr in ('read_text', 'read_bytes')):
@@ -707,7 +749,7 @@ def python_runtime_inputs(source):
         for expected, actual in operands:
             if (isinstance(expected, ast.List) and expected.elts
                     and all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in expected.elts)
-                    and recorded_argv(actual, many)):
+                    and recorded_operand(actual, many)):
                 for item in expected.elts:
                     yield offset(item.lineno, item.col_offset), offset(item.end_lineno, item.end_col_offset)
 

@@ -252,6 +252,30 @@ def test_workflow_command():
                             + shape.message_assertions(code, 'tests/test_calls.py', changed))
                     self.assertEqual(bool(hits), rejected, hits)
 
+    def test_recorded_cli_argv_local_binding_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        records = '[shlex.split(line) for line in calls.read_text().splitlines()]'
+        cases = [
+            (f'argv = {records}\nself.assertIn({payload}, argv)', False),
+            (f'argv = {records}\nassert {payload} not in argv', False),
+            (f'captured = shlex.split(calls.read_text())\nself.assertEqual(captured, {payload})', False),
+            (f'argv = {records}\nargv = generated\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, argv)\nargv = generated', True),
+            (f'self.assertIn({payload}, argv)\nargv = {records}', True),
+            (f'argv = render({records})\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nself.assertIn({payload}, other)', True),
+            (f'def nested():\n    argv = {records}\nself.assertIn({payload}, argv)', True),
+            (f'argv = {records}\ndef nested():\n    self.assertIn({payload}, argv)', True),
+            (f'argv = {records}\nfor argv in generated:\n    pass\nself.assertIn({payload}, argv)', True),
+        ]
+        for body, rejected in cases:
+            code = 'def test_recording():\n' + '\n'.join('    ' + line for line in body.splitlines())
+            for changed in [None, set(range(1, len(code.splitlines()) + 1))]:
+                with self.subTest(body=body, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',

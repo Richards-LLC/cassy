@@ -228,6 +228,9 @@ queueing, so lifting the hold releases no stale READY backlog.
    current blocker belongs to the operator also leave that set; a newer
    factory-owned blocker restores escalation. Missing Git evidence and ordinary
    prose-only deferrals retain escalation; local in-progress work still counts.
+   Tasks blocked by open dependencies and tasks assigned to held workers also
+   leave the waiting set. Resolving their dependencies or releasing the worker
+   hold restores ordinary escalation for work that remains actionable.
    Parked deliveries whose target train is frozen for release also leave that
    set: the supervisor hears once per freeze which tasks it holds and that only
    the operator lifts it in Commander; release repairs still count.

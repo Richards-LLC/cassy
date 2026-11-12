@@ -305,7 +305,6 @@ pub(crate) fn approved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cas_store::TaskStore;
 
     #[test]
     fn transaction_receipt_requires_exactly_one_cycle_cas_e01f() {

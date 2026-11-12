@@ -2705,9 +2705,9 @@ struct GitCommandTarget {
     git_dir: Option<std::path::PathBuf>,
     work_tree: Option<std::path::PathBuf>,
     is_detached_checkout: bool,
-    /// The revision a `git checkout` names, so a refusal can show the
-    /// checkout to run instead of commit guidance (GH #1860).
-    checkout_rev: Option<String>,
+    /// The arguments of a `git checkout`, revision or not, so a refusal can
+    /// show the checkout to run instead of commit guidance (GH #1860).
+    checkout_args: Option<Vec<String>>,
     unresolved_directory: bool,
     uncertain_scope: bool,
 }
@@ -2724,7 +2724,7 @@ impl GitCommandTarget {
             git_dir: None,
             work_tree: None,
             is_detached_checkout: false,
-            checkout_rev: None,
+            checkout_args: None,
             unresolved_directory: false,
             uncertain_scope: false,
         }
@@ -3054,11 +3054,8 @@ fn collect_git_write_targets(
                 .iter()
                 .take_while(|word| word.as_str() != "--")
                 .any(|word| word == "--detach");
-        target.checkout_rev = (git_words[write_index] == "checkout")
-            .then(|| git_words[write_index + 1..].iter()
-                .take_while(|word| word.as_str() != "--")
-                .find(|word| !word.starts_with('-')).cloned())
-            .flatten();
+        target.checkout_args = (git_words[write_index] == "checkout")
+            .then(|| git_words[write_index + 1..].to_vec());
         let mut index = 0;
         while index < write_index {
             let word = &git_words[index];
@@ -3266,10 +3263,9 @@ fn check_worker_git_commit_scope_at_target(
             .is_some_and(|(cwd, worktree)| cwd.starts_with(worktree));
 
         if !inside_worktree {
-            if let Some(rev) = &target.checkout_rev {
-                let detach = if target.is_detached_checkout { &["--detach"][..] } else { &[] };
+            if let Some(checkout_args) = &target.checkout_args {
                 let args: Vec<&str> = ["-C", clone_path, "checkout"].into_iter()
-                    .chain(detach.iter().copied()).chain([rev.as_str()]).collect();
+                    .chain(checkout_args.iter().map(String::as_str)).collect();
                 let [checkout] = match crate::worktree::GitOperations::shell_remedies([("git", &args[..])]) {
                     Ok(commands) => commands,
                     Err(refusal) => return Some(refusal),
@@ -3277,7 +3273,7 @@ fn check_worker_git_commit_scope_at_target(
                 let cwd = crate::worktree::GitOperations::visible_git_label(&cwd);
                 let clone_path = crate::worktree::GitOperations::visible_git_label(clone_path);
                 return Some(format!(
-                    "WORKER_CHECKOUT_OUTSIDE_WORKTREE: 🚫 a worker checks out revisions only in \
+                    "WORKER_CHECKOUT_OUTSIDE_WORKTREE: 🚫 a worker runs checkouts only in \
                     its assigned worktree ({clone_path}); {cwd} is outside it.\n\n\
                     Run the checkout there:\n  {checkout}\n\n\
                     To read another revision without moving your checkout, use \
@@ -12575,6 +12571,16 @@ mod worker_commit_guard_tests {
         ]).unwrap();
         assert!(reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
         assert!(reason.contains(&checkout) && !reason.contains(&switch), "{reason}");
+        // A revisionless path restore is a checkout too, not a commit.
+        let outside_restore = hook_git_write_input(
+            &path, &format!("git -C '{}' checkout -- tracked.rs", outside.path().display()));
+        let value = serde_json::to_value(handle_pre_tool_use(&outside_restore, None).expect("handler ok")).unwrap();
+        let reason = value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or_default();
+        let [restore] = crate::worktree::GitOperations::shell_remedies([
+            ("git", &["-C", path.as_str(), "checkout", "--", "tracked.rs"][..]),
+        ]).unwrap();
+        assert!(reason.starts_with("WORKER_CHECKOUT_OUTSIDE_WORKTREE"), "{reason}");
+        assert!(reason.contains(&restore) && !reason.contains(&switch), "{reason}");
         let outside_commit = hook_git_write_input(
             &path, &format!("git -C '{}' commit -m outside", outside.path().display()));
         let value = serde_json::to_value(handle_pre_tool_use(&outside_commit, None).expect("handler ok")).unwrap();

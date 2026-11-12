@@ -240,8 +240,8 @@ pub(crate) fn canonical_selector(selector: &str) -> String {
 /// Every selector a checkout legitimately answers to, most authoritative first.
 ///
 /// cas-1a1c (GH #151). [`selector_for_repo`] returns a single selector on a
-/// priority order — a `[project] canonical_id` pin wins and the git remote is
-/// never consulted. That is correct for *stamping* a new work target, but wrong
+/// priority order — a `[project] canonical_id` pin wins over a remote identity.
+/// That is correct for *stamping* a new work target, but wrong
 /// for *matching* an existing one: `declare_work_target` records whichever
 /// selector was authoritative at creation time, so pinning a canonical_id
 /// afterwards left every previously-created task holding the `remote:` form
@@ -275,21 +275,12 @@ pub(crate) fn repo_answers_to(repo_root: &Path, target_selector: &str) -> bool {
 }
 
 fn selector_for_repo(repo_root: &Path) -> Result<String, String> {
-    let cas_root = repo_root.join(".cas");
-    if let Some(project_id) = crate::cloud::canonical_id_from_config_toml(&cas_root)
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty())
-    {
-        return Ok(format!("project:{project_id}"));
-    }
-    crate::cloud::derive_canonical_id_from_git_remote(repo_root)
-        .map(|remote| format!("remote:{remote}"))
-        .ok_or_else(|| {
-            format!(
-                "repository {} has neither [project].canonical_id nor a normalizable origin URL",
-                repo_root.display()
-            )
-        })
+    repo_identities(repo_root).into_iter().next().ok_or_else(|| {
+        format!(
+            "repository {} has neither [project].canonical_id nor a normalizable origin URL",
+            repo_root.display()
+        )
+    })
 }
 
 /// Resolve a path supplied to the host-local binding CLI. Bindings require a
@@ -1420,6 +1411,7 @@ mod tests {
         assert!(!linked.join(".cas").exists());
         assert!(repo_answers_to(&main, "project:cas-src"));
         assert!(repo_answers_to(&linked, "project:cas-src"));
+        assert_eq!(selector_for_repo(&linked).unwrap(), "project:cas-src");
 
         let a = resolve_path_context(&main, "master").unwrap();
         let b = resolve_path_context(&linked, "master").unwrap();

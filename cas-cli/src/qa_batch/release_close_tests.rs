@@ -98,7 +98,7 @@ fn published_train_closes_members_independently_cas_734b() {
     conn.execute("UPDATE verification_dispatches SET state='resolved', repository_proof=?1 WHERE id=?2",
         rusqlite::params![serde_json::to_string(&bound).unwrap(), dispatch.id]).unwrap();
     conn.execute("INSERT INTO verifications (id,task_id,agent_id,verification_type,status,summary,files_reviewed,created_at,dispatch_id,provenance,issuer_agent_id) VALUES ('ver-approved','cas-approved','reviewer','task','approved','pass','[]',?1,?2,'peer_attested','supervisor')", rusqlite::params![chrono::Utc::now().to_rfc3339(), dispatch.id]).unwrap();
-    let cycle = cas_store::delivery_cycle::delivery_cycles(&root, "cas-approved").unwrap().pop().unwrap();
+    let cycle = cas_store::delivery_cycles(&root, "cas-approved").unwrap().pop().unwrap();
     conn.execute("UPDATE verification_dispatches SET receipt_id=?1 WHERE id=?2",
         rusqlite::params![cycle.cycle_id, dispatch.id]).unwrap();
     let stamp = serde_json::json!({"cycle_id": cycle.cycle_id, "approved_anchor": anchor,

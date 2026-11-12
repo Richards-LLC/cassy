@@ -628,7 +628,7 @@ owner_groups:
 invariants:
   FACTORY-REEXEC-CLEANUP-RECOVERY:
     statement: Daemon and app handoff share one refusal naming every active or queued worker action and cleanup blocker, with known occurrence and elapsed data, and advises a full factory restart once workers are idle; it never detaches cleanup or releases its name fence.
-    check: Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal.
+    check: "Run reexec_names_timed_out_cleanup_without_releasing_name_cas_624d2 through daemon.reexec with a schema-valid candidate: active spawn alone, then active and queued spawns plus a channel-held cleanup beyond the warning threshold and untracked crash work. Verify every caller identity, retained handles and reservations, and app handoff after ordinary completion. In batch QA read job kinds, elapsed times and idle full-factory restart guidance from the refusal."
     bug: {task: cas-624d2}
   HUB-WORKER-TIMELINE-HEADER:
     statement: Worker names are the native timeline opener; no separate Activity pill competes with the state badge. The timeline consumes the card's task/liveness state projection, preserves return focus and has no orphan task separator.

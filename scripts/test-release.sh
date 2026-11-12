@@ -37,19 +37,13 @@ case "$1 $2" in
   "release view") exit 1 ;;
   "release create") ;;
   "api repos/"*)
-    case "$2" in */logs) cat "${FAKE_TRAIN_LOG_ZIP:?}" ;; *) echo '{}' ;; esac ;;
+    echo '{}' ;;
   "pr list") [[ -f "$state/pr" ]] && cat "$state/pr" || true ;;
   "pr create") echo 77 >"$state/pr"; echo https://example.test/pull/77 ;;
   "pr edit") ;;
   "pr merge") [[ "${FAKE_MERGE_EXIT:-0}" == 0 ]] && touch "$state/admitted"; exit "${FAKE_MERGE_EXIT:-0}" ;;
   "pr checks") cat "${FAKE_PR_CHECKS_JSON:?}" ;;
   "run view") cat "${FAKE_RUN_LOG:-/dev/null}" ;;
-  "run download") cp -R "${FAKE_TRAIN_ARTIFACT:?}/." "${@: -1}" ;;
-  "api -X")
-    case "$4" in
-      */jobs) echo '{"jobs":[{"name":"Shared train and queue graph / Full-set gate","conclusion":"success"}]}' ;;
-      *) cat "${FAKE_TRAIN_RUN:-/dev/null}" ;;
-    esac ;;
   "api graphql")
     if [[ -n "${FAKE_PR_STATE_JSON:-}" ]]; then cat "$FAKE_PR_STATE_JSON"
     elif [[ -f "$state/admitted" ]]; then echo '{"state":"OPEN","autoMergeRequest":null,"mergeQueueEntry":{"state":"QUEUED"}}'
@@ -120,7 +114,7 @@ write_tree() {
 
 - The base release.
 EOF2
-    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/train-ci.py" "$script_dir/classify-ci-diff.sh" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
+    cp "$script_dir/release.sh" "$script_dir/release_changelog.py" "$script_dir/release-train-announce.py" "$script_dir/github_queue_health.py" "$script_dir/github-queue-health.graphql" "$script_dir/classify-ci-diff.sh" "$script_dir/find-release-prebuild.sh" "$root/scripts/"
     # Real, dependency-free npm boundary: the fixture build embeds the crate
     # version just as Commander's Vite config does. No npm/Git calls are mocked.
     mkdir -p "$root/hub-web/dist"
@@ -529,47 +523,19 @@ hotfix_fallback() {
         ! grep -Eq '^(qa candidate|release preview) ' "$tmp/hotfix-$mode-cas.log" &&
         ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:'
 }
-train_receipt_cut() {
-    local fixture="$tmp/train-ci-cut" status=0 before after
+train_cut_without_receipt() {
+    local fixture="$tmp/train-ci-cut" before after
     clone_epic "$fixture" epic/release-train-fixture train-ci
     write_valid_draft "$tmp/train-ci-notes.md"
     before="$(git -C "$fixture" rev-parse HEAD)"
-    mkdir -p "$tmp/train-ci-artifact"
-    export FAKE_TRAIN_ARTIFACT="$tmp/train-ci-artifact" FAKE_TRAIN_RUN="$tmp/train-ci-run.json" FAKE_TRAIN_LOG_ZIP="$tmp/train-ci-logs.zip"
-    echo '{"workflow_runs":[]}' >"$FAKE_TRAIN_RUN"
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || status=$?
-    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
-    python3 - "$before" "$fixture" <<'PY'
-import json, os, pathlib, subprocess, sys, zipfile
-head=sys.argv[1]
-repo=sys.argv[2]
-json.dump({'workflow_runs':[{'id':123,'run_attempt':1,'head_sha':head,'head_branch':'epic/release-train-fixture','event':'push','status':'completed','conclusion':'success'}]},open(os.environ['FAKE_TRAIN_RUN'],'w'))
-jobs={name:'success' for name in ('fast-validation-preflight','fast-validation-ci-tiers','fast-validation-web','fast-validation-suite','fast-validation-docs','queue-flake-publication')}
-receipt={'schema':2,'scope':'full-set','head':head,'branch':'epic/release-train-fixture','run_id':'123','run_attempt':1,'outcome':'PASS','failures':[],
-         'tree':subprocess.check_output(['git','-C',repo,'rev-parse','HEAD^{tree}'],text=True).strip(),
-         'main_baseline':subprocess.check_output(['git','-C',repo,'rev-parse','origin/main'],text=True).strip(),
-         'required_jobs':list(jobs),'jobs':jobs,'elapsed_seconds':12,'journeys_required':False,'bridge_required':False}
-json.dump(receipt,open(pathlib.Path(os.environ['FAKE_TRAIN_ARTIFACT'])/'receipt.json','w'))
-with zipfile.ZipFile(os.environ['FAKE_TRAIN_LOG_ZIP'],'w') as archive: archive.writestr('full.log','Complete fixture log')
-PY
-    cp "$FAKE_TRAIN_ARTIFACT/receipt.json" "$tmp/train-ci-green.json"
-    python3 - "$FAKE_TRAIN_ARTIFACT/receipt.json" <<'PY'
-import json,sys
-p=sys.argv[1]; row=json.load(open(p)); row['jobs']['fast-validation-ci-tiers']='skipped'; json.dump(row,open(p,'w'))
-PY
-    status=0
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || status=$?
-    [[ "$status" != 0 && "$(git -C "$fixture" rev-parse HEAD)" == "$before" ]] || return 1
-    cp "$tmp/train-ci-green.json" "$FAKE_TRAIN_ARTIFACT/receipt.json"
-    rm -rf "$fixture/.git/cas/train-ci"
-    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
+    run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     after="$(git -C "$fixture" rev-parse HEAD)"
-    [[ "$after" != "$before" && "$(git -C "$fixture" log -1 --format=%B)" == *"Train-CI-Head: $before"* ]] || return 1
+    [[ "$after" != "$before" ]] || return 1
+    ! git -C "$fixture" log -1 --format=%B | grep -q '^Train-CI-Head:' || return 1
     run "$fixture" --dry-run --notes "$tmp/train-ci-notes.md" >>"$tmp/train-ci-cut.log" 2>&1 || { cat "$tmp/train-ci-cut.log"; return 1; }
     [[ "$(git -C "$fixture" rev-parse HEAD)" == "$after" ]]
 }
-check 'train_receipt_cut' 'train cut requires green starting-tip receipt and reuses it on an unchanged prepared retry'
-unset FAKE_TRAIN_ARTIFACT FAKE_TRAIN_RUN FAKE_TRAIN_LOG_ZIP
+check 'train_cut_without_receipt' 'train preparation needs no train suite receipt and retries unchanged preparation'
 check 'hotfix_fallback no_train' 'a standalone hotfix with no train or included tasks cuts without a preview or candidate'
 check 'hotfix_fallback different_branch' 'an unrelated train does not block a memberless standalone hotfix'
 freeze_failure_stops_publication() {

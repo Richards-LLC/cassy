@@ -334,17 +334,14 @@ fn cut_command(configured: Option<&str>, repo_root: Option<&Path>, train: &str) 
     }
 }
 
-/// The current tip, when it holds the verdict `scripts/release.sh` demands
-/// before it cuts: the train-tip full-set receipt `train_ci::observe` records
-/// must be green at it. Missing, red, stale or unreadable all mean not green.
-fn green_tip(cas_dir: &Path, epic: &Task, train: &str) -> Option<String> {
-    let state = crate::train_ci::directory(cas_dir, &epic.id)
-        .ok()
-        .and_then(|dir| std::fs::read(dir.join("state.json")).ok())
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
-    let tip = train_repo_root(cas_dir, epic).ok().and_then(|root| git(&root, &["rev-parse", train]).ok());
-    let (state, tip) = (state?, tip?);
-    (state["outcome"] == "PASS" && state["head"].as_str() == Some(tip.as_str())).then_some(tip)
+/// Only a published current lane tip can enter the cut transaction. Lane
+/// impact checks happen at delivery admission; the queue owns full proof.
+fn eligible_tip(cas_dir: &Path, epic: &Task, train: &str) -> Option<String> {
+    let root = train_repo_root(cas_dir, epic).ok()?;
+    let published = crate::worktree::GitOperations::new(root.clone())
+        .fetch_merge_target(train).ok().flatten()?;
+    let tip = git(&root, &["rev-parse", train]).ok()?;
+    (published == tip).then_some(tip)
 }
 
 /// Send each due "train ready to cut" notice once. `queued` holds branches
@@ -363,8 +360,8 @@ pub(crate) fn notify_train_cuts(
         if queued.contains(&train) || crate::mcp::tools::core::task::release_train::is_cut_train(&epic) {
             continue;
         }
-        let Some(tip) = green_tip(cas_dir, &epic, &train) else { continue };
-        // cas-e060: a green tip with changelog fragments is cut by Cassy;
+        let Some(tip) = eligible_tip(cas_dir, &epic, &train) else { continue };
+        // A published tip with changelog fragments is cut by Cassy;
         // the notice below only covers trains auto-cut declines.
         use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
         let auto_cut = match release_auto_cut::attempt(cas_dir, &epic, &train, &tip, !queued.is_empty(), now) {

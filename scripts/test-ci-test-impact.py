@@ -347,7 +347,8 @@ path="tests/builtin_archive_portability_test.rs"
         fake.write_text('#!/bin/sh\nmkdir -p "$(dirname "$CALLS")"; printf "%s\\n" "$*" >> "$CALLS"\n'
                         'case "$*" in *" list "*|"nextest list"*) echo \'{"rust-suites":{"cas":{"testcases":{"alpha::t":{"ignored":false,"filter-match":{"status":"matches"}}}}}}\' ;;\n'
                         '*binary_id*) if [ -n "$BASE_FAILS" ]; then echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; exit 100; fi; echo "        PASS [   0.01s] cas::beta_test beta_test::breaks" ;;\n'
-                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
+                        '*"binary(beta_test)"*) echo "        FAIL [   0.01s] cas::beta_test beta_test::breaks"; if [ -n "$RING_TIMEOUT" ]; then echo "     TIMEOUT [  60.00s] cas::beta_test beta_test::hangs"; echo "Summary [ 60.01s] 2 tests run: 0 passed, 1 failed, 1 timed out"; exit 100; fi;'
+                        ' if [ -n "$RING_UNPARSED" ]; then echo "Summary [ 0.01s] 2 tests run: 0 passed, 2 failed"; exit 100; fi; echo "Summary [ 0.01s] 1 test run: 0 passed, 1 failed"; exit 100 ;;\n'
                         '*) echo "Summary [ 0.01s] 1 test run: 1 passed" ;; esac\n')
         fake.chmod(0o755)
         env = dict(os.environ, CARGO=str(fake), CALLS=str(calls))
@@ -376,7 +377,17 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "passes at the base: this delivery broke it")
         env["BASE_FAILS"] = "1"
         self.assertEqual(phase("attribute", "--receipt", "ring").returncode, 0, "fails at the base too: inherited")
-        del env["BASE_FAILS"]
+        # Verifier repro: an inherited FAIL beside a new TIMEOUT stays red.
+        env["RING_TIMEOUT"] = "1"
+        self.assertEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0)
+        self.assertNotEqual(phase("attribute", "--receipt", "ring").returncode, 0, "the new timeout is not inherited")
+        caused = json.loads(state.with_name("ring-attribution.json").read_text())["caused"]
+        self.assertEqual([f["test"] for f in caused], ["beta_test::hangs"])
+        del env["RING_TIMEOUT"]
+        env["RING_UNPARSED"] = "1"
+        self.assertNotEqual(phase("ring", "--archive", "suite.tar.zst", "--shard", "1/1").returncode, 0,
+                            "an unsuccessful outcome with no parsed test line stays red")
+        del env["RING_UNPARSED"], env["BASE_FAILS"]
         self.select("scripts/release.sh")
         self.assertEqual(phase("plan").returncode, 0)
         split = json.loads(state.read_text())["split"]

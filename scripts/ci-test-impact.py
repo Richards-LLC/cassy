@@ -288,7 +288,15 @@ def lane_run(root, selection, source, expression, extra, destination, role):
     env = dict(os.environ, VERIFIED_TEST_LOG=str(log.resolve()))
     status = subprocess.run([str(root / "scripts/run-verified-tests.sh"), "nextest", "run", *source, "-E", expression, *extra, "--no-fail-fast"], cwd=root, env=env).returncode
     receipt = record(selection, [str(log)], status, time.monotonic() - started, destination, role)
-    return status, bool(status and receipt["failures"])
+    # Attribution may clear the status only when every unsuccessful test is
+    # named: the summary's run-minus-passed count must match the parsed set.
+    counts = re.findall(r"Summary\s+\[.*?\]\s+(\d+) tests? run:\s+(\d+) passed", strip_ansi(log.read_text()))
+    named = {(f["package"], f["binary"], f["test"]) for f in receipt["failures"]}
+    unsuccessful = sum(int(run) - int(passed) for run, passed in counts)
+    accounted = bool(named) and len(counts) > 0 and unsuccessful == len(named)
+    if status and named and not accounted:
+        print(f"Lane impact: {unsuccessful} unsuccessful tests but {len(named)} named; the unaccounted outcomes keep this phase red", file=sys.stderr)
+    return status, bool(status and accounted)
 
 
 def lane_attribute(root, base, failures, destination):
@@ -298,6 +306,7 @@ def lane_attribute(root, base, failures, destination):
     subprocess.run(["git", "worktree", "remove", "--force", str(work)], cwd=root, capture_output=True)
     subprocess.check_call(["git", "worktree", "add", "--detach", str(work), base], cwd=root)
     subprocess.check_call(["git", "submodule", "update", "--init", "--recursive"], cwd=work)
+    failures = list({(f["package"], f["binary"], f["test"]): f for f in failures}.values())
     packages = sorted({failure["package"] for failure in failures})
     build = ["--workspace"] if len(packages) > 1 else ["-p", packages[0]]
     if len(packages) == 1:
@@ -456,10 +465,12 @@ def strip_ansi(text):
 
 
 def parse_failures(text):
-    """FAIL lines of an ANSI-stripped nextest log. nextest 0.9.100+ prints a
-    `( 3528/11850)` progress counter after the duration (cas-38ac)."""
+    """Unsuccessful-test lines of an ANSI-stripped nextest log: FAIL, TIMEOUT,
+    a signal (SIGSEGV, SIGABRT, ...), ABORT and LEAK-FAIL (cas-2e1b). nextest
+    0.9.100+ prints a `( 3528/11850)` progress counter after the duration
+    (cas-38ac)."""
     failures = []
-    for binary, test in re.findall(r"^\s*FAIL\s+\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(\S+)\s*$", text, re.M):
+    for binary, test in re.findall(r"^\s*(?:FAIL|TIMEOUT|SIG[A-Z]+|ABORT|LEAK-FAIL)\s+\[[^\]]*\]\s+(?:\(\s*\d+/\d+\)\s+)?(\S+)\s+(\S+)\s*$", text, re.M):
         package, separator, target = binary.partition("::")
         if not separator:
             target = package

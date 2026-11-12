@@ -309,28 +309,18 @@ fn review(
         Stdio::from(stdin),
     )
     .map_err(|e| format!("harness failed or timed out: {e:?}"))?;
-    std::fs::write(output.with_file_name("harness.log"), &result.stderr)
-        .map_err(|e| e.to_string())?;
+    let stderr_log = output.with_file_name("harness.log");
+    let stdout_log = output.with_file_name("harness.stdout");
+    std::fs::write(&stderr_log, &result.stderr).map_err(|e| e.to_string())?;
+    // cas-2b80b: keep what the harness printed, so a refused response can be
+    // diagnosed from the dispatch audit instead of rerunning the review.
+    std::fs::write(&stdout_log, &result.stdout).map_err(|e| e.to_string())?;
     if !result.status.success() {
-        // Keep the full log on disk; notices carry only the final eight lines
-        // within a 2 KiB window, so an echoed prompt cannot flood the owner.
-        let tail =
-            String::from_utf8_lossy(&result.stderr[result.stderr.len().saturating_sub(2048)..]);
-        let mut lines = tail.lines().rev().take(8).collect::<Vec<_>>();
-        lines.reverse();
-        let tail =
-            crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(
-                &lines.join("\n"),
-            );
         return Err(format!(
             "harness exited {}; stderr tail ({}):\n{}",
             result.status,
-            output.with_file_name("harness.log").display(),
-            if tail.trim().is_empty() {
-                "(empty)"
-            } else {
-                &tail
-            },
+            stderr_log.display(),
+            tail(&result.stderr),
         ));
     }
     let bytes = if output.exists() {
@@ -338,8 +328,16 @@ fn review(
     } else {
         result.stdout
     };
-    let mut arguments: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_slice(&bytes).map_err(|e| format!("invalid verifier response: {e}"))?;
+    let mut arguments = final_json_object(&bytes).ok_or_else(|| {
+        format!(
+            "invalid verifier response: no JSON object in {} bytes; stdout tail ({}):\n{}\nstderr tail ({}):\n{}",
+            bytes.len(),
+            stdout_log.display(),
+            tail(&bytes),
+            stderr_log.display(),
+            tail(&result.stderr),
+        )
+    })?;
     arguments.insert("task_id".into(), serde_json::json!(dispatch.task_id));
     arguments.insert("dispatch_id".into(), serde_json::json!(dispatch.id));
     arguments.insert("verifier_capability".into(), serde_json::Value::Null);
@@ -375,6 +373,38 @@ fn review(
         return Err(format!("verdict refused: {verdict:?}"));
     }
     Ok(())
+}
+
+/// The final eight lines within a 2 KiB window, redacted. The full output
+/// stays on disk, so an echoed prompt cannot flood the owner's notice.
+fn tail(bytes: &[u8]) -> String {
+    let window = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2048)..]);
+    let mut lines = window.lines().rev().take(8).collect::<Vec<_>>();
+    lines.reverse();
+    let tail = crate::mcp::tools::service::agent_search_system::system::redact_known_credentials(
+        &lines.join("\n"),
+    );
+    if tail.trim().is_empty() { "(empty)".into() } else { tail }
+}
+
+/// The last top-level JSON object a harness printed. `claude -p` returns the
+/// model's final text, which may put prose or a Markdown fence around it.
+fn final_json_object(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut found = None;
+    let mut start = 0;
+    while let Some(offset) = bytes[start..].iter().position(|byte| *byte == b'{') {
+        let at = start + offset;
+        let mut stream = serde_json::Deserializer::from_slice(&bytes[at..])
+            .into_iter::<serde_json::Map<String, serde_json::Value>>();
+        match stream.next() {
+            Some(Ok(object)) => {
+                found = Some(object);
+                start = at + stream.byte_offset();
+            }
+            _ => start = at + 1,
+        }
+    }
+    found
 }
 
 pub(super) fn attention(
@@ -747,10 +777,18 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
             let response = if status == "malformed" {
                 "not a verdict".into()
             } else {
-                serde_json::json!({"status": status, "summary": format!("{status}: operator draft probe"),
+                let verdict = serde_json::json!({"status": status, "summary": format!("{status}: operator draft probe"),
                     "confidence":0.95,"files_reviewed":"README.md","issues":"[]",
                     "task_id":"cas-other","dispatch_id":"vdispatch-other", "verifier_capability":"forged",
-                    "verification_type":"epic", "duration_ms":0}).to_string()
+                    "verification_type":"epic", "duration_ms":0}).to_string();
+                // cas-2b80b: `claude -p` prints the model's final text, which
+                // can lead with prose and fence the object (serde: "expected
+                // value at line 1 column 1"). The verdict is the last object.
+                if status == "approved" {
+                    format!("Review complete; {{draft}} preserved.\n\n```json\n{verdict}\n```\n")
+                } else {
+                    verdict
+                }
             };
             let response_path = root.join("provider-response.json");
             std::fs::write(&response_path, response).unwrap();
@@ -884,7 +922,8 @@ cat "$CAS_TEST_VERIFIER_RESPONSE"
                 );
                 assert!(
                     prompts[0].prompt.contains(match status {
-                        "malformed" => "invalid verifier response",
+                        // The refused output itself, not just the parse error.
+                        "malformed" => "not a verdict",
                         "harness_failed" =>
                             "401 Unauthorized: Missing bearer or basic authentication in header",
                         _ => "operator draft probe",

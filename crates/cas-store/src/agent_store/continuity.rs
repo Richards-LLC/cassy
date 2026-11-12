@@ -404,6 +404,24 @@ impl SqliteAgentStore {
             .collect()
     }
 
+    /// The harness session a retired agent row was last bound to. An MCP
+    /// reconnect deletes the row at the old process's end, so the new process
+    /// would otherwise fall back to the launch session and lose a `/clear`
+    /// rebind (GH #1829).
+    pub fn retired_cc_session_id(&self, agent_id: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        Ok(conn
+            .query_row(
+                "SELECT json_extract(metadata, '$.retired_agent.cc_session_id') FROM events
+                 WHERE event_type = 'agent_shutdown' AND entity_id = ?
+                 ORDER BY id DESC LIMIT 1",
+                [agent_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Whether the agent row's current incarnation already recorded a session
     /// end (a retirement whose row deletion failed or has not happened yet).
     /// A `/clear` keeps the row without recording one (cas-ec5f).

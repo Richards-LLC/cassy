@@ -105,6 +105,7 @@ fn published_train_with_fragments_auto_cuts_within_guards_and_waits_for_notes() 
     assert!(wakes()[0].payload.contains(&draft.display().to_string()), "{}", wakes()[0].payload);
     assert!(!repo.join("release-ran").exists(), "no cut without notes");
 
+    std::fs::create_dir_all(draft.parent().unwrap()).unwrap();
     std::fs::write(&draft, "notes\n").unwrap();
     poll(&none);
     let log = draft.with_file_name("auto-cut.log");

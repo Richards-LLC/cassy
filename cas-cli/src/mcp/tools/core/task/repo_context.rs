@@ -1420,6 +1420,7 @@ mod tests {
         assert!(!linked.join(".cas").exists());
         assert!(repo_answers_to(&main, "project:cas-src"));
         assert!(repo_answers_to(&linked, "project:cas-src"));
+        assert_eq!(selector_for_repo(&linked).unwrap(), "project:cas-src");
 
         let a = resolve_path_context(&main, "master").unwrap();
         let b = resolve_path_context(&linked, "master").unwrap();

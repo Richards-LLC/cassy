@@ -510,23 +510,22 @@ preview_cut() {
     release_candidate="$candidate"
     local train_args=()
     "$train_tracking" && train_args=(--train "$task")
-    "$candidate" release preview --commit "$sha" --version "$version" \
-        --inputs "$release_input_report" "${train_args[@]}" >"$candidate_dir/preview.raw.json"
-    release_close_preview="$candidate_dir/preview.json"
-    jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
-        "$candidate_dir/preview.raw.json" >"$release_close_preview"
+    release_close_preview="$("$candidate" release preview --commit "$sha" --version "$version" \
+        --inputs "$release_input_report" "${train_args[@]}")"
+    release_close_preview="$(jq --argjson seconds "$build_seconds" '. + {candidate_build_seconds:$seconds}' \
+        <<<"$release_close_preview")"
     jq -e --arg sha "$sha" '.scope.final_release_sha == $sha and (.members|type)=="number" and (.would_close|type)=="number"' \
-        "$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
-    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' "$release_close_preview")"
+        <<<"$release_close_preview" >/dev/null || die "invalid candidate preview; nothing pushed"
+    say "close preview: $(jq -c '{members,would_close,would_hold,already_closed,not_eligible,by_reason,review_missing,candidate_build_seconds}' <<<"$release_close_preview")"
     local unreviewed
     unreviewed="$(jq -r --slurpfile inputs "$release_input_report" '
         ($inputs[0].included_task_ids // []) as $included |
         [(.review_missing // [])[] | select(. as $id | $included | index($id))] | join(", ")
-    ' "$release_close_preview")"
+    ' <<<"$release_close_preview")"
     [[ -z "$unreviewed" ]] \
-        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release task_ids=<release-member-ids> staging_sha=<reviewed-sha> ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md and $release_close_preview; nothing pushed or enqueued"
-    jq -e '.members == 0 or .would_close > 0' "$release_close_preview" >/dev/null \
-        || die "release cut refused: zero would-close; inspect $release_close_preview; nothing pushed or enqueued"
+        || die "release cut refused: REVIEW_MISSING for $unreviewed; record verification action=batch_receipt verification_type=release ledger_artifact_id=<artifact-id> ledger_path=<ledger-path> ledger_author=<reviewer>; see docs/qa/batch-qa.md; nothing pushed or enqueued"
+    jq -e '.members == 0 or .would_close > 0' <<<"$release_close_preview" >/dev/null \
+        || die "release cut refused: zero would-close; inspect the close preview above; nothing pushed or enqueued"
 }
 
 # Advisory once per invocation, including dry-run and version preview. Never
@@ -593,7 +592,7 @@ done
 # and a retry after any later failure must reuse the same reminder occurrence.
 if "$train_tracking"; then
     if ! tracking="$("$release_candidate" release track --commit "$(git rev-parse HEAD)" --version "$version" \
-        --inputs "$release_input_report" --first-child "$first_child" --preview "$release_close_preview" 2>&1)"; then
+        --inputs "$release_input_report" --first-child "$first_child" <<<"$release_close_preview" 2>&1)"; then
         retry_command="$(printf '%q ' "$0" "${original_args[@]}")"
         die "could not freeze release train $branch: $tracking; nothing pushed or enqueued. Retry: $retry_command"
     fi

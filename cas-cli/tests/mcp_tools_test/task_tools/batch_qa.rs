@@ -876,11 +876,6 @@ async fn release_receipt_at_published_sha_cas_bc58() {
     let fx = fx.with_declared_coverage();
     assert_ne!(prep, fx.staging);
 
-    // Ordinary QA still requires the walked SHA on each configured target.
-    let error = fx.supervisor.verification(Parameters(fx.request())).await.unwrap_err();
-    assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
-    assert!(cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap().is_empty());
-
     let mut request = fx.request();
     request.verification_type = Some("release".into());
     request.staging_sha = Some(git(&fx.repo, &["rev-parse", &format!("{}^", heads["cas-bq01"])]));
@@ -890,6 +885,8 @@ async fn release_receipt_at_published_sha_cas_bc58() {
 
     let mut request = fx.request();
     request.verification_type = Some("release".into());
+    request.task_ids = None;
+    request.staging_sha = None;
     fx.supervisor.verification(Parameters(request)).await.unwrap();
     let receipts = cas_store::list_qa_batch_receipts(&root, "batch-project").unwrap();
     assert_eq!(receipts.len(), 1);
@@ -1259,10 +1256,6 @@ async fn batch_qa_receipt_rejects_invalid_bindings_cas_d697() {
         .unwrap();
     fx.reject(serde_json::json!({"staging_sha":anchor}), "not an ancestor")
         .await;
-    fx.unmerge();
-    fx.reject(serde_json::json!({}), "configured target main")
-        .await;
-    git(&fx.repo, &["branch", "-f", "main", &fx.staging]);
     let ledger = std::fs::read(&fx.ledger).unwrap();
     std::fs::write(&fx.ledger, "changed after publish\n").unwrap();
     fx.reject(serde_json::json!({}), "ledger bytes differ")

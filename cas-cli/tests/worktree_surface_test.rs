@@ -4481,8 +4481,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let retry = runtime.block_on(service.factory(Parameters(req.clone()))).unwrap();
     assert!(!get_text(&retry).contains("Already contained"), "unpublished retry must consult origin: {}", get_text(&retry));
     std::fs::remove_file(&hook).unwrap();
-    // cas-d8ab: count origin fetches. The containment re-check after the
-    // target sync reuses the origin tip that sync fetched.
+    // cas-d8ab: count origin fetches. Containment, the target sync and its
+    // re-check share the merge's one origin read.
     let fetch_log = remote.path().join("fetches.log");
     let counter = remote.path().join("count-upload-pack");
     std::fs::write(&counter, format!("#!/bin/sh\necho fetch >> {}\nexec git upload-pack \"$@\"\n", quote(&fetch_log))).unwrap();
@@ -4491,8 +4491,8 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let landed = runtime.block_on(service.factory(Parameters(req))).unwrap();
     assert!(!get_text(&landed).contains("NOT PUSHED") && !get_text(&landed).contains("PUSH NOT CONFIRMED"), "{}", get_text(&landed));
     let fetches = std::fs::read_to_string(&fetch_log).unwrap_or_default().lines().count();
-    assert_eq!(fetches, 2 + 3,
-        "two merge-path fetches plus the existing final-close integration proofs (verification is disabled in this routing fixture): {}", get_text(&landed));
+    assert_eq!(fetches, 1,
+        "the merge's one origin read also serves the final close's integration proof (verification is disabled in this routing fixture): {}", get_text(&landed));
     let final_tip = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/race"]);
     run_git(&["merge-base", "--is-ancestor", &tips[2], &final_tip], &repo.root);
 

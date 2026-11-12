@@ -34,6 +34,7 @@ pub(crate) struct ReleaseScope {
 }
 
 impl ReleaseScope {
+    // gate-audit[evidence_only]: selector Binds report proof metadata; proof validation and acceptance remain with the consumers.
     pub(crate) fn bind_reports(&mut self, root: &Path) -> Result<(), String> {
         let tasks = release_close::read_tasks(root)?;
         self.no_code_members.clear();

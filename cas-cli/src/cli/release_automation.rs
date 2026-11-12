@@ -956,6 +956,15 @@ pub(super) mod tests {
         let scope = serde_json::to_value(cut_scope(&root, temp.path(), &args.commit, &args.version, Some(&train.id), None).unwrap()).unwrap();
         value["release_scope"] = scope.clone();
         assert!(ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::new()).allow_cut().is_ok());
+        // cas-a6c8: review/QA can close every member before the cut.
+        for (outcome, allowed) in [
+            (CassyMergeClose::AlreadyClosed, true),
+            (CassyMergeClose::Held("RELEASE_MEMBER_HELD: missing proof".into()), false),
+        ] {
+            let members = (0..13).map(|n| (format!("cas-{n:04x}"), outcome.clone())).collect();
+            let preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), members);
+            assert_eq!(preview.allow_cut().is_ok(), allowed);
+        }
         let mut preview = ReleasePreview::from_members(serde_json::from_value(scope.clone()).unwrap(), BTreeMap::from([
             ("cas-0001".into(), CassyMergeClose::Held("REVIEW_MISSING: no approval".into())),
             ("cas-0002".into(), CassyMergeClose::AlreadyClosed),

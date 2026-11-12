@@ -306,6 +306,7 @@ fn fetch(
     cloud: Option<&ArtifactUploadClient>,
     roots: &PublishRoots,
     artifact: PublishedArtifact,
+    file_name: &str,
 ) -> anyhow::Result<PathBuf> {
     validate(&artifact, &artifact.task_id)?;
     let existing = store.get(&artifact.id)?;
@@ -348,7 +349,7 @@ fn fetch(
         crate::config::canonical_factory_task_artifact_dir(base, task_dir).is_some(),
         "task artifact directory escapes its configured namespace"
     );
-    let destination = task_dir.join(format!("{}-{}", artifact.id, artifact.name));
+    let destination = task_dir.join(file_name);
     let mut staging = tempfile::NamedTempFile::new_in(task_dir)?;
     std::io::Write::write_all(&mut staging, &bytes)?;
     staging.persist(&destination)?;
@@ -423,6 +424,126 @@ pub fn fetch_task(
     let base =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let roots = PublishRoots::new(cas_root, &base, task_id);
-    let path = fetch(&store, cloud.as_ref(), &roots, artifact.clone())?;
+    let file_name = format!("{}-{}", artifact.id, artifact.name);
+    let path = fetch(&store, cloud.as_ref(), &roots, artifact.clone(), &file_name)?;
     Ok((artifact, path))
+}
+
+/// Before a pre-merge review, save each committed artifact another machine
+/// published for this task (absent from this ledger) under its published name
+/// in this machine's task evidence directory, which the verifier reads
+/// (cas-5601). Local files win. A failure leaves the verifier's own
+/// missing-evidence path; it never blocks the dispatch.
+pub(crate) fn materialize_peer_evidence(cas_root: &Path, task: &cas_types::Task) {
+    let result = (|| -> anyhow::Result<()> {
+        let store = SqliteArtifactStore::open(cas_root)?;
+        let mut ids: Vec<String> = task.notes.lines()
+            .filter_map(|line| line.strip_prefix(MARKER))
+            .filter_map(|line| serde_json::from_str::<PublishedArtifact>(line).ok())
+            .map(|record| record.id)
+            .collect();
+        ids.sort();
+        ids.dedup();
+        let config = crate::config::Config::load(cas_root).unwrap_or_default();
+        let base = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let roots = PublishRoots::new(cas_root, &base, &task.id);
+        let cloud = super::cloud_client(cas_root);
+        for id in ids {
+            let Some(artifact) = from_notes(&task.notes, &id, &task.id)? else { continue };
+            let name = artifact.name.clone();
+            if store.get(&id)?.is_some() || Path::new(&name).file_name() != Some(name.as_ref())
+                || roots.task_artifacts_dir.join(&name).exists()
+            {
+                continue;
+            }
+            if let Err(error) = fetch(&store, cloud.as_ref(), &roots, artifact, &name) {
+                tracing::warn!(task_id = %task.id, artifact_id = %id, %error, "peer evidence not materialized");
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(task_id = %task.id, %error, "peer evidence not materialized");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::{method, path}};
+
+    /// cas-5601: a LEDGER.md published on a peer machine and missing here is
+    /// restored by the real pre-merge preparation before its context digest,
+    /// so the first attempt reaches dispatch, and a retry fetches nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_evidence_lands_in_the_verifier_evidence_dir_cas_5601() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().to_path_buf();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(repo.join(".gitignore"), ".cas/\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "base"]);
+        git(&["checkout", "-q", "-b", "factory/w"]);
+        std::fs::write(repo.join("work.txt"), "delivery\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "delivery"]);
+        let source = git(&["rev-parse", "HEAD"]);
+        git(&["checkout", "-q", "main"]);
+        let root = crate::store::init_cas_dir(&repo).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        std::fs::write(root.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
+        std::fs::write(root.join("cloud.json"),
+            serde_json::json!({"endpoint": server.uri(), "token": "test-token"}).to_string()).unwrap();
+        let mut task = cas_types::Task::new("cas-peer".into(), "peer delivery".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(source.clone());
+        let bytes = crate::qa_ledger::scaffold(&task, &[], &source).into_bytes();
+        let record = PublishedArtifact {
+            id: "art-peer1".into(), task_id: "cas-peer".into(), name: "LEDGER.md".into(),
+            mime: "text/markdown".into(), size_bytes: bytes.len() as u64,
+            sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes)),
+            cloud_artifact_id: Some("cloud-peer1".into()), status: "committed".into(),
+            cloud_url: None, slack_permalink: None, created_at: "2026-11-12T03:00:00Z".into(),
+            revocation: None,
+        };
+        task.notes = format!("[2026-11-12 03:00] Published artifact art-peer1\n{MARKER}{}",
+            serde_json::to_string(&record).unwrap());
+        crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        Mock::given(method("GET")).and(path("/api/artifacts/cloud-peer1/url"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": "cloud-peer1", "url": format!("{}/blob", server.uri()),
+                "size_bytes": bytes.len()})))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/blob"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes.clone()))
+            .expect(1).mount(&server).await;
+        let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("owner".into());
+        core.open_agent_store().unwrap().register(&cas_types::Agent::new_with_role(
+            "owner".into(), "supervisor".into(), cas_types::AgentRole::Supervisor)).unwrap();
+
+        let (cas_root, merge_task) = (root.clone(), task.clone());
+        let (first, second) = tokio::task::spawn_blocking(move || {
+            let attempt = || {
+                let held = core.prepare_premerge_verification(&merge_task, &repo, "factory/w", "main");
+                assert!(held.is_err(), "an unreviewed delivery cannot merge");
+                cas_store::get_latest_verification_dispatch(&cas_root, &merge_task.id).unwrap()
+                    .unwrap_or_else(|| panic!("first attempt never reached dispatch: {held:?}")).id
+            };
+            (attempt(), attempt())
+        }).await.unwrap();
+        assert_eq!(first, second, "the retry holds on the same dispatch");
+        let evidence = crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::task_evidence_dir(&root, &task).unwrap();
+        assert_eq!(std::fs::read(evidence.join("LEDGER.md")).unwrap(), bytes);
+    }
 }

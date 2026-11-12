@@ -1461,7 +1461,8 @@ impl CasCore {
             .filter(|_| task_type != TaskType::Epic
                 && !labels.iter().any(|label| label == crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL))
             .and_then(|epic| task_store.get(epic).ok())
-            .filter(|epic| crate::mcp::tools::core::workflow::release_freeze::active(&self.cas_root, epic).is_some())
+            .filter(|epic| super::release_train::is_cut_train(epic)
+                || crate::mcp::tools::core::workflow::release_freeze::active(&self.cas_root, epic).is_some())
             .map(|epic| epic.id);
         let (release_train, mut release_train_receipt) = if frozen_epic.is_some()
             || (task_type != TaskType::Epic
@@ -1470,7 +1471,7 @@ impl CasCore {
                 && target_repo.is_none()
                 && target_branch.is_none())
         {
-            self.release_train_for_new_task(task_store.as_ref()).await
+            self.release_train_for_new_task(task_store.as_ref()).await?
         } else {
             (None, String::new())
         };

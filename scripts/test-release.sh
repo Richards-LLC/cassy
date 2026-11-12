@@ -72,7 +72,8 @@ case "$1 $2" in
   "release preview")
     jq -n --arg sha "$(git rev-parse HEAD)" --argjson n "${FAKE_WOULD_CLOSE:-1}" \
       --argjson missing "${FAKE_REVIEW_MISSING:-$(printf '%s' '["cas-dead"]')}" \
-      '{scope:{final_release_sha:$sha},members:($n+($missing|length)),would_close:$n,would_hold:($missing|length),by_reason:{REVIEW_MISSING:($missing|length)},review_missing:$missing}' ;;
+      --argjson closed "${FAKE_ALREADY_CLOSED:-0}" \
+      '{scope:{final_release_sha:$sha},members:($n+$closed+($missing|length)),would_close:$n,would_hold:($missing|length),already_closed:$closed,not_eligible:0,by_reason:{REVIEW_MISSING:($missing|length),ALREADY_CLOSED:$closed},review_missing:$missing}' ;;
   "qa candidate")
     case "$3" in build) ;; path) printf '%s\n' "$0" ;; *) exit 2 ;; esac ;;
   "release track") exit "${FAKE_TRACK_EXIT:-0}" ;;
@@ -677,12 +678,18 @@ cut_preview_gate() {
         ! grep -q '^pr merge ' "$FAKE_GH_LOG" || return 1
     : >"$FAKE_CAS_LOG"
     FAKE_WOULD_CLOSE=1 run "$fixture" --hotfix --notes "$tmp/preview-notes.md" >>"$tmp/preview-cut.log" 2>&1 || return 1
+    # cas-a6c8: receipts may already have closed all thirteen members.
+    local closed_fixture="$tmp/already-closed-cut"
+    clone_epic "$closed_fixture" epic/already-closed-cut already-closed-cut
+    FAKE_CAS_LOG="$tmp/already-closed-cas.log" FAKE_ALREADY_CLOSED=13 FAKE_WOULD_CLOSE=0 FAKE_REVIEW_MISSING='[]' \
+        run "$closed_fixture" --hotfix --notes "$tmp/preview-notes.md" >"$tmp/already-closed-cut.log" 2>&1 || return 1
+    [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/already-closed-cut)" == "$(git -C "$closed_fixture" rev-parse HEAD)" ]] || return 1
     [[ "$(git -C "$tmp/origin.git" rev-parse refs/heads/epic/preview-cut)" == "$(git -C "$fixture" rev-parse HEAD)" ]] &&
         [[ "$(grep -c '^qa candidate build ' "$FAKE_CAS_LOG")" == 1 ]] &&
         grep -q '^release preview --commit ' "$FAKE_CAS_LOG" &&
         grep -q '^release track .* --preview ' "$FAKE_CAS_LOG"
 }
-check 'cut_preview_gate' 'cut refuses zero would-close but older-release review residuals do not block reviewed included members'
+check 'cut_preview_gate' 'cut refuses all-held members, permits all-already-closed members and keeps older-release residuals nonblocking'
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 test "$fail" -eq 0

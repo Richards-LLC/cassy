@@ -207,8 +207,9 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
     use crate::cloud::peer_mailbox::{PeerScope, attach_message_intent};
     let _env = crate::test_env_guard::TestEnvGuard::temp_home();
     let stamp = |body: &str| attach_message_intent(body, None, false).unwrap();
-    // cas-35563: rows 4234550/551 carried a confirmed published landing,
-    // but the renderer silently converted their untyped protocol to receipt.
+    // cas-35563: a published landing wakes, so the supervisor sees its train
+    // move. cas-9cda: #4240970 (Nov 12) rendered it as kind=ask with a reply
+    // instruction; it is a status that asks for no answer.
     let landing = format!("CAS_PEER_PREMERGE_V1 {}", serde_json::to_string(&cas_types::PeerPremergeReceipt {
         status: cas_types::VerificationStatus::Approved,
         project_id: "github.com/acme/widgets".into(),
@@ -229,7 +230,7 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
         ("pm-8e716afb", PeerScope::User, "other-box", stamp("What's its ETA?"), true),
         ("pm-9c915946", PeerScope::User, "this-box", stamp("Reply right away: the release is waiting on you."), true),
         ("pm-legacy", PeerScope::Project, "other-box", "Substantive field report".to_string(), true),
-        ("pm-landing-4234550", PeerScope::Project, "other-box", landing.clone(), true),
+        ("pm-landing-4240970", PeerScope::Project, "other-box", landing.clone(), true),
         ("pm-explicit-receipt", PeerScope::Project, "other-box", attach_message_intent(&landing, Some("receipt"), false).unwrap(), false),
         ("pm-explicit-quiet", PeerScope::Project, "other-box", format!("<cas-message-quiet/>\n{landing}"), false),
     ];
@@ -256,6 +257,12 @@ async fn untyped_peer_mail_wakes_idle_supervisor_prowl_rows_cas_7dd1d() {
             wakes,
             "{id}: only substantive mail without explicit quiet intent wakes: {report:?}"
         );
+        if id == "pm-landing-4240970" {
+            let prompt = queue.queued_prompt(imported.admitted[0]).unwrap().unwrap().prompt;
+            let envelope = crate::cloud::peer_mailbox::parse_envelope(&prompt).unwrap();
+            assert_eq!(envelope.kind, Some(crate::cloud::peer_mailbox::PeerMessageKind::Status), "{prompt}");
+            assert!(!prompt.contains("action=message"), "a landing asks for no reply: {prompt}");
+        }
     }
 }
 

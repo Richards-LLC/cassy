@@ -53,7 +53,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
         const receipt = page.locator(".supervisor-command-receipt");
         await expect(receipt).toHaveAttribute("data-phase", "submitted");
         if (!phone) {
-          const [status, transcript] = await Promise.all([receipt.boundingBox(), page.locator('.thread [role="log"]').boundingBox()]);
+          const [status, transcript] = await Promise.all([receipt.boundingBox(), receipt.locator("..").boundingBox()]);
           expect(status!.width).toBeLessThan(transcript!.width * 0.9);
         }
         await captureReload(page, "finish-menu-requested", viewport.width);

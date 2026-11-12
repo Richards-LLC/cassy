@@ -225,6 +225,29 @@ def test_workflow_command():
             with self.subTest(code=code):
                 self.assertEqual(len(self.hits(code, 'tests/test_receipt.py')), expected)
 
+    def test_recorded_cli_argv_is_data_without_waiving_prose_cas_632b(self):
+        payload = '["task", "notes", "--notes", "Record config get qa.registry.enforce exactly, including the supplied caller argument boundaries."]'
+        cases = [
+            ('self.assertIn(["config", "get", "qa.registry.enforce"], '
+             '[shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            (f'self.assertEqual(shlex.split(calls.read_text()), {payload})', False),
+            (f'assert {payload} == shlex.split(calls.read_text())', False),
+            (f'self.assertNotIn({payload}, [shlex.split(line) for line in calls.read_text().splitlines()])', False),
+            ('self.assertIn("config get qa.registry.enforce", calls.read_text())', True),
+            (f'self.assertEqual(calls.read_text().split(), {payload})', True),
+            (f'self.assertEqual(shlex.split(result.stderr), {payload})', True),
+            (f'self.assertEqual(render(shlex.split(calls.read_text())), {payload})', True),
+            ('# pin: recorded caller payload\n'
+             'self.assertEqual(calls.read_text(), "Please retry the operation later.")', True),
+        ]
+        for code, rejected in cases:
+            line = len(code.splitlines())
+            for changed in [None, {line}]:
+                with self.subTest(code=code, changed=changed):
+                    hits = (shape.lint_text_pins(code, 'tests/test_calls.py', changed_lines=changed)
+                            + shape.message_assertions(code, 'tests/test_calls.py', changed))
+                    self.assertEqual(bool(hits), rejected, hits)
+
     def test_archive_binary_paths_are_rejected_without_pin_escape(self):
         for code in [
             'fn helper() { Command::new(env!("CARGO_BIN_EXE_cas")); }',

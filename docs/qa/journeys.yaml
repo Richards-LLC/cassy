@@ -602,6 +602,953 @@ bug_families:
     title: Release ledger preserves delivery review rounds, authenticated wake kinds and sourced manual work without duplicate counts
     tasks: [cas-089d]
     journeys: [HUB-J13, HUB-J26, FACTORY-CLOSE]
+  accepted-post-merge-recovery:
+    title: Accepted merged deliveries satisfy pending predecessors, preserve scoped decisions and retain supervisor-owned close recovery
+    tasks: [cas-5bbe, cas-562b]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  arithmetic-multiplication-effects:
+    title: Numeric arithmetic stays inert while dynamic operands and array-subscript re-expansion are refused
+    tasks: [cas-0c9c, cas-a3ac, cas-d6f2]
+    invariants: []
+    journeys: []
+  artifact-cold-peer-fetch:
+    title: Cold peers resolve committed artifact metadata within their configured project without failing on a large account's discovery cap or the wrong task endpoint
+    tasks: [cas-e75c]
+    invariants: [FACTORY-ARTIFACT-METADATA]
+    journeys: [FACTORY-QA-RECEIPT]
+  artifact-nested-worktree-publication:
+    title: Registered nested factory checkout files publish while credentials and repository internals remain refused
+    tasks: [cas-9615]
+    journeys: [FACTORY-CLOSE]
+  artifact-revocation-tombstone:
+    title: Published artifact revocation retains an audit and blocks retrieval while Cloud deletion remains explicit
+    tasks: [cas-6d35, cas-7bb4]
+    journeys: [FACTORY-CLOSE, HUB-J26]
+  automatic-ci-merge-landing-receipt:
+    title: Green-CI automatic merge delivers one quiet supervisor receipt naming the exact landing and target, including on intent replay
+    tasks: [cas-5d8d8]
+    journeys: [FACTORY-MERGE]
+  background-sync-before-lease:
+    title: Background sync performed cloud discovery before checking the held store lease
+    tasks: [cas-de92]
+    invariants: [FACTORY-PEER-PULL-CADENCE]
+    journeys: [FACTORY-SUPERVISE]
+  batch-owned-verifier-journey-deferral:
+    title: Premerge verifier honors configured batch journey ownership while escalating per-task and unrelated missing evidence
+    tasks: [cas-8f8b]
+    journeys: [FACTORY-MERGE]
+  batch-qa-notice-ownership:
+    title: Batch QA notices follow current verification ownership and suppress obsolete evidence waits
+    tasks: [cas-0f7b]
+    invariants: [FACTORY-QA-NOTICE-OWNER]
+    journeys: [FACTORY-QA-RECEIPT]
+  batch-receipt-grouped-close-holds:
+    title: A receipt sends one grouped close-hold notice after its member outcomes settle and retains per-task detail
+    tasks: [cas-d31ab]
+    journeys: [FACTORY-QA-RECEIPT, FACTORY-CLOSE]
+  bounded-dpop-clock-correction:
+    title: A retryable 401 cannot shift proof signing or preview expiry beyond 60 seconds; oversized server clocks surface an error without losing pairing or poisoning later proofs, while 1–4 second fast clients recover once
+    tasks: [cas-c2e9]
+    invariants: [HUB-J12-GOAL]
+    journeys: [HUB-J12]
+  candidate-builder-revision:
+    title: QA candidate builds load the builder and its dependencies from the requested revision even when the current checkout predates them
+    tasks: [cas-31c95]
+    journeys: [FACTORY-QA-RECEIPT]
+  cas-3cd4:
+    title: Supervisor commands, operator messages and startup submit recovery use live input while the local pane is scrolled into history
+    tasks: [cas-3cd4]
+    invariants: [HUB-J27-NATIVE-IDLE-COMMANDS, HUB-J13-STARTUP-TURN]
+    journeys: [HUB-J27, HUB-J4, HUB-J13]
+  claude-canary-boot-diagnostics:
+    title: Missing Claude canaries retain observed boot output and inspectable failed request identity without admitting an unsupported worker
+    tasks: [cas-4cdd]
+    invariants: [FACTORY-BOOT-DIAGNOSTICS]
+    journeys: [FACTORY-SPAWN]
+  clean-home-launch-remedies:
+    title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
+    tasks: [cas-a1bc]
+    invariants: [HUB-J13-GOAL]
+    journeys: [HUB-J13]
+  cli-parser-payload-round-trip:
+    title: CLI parser argv payload equality is accepted without allowing generated prose pins
+    tasks: [cas-5442]
+    invariants: [FACTORY-CLI-PAYLOAD-SHAPE]
+    journeys: [FACTORY-CLOSE]
+  close-proof-identifier-adjective:
+    title: Local documentation integrity summaries do not assert external proof completion
+    found: '2026-11-09'
+    tasks: [cas-ecc9]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-CLOSE]
+  command-receipt-retention:
+    title: Supervisor-command receipts expire after their replay window instead of filling a fixed cap, a replay inside the window returns its stored receipt without re-running, and a refused unconfirmed command is audited as denied
+    tasks: [cas-7629]
+    invariants: [HUB-J27-ALLOWLIST, HUB-J27-OBSERVED-OUTCOME]
+    journeys: [HUB-J27]
+  command-redirect-assertions:
+    title: Typed executable-command redirect assertions pass while equivalent human error narratives remain refused
+    tasks: [cas-8edf]
+    invariants: [FACTORY-MACHINE-COMMAND-SHAPE]
+    journeys: [FACTORY-CLOSE]
+  commander-accounts-inline-confirm:
+    title: An account removal confirms inside the card it acts on, with Confirm disabled until the typed text matches and no browser validation bubble; duplicate lines name the other account for people, and protected main accounts are never offered for cleanup
+    tasks: [cas-b2e9]
+    invariants: [HUB-J13-ACCOUNT-MANAGEMENT]
+    journeys: [HUB-J13]
+  commander-bare-url-links:
+    title: A bare https URL in a Commander message or work row must render as a link that opens in a new tab, with trailing punctuation outside it and code spans left as text
+    tasks: [cas-ae69]
+    invariants: [HUB-J4-READABLE-PROSE-TABLES]
+    journeys: [HUB-J4]
+  commander-compact-rows:
+    title: The compact one-line session row keeps its time and End column apart on a phone, speaks its last turn rather than showing it, and the loading list keeps the footer actions in view when held sideways
+    tasks: [cas-42a9]
+    invariants: [HUB-J3-GOAL, HUB-J5-GOAL, HUB-J9-GOAL, HUB-J16-GOAL, HUB-J26-GOAL, HUB-J27-GOAL]
+    journeys: [HUB-J3, HUB-J5, HUB-J9, HUB-J16, HUB-J26, HUB-J27]
+  commander-epic-rail:
+    title: Commander's live epics must sit beside the conversation, scoped to the pane's project with foreign epics absent, with named rows and the TUI's open / in progress / merged split
+    tasks: [cas-0960, cas-9b99]
+    invariants: [HUB-J26-PROJECT-EPICS]
+    journeys: [HUB-J26]
+  commander-frame-error-keeps-socket:
+    title: An error while Commander handles one machine frame (a UI callback or render) is reported and never tears down the live machine socket, so a replayed frame cannot loop every supervisor into Reconnecting
+    tasks: [cas-327d]
+    invariants: [HUB-J11-GOAL]
+    journeys: [HUB-J11]
+  composer-slash-path-routing:
+    title: Only exact supported command tokens claim composer submits; paths, unknown slash text and double-slash escapes reach ordinary sends through Enter and Send, while Usage remains a structured command
+    tasks: [cas-62ea]
+    invariants: [HUB-J27-GOAL]
+    journeys: [HUB-J27]
+  conversation-reload-density:
+    title: Per-session reload controls must not add empty action rows or Tab stops to the conversation list
+    tasks: [cas-c442]
+    invariants: [HUB-J27-CARD-RELOAD, HUB-J16-GOAL, HUB-J14-GOAL]
+    journeys: [HUB-J14, HUB-J16, HUB-J27]
+  cross-project-session-launch:
+    title: A machine hub's originating store must not override the project selected for New session
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
+    journeys: [HUB-J13]
+  daemon-ended-replacement:
+    title: A requested conversation resumes when a live daemon replaces its ended catalog entry, without retrying or sending while ended
+    tasks: [cas-5049]
+    invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
+    journeys: [HUB-J11]
+  dark-theme-conversation-readiness:
+    title: Desktop dark-theme and phone find, ask and dark-theme stages await the conversation socket before publishing seeded supervisor messages; composer visibility alone is not transport readiness
+    tasks: [cas-f811, cas-9f5a, cas-44e8]
+    invariants: [HUB-J3-GOAL, HUB-J7-GOAL, HUB-J10-GOAL]
+    journeys: [HUB-J3, HUB-J7, HUB-J10]
+  deferred-session-startup:
+    title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-STARTUP-WAKE]
+    journeys: [HUB-J13]
+  derived-priority-atomic-refusal:
+    title: Conflicting finding priority requests return a typed refusal before any accompanying fields save
+    tasks: [cas-76eb]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-CLOSE]
+  detached-successor-start:
+    title: Detached successor startup prepares a named branch while preserving held deliveries and refusing unsafe checkouts
+    tasks: [cas-ce0d]
+    invariants: [FACTORY-DETACHED-SUCCESSOR]
+    journeys: [FACTORY-SPAWN]
+  diagram-dead-wrap:
+    title: A rendered Mermaid diagram must not offer a Wrap control that changes nothing, and its source view must keep Wrap
+    tasks: [cas-0830]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  diagram-height-cut:
+    title: A rendered Mermaid diagram must show whole instead of being cut at the code frame's height cap with no cue
+    tasks: [cas-3cb6]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  disjoint-registry-entry-merge:
+    title: Parallel registry entries survive candidate and landing merges while competing edits still conflict and separate shared doc entries require no coordination
+    tasks: [cas-7867]
+    invariants: []
+    journeys: [FACTORY-MERGE, FACTORY-SUPERVISE]
+  disposable-hub-config-table:
+    title: Disposable hub fixtures must write parseable AI enrichment config so real composer uploads can store files
+    tasks: [cas-6217, cas-de58]
+    invariants: [HUB-J24-GOAL]
+    journeys: [HUB-J24]
+  epic-move-corrected-lane:
+    title: An explicit epic move carries a corrected old-lane target and names any distinct target it preserves
+    tasks: [cas-0ef5]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  escaped-backtick-shell-data:
+    title: Escaped backticks inside double-quoted shell data stay literal while executable backticks retain workspace and operator-only inspection
+    tasks: [cas-6e99]
+    invariants: []
+    journeys: []
+  exhausted-release-notice:
+    title: Stop exhausted installed-release notices and report once to their owner
+    tasks: [cas-fed1]
+    invariants: [CLI-RELEASE-NOTICE-EXHAUSTION]
+    journeys: [CLI-RELEASE]
+  expanding-heredoc-workspace-effects:
+    title: Heredoc substitutions obey workspace boundaries and ambiguous body pairing, all quoted or unquoted byte boundaries, dollar-quote fragments and continued declarations fail closed while ordinary quoted bodies and escaped markers stay inert
+    tasks: [cas-b8ae]
+    invariants: []
+    journeys: []
+  expired-toast-announcement:
+    title: Expired connection notices must leave an empty live region while subsequent notices still announce
+    tasks: [cas-326e8]
+    invariants: [HUB-J9-GOAL]
+    journeys: [HUB-J9]
+  expired-transcript-mirror-wake:
+    title: Old transcript mirrors stay quiet while recent actionable mirrors batch once and explicit operator actions retain watchdog alerts
+    tasks: [cas-31c9]
+    journeys: [FACTORY-SUPERVISE, HUB-J5]
+  explicit-release-report-proof:
+    title: Explicit release reports retain audited portable proof and close once through ordinary gates; missing or mismatched bindings hold before cut
+    tasks: [cas-2ecc]
+    journeys: [CLI-RELEASE, FACTORY-CLOSE]
+  factory-finding-priority:
+    title: Primary factory and CLI findings retain derived priority and label corrections replace stale triage axes
+    tasks: [cas-7129]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SUPERVISE, FACTORY-MERGE, FACTORY-CLOSE, CLI-RELEASE, FACTORY-SPAWN, FACTORY-QA-RECEIPT]
+  fenced-status-folding:
+    title: Short status replies containing fenced source must keep their code frame and exact Copy instead of folding into plain progress
+    tasks: [cas-5a76]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  finding-main-reach-correction:
+    title: Main-reach corrections require a declared journey, preserve stored runtime evidence and report resulting priority
+    tasks: [cas-2c35]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SUPERVISE, FACTORY-MERGE]
+  finish-native-turn-queue:
+    title: Finish waits for native turn completion without mistaking background footer repaint for model work
+    tasks: [cas-88ca]
+    invariants: [HUB-J27-FINISH-NATIVE-TURN]
+    journeys: [HUB-J27]
+  finish-session-background-cleanup:
+    title: Finish stops session-owned background work before Exit
+    tasks: [cas-1318]
+    invariants: [HUB-J27-FINISH-BACKGROUND-CLEANUP]
+    journeys: [HUB-J27]
+  finished-command-toast:
+    title: A finished supervisor command reports its one-line outcome as a self-clearing toast instead of leaving a card that needs Dismiss; failed, refused and unconfirmed commands keep their card until dismissed
+    tasks: [cas-95ea]
+    invariants: [HUB-J27-CARD-RELOAD]
+    journeys: [HUB-J27]
+  first-park-syncing-merge-grant:
+    title: First-park import grants work through the syncing store without reopening an unparked task
+    tasks: [cas-a7b5]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  forced-colors-selected-state:
+    title: In forced colors the selected conversation's name stays readable, and only the selected view tab carries an underline
+    found: '2026-10-30'
+    tasks: [cas-bdb2]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  foreign-slack-claim-refusal:
+    title: A foreign Slack claim owner stays visible in the refusal even without a local registration
+    tasks: [cas-b584]
+    invariants: [FACTORY-MANAGED-MENTION-CLAIMS]
+    journeys: [FACTORY-SUPERVISE]
+  fresh-park-red-anchor:
+    title: First park measures the pushed fix tip from the active task start rather than its earlier red-test anchor
+    found: '2026-11-08'
+    tasks: [cas-787e, cas-73de]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-CLOSE]
+  github-source-peer-handoff:
+    title: Explicit GitHub source handoff stops the old owner's renewal and permits peer assignment without an override
+    tasks: [cas-5b76]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  grok-native-commander-replies:
+    title: Native Grok completions mirror into the Commander conversation
+    tasks: [cas-44f0]
+    invariants: [HUB-J4-GROK-NATIVE-REPLY]
+    journeys: [HUB-J4]
+  handwritten-diff-tint:
+    title: A diff fence written by hand without an @@ line must still show its added and removed lines in distinct colors
+    tasks: [cas-f5ee]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  harness-scratchpad-bash-staging:
+    title: Bash can create its session scratchpad and stage notes while other sessions and bare temporary paths stay refused
+    tasks: [cas-738c]
+    invariants: []
+    journeys: []
+  header-overflow-train-repair:
+    title: The one-row Commander header keeps overflow-menu actions anchored to the visible toggle, its inline menu unclipped, and its journeys asserting stable identifiers rather than retired text
+    tasks: [cas-e1db]
+    invariants: [HUB-PHONE-OVERFLOW-ANCHOR]
+    journeys: [HUB-J4, HUB-J9, HUB-J17, HUB-J18, HUB-J25, HUB-J27]
+  header-state-chip-height:
+    title: The conversation header keeps one height across connection-state changes regardless of the runner's fonts
+    tasks: [cas-f19b, cas-53b9]
+    invariants: [HUB-HEADER-STATE-HEIGHT-STABLE]
+    journeys: [HUB-J4]
+  hidden-cached-preview-retry:
+    title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
+    tasks: [cas-abb7]
+    invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
+    journeys: [HUB-J22]
+  historical-ledger-build-identity:
+    title: Historical ledger init uses immutable delivery identity after local source cleanup without changing bindings or evidence
+    tasks: [cas-0371]
+    invariants: [FACTORY-LEDGER-HISTORICAL-BUILD]
+    journeys: [FACTORY-QA-RECEIPT]
+  history-journey-fixture-races:
+    title: History controls select conversation rows and distinguish settled host layout and storage from hostile-frame effects
+    tasks: [cas-e155, cas-b255, cas-c3ac]
+    invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
+    journeys: [HUB-J4]
+  independent-qa-evidence-identity:
+    title: Corrected heads and fresh independent passes never reuse prior round-only evidence
+    tasks: [cas-6813]
+    invariants: [FACTORY-QA-EVIDENCE-IDENTITY]
+    journeys: [FACTORY-QA-RECEIPT]
+  inline-reply-image-decode:
+    title: Inline reply image assertions wait for the opener to report the image loaded before reading intrinsic dimensions
+    tasks: [cas-a16f]
+    invariants: [HUB-J22-REPLY-IMAGES]
+    journeys: [HUB-J22]
+  install-before-release-reconciliation:
+    title: Install and verify the newest binary before reconciling current and pending older releases
+    tasks: [cas-bca3]
+    invariants: [CLI-RELEASE-INSTALLED-RECONCILER]
+    journeys: [CLI-RELEASE]
+  isolated-home-capped-tests:
+    title: Isolated HOME and Git prefixes reach capped named test children without changing runner identity or admitting broad commands
+    tasks: [cas-dfaf]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  landed-train-successor-selection:
+    title: Standalone tasks join the successor while a landed train waits for release reconciliation
+    tasks: [cas-b584]
+    journeys: [CLI-RELEASE]
+  late-created-lifecycle-relay:
+    title: Late-created lifecycle relays retain occurrence age and resumed tasks suppress obsolete blockers
+    tasks: [cas-bfb3]
+    journeys: [FACTORY-SUPERVISE]
+  launch-catalog-before-outage:
+    title: Launch outage fixture waits for its first conversation catalog before taking the machine offline
+    tasks: [cas-3dce]
+    invariants: [HUB-J13-GOAL]
+    journeys: [HUB-J13]
+  linked-checkout-blocked-wip:
+    title: A blocked worker's unnamed WIP retains its recorded start boundary through the primary repository identity
+    found: '2026-11-09'
+    tasks: [cas-7ce5]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SPAWN]
+  linked-identity-empty-checkpoint:
+    title: Inherited project identity does not grant task ownership to an unattributed empty checkpoint
+    found: '2026-11-09'
+    tasks: [cas-f49a, cas-a75e]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SPAWN]
+  linked-worktree-release-scope:
+    title: Release preview recognizes the main project from a linked worktree without local Cassy config
+    tasks: [cas-17e9]
+    journeys: [CLI-RELEASE, FACTORY-CLOSE]
+  live-work-invalidation-during-read:
+    title: A live work notice newer than a pending page is retained until one visible follow-up read
+    tasks: [cas-fc4c]
+    invariants: [HUB-J25-GOAL]
+    journeys: [HUB-J25]
+  local-parked-delivery-recovery:
+    title: Integrated local_merge deliveries recover after worker retirement without origin while preserving QA and verification authority
+    tasks: [cas-3a4b]
+    journeys: [FACTORY-MERGE]
+  local-preview-reading-intent:
+    title: Inspecting a visibility-driven local thumbnail claims the file card as the reading destination before scrolling, so a saved earlier anchor cannot hide it before its ticket request
+    tasks: [cas-4b28]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  lost-ack-history-correlation:
+    title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
+    tasks: [cas-d17f]
+    invariants: [HUB-J12-DURABLE-SEND-REF, HUB-J5-RECEIPT-STAGES]
+    journeys: [HUB-J5, HUB-J12]
+  machine-version-after-hub-restart:
+    title: A machine card shows the running hub against its installed binary and re-reads it after a hub restart, instead of offering an installed release as an update
+    tasks: [cas-d786]
+    invariants: [HUB-J3-MACHINE-VERSIONS]
+    journeys: [HUB-J3]
+  managed-slack-uncertain-legacy-fallback:
+    title: An uncertain managed Slack claim cannot enable legacy intake on a fresh non-owner reader
+    tasks: [cas-30b0]
+    # no case: The registry has no managed-Slack claim/fallback journey or invariant.
+    # The Violet handoff journey covers unread mail succession, a separate behavior.
+    # Local fallback is covered by the named Rust regression; live Cloud routing
+    # remains outside this authorized client-only delivery.
+    invariants: []
+    journeys: []
+  mcp-read-only-search-deadline:
+    title: Read-only evidence search deadlines report non-mutating metadata and preserve search stage timings
+    tasks: [cas-533a]
+    journeys: [FACTORY-MERGE]
+  merge-publication-before-local-ref:
+    title: Worktree merge publishes its detached candidate with compare-and-swap before moving the shared local target
+    tasks: [cas-53f2, cas-7daf]
+    journeys: [FACTORY-MERGE]
+  merge-queue-wrapper-run-citation:
+    title: Canonical queue wrapper CI and punctuated run citations authorize exact landed-tree evidence
+    tasks: [cas-f448]
+    invariants: [FACTORY-MERGE-QUEUE-CI-IDENTITY]
+    journeys: [FACTORY-CLOSE]
+  mirror-secret-shapes:
+    title: Commander preserves ordinary sk-containing words while redacting long key-shaped SK credentials
+    found: '2026-11-06'
+    tasks: [cas-c1ff]
+    invariants: [HUB-J5-SECRET-SHAPES]
+    journeys: [HUB-J5]
+  missing-native-claude-capacity:
+    title: Generated statuslines must record native usage and account choices must retain unreset observations with their age
+    tasks: [cas-7045, cas-d739]
+    invariants: [HUB-J13-NATIVE-CLAUDE-CAPACITY]
+    journeys: [HUB-J13]
+  missing-terminal-operator-input:
+    title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
+    tasks: [cas-69b3f]
+    invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J4, HUB-J12]
+  native-real-hub-home-path:
+    title: Native real-hub fixtures allocate a short macOS HOME so the GUI daemon socket fits the 103-byte pathname limit with the default TMPDIR
+    tasks: [cas-a716]
+    invariants: [HUB-J7-GOAL, HUB-J11-GOAL, HUB-J13-GOAL, HUB-J24-GOAL]
+    journeys: [HUB-J7, HUB-J11, HUB-J13, HUB-J24]
+  native-real-hub-provider-isolation:
+    title: Native launch fixtures keep provider lookup and account state inside private HOME, consume bracketed CR submissions, and clean up only captured child identities
+    tasks: [cas-8dcc]
+    invariants: [HUB-J13-GOAL]
+    journeys: [HUB-J13]
+  native-recording-chapter-csp:
+    title: Native Commander recordings show chapter captions without inline-style CSP refusals or changes to the production policy
+    tasks: [cas-aff6]
+    invariants: [HUB-J24-GOAL]
+    journeys: [HUB-J24]
+  null-label-reply-receipt:
+    title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
+    tasks: [cas-c641]
+    invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J3, HUB-J12]
+  opaque-auth-transient-state:
+    title: Opaque authenticated HTTP failures retain pairing while independent transport recovery may already be Live
+    tasks: [cas-ee74]
+    invariants: [HUB-J12-GOAL]
+    journeys: [HUB-J12]
+  overview-upkeep-target-merge:
+    title: Overview upkeep attributes live journey changes to the delivery after a target merge
+    tasks: [cas-362df]
+    journeys: [FACTORY-CLOSE]
+  pairing-code-landscape-clipping:
+    title: Sharing controls made the pairing-code dialog overflow its clipping edge on a sideways phone
+    tasks: [cas-f300]
+    invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
+    journeys: [HUB-J1]
+  pairing-code-rate-limit-refusal:
+    title: When the relay rate-limited code creation, the dialog said only that the service refused, with no cause or next step
+    tasks: [cas-310f]
+    invariants: [HUB-J1-GOAL]
+    journeys: [HUB-J1]
+  parallel-case-registry-additions:
+    title: Separate family files preserve parallel merges, keep case checks independent of registry waivers, reject delivered duplicates detect working-tree drift, bind waivers to current findings and retain G3 for untouched parse debt
+    tasks: [cas-c968, cas-d4d7, cas-a207, cas-8d6a, cas-b7e7]
+    invariants: []
+    journeys: []
+  park-sync-note-union:
+    title: Worker park survives clock and note-block collation when prior audit text and every task scope and lifecycle field remain unchanged
+    tasks: [cas-1a88]
+    invariants: []
+    journeys: []
+  peer-mail-receipt-semantics:
+    title: Cloud acceptance and machine acknowledgement cannot claim peer supervisor surfacing
+    tasks: [cas-292a]
+    invariants: [HUB-J5-RECEIPT-STAGES]
+    journeys: [HUB-J5]
+  peer-published-approval-plan-drift:
+    title: Published peer approval survives later plan bookkeeping while retaining task and Git identity
+    found: '2026-11-09'
+    tasks: [cas-9839c]
+    invariants: []
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+  peer-replay-control-request-fanout:
+    title: Retained peer session events do not reload the open conversation's status and lease
+    tasks: [cas-c971]
+    invariants: [HUB-J12-GOAL]
+    journeys: [HUB-J12, HUB-J24]
+  peer-source-release-approval:
+    title: Release completion honors approved peer source anchors when the repository head records the later landed merge, while unrelated-head approvals stay held
+    tasks: [cas-d37f]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+    journeys: [CLI-RELEASE]
+  portable-binding-close-receipt:
+    title: A local close-detail locator exempts only its path and digest, while literal and canonical HOME stay out of semantic and persisted binding
+    tasks: [cas-417e, cas-400a]
+    invariants: []
+    journeys: []
+  premerge-verifier-startup-budget:
+    title: Premerge dispatch returns its hold while provider startup is blocked; retries retain one claimed verifier and startup failure releases that exact claim
+    tasks: [cas-2efe]
+    journeys: [FACTORY-MERGE]
+  preview-layout-tail-follow:
+    title: Preview collapse and growth before queued scroll delivery retain tail following, while explicit upward reading gestures retain the reader's place
+    tasks: [cas-d587]
+    invariants: [HUB-J4-GOAL]
+    journeys: [HUB-J4]
+  project-account-recommendation:
+    title: New session must refresh account recommendations using the selected project's policy
+    tasks: [cas-774a]
+    invariants: [HUB-J13-PROJECT-ACCOUNT-POLICY]
+    journeys: [HUB-J13]
+  project-card-supervisor-name:
+    title: Project card supervisor rows show the supervisor name clear of the avatar and fit at phone width
+    tasks: [cas-219c, cas-be27, cas-d898]
+    invariants: [HUB-J14-PROJECT-SUPERVISOR-NAME]
+    journeys: [HUB-J14]
+  prose-table-column-collapse:
+    title: A prose column must never consume its siblings' word widths or render inline markdown literally
+    tasks: [cas-8bb3]
+    invariants: [HUB-J4-READABLE-PROSE-TABLES]
+    journeys: [HUB-J4]
+  provider-credential-metadata-reads:
+    title: Account catalog metadata must not be extracted from provider credential files
+    tasks: [cas-46db]
+    invariants: [HUB-J13-PROVIDER-CREDENTIAL-BOUNDARY]
+    journeys: [HUB-J13]
+  read-only-pairing-dead-end:
+    title: A read-only pairing told the person holding the phone to run a CLI command, and its composer looked writable
+    tasks: [cas-b7c0]
+    invariants: [HUB-J2-GOAL]
+    journeys: [HUB-J2]
+  real-launch-teardown:
+    title: Real disposable launch teardown waits for the daemon and its children and retains state after deletion failure
+    tasks: [cas-bb86, cas-9474]
+    invariants: [HUB-J13-GOAL]
+    journeys: [HUB-J13]
+  rebind-ledger-aliases:
+    title: Live rebinds and retained backfill aliases count once while immutable history and distinct actions survive
+    tasks: [cas-c921]
+    journeys: [HUB-J13, HUB-J26, FACTORY-CLOSE]
+  recorded-cli-argv-lint:
+    title: Test-shape lint accepts structured recorded CLI argument vectors while raw text pins remain rejected
+    tasks: [cas-632b]
+    journeys: [FACTORY-CLOSE]
+  recovered_session_attention:
+    title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
+    found: '2026-10-27'
+    fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
+    tasks: [cas-d53c, cas-9e46]
+    invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
+    journeys: [HUB-J11]
+  recycled-worker-late-task-start:
+    title: A task start finishing during worker teardown cannot leave the replacement blocked by the old session's lease
+    tasks: [cas-625c]
+    journeys: [FACTORY-SUPERVISE, HUB-J26]
+  registered-gate-token-assertions:
+    title: Registered gate wire tokens pass named-test admission while unknown tokens and prose remain refused
+    tasks: [cas-af9e]
+    invariants: [FACTORY-MACHINE-COMMAND-SHAPE]
+    journeys: [FACTORY-CLOSE]
+  registry-upkeep-approval:
+    title: Independent journey registry hunks preserve the original candidate approval while changed reviewed context requires fresh verification
+    tasks: [cas-6c21]
+    journeys: [FACTORY-MERGE]
+  relay-double-deadline-drift:
+    title: The relay double restamped a pairing request's deadline on every poll, so each poll looked like a new pairing step and reset the code view
+    found: '2026-10-27'
+    tasks: [cas-fa56]
+    invariants: [HUB-J1-RELAY-DEADLINE-STABLE]
+    journeys: [HUB-J1]
+  release-closeout-outcome-counts:
+    title: Release closeout separates successful, already closed, held and ineligible members from residuals and completion without duplicating notices
+    tasks: [cas-736f]
+    journeys: [CLI-RELEASE]
+  release-cut-own-member-review:
+    title: Cut preview refuses unreviewed included deliveries while retaining older release review debt as residuals
+    tasks: [cas-821e]
+    journeys: [CLI-RELEASE]
+  release-portable-ledger:
+    title: Imported release reviews resolve verified Cloud bytes on the consuming machine
+    tasks: [cas-52c1]
+    invariants: [FACTORY-RELEASE-PORTABLE-LEDGER]
+    journeys: [CLI-RELEASE]
+  release-progress-zero:
+    title: A release at zero merges shows an empty outlined track, not one solid bar, in Team and the rail
+    found: '2026-10-30'
+    tasks: [cas-d640]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  relocated-release-preview-store:
+    title: A relocated copied store replays preview from the original repository while preserving candidate identity and rejecting same-origin foreign clones
+    tasks: [cas-afdf]
+    journeys: [CLI-RELEASE]
+  repaired-peer-approval:
+    title: A fresh exact-delivery approval from the same source replaces stale peer proof without rebinding history or displacing local review
+    tasks: [cas-d7f9]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+  repeat-native-status-observation:
+    title: A repeated native status command whose output leaves the screen unchanged is confirmed by the output the harness printed after it was typed, instead of staying unconfirmed until the receipt timeout and blocking every other supervisor command
+    tasks: [cas-7ec8]
+    invariants: [HUB-J27-OBSERVED-OUTCOME]
+    journeys: [HUB-J27]
+  reply-table-code-box:
+    title: A short reply table rendered as a filled code-like sheet with monospace numbers, no row rules, a nameless blank header and Copy floating above it
+    found: '2026-11-01'
+    tasks: [cas-0e5e]
+    invariants: [HUB-J4-READABLE-PROSE-TABLES, HUB-J4-TABLE-COPY]
+    journeys: [HUB-J4]
+  repro-sha-code-dependency:
+    title: Reproduction and temporary candidate SHAs do not declare missing epic code dependencies
+    found: '2026-11-09'
+    tasks: [cas-0f47]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SPAWN]
+  restored-card-gesture-suppression:
+    title: A cached refused card must accept a fresh Edit gesture immediately after swipe dismissal and restoration
+    tasks: [cas-f722]
+    invariants: [HUB-J5-GOAL]
+    journeys: [HUB-J5]
+  retarget-empty-task-branch:
+    title: Retargeted tasks can bind a clean empty replacement before committing without abandoning existing work
+    tasks: [cas-a4a7]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SPAWN]
+  retired-assignee-required-verification:
+    title: Retired implementer recovery preserves required review and reports known missing registrations accurately
+    tasks: [cas-8826]
+    journeys: [FACTORY-CLOSE, FACTORY-MERGE]
+  retired-epic-close-target:
+    title: Deleted and stale local epic targets use the published default proof only when child deliveries and the receipt are reachable
+    tasks: [cas-e8c6]
+    journeys: [FACTORY-CLOSE]
+  revoked-send-refusal-cause:
+    title: A revoked semantic send names re-pairing without Take control, missing message permission names its grant, and true terminal lease refusals retain ownership guidance while refused text and drafts stay recoverable
+    found: '2026-10-29'
+    tasks: [cas-5e60, cas-573d]
+    invariants: [HUB-J5-GOAL, HUB-J5-SEND-WITHOUT-PANE-LEASE]
+    journeys: [HUB-J5, HUB-J12, HUB-J18]
+  revoked-working-indicator:
+    title: An authenticated pairing refusal clears working before the next animation frame
+    tasks: [cas-ef7a]
+    invariants: [HUB-J12-TRUTHFUL-WORKING]
+    journeys: [HUB-J12]
+  rich-inspection-toggle-coalescing:
+    title: Opening rich-content disclosures counts once even when a quick close coalesces the native toggle events
+    tasks: [cas-eefb]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  scoped-supervisor-idle-staffing:
+    title: Unfocused historical backlog does not trigger staffing nudges while focused ready work respects grace, holds and cooldowns
+    tasks: [cas-c243]
+    invariants: [FACTORY-SCOPED-IDLE-STAFFING]
+    journeys: [FACTORY-SUPERVISE]
+  scrolling-list-absolute-label-overflow:
+    title: Absolute accessibility labels in long project lists must use the scrolling navigation as their containing block
+    tasks: [cas-2a07]
+    invariants: [HUB-J3-LIST-SCROLL-BOUNDS]
+    journeys: [HUB-J1, HUB-J3]
+  second-person-pairing-code:
+    title: The pairing-code dialog assumed the phone's owner was at the machine; a second person had no way to send the code on
+    tasks: [cas-a56c]
+    invariants: [HUB-J1-GOAL]
+    journeys: [HUB-J1]
+  selected-account-lane-model:
+    title: Lane admission checks the selected Codex account before queueing, warns on a supported registry fallback, and excludes failed harnesses from idle staffing
+    found: '2026-11-08'
+    tasks: [cas-8f40]
+    invariants: [FACTORY-FINDING-PRIORITY]
+    journeys: [FACTORY-SPAWN]
+  selected-operator-reply-recovery:
+    title: Selected operator replies record forwarding attempts and accept authenticated wildcard receipts despite transient SQLite contention
+    tasks: [cas-1962, cas-c271]
+    invariants: [HUB-J5-SELECTED-REPLY-RECOVERY]
+    journeys: [HUB-J5, FACTORY-SUPERVISE]
+  sent-attachment-open-and-edit:
+    title: The sender's own non-media upload cannot be opened, Edit on a refused send puts the host path in the composer, and every preview request re-hashes the upload
+    found: '2026-10-28'
+    tasks: [cas-a4c4]
+    invariants: [HUB-J24-GOAL, HUB-J24-SENT-ATTACHMENT]
+    journeys: [HUB-J24]
+  session-recency-stability:
+    title: Session recency reserves its layout slot and ignores frame-by-frame ordering within one activity minute
+    tasks: [cas-6faf]
+    invariants: [HUB-J14-GOAL]
+    journeys: [HUB-J14, HUB-J8]
+  shared-context-receipt-clock:
+    title: Multi-tab receipt checks hold the shared BrowserContext clock through inspection and advance it once per intended deadline, without expiring the live session catalog during renewal
+    tasks: [cas-b417, cas-2408]
+    invariants: [HUB-J12-GOAL, HUB-J12-DURABLE-SEND-REF]
+    journeys: [HUB-J12]
+  shared-default-release-train:
+    title: Epic-less tasks across machines elect the same live train; cut retirement preserves fresh lanes and unfinished children
+    tasks: [cas-7ab6]
+    journeys: [CLI-RELEASE, FACTORY-SPAWN]
+  shared-file-task-rollover:
+    title: Queued successors and retired file claims do not warn workers about themselves while active peers retain task and branch diagnostics
+    tasks: [cas-15f5]
+    journeys: [FACTORY-SUPERVISE]
+  shipped-delivery-identity:
+    title: Shipped deliveries with lost anchors or implementers can record independent batch evidence before ordinary close
+    tasks: [cas-d853]
+    invariants: [FACTORY-RECOVER-SHIPPED-IDENTITY]
+    journeys: [FACTORY-CLOSE, FACTORY-QA-RECEIPT]
+  shipped-sync-task-resume:
+    title: Request changes and resume accepts shipped release imports while unshipped foreign task commits stay refused
+    tasks: [cas-ef54]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  short-status-markdown:
+    title: A short status must render its callout, heading, list and inline Markdown instead of showing their markers in the quiet status box
+    tasks: [cas-2eb8]
+    invariants: [HUB-J4-MESSAGE-HIERARCHY]
+    journeys: [HUB-J4]
+  slack-share-issuer-receipt:
+    title: A stale source-free peer cannot delegate another supervisor's Slack task or use a historical acceptance to bypass source ownership
+    tasks: [cas-0fd5]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+    journeys: [FACTORY-SPAWN]
+  slow-phone-composer-upload:
+    title: Generic request deadlines and generic refusals prevent large phone attachments from reaching the supervisor
+    tasks: [cas-fed8]
+    invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
+    journeys: [HUB-J24]
+  slow-premerge-candidate:
+    title: Concurrent exact receipts share a completed candidate while slow preparation retains a bounded hold and completion notice
+    tasks: [cas-352b, cas-2ba8]
+    journeys: [FACTORY-MERGE, FACTORY-CLOSE]
+  source-color-apostrophes:
+    title: Rust lifetimes stay plain beside colored characters, script apostrophes stay line-bounded, shell quotes span lines, and uncacheable source preserves earlier cached entries
+    tasks: [cas-7457]
+    invariants: [HUB-J22-SYNTAX-SOURCE]
+    journeys: [HUB-J22]
+  source-status-reactions:
+    title: Source status reconciles eyes and pick, gates check on staging, retains rate-limit retries after restart and stops the former owner on observed takeover
+    tasks: [cas-c610]
+    invariants: [FACTORY-SOURCE-REACTIONS]
+    journeys: [FACTORY-SOURCE-REACTIONS]
+  source-work-split-without-thread-replies:
+    title: The Slack claim owner delegates a standalone task through an accepted split while retaining reply authority and its source link
+    tasks: [cas-ad2c, cas-7bb4]
+    invariants: [FACTORY-SOURCE-WORK-DELEGATION]
+    journeys: [FACTORY-SPAWN]
+  stale-network-footer-assertion:
+    title: Outage assertions must verify catalog counts independently of the Web version label
+    tasks: [cas-3100]
+    invariants: [HUB-J12-CATALOG-FOOTER]
+    journeys: [HUB-J12]
+  stale-worker-and-delivery-projection:
+    title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
+    tasks: [cas-0a75]
+    invariants: [HUB-J17-STATUS-TRUTH]
+    journeys: [HUB-J17]
+  status-only-resume-sync:
+    title: Cloud task projections cannot undo assigned execution restored after a lease-releasing hold
+    found: '2026-11-09'
+    tasks: [cas-45e7]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  stopped-session-dot:
+    title: A stopped session must show the gray disconnected dot, never the idle or needs-you dot of a live session
+    tasks: [cas-1437]
+    invariants: [HUB-J14-GOAL]
+    journeys: [HUB-J14]
+  supervisor-assignment-staleness:
+    title: Worker filing a task to a registered supervisor bypasses worker checkout staleness while stale worker assignees remain refused
+    tasks: [cas-9197]
+    journeys: [FACTORY-SUPERVISE]
+  supervisor-command-busy-turn:
+    title: A supervisor command waits briefly for an idle reply to settle, while a running turn is still refused, including Claude's middle-dot spinner and Codex's idle-looking mid-stream pauses identified by rollout turn markers
+    tasks: [cas-1a93, cas-3980, cas-c04b7]
+    invariants: [HUB-J27-ALLOWLIST, HUB-J13-GOAL]
+    journeys: [HUB-J27, HUB-J13]
+  supervisor-command-cancel-outcome-poll:
+    title: Refused or timed-out Cancel keeps polling the original command until its actual outcome
+    tasks: [cas-5b23]
+    invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-OBSERVED-OUTCOME]
+    journeys: [HUB-J27]
+  supervisor-command-dismiss-cancellation:
+    title: Dismiss cancels a queued Finish or interactive receipt without typing; closed native choosers release command admission
+    tasks: [cas-f1a2]
+    invariants: [HUB-J27-DISMISS-CANCEL, HUB-J27-ALLOWLIST]
+    journeys: [HUB-J27]
+  supervisor-command-usage-screen:
+    title: Claude Usage is observed from native usage sections with or without Current session, and an unconfirmed Usage can be closed without resending or interrupting a turn
+    tasks: [cas-95a1]
+    invariants: [HUB-J27-ALLOWLIST]
+    journeys: [HUB-J27]
+  supervisor-exit-worker-recovery:
+    title: Supervisor exit and successor diagnostics preserve unfinished worker work and inventory uncertainty
+    tasks: [cas-affc, cas-7772d, cas-a7369]
+    invariants: [HUB-J27-EXIT-WORKER-RECOVERY]
+    journeys: [HUB-J27]
+  supervisor-reconnect-mirror:
+    title: An MCP reconnect after a supervisor /clear keeps pane answers mirrored to Commander
+    tasks: [cas-bfe3]
+    invariants: [HUB-J5-RECONNECT-ANSWER]
+    journeys: [HUB-J5]
+  table-column-alignment:
+    title: A table column aligns once, header included, from its rule or from all its cells, and sizes to its content
+    found: 2026-11-05
+    tasks: [cas-72ff]
+    invariants: [HUB-J4-READABLE-PROSE-TABLES]
+    journeys: [HUB-J4]
+  target-only-supervisor-call-carry-forward:
+    title: Target-only candidate re-dispatch carries the supervisor's answer for the unchanged NOT EXERCISED row
+    found: '2026-11-09'
+    tasks: [cas-1d99]
+    invariants: []
+    journeys: [FACTORY-MERGE]
+  task-start-and-cancelled-delivery-succession:
+    title: Worker start uses origin despite unpublished local target commits; cancelled delivery attribution passes only to the named successor
+    tasks: [cas-aacc]
+    journeys: [FACTORY-SPAWN, FACTORY-CLOSE]
+  task-start-peer-warning-budget:
+    title: Long temporary paths cannot defer task-start peer and remote-assignee warnings into notes
+    tasks: [cas-0fd1e]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-current-task-snapshot:
+    title: An executing worker names the assigned in-progress task already present in the same Team status response, including supported legacy status spellings
+    found: '2026-10-29'
+    tasks: [cas-787c]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-finding-and-rail-weight:
+    title: Team leads with a computed finding, each lane's delivery track implies nothing unreported, and the rail's worker rows keep their controls while lighter than the lanes
+    found: '2026-10-30'
+    tasks: [cas-2d83, cas-64ef]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-latest-parked-work:
+    title: Later parked work remains the current Team task when an older integrated delivery receives a new batch note; in-progress assignments retain precedence
+    found: '2026-10-29'
+    tasks: [cas-cb6f]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-rail-rows-and-receipt-names:
+    title: Beside Team, rail worker rows keep name and controls on one line with no border painted in forced colors, the track connector holds 3:1, and receipt names speak no internal event ids
+    found: '2026-10-30'
+    tasks: [cas-64ef]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-roster-recycle:
+    title: Team lanes retain live workers through heartbeat expiry and recycle; a new assignment replaces parked work within five seconds, and durable metadata matches both worker panes after replacement
+    found: '2026-10-29'
+    tasks: [cas-eec4]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-state-signals:
+    title: Team lanes tell working from waiting by color and mark as well as by word, and an open decision carries the warning treatment
+    found: '2026-10-30'
+    tasks: [cas-b33d]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-whole-team-above-fold:
+    title: Team shows four workers above the fold at 1280x800 and 390x844, and the panel is the release block's one home while Team is open
+    found: '2026-10-30'
+    tasks: [cas-853c]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  team-worker-model:
+    title: Codex worker spawn model reaches CAS registration and Team status through the restricted MCP environment; absent or removed selectors remain unreported
+    found: '2026-10-29'
+    tasks: [cas-fe2a]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  three-state-dots-dismissed-reach:
+    title: Running sessions keep three status dots and ended sessions leave navigation automatically
+    tasks: [cas-51f6, cas-dbcb, cas-bbad5]
+    invariants: [HUB-J14-RUNNING-ONLY, HUB-J14-IDLE-OFFLINE-DOT]
+    journeys: [HUB-J14]
+  train-ci-rerun-and-missing-receipt:
+    title: Failed-job reruns accept successful earlier shards, and a failed run without a receipt wakes and holds until verified green
+    tasks: [cas-f16d]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26, CLI-RELEASE]
+  twelve-hour-clock-times:
+    title: Commander clock times read 12-hour with AM/PM in the viewer's locale and timezone, never a 24-hour clock
+    found: '2026-10-30'
+    tasks: [cas-73dd9, cas-2021]
+    invariants: [HUB-J4-TWELVE-HOUR-TIMES]
+    journeys: [HUB-J4, HUB-J7, HUB-J9, HUB-J14, HUB-J15]
+  unanswered-conversation-history:
+    title: Unanswered conversation history must expose missing answers and permit retry
+    tasks: [cas-3590, cas-bf2f]
+    invariants: [HUB-J23-HISTORY-FAILURE]
+    journeys: [HUB-J23]
+  unattributable-repark:
+    title: A refused re-park preserves the anchor and foreign-work remedy while full released-trunk refs and each safe sync parent retain attribution
+    tasks: [cas-a58cc, cas-d386, cas-3d57, cas-ba4a, cas-77b81]
+    invariants: []
+    journeys: []
+  undeclared-unshipped-release-members:
+    title: Release inventory excludes undeclared unshipped and unstarted candidates while retaining explicit missing members and proven earlier debt through retry
+    tasks: [cas-5968]
+    invariants: []
+    journeys: [CLI-RELEASE, FACTORY-QA-RECEIPT]
+  undelivered-blocked-relay:
+    title: Stale blocked lifecycle relays escalate once before their obsolete payload retires
+    tasks: [cas-f66d]
+    invariants: [FACTORY-UNDELIVERED-RELAY-ACTION]
+    journeys: [FACTORY-SUPERVISE]
+  unregistered-release-parent-review:
+    title: Unregistered release reconciliation queues parent review under the recorded release identity
+    tasks: [cas-d47d]
+    invariants: [FACTORY-RELEASE-CLOSEOUT]
+    journeys: [CLI-RELEASE]
+  verified-delivery-filesystem-refusal:
+    title: Missing verified-delivery candidate manifests hold close with the path, dispatch and gate visible
+    tasks: [cas-97b0]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  verifier-question-path-redaction:
+    title: Host paths do not erase the verifier supervisor question
+    tasks: [cas-ef5e8]
+    invariants: [FACTORY-VERIFIER-QUESTION]
+    journeys: [FACTORY-MERGE]
+  violet-request-id-capability:
+    title: Violet message request IDs require an advertised standalone reconciliation selector and refresh after reconnect
+    tasks: [cas-64af]
+    journeys: []
+  violet-thread-outcomes:
+    title: Violet CLI thread outcomes reflect every confirmed part and readability refusals retain part indices and prior posts in one JSON document
+    tasks: [cas-c962]
+    journeys: []
+  waived-qa-record-release-exit:
+    title: A waived QA-record-only delivery can receive its release verdict without admitting product self-review
+    found: '2026-11-08'
+    tasks: [cas-ace0]
+    invariants: []
+    journeys: [FACTORY-QA-RECEIPT]
+  work-source-offline-disclosure:
+    title: Closed edit disclosures leave no stored tombstone and offline source evidence waits for reconnect before retrying
+    tasks: [cas-edd9]
+    invariants: [HUB-J25-GOAL]
+    journeys: [HUB-J25]
+  worker-assignment-continuation:
+    title: A worker receives one startup assignment with its brief; an auto-started queue successor survives transport and every readiness report names the worker's current task so Team staffing never implies unassigned work
+    found: '2026-11-01'
+    tasks: [cas-d966]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  worker-codemap-index-flags:
+    title: Clean CODEMAP files with legacy skip-worktree metadata allow queued checkout and fast-forward while real edits remain protected
+    tasks: [cas-e0d8]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
+  worker-launch-assignment:
+    title: A worker spawned with a task launches past every harness flag and carries that task; a failed launch leaves no assignee or prompt behind and a same-name replacement gets its own assignment
+    found: '2026-11-01'
+    tasks: [cas-223a]
+    invariants: [HUB-J26-GOAL]
+    journeys: [HUB-J26]
+  worker-timeline-fixture-chronology:
+    title: A newly appended worker timeline fixture event is chronologically newer than its initial page regardless of recording delays
+    tasks: [cas-5ff7]
+    invariants: [HUB-J25-GOAL]
+    journeys: [HUB-J25]
 ignore:
 - hub-web/dist/**
 - hub-web/src/**/*.test.ts

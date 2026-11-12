@@ -171,6 +171,24 @@ A new Claude supervisor confirms its startup only after the native transcript re
 
 - **Epic design review** - five Bug tasks labelled `stakeholder-reported` at P0/P1 within 48 hours pause new starts and spawns on their epic. The supervisor reviews the design against the plan; the operator resumes staffing with a recorded reason. Configurable thresholds, acknowledged reports and per-epic scope keep other work and shipping available.
 
+Linked scratch worktrees without local Cassy configuration inherit the main checkout's canonical project identity through the shared Git common directory. Release preview therefore recognizes the same project scope, while an explicit checkout-local pin retains precedence.
+
+- **Doc fragments** - deliveries never edit the shared journey registry map, `.claude/CODEMAP.md` or `docs/PRODUCT_OVERVIEW.md`. They add `docs/qa/bug-families/<slug>.yaml` and `docs/product-overview.d/<task-id>.md` files; the `journey-catalog` lane lint checks them and `scripts/release.sh` folds them in once per release, so parallel deliveries never conflict on shared docs.
+
+- **Ledger scorers** - `cas ledger report` grades each release on five four-label rubrics, each with a name, a question, and labels that carry a value, a description and a score. The pass line sits between 0.8 and 0.4. The rubrics cover review rounds per delivery (a hit above two rounds), approved spikes and no-code deliverables graded by the supervisor alone, hold notices per release receipt, minutes a green release train with its verdict recorded sat uncut, and minutes workers sat held or idle while an epic they work had ready, unblocked tasks. Every hit names its delivery, receipt, train or worker with evidence ids and, for time rubrics, its window. Time spent on in-progress tasks aimed at a held train counts as repair, not waiting. The scorers read existing review rows, supervisor notices, release receipts, task events and factory-session hold records, and they only measure: nothing gates or refuses on them. Unreadable sources show as not measured, and subjects that cannot be graded are listed with the reason.
+
+A copied store may live outside Git when release preview runs from the original repository. Store relocation preserves the repository's Git identity and the candidate proof, key, source and tree bindings.
+
+- **Gate registry** - factory checks have stable codes across gate, guard, watchdog, notice and CI families. `cas gates list` measures the live registry from source declarations. MCP tool, hook and release/pre-push refusals carry their `[CODE]`; `cas gates report --since <tag>` counts recorded refusals, overrides and false-positive declarations per code. Uncoded refusals remain countable. Workflow C checks are counted and coded; their per-code facts follow separately.
+
+- **Measured policy exceptions** - accepting producers carry explicit override tags through successful MCP, hook or CLI results. One observer per request boundary counts each code once; reads quoting codes and approval-receipt replays add no override. The completeness test generates an AST audit of emission sites, bypass classifications and recording boundaries; builds generate only the declaration registry. Personal-memory data quality, non-factory device controls and execution confirmations are reasoned exclusions.
+
+Friction ledger backfill recovers the live branch rebind identity from structured audit notes. Release reports count each action once even when an older backfill already stored an alias; stored history remains intact, and distinct same-minute actions remain separate.
+
+The factory gate audit detects refusals controlled by caller identity independently of gate declarations. A counted legacy baseline preserves existing behavior while preventing new uncoded authority checks; versioned baseline allowances can only shrink. Error-message rewording does not change a site's identity.
+
+Factory-check cleanup retires duplicated test-shape validation at park and CI prose pins, merges proof-scope and independent-QA code identities. Train dispatch holds remain where candidate-review exemptions would otherwise skip a pending verdict. Publication hooks remain until every post route has an equivalent server-side enforcer. Messaging to recorded native child IDs preserves factory-peer coordination policy. The mechanical task audit records removed rows, retained checks without equivalent enforcement, and the measured registry reduction; generated shared docs refresh at the release cut.
+
 ## Primary Journeys
 
 Factory merges combine disjoint journey registry entries by ID. Shared-file notices let workers proceed with separate overview, codemap and registry entries, and ask them to coordinate when edits touch the same entry.

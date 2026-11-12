@@ -1,3 +1,0 @@
-title: Worker start uses origin despite unpublished local target commits; cancelled delivery attribution passes only to the named successor
-tasks: [cas-aacc]
-journeys: [FACTORY-SPAWN, FACTORY-CLOSE]

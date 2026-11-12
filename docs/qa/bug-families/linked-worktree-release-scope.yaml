@@ -1,3 +1,0 @@
-title: Release preview recognizes the main project from a linked worktree without local Cassy config
-tasks: [cas-17e9]
-journeys: [CLI-RELEASE, FACTORY-CLOSE]

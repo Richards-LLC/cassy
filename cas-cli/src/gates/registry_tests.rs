@@ -135,6 +135,9 @@ fn every_registered_refusal_site_emits_its_code() {
     write_baseline(&seed);
     std::fs::write(&probe, legacy.replace("old diagnostic", "reworded diagnostic").replace("old label", "new label")).unwrap();
     assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    let duplicate = format!("{} if role == Worker && diagnostic_label(\"another label\") {{ anyhow::bail!(\"another diagnostic\"); }} }}", legacy.trim_end_matches('}'));
+    std::fs::write(&probe, duplicate).unwrap();
+    assert!(!gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
     std::fs::write(&probe, legacy.replace("old diagnostic", "first").replace(
         "if role == Worker", "if role == Supervisor")).unwrap();
     assert!(!gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());

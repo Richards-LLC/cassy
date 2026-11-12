@@ -398,6 +398,12 @@ fn baseline(root: &Path, audit: &mut Audit) -> Counts {
     // Unversioned parser fixtures have no history; the test also exercises a
     // real Git history, including an attempted committed growth and shrink.
     if root.join(".git").exists() {
+        let complete = Command::new("git").args(["rev-parse", "--is-shallow-repository"]).current_dir(root).output()
+            .is_ok_and(|result| result.status.success() && result.stdout == b"false\n");
+        if !complete {
+            audit.gaps.push(format!("{BASELINE}: complete Git history is required to validate the ratchet"));
+            return current;
+        }
         let history = Command::new("git").args(["log", "--first-parent", "--diff-filter=AM", "--format=%H", "--", BASELINE]).current_dir(root).output();
         match history {
             Ok(history) if history.status.success() => {

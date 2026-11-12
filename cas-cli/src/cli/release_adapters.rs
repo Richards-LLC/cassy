@@ -809,7 +809,7 @@ mod tests {
         let trigger = ReconcileTrigger::Publish { tag: "v9.99.7".into() };
         let receipt = root.join("publication.json");
         fs::write(&receipt, r#"{"tag_name":"v9.99.7","draft":false,"published_at":"2026-01-01T00:00:00Z"}"#).unwrap();
-        published(&PublishedArgs { receipt, repo: "example/repo".into() }, Some(&root)).unwrap();
+        super::published(&PublishedArgs { receipt, repo: "example/repo".into() }, Some(&root)).unwrap();
         reconcile_once(&root, repo, &scope, trigger.clone(), &reconciler).unwrap();
         let tip = git(repo, &["rev-parse", "epic/custom-cleanup"]).unwrap();
         assert!(crate::worktree::GitOperations::new(repo.to_path_buf()).is_ancestor(&published, &tip));

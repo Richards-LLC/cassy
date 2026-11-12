@@ -12,6 +12,10 @@ seeded_from:
 - scripts/journeys-for-diff.py (static import closure; CSS/main/fixture hunk selector)
 - cas qa journeys --seed (1693 route candidates; replaced by existing stable catalog IDs)
 bug_families:
+  authenticated-recycle-fixtures:
+    title: Hermetic reset and dead-worker recovery fixtures satisfy account and execution-host admission while preserving refusal and work-retention checks
+    tasks: [cas-613e]
+    journeys: [FACTORY-SPAWN, FACTORY-SUPERVISE]
   same-task-uncommitted-review-resume:
     title: Blocked and reopened tasks retain their original same-worker source boundary before the first commit
     tasks: [cas-d4c7]

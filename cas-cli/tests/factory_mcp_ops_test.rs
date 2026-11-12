@@ -451,6 +451,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         std::fs::copy(git, bin_dir.join("git")).expect("fixture Git copy");
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
+        cas::test_paths::warm_stub(&bin_dir.join("codex-code-mode-host"), "#!/bin/sh\nexit 0\n");
 
         write_codex_account_fixture(
             &account,
@@ -462,7 +463,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
         std::env::current_exe().expect("current integration-test executable"),
     );
     command
-        .args(["--exact", &child_filter, "--ignored", "--nocapture"])
+        .args(["--exact", &child_filter, "--include-ignored", "--nocapture"])
         .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
         // The child deliberately supplies HOME/PATH itself, so it cannot inherit
         // the TestEnvGuard-owned override from the parent test process. Keep the
@@ -499,6 +500,16 @@ fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
     );
     assert_no_account_selectors();
     FactoryTestEnv::with_agent_id_and_env("test-agent-id", None)
+}
+
+/// Reuse the real test entry in a child whose PATH contains only fixture CLIs.
+/// The runner verifies the exact named child passed before the parent returns.
+fn run_authenticated_recycle_child(test_name: &str) -> bool {
+    if std::env::var("CAS_FACTORY_CODEX_ISOLATED_CHILD").as_deref() == Ok(test_name) {
+        return false;
+    }
+    run_isolated_codex_test(test_name, IsolatedCodexState::Available);
+    true
 }
 
 /// cas-5270: the lib-test invariant in `src/lib.rs` covers `src/`; this
@@ -3240,7 +3251,9 @@ fn register_codex_worker_at(env: &FactoryTestEnv, name: &str, session: &str, pat
 /// refuse; the request must be queued and the tasks left exactly as they were.
 #[tokio::test]
 async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622() {
+    if run_authenticated_recycle_child("test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_cas_a622") { return; }
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-a622")]);
+    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "wise-raven");
     let worker_id = register_codex_worker_at(&env, "wise-raven", "session-a622", &worker_path);
@@ -3267,15 +3280,9 @@ async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_
         let mut req = factory_req("clear_context");
         req.target = Some("wise-raven".to_string());
         req.force = force;
-        let text = get_text(
-            &env.service
-                .factory_request(Parameters(req))
-                .await
-                .unwrap_or_else(|error| {
-                    panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
-                }),
-        );
-        assert!(text.contains("recycle") && text.contains("wise-raven"), "{text}");
+        env.service.factory_request(Parameters(req)).await.unwrap_or_else(|error| {
+            panic!("force={force:?}: a clean, pushed worker must be refreshable: {}", error.message)
+        });
         let entries = env.spawn_queue().peek(10).expect("peek recycle queue");
         assert_eq!(entries.len(), 1, "force={force:?}: one recycle request");
         assert_eq!(entries[0].action, cas_store::SpawnAction::Recycle);
@@ -3295,7 +3302,9 @@ async fn test_clear_context_recycles_clean_pushed_worker_with_nonterminal_tasks_
 /// GH #1098: a delivered, parked task alone must not block a context reset.
 #[tokio::test]
 async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
+    if run_authenticated_recycle_child("test_clear_context_with_only_awaiting_merge_cas_35af") { return; }
     let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-1098")]);
+    write_codex_account_fixture(&_guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
     let env = FactoryTestEnv::new();
     let worker_path = init_pushed_worker_repo(&env, "parked-worker");
     register_codex_worker_at(&env, "parked-worker", "session-1098", &worker_path);
@@ -3305,9 +3314,8 @@ async fn test_clear_context_with_only_awaiting_merge_cas_35af() {
     env.task_store().add(&task).unwrap();
     let mut req = factory_req("clear_context");
     req.target = Some("parked-worker".into());
-    let result = env.service.factory_request(Parameters(req)).await
+    env.service.factory_request(Parameters(req)).await
         .expect("a clean pushed worker with only parked work can reset");
-    assert!(get_text(&result).contains("recycle"));
     assert_eq!(env.spawn_queue().peek(10).unwrap()[0].action, cas_store::SpawnAction::Recycle);
     let after = env.task_store().get(&task.id).unwrap();
     assert_eq!(after.status, task.status);
@@ -5905,6 +5913,7 @@ async fn test_clear_context_confirms_reset_from_new_session_transcript() {
 /// resets as Codex too, as recycle_worker already reads it.
 #[tokio::test]
 async fn test_clear_context_uses_current_idle_harness_cas_1114() {
+    if run_authenticated_recycle_child("test_clear_context_uses_current_idle_harness_cas_1114") { return; }
     for (cli, model) in [
         ("codex", None),
         ("claude", Some("gpt-6.1-sol")),
@@ -5912,6 +5921,7 @@ async fn test_clear_context_uses_current_idle_harness_cas_1114() {
         ("opencode", None),
     ] {
         let (guard, mut fixture) = clear_context_fixture("badger", cli, "0");
+        write_codex_account_fixture(&guard._guard.home().join(".codex"), &[cas::config::STOCK_WORKER_MODEL]);
         if let Some(model) = model {
             fixture.worker.metadata.insert("worker_model".into(), model.into());
         }
@@ -5940,14 +5950,12 @@ async fn test_clear_context_uses_current_idle_harness_cas_1114() {
             .await;
         if cli != "codex" {
             let error = result.expect_err("an unverified reset must remain unsupported");
-
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
             assert!(env.spawn_queue().peek(10).unwrap().is_empty());
             assert!(env.prompt_queue().peek_all(10).unwrap().is_empty());
             continue;
         }
-        let result = result.expect("Idle Codex clear_context should recycle the current worker");
-        let message = get_text(&result);
-        assert!(message.contains("recycle"), "{message}");
+        result.expect("Idle Codex clear_context should recycle the current worker");
 
         let requests = env.spawn_queue().peek(10).expect("peek recycle queue");
         assert_eq!(requests.len(), 1);

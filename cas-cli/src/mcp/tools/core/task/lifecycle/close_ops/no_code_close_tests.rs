@@ -1154,7 +1154,10 @@ async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
     for marker in crate::qa_ledger::DECLARATION_MARKERS {
         assert!(started.contains(marker), "start must announce the QA declaration: {started}");
     }
-    let dir = &crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None).task_dirs(id)[0];
+    let config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    let dir = &crate::config::resolved_factory_artifact_paths(
+        &f.cas_dir(), config.factory().artifacts_root.as_deref(),
+    ).task_dirs(id)[0];
     std::fs::create_dir_all(dir).unwrap();
     let audit = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n\
         | id | item | verdict | tests | evidence | fix | covering | confidence |\n\

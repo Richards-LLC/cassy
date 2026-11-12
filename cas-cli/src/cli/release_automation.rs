@@ -1474,7 +1474,18 @@ pub(super) mod tests {
         let audit_path = root.join("input-audit.json");
         fs::write(&audit_path, serde_json::to_vec(&audit).unwrap()).unwrap();
         args.inputs = Some(audit_path);
+        cas_store::record_observed_delivery_merge(
+            &root, "cas-clock", "factory/clock", train.branch.as_deref().unwrap(),
+            &sha, &sha, &owner.id,
+        ).unwrap();
+        let merged_at = cas_store::observed_delivery_merges_into(
+            &root, train.branch.as_deref().unwrap(),
+        ).unwrap()[0].created_at.to_rfc3339();
         track_on_train(&args, &root, repo, &train).unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &fs::read(receipt_path(&root, &args.version).unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["last_delivery_merged_at"], merged_at);
         track_on_train(&args, &root, repo, &train).unwrap();
         let reminders = open_reminder_store(&root).unwrap();
         let pending = reminders.list_all_pending().unwrap();

@@ -3270,6 +3270,19 @@ mod tests {
     }
 
     #[test]
+    fn release_clock_receipt_row_reaches_report_without_stage_timings() {
+        let mut evidence = ReleaseEvidence::default();
+        let header = "| Last delivery merged | Cut started | PR opened | Main | Published | Installed per machine | Last merge to main | Main to published |";
+        let row = "| 2026-11-12T12:00:00Z | unavailable | 2026-11-12T14:35:00Z | 2026-11-12T14:50:00Z | 2026-11-12T15:00:00Z | soundwave 2026-11-12T15:01:00Z; prowl unavailable | 10200s / 1800s OVER | 600s / 1200s OK |";
+        evidence.record_latency(&parse_key_values(&format!(
+            "RELEASE_CLOCK_HEADER={header}\nRELEASE_CLOCK_ROW={row}\n"
+        )));
+        let report = pipeline_latency_section(&evidence);
+        assert!(report.contains(row));
+        assert!(report.contains(header));
+    }
+
+    #[test]
     fn publication_receipt_interventions_preserve_unknown_and_real_counts() {
         let mut evidence = ReleaseEvidence::default();
         for (value, expected) in [

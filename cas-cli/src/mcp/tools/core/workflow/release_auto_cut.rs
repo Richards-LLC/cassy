@@ -53,12 +53,6 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Whether auto-cut can act on this train at all: it is on, not paused, and
-/// the repository cuts with its own `scripts/release.sh`.
-pub(crate) fn enabled(root: &Path, train: &Task) -> bool {
-    declined_setup(root, train).is_none()
-}
-
 fn declined_setup(root: &Path, train: &Task) -> Option<String> {
     let config = crate::config::Config::load(root).ok()?;
     if config.release.clone().unwrap_or_default().auto_cut_max_per_day == 0 {
@@ -112,7 +106,7 @@ fn cadence(root: &Path, train: &Task, now: DateTime<Utc>) -> Result<Option<Strin
     Ok(None)
 }
 
-/// One poll for a train whose exact tip `tip` is green. `queue_busy` is true
+/// One poll for a published train tip. `queue_busy` is true
 /// while any merge-queue run is in flight.
 pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_busy: bool, now: DateTime<Utc>) -> Result<Outcome> {
     if let Some(reason) = declined_setup(root, train) {
@@ -162,7 +156,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             root,
             &train.id,
             "Cassy auto-cut",
-            Some(format!("auto-cut: green train suite at {tip}, {count} changelog fragments").as_str()),
+            Some(format!("auto-cut: published tip {tip}, {count} changelog fragments").as_str()),
         )?;
     }
     if !draft.is_file() {
@@ -174,7 +168,7 @@ pub(crate) fn attempt(root: &Path, train: &Task, lane: &str, tip: &str, queue_bu
             ReleaseNoticePhase::CutReady,
             &format!("auto-cut-notes:{tip}"),
             &format!(
-                "Release train {lane} ({}) is green at {tip} with {count} changelog fragments and is frozen for its \
+                "Release train {lane} ({}) is published at {tip} with {count} changelog fragments and is frozen for its \
                  auto-cut. Write the release-notes draft at {} by {deadline} (docs/release-notes/RUBRIC.md; \
                  `{{{{VERSION}}}}` becomes the version). Cassy cuts once it exists, and never writes or posts notes.",
                 train.id,

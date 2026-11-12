@@ -1,5 +1,5 @@
 //! Release script adapters. Train selection and notice delivery stay in core.
-use crate::qa_batch::{ReleaseInventory, ReleaseProofRef, ReleaseScope};
+use crate::qa_batch::{ReleaseProofRef, ReleaseScope};
 use std::collections::BTreeMap;
 use crate::store::{open_agent_store, open_reminder_store, open_task_store};
 use anyhow::{Context, Result, ensure};
@@ -203,8 +203,6 @@ pub(super) struct ReleaseContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) release_scope: Option<ReleaseScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    release_inventory: Option<ReleaseInventory>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     close_preview: Option<ReleasePreview>,
 }
 
@@ -318,7 +316,6 @@ fn new_context(repo: &Path, train: &cas_types::Task) -> Result<ReleaseContext> {
         publish_reminder: None,
         release_inputs: None,
         release_scope: None,
-        release_inventory: None,
         close_preview: None,
     })
 }

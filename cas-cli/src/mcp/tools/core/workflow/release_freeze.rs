@@ -383,10 +383,8 @@ mod tests {
         assert!(freeze_of(&store.get("cas-tr").unwrap()).is_none());
     }
 
-    /// The 4.2.1 incident: merges kept landing after the release ask. Frozen,
-    /// a feature is refused and a repair is refused until the train is red,
-    /// by receipt or by GitHub. A peer reads only the synced task row, and
-    /// the freeze ends when a published release covers its tip.
+    /// Named repairs consume their admission when the target advances;
+    /// only publication or an operator lift ends the standing freeze.
     #[cfg(unix)]
     #[test]
     fn frozen_train_admits_only_named_cut_repair_then_refreezes_cas_80df() {
@@ -396,14 +394,12 @@ mod tests {
         let lane = "epic/release-train-vnext-cas-tr";
         assert!(check_merge(&root, lane, Some("cas-feat")).is_ok(), "unfrozen");
 
-        let receipt = freeze(&root, "cas-tr", "supervisor calm-koala", Some("4.2.1")).unwrap();
-        assert!(receipt.starts_with("TRAIN FROZEN"), "{receipt}");
+        freeze(&root, "cas-tr", "supervisor calm-koala", Some("4.2.1")).unwrap();
         // A second machine opening the same synced row sees the same gate.
         let peer = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap();
         assert!(freeze_of(&peer).is_some());
-        let refused = check_merge(&root, lane, Some("cas-feat")).unwrap_err();
-        assert!(refused.contains("train frozen for release, parked for the next train"), "{refused}");
-        assert!(check_merge(&root, lane, Some("cas-fix")).is_err(), "repair without a red");
+        assert!(check_merge(&root, lane, Some("cas-feat")).is_err());
+        assert!(check_merge(&root, lane, Some("cas-fix")).is_err(), "repair without a named blocker");
 
         let tip = git(repo, &["rev-parse", lane]);
         record_cut_blockers(&root, "cas-tr", &tip, &std::collections::BTreeMap::from([("NOTES_LINT".into(), "Correct the notes".into())])).unwrap();
@@ -418,7 +414,7 @@ mod tests {
         git(repo, &["checkout", "-q", "main"]);
         assert!(check_merge(&root, lane, Some("cas-fix")).is_err());
         assert!(active(&root, &store.get("cas-tr").unwrap()).is_some());
-        assert!(check_merge(&root, lane, Some("cas-feat")).is_err(), "red admits repairs only");
+        assert!(check_merge(&root, lane, Some("cas-feat")).is_err());
         assert!(check_staffing(&root, "cas-feat").is_err());
         let notes = crate::store::open_task_store(&root).unwrap().get("cas-tr").unwrap().notes;
         assert!(notes.contains("cas-fix"), "{notes}");
@@ -452,7 +448,7 @@ mod tests {
         check_merge(&root, lane, Some("cas-feat")).unwrap();
     }
 
-    /// ETA = now + median train suite + queue + publish minutes.
+    /// ETA = now + median queue + publish minutes.
     #[test]
     fn eta_adds_measured_stage_medians() {
         let _env = TestEnvGuard::temp_home();

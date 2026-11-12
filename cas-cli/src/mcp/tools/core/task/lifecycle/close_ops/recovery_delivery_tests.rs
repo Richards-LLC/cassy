@@ -447,7 +447,6 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
 }
 
 /// GH #1543/#1548: a supervisor-required release import may itself contain
-/// sibling merges that have not reached this task's target yet.
 #[tokio::test]
 async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commits_cas_ef54() {
     for shipped_by in [Some("origin/main"), Some("v4.18.0"), None] {
@@ -455,6 +454,10 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
         let f = fixture_with_surface(&mut env, "note.txt", false);
         let repo = f.dir.path();
         let root = repo.join(".cas");
+        let agents = open_agent_store(&root).unwrap();
+        let mut worker = agents.get("recovery-session").unwrap();
+        worker.metadata.insert("clone_path".into(), f.worker_path.display().to_string());
+        agents.update(&worker).unwrap();
         git(repo, &["branch", "epic/sync", "main"]);
         std::fs::write(repo.join("release.txt"), "foreign task delivery\n").unwrap();
         git(repo, &["add", "release.txt"]);
@@ -504,6 +507,7 @@ async fn resume_release_sync_accepts_shipped_but_refuses_unshipped_foreign_commi
     }
 }
 
+/// sibling merges that have not reached this task's target yet.
 #[tokio::test]
 async fn request_changes_authorizes_only_pinned_release_import_cas_09f7() {
     let mut env = TestEnvGuard::temp_home();

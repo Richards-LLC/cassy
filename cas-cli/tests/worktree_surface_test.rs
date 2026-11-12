@@ -7352,7 +7352,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         // Reopen mints a new receipt identity; reject the old inputs without
         // depending on which current-cycle integrity check fails first.
         assert!(
-            replay.is_error.unwrap_or(false) && replay_text.contains("[G-28]"),
+            replay.is_error.unwrap_or(false) && cas::gates::codes_in(&replay_text).contains(&"G-28"),
             "reopened receipt replay must fail the receipt integrity gate:\n{replay_text}"
         );
         assert_eq!(
@@ -7372,7 +7372,7 @@ async fn transactional_delivery_cleanup_resume_scenario(system_a: bool) {
         let direct_close_text = direct_close.message.to_string();
         assert_eq!(direct_close.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(
-            direct_close_text.contains("[G-86]"),
+            cas::gates::codes_in(&direct_close_text).contains(&"G-86"),
             "later close must fail the delivery state gate:\n{direct_close_text}"
         );
         assert_eq!(

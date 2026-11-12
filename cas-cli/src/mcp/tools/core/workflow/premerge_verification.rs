@@ -1305,6 +1305,8 @@ impl CasCore {
             )
             .map_err(fail)?;
         }
+        // A peer machine's committed evidence lands where the verifier reads.
+        crate::artifacts::proof::materialize_peer_evidence(&self.cas_root, task);
         crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::ledger_preflight(
             &self.cas_root,
             task,

@@ -16,6 +16,10 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
+    with_fixture_as("supervisor", check);
+}
+
+fn with_fixture_as(role: &str, check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let temp = tempfile::TempDir::new().unwrap();
     let home = tempfile::TempDir::new().unwrap();
     let mut env = crate::test_support::TestEnvGuard::with_vars(&[
@@ -25,7 +29,7 @@ fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
             home.path().join(".config").to_str().unwrap(),
         ),
         ("CAS_PUSH_EPIC_BRANCH", "0"),
-        ("CAS_AGENT_ROLE", "supervisor"),
+        ("CAS_AGENT_ROLE", role),
     ]);
     let origin = temp.path().join("origin.git");
     let repo = temp.path().join("repo");
@@ -473,7 +477,8 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
 fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
     let mut unpublished = Vec::new();
     for entry in ["update", "create", "start"] {
-        with_fixture(|_repo, origin, root, base| {
+        let role = if entry == "start" { "worker" } else { "supervisor" };
+        with_fixture_as(role, |_repo, origin, root, base| {
             let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
             let agents = core.open_agent_store().unwrap();
             agents.init().unwrap();

@@ -58,7 +58,6 @@ struct Function {
     flags: BTreeSet<String>,
     conditional: BTreeSet<String>,
     policy: bool,
-    authority: bool,
     authority_value: Option<refusals::AuthorityValue>,
     annotations: BTreeMap<String, String>,
     script_sink: bool,
@@ -151,11 +150,6 @@ impl<'ast> Visit<'ast> for Body<'_> {
         if let syn::Expr::Path(path) = expr.func.as_ref() {
             if let Some(segment) = path.path.segments.last() {
                 let name = segment.ident.to_string();
-                if matches!(name.as_str(), "var" | "var_os")
-                    && expr.args.first().and_then(literal).is_some_and(|key| refusals::identity_env(&key))
-                { self.function.authority = true; }
-                self.function.authority |= name == "from_process"
-                    && path.path.segments.iter().any(|segment| segment.ident == "InvocationContext");
                 self.function.calls.insert(name.clone());
                 if matches!(name.as_str(), "tag" | "refusal_tag" | "override_tag") {
                     if let Some(code) = expr.args.first().and_then(literal) {
@@ -175,7 +169,6 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_expr_call(self, expr);
     }
     fn visit_expr_method_call(&mut self, expr: &'ast syn::ExprMethodCall) {
-        self.function.authority |= refusals::authority_symbol(&expr.method.to_string());
         self.function.methods.insert(expr.method.to_string());
         // A method spelling alone is not a resolved free-function call:
         // `.get()`/`.find()` must not import unrelated gate handlers.
@@ -217,17 +210,10 @@ impl<'ast> Visit<'ast> for Body<'_> {
         visit::visit_pat_ident(self, pat);
     }
     fn visit_expr_path(&mut self, path: &'ast syn::ExprPath) {
-        self.function.authority |= path.path.segments.iter().any(|s| refusals::authority_symbol(&s.ident.to_string()));
         if path.path.segments.last().is_some_and(|segment| segment.ident == "FalsePositive") {
             self.function.calls.insert("record_false_positive".into());
         }
         visit::visit_expr_path(self, path);
-    }
-    fn visit_member(&mut self, member: &'ast syn::Member) {
-        if let syn::Member::Named(name) = member {
-            self.function.authority |= refusals::authority_symbol(&name.to_string());
-        }
-        visit::visit_member(self, member);
     }
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         fn tokens(body: &mut Body<'_>, stream: proc_macro2::TokenStream, guard: bool) {
@@ -246,13 +232,6 @@ impl<'ast> Visit<'ast> for Body<'_> {
                     }
                     proc_macro2::TokenTree::Ident(ident) => {
                         let name = ident.to_string();
-                        body.function.authority |= refusals::authority_symbol(&name);
-                        if matches!(name.as_str(), "var" | "var_os")
-                            && let Some(proc_macro2::TokenTree::Group(args)) = tokens.get(index + 1)
-                            && let Some(proc_macro2::TokenTree::Literal(lit)) = args.stream().into_iter().next()
-                            && let Ok(key) = syn::parse_str::<syn::LitStr>(&lit.to_string())
-                            && refusals::identity_env(&key.value())
-                        { body.function.authority = true; }
                         if guard && candidate(&name) {
                             body.function.flags.insert(name.clone());
                             body.function.conditional.insert(name.clone());

@@ -110,6 +110,7 @@ mod tests {
     #[test]
     fn gc_cli_reclaims_expired_artifacts_host_wide_cas_d740() {
         let mut env = crate::test_support::TestEnvGuard::temp_home();
+        crate::store::known_repos::ensure_host_schema().unwrap();
         let now = chrono::Utc::now();
         let mut roots = Vec::new();
         let mut expired = Vec::new();

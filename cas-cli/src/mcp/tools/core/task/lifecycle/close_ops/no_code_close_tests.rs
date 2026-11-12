@@ -1131,6 +1131,44 @@ async fn no_code_spike_closes_when_its_target_exists_only_on_origin_gh1167() {
     assert_closed_without_lane(&f, id, &response);
 }
 
+/// GH #1766, #1817: a no-code spike's audit report is named LEDGER.md. Start
+/// announces how close classifies that file; close accepts the report unless
+/// it declares the canonical QA matrix, which stays validated.
+#[tokio::test]
+async fn no_code_audit_ledger_closes_unless_it_declares_the_qa_matrix_gh1766() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let id = "cas-c766";
+    let mut spike = no_code_spike(id, "main");
+    spike.status = TaskStatus::Open;
+    f.put(&spike);
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+    for marker in crate::qa_ledger::DECLARATION_MARKERS {
+        assert!(started.contains(marker), "start must announce the QA declaration: {started}");
+    }
+    let dir = &crate::config::resolved_factory_artifact_paths(&f.cas_dir(), None).task_dirs(id)[0];
+    std::fs::create_dir_all(dir).unwrap();
+    let audit = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n\
+        | id | item | verdict | tests | evidence | fix | covering | confidence |\n\
+        |---|---|---|---|---|---|---|---|\n| L2 | a.rs:1 | dup | t | e | f | none | high |\n";
+    let request = serde_json::json!({
+        "action": "close", "id": id, "reason": "Audit report published",
+        "execution_note": "no-code", "external_ref": "art-c766",
+    });
+    std::fs::write(dir.join("LEDGER.md"), format!("schema: 2\n{audit}")).unwrap();
+    let refused = call(&f.worker, request.clone()).await;
+    assert!(refused.contains("QA LEDGER REJECTED"), "{refused}");
+    assert_ne!(f.task(id).status, TaskStatus::Closed);
+    std::fs::write(dir.join("LEDGER.md"), audit).unwrap();
+    let response = call(&f.worker, request).await;
+    assert_closed_without_lane(&f, id, &response);
+}
+
 /// GH #1167 (2): the supervisor's evidence_only close of an artifact-only
 /// no-code spike succeeds even when the worker lane holds an unnamed commit.
 /// The supervisor reviewed the artifact; the lane is not measured.

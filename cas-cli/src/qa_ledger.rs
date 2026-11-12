@@ -587,11 +587,14 @@ pub fn declares_canonical(body: &str) -> bool {
             return false;
         }
         !fence
-            && (line.starts_with("# QA evidence:")
-                || line.starts_with("schema:")
+            && (DECLARATION_MARKERS.iter().any(|marker| line.starts_with(marker))
                 || (line.contains('|') && cells(line) == expected))
     })
 }
+
+/// Line prefixes that declare a canonical QA ledger. Task start announces
+/// these same markers, so start and close classify a `LEDGER.md` alike.
+pub const DECLARATION_MARKERS: [&str; 2] = ["# QA evidence:", "schema:"];
 
 pub fn minimum_rows(task: &cas_types::Task) -> usize {
     if task.execution_note.as_deref() != Some("no-code") && !task.demo_statement.trim().is_empty() {

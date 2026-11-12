@@ -200,7 +200,7 @@ fn published_train_closes_members_independently_cas_734b() {
             std::fs::write(copy, bytes).unwrap();
         }
     }
-    conn.backup(rusqlite::DatabaseName::Main, copied_root.join("cas.db"), None).unwrap();
+    conn.backup(rusqlite::MAIN_DB, copied_root.join("cas.db"), None).unwrap();
     assert!(crate::worktree::GitOperations::new(replay.path().to_path_buf()).canonical_repo_key().is_err());
     env.set("CAS_ROOT", &copied_root);
     env.remove("CAS_CLONE_PATH");

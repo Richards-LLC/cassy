@@ -102,7 +102,7 @@
 
 - `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_upkeep.rs` — journey validation, diff impact and lane upkeep.
 - `cas-cli/src/qa_ledger.rs`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/qa_pass/` — ledger parsing, proof manifests and independent QA dispatch.
-- `cas-cli/src/qa_batch.rs`, `cas-cli/src/qa_batch/`, `cas-cli/src/qa_post_release.rs`, `cas-cli/src/release_reconcile.rs` — release membership, external-store replay identity, batch verdicts and durable reconciliation.
+- `cas-cli/src/qa_batch/`, `cas-cli/src/qa_post_release.rs`, `cas-cli/src/release_reconcile.rs` — release membership, batch verdicts and durable reconciliation.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs` — fast-lane eligibility and post-merge proof.
 - `cas-cli/src/quality_ledger/`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` — quality events, delivery metrics and measured estimates.
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` — Commander service, bridge, pairing and durable input.

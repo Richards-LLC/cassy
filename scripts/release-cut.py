@@ -27,6 +27,13 @@ def cut(repo, branch, tip, args):
             checkout = Path(temporary) / 'tree'
             subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '--quiet', '--detach', str(checkout), tip], check=True)
             try:
+                if '--notes' in args:
+                    index = args.index('--notes') + 1
+                    notes = Path(args[index])
+                    if notes.is_absolute() and notes.is_relative_to(repo.resolve()):
+                        relative = notes.relative_to(repo.resolve())
+                        if not notes.exists() or subprocess.run(['git', '-C', str(checkout), 'cat-file', '-e', f'{tip}:{relative}'], stderr=subprocess.DEVNULL).returncode == 0:
+                            args[index] = str(checkout / relative)
                 (directory / 'owner.json').write_text(json.dumps({'pid': os.getpid(), 'branch': branch, 'tip': tip, 'checkout': str(checkout)}))
                 env = dict(os.environ, CAS_RELEASE_CUT_OWNED='1', CAS_RELEASE_CUT_BRANCH=branch,
                            CAS_RELEASE_TRAIN_TIP=tip, CAS_ROOT=os.environ.get('CAS_ROOT', str(common.parent / '.cas')))

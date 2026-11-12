@@ -40,7 +40,9 @@ while (($#)); do
         --hotfix) kind="patch"; shift ;;
         --version) explicit_version="${2:?--version needs x.y.z}"; shift 2 ;;
         --base) base="${2:?--base needs a branch}"; shift 2 ;;
-        --notes) notes_file="${2:?--notes needs a file}"; shift 2 ;;
+        --notes) notes_file="${2:?--notes needs a file}"
+            [[ "$notes_file" == /* ]] || notes_file="$PWD/$notes_file"
+            original_args[${#original_args[@]} - $# + 1]="$notes_file"; shift 2 ;;
         --next-version) print_only=true; shift ;;
         --no-watch) shift ;;
         --dry-run) dry_run=true; shift ;;
@@ -52,12 +54,6 @@ done
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 # Progress goes to stderr: prepare's stdout is the version it prepared.
 say() { printf 'release: %s\n' "$*" >&2; }
-
-if [[ -n "$notes_file" && "$notes_file" != /* ]]; then
-    # Keep the caller's directory, but resolve a missing path after finding the
-    # release commit: the first run may have renamed this very draft.
-    notes_file="$PWD/$notes_file"
-fi
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"

@@ -466,40 +466,58 @@ fn cas_bfa1_round4_focus_no_parent_preserves_old_tag_tip() {
     }
 }
 
-/// GH #1871: spawn_workers without task_id, then task update assignee on a
-/// child, is the first time the epic reaches a worker; origin must have it.
+/// GH #1871: spawn_workers without task_id, then the first child assignment
+/// (update assignee, or create with an assignee), is the first time the epic
+/// reaches a worker; origin must have the lane afterwards.
 #[test]
 fn cas_2c0b_assigning_first_child_publishes_unpublished_epic() {
-    with_fixture(|_repo, origin, root, base| {
-        let tasks = crate::store::open_task_store(root).unwrap();
-        tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
-        tasks
-            .add_dependency(&cas_types::Dependency::new(
-                "cas-child".into(),
-                "cas-unpublished".into(),
-                cas_types::DependencyType::ParentChild,
-            ))
-            .unwrap();
-        let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
-        let agents = core.open_agent_store().unwrap();
-        agents.init().unwrap();
-        let supervisor = cas_types::Agent::new_with_role(
-            "sup".into(), "sup".into(), cas_types::AgentRole::Supervisor,
-        );
-        agents.register(&supervisor).unwrap();
-        core.set_agent_id_for_testing(supervisor.id);
-        let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
-            serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
-        )
-        .unwrap();
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
-            .unwrap();
-        assert_eq!(
-            git(origin, &["rev-parse", "refs/heads/epic/unpublished"]),
-            base,
-            "the first assignment must publish the epic lane at its base"
-        );
-    });
+    for entry in ["update", "create"] {
+        with_fixture(|_repo, origin, root, base| {
+            let core = crate::mcp::CasCore::with_daemon(root.to_path_buf(), None, None);
+            let agents = core.open_agent_store().unwrap();
+            agents.init().unwrap();
+            let supervisor = cas_types::Agent::new_with_role(
+                "sup".into(), "sup".into(), cas_types::AgentRole::Supervisor,
+            );
+            agents.register(&supervisor).unwrap();
+            core.set_agent_id_for_testing(supervisor.id);
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            if entry == "update" {
+                let tasks = crate::store::open_task_store(root).unwrap();
+                tasks.add(&cas_types::Task::new("cas-child".into(), "Child".into())).unwrap();
+                tasks
+                    .add_dependency(&cas_types::Dependency::new(
+                        "cas-child".into(),
+                        "cas-unpublished".into(),
+                        cas_types::DependencyType::ParentChild,
+                    ))
+                    .unwrap();
+                let request: crate::mcp::tools::TaskUpdateRequest = serde_json::from_value(
+                    serde_json::json!({"id": "cas-child", "assignee": "spawned-worker"}),
+                )
+                .unwrap();
+                runtime
+                    .block_on(core.cas_task_update(rmcp::handler::server::wrapper::Parameters(request)))
+                    .unwrap();
+            } else {
+                let request: crate::mcp::tools::TaskCreateRequest = serde_json::from_value(
+                    serde_json::json!({
+                        "title": "Child created for a spawned worker",
+                        "epic": "cas-unpublished",
+                        "assignee": "spawned-worker",
+                        "risk": "none",
+                    }),
+                )
+                .unwrap();
+                runtime
+                    .block_on(core.cas_task_create(rmcp::handler::server::wrapper::Parameters(request)))
+                    .unwrap();
+            }
+            assert_eq!(
+                git(origin, &["rev-parse", "refs/heads/epic/unpublished"]),
+                base,
+                "the first assignment ({entry}) must publish the epic lane at its base"
+            );
+        });
+    }
 }

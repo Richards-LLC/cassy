@@ -457,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f() {
         use crate::mcp::tools::core::task::release_train::active_trains;
-        use crate::mcp::tools::core::workflow::release_auto_cut::{self, Outcome};
+        use crate::mcp::tools::core::workflow::release_auto_cut;
         use crate::mcp::tools::service::CasService;
         use rmcp::handler::server::wrapper::Parameters;
 
@@ -474,18 +474,26 @@ mod tests {
         let store = core.open_task_store().unwrap();
         let mut epic = store.get("cas-tr").unwrap();
         epic.labels.clear();
+        git(repo, &["branch", "-m", epic.effective_epic_branch().unwrap(), "epic/operator-release"]);
+        epic.branch = Some("epic/operator-release".into());
         let lane = epic.effective_epic_branch().unwrap().to_string();
         epic.deliverables.work_target.as_mut().unwrap().target_branch = lane.clone();
         epic.epic_verification_owner = Some(supervisor.id);
         store.update(&epic).unwrap();
+        let remote = TempDir::new().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+        git(repo, &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        std::fs::create_dir_all(repo.join("scripts")).unwrap();
+        std::fs::write(repo.join("scripts/release.sh"), "release fixture\n").unwrap();
+        git(repo, &["add", "scripts/release.sh"]);
+        git(repo, &["commit", "-qm", "release script on integration"]);
         git(repo, &["checkout", "-q", &lane]);
-        for path in ["scripts/release.sh", "changelog.d/cas-e49f.md"] {
-            let file = repo.join(path);
-            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(file, "release fixture\n").unwrap();
-            git(repo, &["add", path]);
-        }
+        git(repo, &["merge", "-q", "--no-edit", "main"]);
+        std::fs::create_dir_all(repo.join("changelog.d")).unwrap();
+        std::fs::write(repo.join("changelog.d/cas-e49f.md"), "release fixture\n").unwrap();
+        git(repo, &["add", "changelog.d/cas-e49f.md"]);
         git(repo, &["commit", "-qm", "release inputs"]);
+        git(repo, &["push", "-q", "origin", &lane]);
         git(repo, &["checkout", "-q", "main"]);
         let tip = git(repo, &["rev-parse", &lane]);
         let before = serde_json::to_value(store.get("cas-tr").unwrap()).unwrap();
@@ -503,8 +511,10 @@ mod tests {
         assert_eq!(promoted[0].id, epic.id);
         assert_eq!(promoted[0].deliverables.work_target.as_ref().unwrap().repo_selector, "project:freeze-test");
         assert_eq!(freeze_of(&promoted[0]).unwrap().tip, tip);
-        assert!(matches!(release_auto_cut::attempt(&root, &promoted[0], &lane, &tip, false, Utc::now()).unwrap(), Outcome::Handled));
-        assert!(!release_auto_cut::notes_draft(&root, &epic.id).unwrap().exists());
+        crate::train_guardrails::notify_train_cuts(&root, &std::collections::BTreeSet::new(), Utc::now()).unwrap();
+        let wakes = crate::store::open_supervisor_queue_store(&root).unwrap().peek("freeze-supervisor", 10).unwrap();
+        assert_eq!(wakes.len(), 1);
+        assert!(wakes[0].payload.contains(&release_auto_cut::notes_draft(&root, &epic.id).unwrap().display().to_string()));
         // No second promotion or freeze record on replay.
         let before = serde_json::to_value(store.get(&epic.id).unwrap()).unwrap();
         let replay = serde_json::json!({"action":"train_freeze", "id":"cas-tr", "reason":"release-freeze: v4.21.0 cut", "decision":"promote"});

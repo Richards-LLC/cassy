@@ -1419,7 +1419,7 @@ invariants:
     check: Run test-release-latency-receipt.sh, test-install-on-publish.sh and the release_clock_receipt_row_reaches_report_without_stage_timings and release_tracking_and_installed_notice_are_restart_safe named Rust tests. Record three consecutive real release receipts inside budget before closing the release-flow epic.
   CLI-RELEASE-EPIC-PROMOTION:
     statement: A supervisor can retry an open epic's freeze with the returned promotion payload; train label, integration target and freeze persist together, making the epic visible to auto-cut. Divergent open train lanes refuse before mutation with their epic ids.
-    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and exercise auto-cut eligibility, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
+    check: Run mcp_promotes_release_epic_and_exposes_it_to_auto_cut_cas_e49f and mcp_promotion_refuses_divergent_train_without_mutation_cas_e49f through factory MCP; replay the returned command, read active_trains and exercise the auto-cut poll on a published lane named epic/operator-release, then attempt promotion beside a genuinely divergent Git lane and require unchanged task rows.
     bug: {task: cas-e49f}
   CLI-RELEASE-TRAIN-SUCCESSION:
     statement: Publication imports the published tag into each open train in one merge or names one repair; a successor waits for publication and starts at its tag. Retargeting unfinished work also replaces its parent atomically.

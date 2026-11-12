@@ -536,7 +536,8 @@ mod tests {
     fn store() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(dir.path()).unwrap();
-        cas_store::SqliteSupervisorQueueStore::open(&root).unwrap();
+        use cas_store::SupervisorQueueStore;
+        cas_store::SqliteSupervisorQueueStore::open(&root).unwrap().init().unwrap();
         crate::store::open_agent_store(&root).unwrap();
         let db = rusqlite::Connection::open(root.join("cas.db")).unwrap();
         for statement in cas_store::QA_BATCH_SCHEMA_STATEMENTS { db.execute_batch(statement).unwrap(); }

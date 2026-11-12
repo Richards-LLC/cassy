@@ -1,0 +1,56 @@
+{
+  "currency": "USD",
+  "chart": "accounting-chart.json",
+  "revision": 1,
+  "entries": [
+    {
+      "id": "invoice-17",
+      "date": "2026-10-31",
+      "type": "Invoice",
+      "document": "INV-17",
+      "name": "Example Customer",
+      "posted": false,
+      "hypothetical": true,
+      "memo": "Illustrative hosting invoice.",
+      "lines": [
+        {
+          "id": "ar",
+          "account": "Accounts Receivable",
+          "debit": "2250.00"
+        },
+        {
+          "id": "income",
+          "account": "Hosting Income",
+          "credit": "2250.00"
+        }
+      ]
+    },
+    {
+      "id": "payment-17",
+      "date": "2026-11-01",
+      "type": "Payment",
+      "document": "PAY-17",
+      "name": "Example Customer",
+      "posted": false,
+      "hypothetical": true,
+      "memo": "Illustrative receipt after a processing fee.",
+      "lines": [
+        {
+          "id": "bank",
+          "account": "Bank",
+          "debit": "2190.00"
+        },
+        {
+          "id": "fee",
+          "account": "Processing Fees",
+          "debit": "60.00"
+        },
+        {
+          "id": "ar",
+          "account": "Accounts Receivable",
+          "credit": "2250.00"
+        }
+      ]
+    }
+  ]
+}

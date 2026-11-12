@@ -547,6 +547,38 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
+        path: "skills/cas-html-reports/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/accounting-entries.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/scripts/accounting-journals.py",
+        content: include_str!("builtins/skills/cas-html-reports/scripts/accounting-journals.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-chart.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-chart.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.why.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.why.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-html-reports/references/supervisor-brief.md",
         content: include_str!("builtins/skills/cas-html-reports/references/supervisor-brief.md"),
     },
@@ -1301,6 +1333,38 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
     },
     BuiltinFile {
+        path: "skills/cas-html-reports/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/accounting-entries.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/scripts/accounting-journals.py",
+        content: include_str!("builtins/skills/cas-html-reports/scripts/accounting-journals.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-chart.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-chart.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.why.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.why.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-html-reports/references/supervisor-brief.md",
         content: include_str!("builtins/skills/cas-html-reports/references/supervisor-brief.md"),
     },
@@ -2045,6 +2109,38 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-html-reports/references/review-checklist.md",
         content: include_str!("builtins/skills/cas-html-reports/references/review-checklist.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/accounting-entries.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/accounting-entries.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/scripts/accounting-journals.py",
+        content: include_str!("builtins/skills/cas-html-reports/scripts/accounting-journals.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-chart.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-chart.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.json",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.json"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.html",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.why.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.why.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md",
+        content: include_str!("builtins/skills/cas-html-reports/references/examples/accounting-journals.visual-qa.md"),
     },
     BuiltinFile {
         path: "skills/cas-html-reports/references/supervisor-brief.md",

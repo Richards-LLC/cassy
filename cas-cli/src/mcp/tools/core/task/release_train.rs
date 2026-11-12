@@ -522,64 +522,56 @@ mod tests {
         }
     }
 
-    /// cas-2f4d: a frozen train keeps its own work, but a new task, even one
-    /// aimed at the frozen train, joins the next train.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn new_work_joins_the_next_train_while_one_is_frozen() {
+    /// B10: the successor waits for publication and starts at that tag even
+    /// when main already contains a later, unpublished commit.
+    #[tokio::test]
+    async fn successor_waits_for_publication_and_uses_tag_cas_4845() {
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().unwrap();
         let temp = repo();
         let root = temp.path().to_path_buf();
+        let bare = TempDir::new().unwrap();
+        git(bare.path(), &["init", "-q", "--bare", "-b", "main"]);
+        git(&root, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/example/train-test.git"]);
+        git(&root, &["push", "-q", "origin", "main"]);
         std::fs::create_dir_all(root.join(".cas")).unwrap();
         std::fs::write(root.join(".cas/config.toml"), "[factory]\nrelease_train = true\n").unwrap();
         let core = CasCore::with_daemon(root.clone(), None, None);
         core.cas_task_create(Parameters(request("Repair alpha parser"))).await.unwrap();
         let store = core.open_task_store().unwrap();
-        let frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
+        let mut frozen = store.list(None).unwrap().into_iter().find(is_release_train).unwrap();
         let lane = frozen.effective_epic_branch().unwrap().to_string();
-        // The train carries work main lacks; a tip already on main is landed.
-        git(&root, &["checkout", "-qB", &lane]);
-        std::fs::write(root.join("work.txt"), "work\n").unwrap();
-        git(&root, &["add", "work.txt"]);
-        git(&root, &["commit", "-qm", "work"]);
+        git(&root, &["checkout", "-q", &lane]);
+        std::fs::write(root.join("gate-fix.txt"), "required checker fix\n").unwrap();
+        git(&root, &["add", "gate-fix.txt"]);
+        git(&root, &["commit", "-qm", "unpublished checker fix"]);
+        git(&root, &["push", "-q", "origin", &lane]);
         git(&root, &["checkout", "-q", "main"]);
         crate::mcp::tools::core::workflow::release_freeze::freeze(&root, &frozen.id, "operator", None).unwrap();
-        let aimed: TaskCreateRequest = serde_json::from_value(serde_json::json!({
-            "title": "Tune beta renderer colours", "task_type": "task", "priority": 2, "risk": "none",
-            "epic": frozen.id,
-        }))
-        .unwrap();
-        core.cas_task_create(Parameters(aimed)).await.map_err(|error| error.message).unwrap();
-        let next: Vec<_> = store.list(None).unwrap().into_iter()
-            .filter(|train| is_release_train(train) && train.id != frozen.id).collect();
-        assert_eq!(next.len(), 1, "{next:?}");
-        assert_eq!(store.get_subtasks(&frozen.id).unwrap().len(), 1);
-        assert_eq!(store.get_subtasks(&next[0].id).unwrap().len(), 1);
-
-        // Commander's assignee-only update is staffing too: a new assignment on
-        // the frozen train's open child is refused and not persisted; a repair
-        // assignment is admitted; unassigning stays allowed.
-        let child = store.get_subtasks(&frozen.id).unwrap().remove(0);
-        let mut stored = store.get(&child.id).unwrap();
-        stored.assignee = Some("old-worker".into());
-        store.update(&stored).unwrap();
-        let mut repair = Task::new("cas-repair".into(), "Repair the red tip".into());
-        repair.labels = vec![crate::mcp::tools::core::workflow::release_freeze::REPAIR_LABEL.into()];
-        store.add(&repair).unwrap();
-        store
-            .add_dependency(&Dependency::new(repair.id.clone(), frozen.id.clone(), DependencyType::ParentChild))
-            .unwrap();
-        let assign = |id: &str, assignee: &str| {
-            let update: crate::mcp::tools::TaskUpdateRequest =
-                serde_json::from_value(serde_json::json!({"id": id, "assignee": assignee})).unwrap();
-            core.cas_task_update_with_target(update, None, None, false, None, None)
-        };
-        assert!(assign(&child.id, "swift-lark-3").await.is_err());
-        assert_eq!(store.get(&child.id).unwrap().assignee.as_deref(), Some("old-worker"));
-        assign("cas-repair", "swift-lark-3").await.unwrap();
-        assert_eq!(store.get("cas-repair").unwrap().assignee.as_deref(), Some("swift-lark-3"));
-        assign(&child.id, "").await.unwrap();
-        assert_eq!(store.get(&child.id).unwrap().assignee, None);
+        let before = store.list(None).unwrap().len();
+        assert!(core.cas_task_create(Parameters(request("Waiting successor"))).await.is_err());
+        assert_eq!(store.list(None).unwrap().len(), before);
+        git(&root, &["merge", "-q", "--no-ff", &lane]);
+        git(&root, &["tag", "v9.99.8"]);
+        let released = Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&root).output().unwrap();
+        let released = String::from_utf8(released.stdout).unwrap().trim().to_string();
+        git(&root, &["push", "-q", "origin", "main", "--tags"]);
+        let mut event = cas_store::NewQualityEvent::new("release|9.99.8", cas_store::QualityPayload::Release {
+            commit_to_main_minutes: None, main_to_published_minutes: None, ejections: 0, rescues: 0,
+        });
+        event.release_version = Some("v9.99.8".into());
+        cas_store::record_quality_event(&root.join(".cas"), &event).unwrap();
+        frozen.status = TaskStatus::Closed;
+        store.update(&frozen).unwrap();
+        std::fs::write(root.join("future.txt"), "unpublished main\n").unwrap();
+        git(&root, &["add", "future.txt"]);
+        git(&root, &["commit", "-qm", "later unpublished main"]);
+        git(&root, &["push", "-q", "origin", "main"]);
+        core.cas_task_create(Parameters(request("Published successor"))).await.unwrap();
+        let next = store.list(None).unwrap().into_iter().find(|t| is_release_train(t) && t.id != frozen.id).unwrap();
+        let sha = Command::new("git").args(["rev-parse", next.effective_epic_branch().unwrap()]).current_dir(&root).output().unwrap();
+        assert_eq!(String::from_utf8(sha.stdout).unwrap().trim(), released);
+        assert!(crate::worktree::GitOperations::new(root).is_ancestor(&released, next.effective_epic_branch().unwrap()));
     }
 
     /// Both machines must use shared branch facts, not an older local train

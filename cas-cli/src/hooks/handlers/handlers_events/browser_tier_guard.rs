@@ -25,6 +25,17 @@ const VALUE_OPTIONS: &[&str] = &[
     "--tsconfig",
 ];
 
+/// Playwright options whose value is optional (`--shuffle[=seed]`). A numeric
+/// next word is the value, never a file filter (GH #1876); anything else is
+/// left for spec selection, so `--shuffle tests/a.spec.ts` still names a spec.
+const OPTIONAL_VALUE_OPTIONS: &[&str] = &["--shuffle"];
+
+fn optional_value_width(arg: &str, next: Option<&String>) -> Option<usize> {
+    OPTIONAL_VALUE_OPTIONS.contains(&arg).then(|| {
+        1 + usize::from(next.is_some_and(|v| !v.is_empty() && v.bytes().all(|c| c.is_ascii_digit())))
+    })
+}
+
 /// `test --list` only collects: no browser, server or test runs (GH #1852).
 /// Every option must be understood, because an option value can itself be
 /// `--list` (`--grep-invert --list` runs the suite) and `--` turns later
@@ -38,6 +49,8 @@ fn collection_only(args: &[String]) -> bool {
             list = true;
         } else if VALUE_OPTIONS.contains(&arg) {
             i += 1;
+        } else if let Some(width) = optional_value_width(arg, args.get(i + 1)) {
+            i += width - 1;
         } else if arg.starts_with('-')
             && !arg
                 .split_once('=')
@@ -50,7 +63,7 @@ fn collection_only(args: &[String]) -> bool {
     list
 }
 
-fn selected(args: &[String]) -> bool {
+fn selected(args: &[String], culprit: &mut Option<String>) -> bool {
     if args
         .iter()
         .any(|arg| arg == "--full" || arg.starts_with("--full="))
@@ -83,6 +96,10 @@ fn selected(args: &[String]) -> bool {
         }
         if VALUE_OPTIONS.contains(&arg.as_str()) {
             i += 2;
+            continue;
+        }
+        if let Some(width) = optional_value_width(arg, args.get(i + 1)) {
+            i += width;
             continue;
         }
         if !arg.starts_with('-') {
@@ -121,6 +138,7 @@ fn selected(args: &[String]) -> bool {
                     )
                 })
             {
+                *culprit = Some(arg.clone());
                 return false;
             }
             let Some(stem) = [
@@ -134,9 +152,11 @@ fn selected(args: &[String]) -> bool {
             .iter()
             .find_map(|suffix| filename.strip_suffix(suffix)) else {
                 // Playwright ORs file filters, so a plain word can widen the run too.
+                *culprit = Some(arg.clone());
                 return false;
             };
             if !stem.chars().any(char::is_alphanumeric) {
+                *culprit = Some(arg.clone());
                 return false;
             }
             targeted = true;
@@ -146,7 +166,7 @@ fn selected(args: &[String]) -> bool {
     targeted
 }
 
-fn unfiltered(command: &str, depth: usize) -> bool {
+fn unfiltered(command: &str, depth: usize, culprit: &mut Option<String>) -> bool {
     if depth > 4 {
         return true;
     }
@@ -171,7 +191,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             .position(|w| matches!(w.rsplit('/').next(), Some("bash" | "sh" | "zsh")))
         {
             if words.get(i + 1).is_some_and(|w| w == "-c" || w == "-lc")
-                && words.get(i + 2).is_some_and(|w| unfiltered(w, depth + 1))
+                && words.get(i + 2).is_some_and(|w| unfiltered(w, depth + 1, culprit))
             {
                 return true;
             }
@@ -219,7 +239,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             } else {
                 args
             };
-            if needs_selection && !selected(args) {
+            if needs_selection && !selected(args, culprit) {
                 return true;
             }
         }
@@ -230,7 +250,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             )
         }) {
             if words[..i].iter().any(|w| w == "run" || w == "run-script")
-                && !selected(&words[i + 1..])
+                && !selected(&words[i + 1..], culprit)
             {
                 return true;
             }
@@ -239,7 +259,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
     false
 }
 
-pub(super) fn denial(input: &HookInput) -> Option<&'static str> {
+pub(super) fn denial(input: &HookInput) -> Option<String> {
     if !crate::harness_policy::is_factory_agent(input)
         || crate::harness_policy::is_supervisor(input)
         || input.tool_name.as_deref() != Some("Bash")
@@ -247,7 +267,14 @@ pub(super) fn denial(input: &HookInput) -> Option<&'static str> {
         return None;
     }
     let command = input.tool_input.as_ref()?.get("command")?.as_str()?;
-    unfiltered(command, 0).then_some(
-        "BROWSER TEST TIER: workers run touched vitest files; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here."
-    )
+    let mut culprit = None;
+    unfiltered(command, 0, &mut culprit).then(|| {
+        let mut reason = String::from(
+        "BROWSER TEST TIER: workers run touched vitest files; journeys run in batch QA. Iterate on a named spec (tests/example.spec.cjs --workers=1) or canonical --grep journey IDs, preserving original failures, or scripts/journey-eval.sh <task-artifact-dir> (default affected). The full suite runs once on the landing tree: in the merge queue, else CI, else one supervisor run per epic. --full is refused here.",
+        );
+        if let Some(token) = culprit {
+            reason.push_str(&format!(" Could not read `{token}` as a named spec file or a known option."));
+        }
+        reason
+    })
 }

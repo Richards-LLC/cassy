@@ -496,7 +496,7 @@ fn handle_pre_tool_use_inner(
     }
 
     if let Some(reason) = super::browser_tier_guard::denial(input) {
-        return Ok(HookOutput::with_pre_tool_permission("deny", reason));
+        return Ok(HookOutput::with_pre_tool_permission("deny", &reason));
     }
 
     if let Some(reason) =

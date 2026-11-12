@@ -38,6 +38,8 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "npx playwright test -- --list",
             "npx playwright test --list --full",
             "npx playwright test --reporter --help",
+            // GH #1876: the seed is consumed by --shuffle, so nothing names a spec.
+            "npx playwright test --shuffle 42",
             "npx playwright test -- --help",
             "npx playwright test --help --full",
             "npx playwright test --help; npx playwright test",
@@ -87,6 +89,9 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             let reason = denial(command, role).expect(command);
             assert!(reason.contains("scripts/journey-eval.sh"), "{reason}");
         }
+        // A refusal names the token it could not read as a spec or option.
+        let reason = denial("npx playwright test qa/a.spec.ts widen", role).unwrap();
+        assert!(reason.contains("`widen`"), "{reason}");
     }
 }
 
@@ -113,6 +118,9 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/x.spec.ts:42 --debug=cli > pw-debug.log 2>&1 &",
         "npx playwright test qa/real-walk.spec.mjs --retries 0 -j 1 --trace on --repeat-each 2 --max-failures 1 --browser chromium --global-timeout 30000 --tsconfig tsconfig.json",
         "npx playwright test qa/real-walk.spec.js --workers=1",
+        // GH #1876: --shuffle takes an optional seed that is not a file filter.
+        "pnpm exec playwright test tests/qa-coverage/am-hubspot-integrations.spec.ts -c tests/qa-coverage/playwright.hubspot-integrations.config.ts --trace on --workers=1 --shuffle 42 --reporter=json",
+        "pnpm exec playwright test --shuffle tests/qa-coverage/a.spec.ts --workers=1",
         "npx playwright test tests/e2e/explorer-login.spec.cjs --workers=1",
         "NODE_PATH=/cached/node_modules npx --prefix /cached playwright test scripts/tests/decision-workbook.spec.js --config scripts/tests/decision-workbook.playwright.config.cjs",
         "npx --prefix=/cached playwright test scripts/tests/decision-workbook.spec.cjs --config=scripts/tests/decision-workbook.playwright.config.cjs",

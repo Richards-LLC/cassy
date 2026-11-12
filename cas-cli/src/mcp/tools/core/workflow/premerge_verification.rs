@@ -1051,7 +1051,7 @@ impl CasCore {
             return match automatic::launch(self, task, dispatch) {
                 Ok(handle) => Ok(handle),
                 Err(error) => {
-                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}"))
+                    automatic::attention(self, dispatch, &format!("Automatic verifier could not start: {error}. {}", automatic::recovery(&self.cas_root, dispatch)))
                         .map_err(fail)?;
                     Ok(None)
                 }
@@ -1269,12 +1269,9 @@ impl CasCore {
                 }
                 if dispatch.state == cas_types::VerificationDispatchState::TimedOut {
                     return Err(fail(format!(
-                        "exact dispatch {} timed out. A registered supervisor must recover it. Re-dispatch task-verifier for task {} on this dispatch, or record its verdict directly: {}verification action=add task_id={} dispatch_id={} status=approved|rejected summary=\"<review and verdict>\". Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
+                        "exact dispatch {} timed out. A registered supervisor must recover it. {} Then the supervisor retries {}factory action=worktree_merge id={} task_id={}. Do not ask the worker to finish an expired review.",
                         dispatch.id,
-                        task.id,
-                        crate::mcp::tools::core::guidance::supervisor_prefix(),
-                        task.id,
-                        dispatch.id,
+                        automatic::direct_verdict(dispatch),
                         crate::mcp::tools::core::guidance::supervisor_prefix(),
                         source,
                         task.id,
@@ -1360,9 +1357,8 @@ impl CasCore {
             )));
         }
         Err(fail(format!(
-            "task {}: merge held on verification dispatch {}. Spawn task-verifier: prompt=\"Verify task {}\"; read `{}verification action=latest task_id={}`",
-            task.id, dispatch.id, task.id,
-            crate::mcp::tools::core::guidance::supervisor_prefix(), task.id
+            "task {}: merge held on verification dispatch {}. {}",
+            task.id, dispatch.id, automatic::direct_verdict(&dispatch)
         )))
     }
 

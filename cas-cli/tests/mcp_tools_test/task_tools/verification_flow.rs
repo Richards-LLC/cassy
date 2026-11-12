@@ -3483,9 +3483,11 @@ async fn test_task_close_blocked_without_verification() {
         text.contains("VERIFICATION REQUIRED"),
         "Close should be blocked without verification: {text}"
     );
+    // GH #1867: a native Task/Agent verifier shares the caller and cannot
+    // record, so the warning never instructs one.
     assert!(
-        text.contains("Task(subagent_type=\"task-verifier\""),
-        "Close warning must include explicit Task() spawn syntax: {text}"
+        !text.contains("Task(subagent_type=\"task-verifier\""),
+        "Close warning must not instruct a native verifier spawn: {text}"
     );
 
     // A durable dispatch-request verification row must be persisted so the

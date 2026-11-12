@@ -262,10 +262,12 @@ only its own unresolved claim, consumes its old authority and retains an audit
 of the failure. Retrying the same merge starts one replacement on the same
 candidate; stale verdicts are refused and each attempt retains separate logs.
 
-Native Codex children share their parent's MCP caller. Shared connections refuse
-child registration before changing caller or session state. Initial dispatches
-and verifier instructions identify the supported alternatives: a daemon-owned
-candidate reviewer or a separately registered reviewer bound to the dispatch.
+Native Task/Agent subagents and Codex children share their parent's MCP
+caller. Shared connections refuse child registration before changing caller or
+session state. The daemon-owned verifier reviews no-code close dispatches as
+well as merge candidates; retrying the close or merge that opened a dispatch
+starts one replacement after a stopped verifier. Dispatches, retry notices and
+verifier instructions name only those routes and a supervisor's direct verdict.
 A supervisor's own review, recorded with supervisor_direct provenance, covers
 mechanical evidence only; designs, spikes and operator-approved deliverables get
 an independent reviewer. A native child returns identity evidence without

@@ -929,6 +929,11 @@ fn root_managed_projections_stay_synced_and_project_skills_stay_ignored() {
         String::from_utf8_lossy(&init.stderr)
     );
 
+    for file in ["SKILL.md", "references/accounting-entries.md"] {
+        let installed = project.join(".claude/skills/cas-client-report").join(file);
+        assert!(installed.is_file(), "cas init did not install {}", installed.display());
+    }
+
     let generated_settings: Value = serde_json::from_str(
         &fs::read_to_string(project.join(".claude/settings.json"))
             .expect("generated settings.json"),
@@ -1149,10 +1154,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
         ] {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");
             println!("installed {directory}/skills/cas-sow-delivery-report/{file}");
-        }
-        for file in ["SKILL.md", "references/accounting-entries.md"] {
-            let client_report = destination.join("skills/cas-client-report").join(file);
-            assert!(client_report.is_file(), "missing installed {}", client_report.display());
         }
         // cas-d1dc: customer release notes install beside them.
         let notes = destination.join("skills/cas-customer-release-notes");

@@ -654,6 +654,8 @@ impl CasCore {
                     data: None,
                 },
             )?;
+        let proof_receipt = proof_dispatch.receipt()
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
         // cas-5c33: the boundary that matters is the delivered commit
         // identity. A branch that moved on to the next task keeps the verdict
         // valid while every delivered commit is still reachable; the moved
@@ -807,7 +809,7 @@ impl CasCore {
                         self.continue_premerge_after_verdict(&proof_dispatch, existing.status).await.unwrap_or_else(|error| format!("; verdict recorded; merge continuation unavailable: {}. Retry this exact verdict or worktree_merge.", error.message))
                     } else if existing.status == VerificationStatus::Approved
                         && existing.verification_type == VerificationType::Task
-                        && proof_dispatch.delivery_transaction_id.is_none()
+                        && proof_receipt.transaction().is_none()
                     {
                         if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                             outcome
@@ -1047,8 +1049,8 @@ impl CasCore {
                     verification.status,
                     VerificationStatus::Approved | VerificationStatus::Skipped
                 );
-                let delivery_transitioned = if let Some(delivery_transaction_id) =
-                    dispatch.delivery_transaction_id.as_deref()
+                let delivery_transitioned = if let Some((_, delivery_transaction_id)) =
+                    dispatch.receipt().map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?.transaction()
                     && cas_store::transition_worker_delivery_verification_with_conn(
                         &tx,
                         delivery_transaction_id,
@@ -1158,7 +1160,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
             && (task.pending_verification || cassy_merged)
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && proof_receipt.transaction().is_none()
         {
             if let Some(outcome) = self.close_no_delivery_after_verdict(&req.task_id, &requested_dispatch_id).await? {
                 outcome
@@ -1198,7 +1200,7 @@ impl CasCore {
         } else if verification.status == VerificationStatus::Rejected
             && verification.verification_type == VerificationType::Task
             && cassy_merged
-            && proof_dispatch.delivery_transaction_id.is_none()
+            && proof_receipt.transaction().is_none()
         {
             self.return_rejected_merged_delivery(&req.task_id, &verification)
         } else {

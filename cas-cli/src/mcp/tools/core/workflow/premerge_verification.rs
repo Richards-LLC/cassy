@@ -1117,6 +1117,7 @@ impl CasCore {
             && let Some(candidate) =
                 candidate_for_dispatch(&self.cas_root, dispatch).map_err(fail)?
         {
+            let receipt = dispatch.receipt().map_err(fail)?;
             let verdict = cas_store::get_verification_for_dispatch(&self.cas_root, &dispatch.id)
                 .map_err(fail)?;
             if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -1144,7 +1145,7 @@ impl CasCore {
                 && candidate.source_branch == source
                 && candidate.target_branch == target
                 && (candidate.validate(&self.cas_root, task).is_ok()
-                    || (dispatch.delivery_transaction_id.is_some()
+                    || (receipt.transaction().is_some()
                         && repository_proof::verify_repository_proof(&candidate.proof).is_ok()))
             {
                 if dispatch.state == cas_types::VerificationDispatchState::Resolved
@@ -1182,7 +1183,7 @@ impl CasCore {
                     task.id, dispatch.id, dispatch.state
                 )));
             }
-            if dispatch.delivery_transaction_id.is_some() {
+            if receipt.transaction().is_some() {
                 return Err(fail(
                     "transactional candidate drifted; request changes and submit a fresh receipt against the current target before another review",
                 ));
@@ -1292,7 +1293,7 @@ impl CasCore {
             fail(format!("could not resolve candidate repository {}: {error}", repo.display()))
         })?;
         if dispatch.state != cas_types::VerificationDispatchState::Resolved
-            || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref()).map_err(fail)?, cas_types::VerificationReceipt::TransactionReceipt(_))
+            || matches!(dispatch.receipt().map_err(fail)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
             || prior.context_digest != digest
             || prior.repository != repository
             || prior.source_branch != source

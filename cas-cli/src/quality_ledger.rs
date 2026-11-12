@@ -218,13 +218,18 @@ fn review_cycle(root: &Path, verification: &cas_types::Verification) -> Option<S
         .and_then(|id| cas_store::get_verification_dispatch(root, id).ok());
     let mut anchors = Vec::new();
     if let Some(dispatch) = &dispatch {
-        if let Some(repo) = &dispatch.repository {
-            anchors.extend(repo.anchor_commits.iter().cloned());
-            anchors.push(repo.head_commit.clone());
-        }
-        if let Some(receipt) = dispatch.receipt_id.as_deref()
-            .and_then(|id| cas_store::get_worker_delivery_by_receipt(root, id).ok().flatten()) {
-            anchors.push(receipt.0.commit_sha);
+        match dispatch.receipt().ok()? {
+            cas_types::VerificationReceipt::None => {
+                if let Some(repo) = &dispatch.repository {
+                    anchors.extend(repo.anchor_commits.iter().cloned());
+                    anchors.push(repo.head_commit.clone());
+                }
+            }
+            _ => {
+                let connection = crate::qa_batch::release_close::read_connection(root).ok()?;
+                return crate::mcp::tools::core::workflow::premerge_verification::cycle::receipt_cycle(&connection,dispatch)
+                    .ok()?.filter(|id| cycles.iter().any(|cycle| cycle.cycle_id==*id));
+            }
         }
     }
     let candidates: Vec<_> = cycles.iter().filter(|cycle|
@@ -978,6 +983,7 @@ mod tests {
 
     #[test]
     fn review_backfill_binds_the_reviewed_cycle_without_recounting_legacy_checks() {
+        for cycle_bound in [false,true] {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -987,11 +993,11 @@ mod tests {
         tasks.add(&task).unwrap();
         let cycle = cas_store::delivery_cycles(&root, &task.id).unwrap()[0].cycle_id.clone();
         let dispatch = cas_store::create_verification_dispatch_bound(&root, &task.id, "worker", "supervisor",
-            &cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
+            &cas_types::VerificationProofBoundary { receipt_id:cycle_bound.then(||cycle.clone()), ..cas_types::VerificationProofBoundary::task_at(cas_types::RepositoryProofBoundary {
                 peer_premerge: None, repository_root: "/fixture".into(), worktree_root: "/fixture".into(),
-                head_commit: "a".repeat(40), state_digest: "state".into(), target_branch: None,
-                anchor_commits: vec!["a".repeat(40)],
-            }), Utc::now() + Duration::minutes(10), false).unwrap();
+                head_commit: if cycle_bound { "c".repeat(40) } else { "a".repeat(40) }, state_digest: "state".into(), target_branch: None,
+                anchor_commits: if cycle_bound { vec![] } else { vec!["a".repeat(40)] },
+            }) }, Utc::now() + Duration::minutes(10), false).unwrap();
         // The task has already advanced; a backfill must retain cycle 1.
         task = tasks.get(&task.id).unwrap();
         task.deliverables.decline_factory_branch_anchor();
@@ -1039,6 +1045,7 @@ mod tests {
         assert_eq!(enriched.supersedes.as_deref(), Some(events[3].id.as_str()));
         verdict.provenance = cas_types::VerificationProvenance::PeerAttested;
         assert!(!verification_recorded(&root, &verdict));
+        }
     }
 
     #[test]

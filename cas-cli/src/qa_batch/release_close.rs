@@ -559,7 +559,7 @@ pub(crate) fn parent_dispatch_covered(root: &Path, id: &str) -> bool {
     CURRENT.try_with(|c| {
         c.root == root && c.parent.as_ref().is_some_and(|p| p.task_id == id && p.review.is_some())
             && cas_store::get_latest_verification_dispatch(root, id).is_ok_and(|dispatch| dispatch.is_none_or(|d| {
-                d.receipt_id.is_none() && d.delivery_transaction_id.is_none()
+                d.receipt().is_ok_and(|receipt| receipt.transaction().is_none())
                     && d.repository.as_ref().is_some_and(|r| r.head_commit == c.inventory.scope.final_release_sha)
             }))
     }).unwrap_or(false)

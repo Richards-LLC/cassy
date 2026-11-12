@@ -43,16 +43,19 @@ pub(crate) fn receipt_cycle(
     conn: &Connection,
     dispatch: &VerificationDispatch,
 ) -> Result<Option<String>, String> {
-    match VerificationReceipt::parse(dispatch.receipt_id.as_deref())? {
+    match dispatch.receipt()? {
         VerificationReceipt::None => Ok(None),
         VerificationReceipt::DeliveryCycle(id) => Ok(Some(id.into())),
-        VerificationReceipt::TransactionReceipt(id) => {
+        VerificationReceipt::TransactionReceipt {
+            receipt_id: id,
+            transaction_id,
+        } => {
             let (task, tip): (String, String) = conn
                 .query_row(
                     "SELECT t.task_id,r.commit_sha FROM worker_delivery_transactions t
                  JOIN worker_completion_receipts r ON r.id=t.receipt_id AND r.task_id=t.task_id
                  WHERE t.id=?1 AND t.receipt_id=?2 AND t.task_id=?3",
-                    params![dispatch.delivery_transaction_id, id, dispatch.task_id],
+                    params![transaction_id, id, dispatch.task_id],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .map_err(|e| format!("TRANSACTION_CYCLE_MAPPING: {e}"))?;
@@ -92,10 +95,8 @@ pub(crate) fn boundary(
 ) -> Result<VerificationProofBoundary, String> {
     let mut boundary = VerificationProofBoundary::task_at(proof);
     if let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref() {
-        boundary.receipt_id = current(&connection(root)?, task, anchor)?;
-        if boundary.receipt_id.is_none() {
-            return Err("DELIVERY_CYCLE_MISSING".into());
-        }
+        boundary.receipt_id =
+            Some(current(&connection(root)?, task, anchor)?.ok_or("DELIVERY_CYCLE_MISSING")?);
     }
     Ok(boundary)
 }
@@ -155,8 +156,8 @@ pub(crate) fn event(
                 .and_then(|r| r.peer_premerge.as_ref())
             {
                 peer.receipt.source_sha.clone()
-            } else if let VerificationReceipt::TransactionReceipt(id) =
-                VerificationReceipt::parse(dispatch.receipt_id.as_deref())?
+            } else if let VerificationReceipt::TransactionReceipt { receipt_id: id, .. } =
+                dispatch.receipt()?
             {
                 conn.query_row(
                     "SELECT commit_sha FROM worker_completion_receipts WHERE id=?1",

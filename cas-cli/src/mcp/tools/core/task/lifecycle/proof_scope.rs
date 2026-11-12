@@ -132,8 +132,7 @@ pub(crate) fn close_authoritative_task_proof_dispatch(
         return Ok(None);
     };
     if dispatch.task_id != task_id
-        || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref())?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        || dispatch.delivery_transaction_id.is_some()
+        || matches!(dispatch.receipt()?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || dispatch.state != VerificationDispatchState::Resolved
     {
         return Ok(None);
@@ -165,11 +164,8 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
             _ => Ok(false),
         };
     };
-    match (
-        dispatch.receipt_id.as_deref(),
-        dispatch.delivery_transaction_id.as_deref(),
-    ) {
-        (None, None) => {
+    match dispatch.receipt()? {
+        cas_types::VerificationReceipt::None | cas_types::VerificationReceipt::DeliveryCycle(_) => {
             if let Some((_, transaction)) = delivery
                 && delivery_state_locks_scope(transaction.state)
             {
@@ -188,7 +184,7 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
                 VerificationDispatchState::Invalidated => Ok(false),
             }
         }
-        (Some(receipt_id), Some(transaction_id)) => {
+        cas_types::VerificationReceipt::TransactionReceipt { receipt_id, transaction_id } => {
             let Some((receipt, transaction)) =
                 cas_store::get_worker_delivery_by_receipt(cas_root, receipt_id)
                     .map_err(|error| format!("exact delivery lookup failed: {error}"))?
@@ -217,10 +213,6 @@ fn exact_proof_locks_scope(cas_root: &Path, task: &Task) -> Result<bool, String>
             }
             Ok(delivery_state_locks_scope(transaction.state))
         }
-        _ => Err(
-            "exact dispatch has a partial delivery proof boundary and is not safe to mutate"
-                .to_string(),
-        ),
     }
 }
 
@@ -719,6 +711,7 @@ mod tests {
 
     #[test]
     fn approved_unchanged_delivery_allows_only_posture_clear() {
+        for cycle_bound in [false,true] {
         let root = TempDir::new().unwrap();
         let repo = TempDir::new().unwrap();
         for args in [
@@ -756,7 +749,7 @@ mod tests {
             &task.id,
             "requester",
             FIXTURE_SUPERVISOR_ID,
-            &VerificationProofBoundary::task_at(proof),
+            &VerificationProofBoundary { receipt_id: cycle_bound.then(|| "dc-posture".to_string()), ..VerificationProofBoundary::task_at(proof) },
             chrono::Utc::now() + chrono::Duration::minutes(10),
             false,
         )
@@ -805,6 +798,7 @@ mod tests {
             check(&update).is_err(),
             "changed repository needs fresh verification"
         );
+        }
     }
 
     #[test]

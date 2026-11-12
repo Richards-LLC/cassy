@@ -1082,10 +1082,10 @@ pub fn resolve_verification_dispatch_for_add_with_conn(
     else {
         return Ok(requested);
     };
-    let same_task_only_proof = requested.receipt_id == current.receipt_id
-        && !matches!(cas_types::VerificationReceipt::parse(requested.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        && requested.delivery_transaction_id.is_none()
-        && current.delivery_transaction_id.is_none()
+    let requested_receipt = requested.receipt().map_err(StoreError::Parse)?;
+    let current_receipt = current.receipt().map_err(StoreError::Parse)?;
+    let same_task_only_proof = requested_receipt == current_receipt
+        && requested_receipt.transaction().is_none()
         && requested.repository.is_some()
         && requested.repository == current.repository;
     if current.id != requested.id
@@ -1197,8 +1197,7 @@ fn create_verification_dispatch_bound_in_transaction(
     {
         if existing.requester_agent_id == requester_agent_id
             && existing.owner_agent_id == owner_agent_id
-            && existing.receipt_id == boundary.receipt_id
-            && existing.delivery_transaction_id == boundary.delivery_transaction_id
+            && existing.receipt().map_err(StoreError::Parse)? == boundary.receipt().map_err(StoreError::Parse)?
             && existing.repository == boundary.repository
         {
             return Ok(existing);
@@ -1657,14 +1656,13 @@ pub fn rebind_approved_verification_dispatch(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
+    let prior_receipt = prior.receipt().map_err(StoreError::Parse)?;
+    let next_receipt = boundary.receipt().map_err(StoreError::Parse)?;
     if latest.as_ref().map(|latest| latest.id.as_str()) != Some(prior.id.as_str())
-        || prior.receipt_id != boundary.receipt_id
+        || prior_receipt != next_receipt
         || prior.state != VerificationDispatchState::Resolved
-        || matches!(cas_types::VerificationReceipt::parse(prior.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        || prior.delivery_transaction_id.is_some()
+        || prior_receipt.transaction().is_some()
         || prior.repository.is_none()
-        || matches!(cas_types::VerificationReceipt::parse(boundary.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        || boundary.delivery_transaction_id.is_some()
         || boundary.repository.is_none()
         || verdict.as_ref().map(|(id, status)| (id.as_str(), status.as_str()))
             != Some((prior_verdict_id, VerificationStatus::Approved.storage_status()))
@@ -1818,8 +1816,7 @@ pub fn invalidate_verification_dispatch_for_repository_drift(
     let latest = get_latest_verification_dispatch_with_conn(&tx, &dispatch.task_id)?
         .ok_or_else(|| StoreError::NotFound("latest verification dispatch".to_string()))?;
     if latest.id != dispatch.id
-        || matches!(cas_types::VerificationReceipt::parse(dispatch.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        || dispatch.delivery_transaction_id.is_some()
+        || matches!(dispatch.receipt().map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || dispatch.repository.is_none()
     {
         return Err(StoreError::Parse(
@@ -2051,8 +2048,7 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
     let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
     let selected = get_verification_dispatch_with_conn(&tx, dispatch_id)?;
     if selected.task_id != task.id
-        || matches!(cas_types::VerificationReceipt::parse(selected.receipt_id.as_deref()).map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt(_))
-        || selected.delivery_transaction_id.is_some()
+        || matches!(selected.receipt().map_err(StoreError::Parse)?, cas_types::VerificationReceipt::TransactionReceipt { .. })
         || selected.state != VerificationDispatchState::Resolved
     {
         return Err(StoreError::Parse(
@@ -2519,8 +2515,8 @@ pub fn request_changes_for_parked_delivery_with_merge_sources(
             Some((transaction_id, receipt_id, WorkerDeliveryState::AwaitingMerge)),
             Some(dispatch),
         ) if dispatch.state == VerificationDispatchState::Resolved
-            && dispatch.delivery_transaction_id.as_deref() == Some(transaction_id.as_str())
-            && dispatch.receipt_id.as_deref() == Some(receipt_id.as_str()) =>
+            && dispatch.receipt().map_err(StoreError::Parse)?.transaction()
+                == Some((receipt_id.as_str(), transaction_id.as_str())) =>
         {
             RequestChangesBoundary::Exact
         }
@@ -5093,6 +5089,7 @@ mod tests {
         };
         let mut boundary = cas_types::VerificationProofBoundary::task_at(repository);
         boundary.receipt_id = receipt_id.map(str::to_string);
+        boundary.delivery_transaction_id = (receipt_id==Some("wcr-receipt")).then(|| "wdt-receipt".to_string());
         let first = create_verification_dispatch_bound(
             dir.path(),
             "cas-superseded-add",

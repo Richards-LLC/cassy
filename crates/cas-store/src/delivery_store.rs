@@ -788,14 +788,12 @@ fn exact_receipt_replay_with_conn(
     let Some(transaction) = transaction else {
         return Ok(None);
     };
-    let dispatch = crate::verification_store::get_latest_verification_dispatch_with_conn(
-        conn,
-        &receipt.task_id,
-    )?
-    .filter(|dispatch| {
-        dispatch.receipt_id.as_deref() == Some(receipt.id.as_str())
-            && dispatch.delivery_transaction_id.as_deref() == Some(transaction.id.as_str())
-    });
+    let dispatch = crate::verification_store::get_latest_verification_dispatch_with_conn(conn,&receipt.task_id)?;
+    let dispatch = match dispatch {
+        Some(dispatch) if dispatch.receipt().map_err(StoreError::Parse)?.transaction()
+            == Some((receipt.id.as_str(),transaction.id.as_str())) => Some(dispatch),
+        _ => None,
+    };
     Ok(dispatch.map(|dispatch| (transaction, dispatch)))
 }
 
@@ -1010,18 +1008,26 @@ pub fn transition_worker_delivery_verification_with_conn(
     if current.state != WorkerDeliveryState::AwaitingVerification {
         return Ok(None);
     }
+    let dispatch_id: Option<String> = conn.query_row("SELECT dispatch_id FROM verifications WHERE id=?1",
+        [verification_id], |r|r.get(0)).optional()?.flatten();
+    let dispatch = dispatch_id.map(|id| crate::get_verification_dispatch_with_conn(conn,&id)).transpose()?;
+    let Some(dispatch) = dispatch.filter(|dispatch| dispatch.task_id==current.task_id) else {
+        return Err(StoreError::Parse("delivery verification has no exact dispatch".into()));
+    };
+    if dispatch.receipt().map_err(StoreError::Parse)?.transaction()!=Some((current.receipt_id.as_str(),current.id.as_str())) {
+        return Err(StoreError::Parse("delivery verification has a different receipt or transaction".into()));
+    }
     let exact_binding: i64 = conn.query_row(
         "SELECT EXISTS(
             SELECT 1
             FROM verifications v
             JOIN verification_dispatches d ON d.id = v.dispatch_id
-            JOIN worker_completion_receipts r ON r.id = d.receipt_id
+            JOIN worker_completion_receipts r ON r.id = ?4
             WHERE v.id = ?1
               AND v.task_id = ?2
               AND v.agent_id = ?3
               AND d.task_id = ?2
-              AND d.receipt_id = ?4
-              AND d.delivery_transaction_id = ?5
+              AND d.id = ?5
               AND d.state = 'resolved'
               AND r.id = ?4
               AND r.task_id = ?2
@@ -1033,7 +1039,7 @@ pub fn transition_worker_delivery_verification_with_conn(
             current.task_id,
             actor_agent_id,
             current.receipt_id,
-            current.id,
+            dispatch.id,
             approved as i64,
         ],
         |row| row.get(0),
@@ -1209,6 +1215,13 @@ mod tests {
         )
         .unwrap();
         drop(conn);
+
+        let connection = Connection::open(root.path().join("cas.db")).unwrap();
+        connection.execute("UPDATE verification_dispatches SET receipt_id='dc-unrelated',delivery_transaction_id=NULL WHERE id=?1",[&dispatch.id]).unwrap();
+        assert!(crate::request_changes_for_parked_delivery_with_merge_sources(root.path(),&task.id,"supervisor-session","rework",&[]).is_err());
+        assert_eq!(task_store.get(&task.id).unwrap().status,TaskStatus::AwaitingMerge);
+        connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=?2 WHERE id=?3",params![receipt.id,delivery.id,dispatch.id]).unwrap();
+        drop(connection);
 
         // GH #1276: deterministically pause a close retry after its read,
         // then let the supervisor commit request_changes before it writes.
@@ -1715,6 +1728,13 @@ mod tests {
         assert_eq!(replay.id, first.id);
         assert_eq!(replay_dispatch.id, first_dispatch.id);
         assert_eq!(replay_dispatch.repository.as_ref(), Some(&proof));
+        let connection = open(root.path()).unwrap();
+        connection.execute("UPDATE verification_dispatches SET receipt_id='dc-foreign',delivery_transaction_id=NULL WHERE id=?1",[&first_dispatch.id]).unwrap();
+        assert!(exact_receipt_replay_with_conn(&connection,&receipt,"worker-session").unwrap().is_none());
+        connection.execute("UPDATE verification_dispatches SET receipt_id=?1,delivery_transaction_id=?2 WHERE id=?3",
+            params![receipt.id,first.id,first_dispatch.id]).unwrap();
+        drop(connection);
+
         let mut changed = proof.clone();
         changed.state_digest = "a different candidate".into();
         assert!(create_worker_delivery_with_dispatch_for_lease_at_repository(

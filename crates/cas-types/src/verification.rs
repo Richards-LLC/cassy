@@ -624,25 +624,50 @@ pub struct RepositoryProofBoundary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerificationReceipt<'a> {
     DeliveryCycle(&'a str),
-    TransactionReceipt(&'a str),
+    TransactionReceipt {
+        receipt_id: &'a str,
+        transaction_id: &'a str,
+    },
     None,
 }
 
 impl<'a> VerificationReceipt<'a> {
-    pub fn parse(receipt: Option<&'a str>) -> Result<Self, String> {
-        match receipt {
-            None => Ok(Self::None),
-            Some(id) if id.strip_prefix("dc-").is_some_and(|s| !s.is_empty()) => Ok(Self::DeliveryCycle(id)),
-            Some(id) if id.strip_prefix("wcr-").is_some_and(|s| !s.is_empty()) => Ok(Self::TransactionReceipt(id)),
-            Some(_) => Err("UNKNOWN_VERIFICATION_RECEIPT".into()),
+    /// Parse the complete boundary once; a cycle has no worker transaction.
+    /// Partial or mixed namespaces never become task-only authority.
+    pub fn parse(receipt: Option<&'a str>, transaction: Option<&'a str>) -> Result<Self, String> {
+        match (receipt, transaction) {
+            (None, None) => Ok(Self::None),
+            (Some(id), None) if id.strip_prefix("dc-").is_some_and(|s| !s.is_empty()) => {
+                Ok(Self::DeliveryCycle(id))
+            }
+            (Some(id), Some(transaction_id))
+                if id.strip_prefix("wcr-").is_some_and(|s| !s.is_empty())
+                    && !transaction_id.is_empty() =>
+            {
+                Ok(Self::TransactionReceipt {
+                    receipt_id: id,
+                    transaction_id,
+                })
+            }
+            _ => Err("INCONSISTENT_VERIFICATION_RECEIPT".into()),
+        }
+    }
+
+    pub fn transaction(self) -> Option<(&'a str, &'a str)> {
+        match self {
+            Self::TransactionReceipt {
+                receipt_id,
+                transaction_id,
+            } => Some((receipt_id, transaction_id)),
+            _ => None,
         }
     }
 }
 
 /// Immutable external identity attached to a verification proof cycle.
 ///
-/// A task-only close has neither delivery field; the dispatch ID itself is
-/// still the exact proof boundary. Delivery verification binds both IDs.
+/// Nontransactional review carries a delivery-cycle receipt or no receipt.
+/// Worker delivery verification binds a WCR receipt and its transaction together.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationProofBoundary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -654,6 +679,13 @@ pub struct VerificationProofBoundary {
 }
 
 impl VerificationProofBoundary {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
+
     pub fn task() -> Self {
         Self::default()
     }
@@ -705,6 +737,15 @@ pub struct VerificationDispatch {
     pub resolved_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub recovery_action: VerificationRecoveryAction,
+}
+
+impl VerificationDispatch {
+    pub fn receipt(&self) -> Result<VerificationReceipt<'_>, String> {
+        VerificationReceipt::parse(
+            self.receipt_id.as_deref(),
+            self.delivery_transaction_id.as_deref(),
+        )
+    }
 }
 
 /// Status of a verification
@@ -1306,12 +1347,36 @@ mod tests {
 
     #[test]
     fn verification_receipt_identity_cas_e01f() {
-        for (raw, expected) in [
-            (None, VerificationReceipt::None),
-            (Some("dc-cycle"), VerificationReceipt::DeliveryCycle("dc-cycle")),
-            (Some("wcr-receipt"), VerificationReceipt::TransactionReceipt("wcr-receipt")),
-        ] { assert_eq!(VerificationReceipt::parse(raw).unwrap(), expected); }
-        for raw in ["unknown", "dc-", "wcr-"] { assert!(VerificationReceipt::parse(Some(raw)).is_err()); }
+        for ((receipt, transaction), expected) in [
+            ((None, None), VerificationReceipt::None),
+            (
+                (Some("dc-cycle"), None),
+                VerificationReceipt::DeliveryCycle("dc-cycle"),
+            ),
+            (
+                (Some("wcr-receipt"), Some("wdt-receipt")),
+                VerificationReceipt::TransactionReceipt {
+                    receipt_id: "wcr-receipt",
+                    transaction_id: "wdt-receipt",
+                },
+            ),
+        ] {
+            assert_eq!(
+                VerificationReceipt::parse(receipt, transaction).unwrap(),
+                expected
+            );
+        }
+        for (receipt, transaction) in [
+            (Some("unknown"), None),
+            (Some("dc-"), None),
+            (Some("wcr-"), Some("wdt")),
+            (Some("wcr-receipt"), None),
+            (Some("dc-cycle"), Some("wdt")),
+            (None, Some("wdt")),
+            (Some("wcr-receipt"), Some("")),
+        ] {
+            assert!(VerificationReceipt::parse(receipt, transaction).is_err());
+        }
     }
 
     #[test]

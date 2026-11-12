@@ -287,6 +287,11 @@ pub(super) async fn probe_deleted_parent_and_single_pending_cycle(
         panic!("{pending:?}");
     };
     assert_eq!(owner, "supervisor-id");
+    // A cycle receipt is nontransactional and keeps this exact pending parent review.
+    let connection = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+    connection.execute("UPDATE verification_dispatches SET receipt_id='dc-parent' WHERE id=?1",[&dispatch_id]).unwrap();
+    drop(connection);
+
     let again = core
         .close_release_parent(&inventory, "cas-release-pending")
         .await;

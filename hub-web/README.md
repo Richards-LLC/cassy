@@ -23,3 +23,17 @@ and the read-only Raw output drawer reads the supervisor pane's rows as the fact
 them, a bounded page at a time (`ScrollbackRequest` → `ScrollbackPage`, `src/raw-output.ts`). A daemon
 too old to announce paged rows falls back to the pane's recent output with its control sequences removed.
 The Ghostty WebAssembly terminal, its T3 Code adapter and the symbols font left the bundle with it.
+
+## Playwright tools
+
+The repository MCP registrations launch the bundled `playwright mcp` from
+`hub-web`'s locked install, using `npx --prefix hub-web --no-install`. Run
+`npm ci` in `hub-web` before starting those clients from the checkout root.
+Both use Playwright’s managed Chromium with isolated, headless contexts; automatic captures go under
+`target/artifacts/playwright-mcp` in that checkout. For authenticated work,
+set `PLAYWRIGHT_MCP_STORAGE_STATE` to an explicit storage-state file; keep it
+out of Git. There is no shared persistent profile.
+
+The committed test agents are the planner and generator. Trial a healer only
+in scratch under the existing review guard; never delegate assertion changes
+to it in this checkout.

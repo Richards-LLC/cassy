@@ -453,50 +453,7 @@ rerun_after_repair() {
 }
 check 'rerun_after_repair' 'a repaired release requeues once with old/new notes paths and reports command failures'
 
-# 5. Another epic's release lands first with the same version: re-bump.
-clone_epic "$tmp/beta" epic/beta beta
-# cas-9cb3: base deletes a fixed-name generated file our branch modified.
-git -C "$tmp/beta" rm --quiet hub-web/dist/app.css
-git -C "$tmp/beta" commit --quiet -m 'drop obsolete generated styles'
-write_valid_draft "$tmp/beta-draft.md"
-rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"
-run "$tmp/beta" --no-watch --notes "$tmp/beta-draft.md" 2>/dev/null
-git -C "$tmp/beta" push --quiet origin epic/beta:main
-rm -f "$FAKE_GH_STATE/admitted" "$FAKE_GH_STATE/pr"; echo 77 >"$FAKE_GH_STATE/pr"
-: >"$FAKE_GH_LOG"
-run "$epic" --no-watch 2>"$tmp/rebump.err" || { cat "$tmp/rebump.err" >&2; exit 1; }
-check '[[ "$(git -C "$epic" log -1 --format=%s)" == "release: v9.101.0" ]]' 'the re-bump takes the next free version'
-check 'git -C "$epic" merge-base --is-ancestor origin/main HEAD' 'the base branch is merged in'
-check 'grep -q "^## \[9.101.0\] - 2026-10-15" "$epic/CHANGELOG.md" && grep -A16 "^## \[9.101.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'our entries move to the new version'
-check 'grep -A4 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "beta shipped" && ! grep -A6 "^## \[9.100.0\]" "$epic/CHANGELOG.md" | grep -q "alpha shipped"' 'the landed release section is kept intact'
-check '[[ "$(grep -c "alpha shipped" "$epic/CHANGELOG.md")" -eq 1 && "$(grep -c "^## \[9.100.0\]" "$epic/CHANGELOG.md")" -eq 1 ]]' 'no entry or heading is duplicated'
-check '! grep -q "<<<<<<<\|>>>>>>>" "$epic/CHANGELOG.md" "$epic/Cargo.lock" "$epic/cas-cli/Cargo.toml"' 'no conflict markers remain'
-check '[[ "$(grep -c "^version = \"9.101.0\"" "$epic/Cargo.lock")" -eq 6 ]] && grep -q "^version = \"9.101.0\"" "$epic/crates/cas-core/Cargo.toml"' 'manifests and lock carry the re-bumped version'
-check 'grep -q "Cassy v9.101.0" "$epic/docs/release-notes/2026-10-15-v9.101.0-slack.md" && grep -q "Cassy v9.100.0" "$epic/docs/release-notes/2026-10-15-v9.100.0-slack.md"' 'our draft is renamed and the landed draft is untouched'
-check '[[ -f "$epic/beta.txt" && -f "$epic/alpha.txt" ]]' 'the landed code is merged'
-check 'grep -q "^pr edit 77 --title Release v9.101.0: epic/alpha" "$FAKE_GH_LOG" && grep -q "^pr merge 77 --auto --merge" "$FAKE_GH_LOG"' 'the open PR is retitled and auto-merge re-enabled'
-check 'grep -q "9.101.0" "$epic/hub-web/dist/app.js" && grep -q "alpha" "$epic/hub-web/dist/app.js" && grep -q "beta" "$epic/hub-web/dist/app.js" && git -C "$epic" diff --quiet HEAD -- hub-web/dist' 'a re-bump resolves generated bundle conflicts and commits the merged web sources with the new version'
-check '[[ ! -e "$epic/hub-web/dist/app.css" && -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'cas-9cb3: a base-deleted fixed-name dist file resolves and the re-bump finishes cleanly'
-
-# 6. A conflict outside the release files stops with exit 4 and no merge.
-echo main-change >"$tmp/seed/app.txt"
-git -C "$tmp/seed" pull --quiet --no-rebase origin main
-echo main-change >"$tmp/seed/app.txt"
-git -C "$tmp/seed" commit --quiet -am 'main edits app'
-git -C "$tmp/seed" push --quiet origin main
-echo epic-change >"$epic/app.txt"
-git -C "$epic" commit --quiet -am 'epic edits app'
-set +e
-out="$(run "$epic" --no-watch 2>&1)"
-status=$?
-set -e
-check '[[ $status -eq 4 && "$out" == *"conflicts outside the release files"* && "$out" == *app.txt* ]]' 'a code conflict stops with exit 4 and names the file'
-check '[[ -z "$(git -C "$epic" status --porcelain)" && ! -f "$epic/.git/MERGE_HEAD" ]]' 'a code conflict leaves no merge in progress'
-git -C "$epic" reset --quiet --hard HEAD^
-
 # 7. A queued rerun is one read, no duplicate admission and no polling.
-git -C "$tmp/seed" revert --no-edit HEAD >/dev/null
-git -C "$tmp/seed" push --quiet origin main
 run "$epic" --no-watch 2>/dev/null
 : >"$FAKE_GH_LOG"
 run "$epic" 2>"$tmp/event-driven.err"

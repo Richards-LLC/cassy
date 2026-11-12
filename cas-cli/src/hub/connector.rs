@@ -258,23 +258,34 @@ type UpstreamSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::Mayb
 async fn connect_upstream(session: &str, port: u16, hub_root: Option<&std::path::Path>) -> Result<UpstreamSocket> {
     // cas-ca22: present the daemon's relay token, so this connection alone
     // may carry the operator_verified attribution the hub sets.
-    let token = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
+    let mut token = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
     if token.is_none() {
-        tracing::warn!(
-            session,
-            "cas-ca22: no relay token for this daemon; its Commander messages will be stored unverified"
-        );
+        tracing::warn!(session, "cas-ca22: no relay token for this daemon; its Commander messages will be stored unverified");
     }
-    let request = crate::ui::factory::relay_token::upstream_request(port, token.as_deref())?;
-    let config = WebSocketConfig {
-        max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
-        max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
-        ..WebSocketConfig::default()
-    };
-    let (socket, _) = connect_async_with_config(request, Some(config), false)
-        .await
-        .with_context(|| format!("connect to daemon for session '{session}'"))?;
-    Ok(socket)
+    for retry in [false, true] {
+        let request = crate::ui::factory::relay_token::upstream_request(port, token.as_deref())?;
+        let config = WebSocketConfig {
+            max_message_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+            max_frame_size: Some(COMMANDER_LEGACY_UPSTREAM_MAX_MESSAGE_BYTES),
+            ..WebSocketConfig::default()
+        };
+        match connect_async_with_config(request, Some(config), false).await {
+            Ok((socket, _)) => return Ok(socket),
+            Err(error) => {
+                if !retry && matches!(&error, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401) {
+                    let current = hub_root.and_then(|root| crate::ui::factory::relay_token::read(root, session));
+                    if current.is_some() && current != token {
+                        // Reexec can rotate between our read and its accept.
+                        // Keep this upstream's queued controls while retrying.
+                        token = current;
+                        continue;
+                    }
+                }
+                return Err(error).with_context(|| format!("connect to daemon for session '{session}'"));
+            }
+        }
+    }
+    unreachable!("a second handshake always returns its result")
 }
 
 async fn run_upstream(

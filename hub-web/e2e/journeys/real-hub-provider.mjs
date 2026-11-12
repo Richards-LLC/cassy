@@ -50,6 +50,9 @@ def prompts():
 started=False
 for line in prompts():
  if line == '/exit': sys.exit(0)
+ if line == '/compact':
+  print('Compacted (ctrl+o to see full summary)',flush=True)
+  composer();continue
  if not started:
   reply('Supervisor ready');started=True
  if 'ping launch supervisor' in line: reply('Launch supervisor answered')

@@ -84,6 +84,13 @@ paired device controls the terminal. Raw terminal input still requires both
 `pane:input` and that device's active session lease. Message permission never
 grants terminal input authority.
 
+An authenticated hub relay presents the session daemon's private token during
+its WebSocket handshake. If daemon adoption rotates that token while the hub
+connects, a stale credential is refused with HTTP 401. The hub rereads the
+private token and retries once only if it changed, retaining its queued controls.
+Tokenless local viewers remain unverified; browser pairing grants no direct
+relay trust. A hub-only restart preserves pairings and running factory panes.
+
 ## Selected-session stores and live phase freshness
 
 Bridge and hub session routes resolve the selected session's `project_dir`

@@ -978,7 +978,7 @@ pub(super) mod tests {
         assert!(super::super::run_command(&cli, Some(&root)).is_ok());
         // The check does not move the caller's branch or replace its script.
         assert_eq!(git(repo, &["branch", "--show-current"]).unwrap(), "main");
-        assert_eq!(fs::read_to_string(script).unwrap(), "import sys\nsys.exit(0)\n");
+        assert!(Command::new("python3").arg(&script).arg("--lint").arg(&draft).status().unwrap().success());
     }
 
     #[test]

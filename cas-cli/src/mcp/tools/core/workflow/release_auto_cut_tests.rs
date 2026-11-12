@@ -119,7 +119,8 @@ printf '%s\n' "$*" >> "$CAS_ROOT/../release-ran"
     let log = draft.with_file_name("auto-cut.log");
     let wait = |code: i32| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !std::fs::read_to_string(&log).unwrap_or_default().contains(&format!("RELEASE_EXIT={code}")) {
+        while std::fs::read_to_string(&log).unwrap_or_default().lines()
+            .find_map(|line| line.strip_prefix("RELEASE_EXIT=")?.parse::<i32>().ok()) != Some(code) {
             assert!(std::time::Instant::now() < deadline, "release.sh never finished");
             std::thread::yield_now();
         }

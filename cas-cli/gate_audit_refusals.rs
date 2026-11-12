@@ -21,80 +21,69 @@ pub(super) fn policy_module(path: &str, declared: &BTreeSet<String>) -> bool {
     declared.contains(path) || POLICY_ROOTS.iter().any(|root| path.starts_with(root))
 }
 
-// Value references exclude field/method spellings: model.role must never
-// borrow an unrelated local role binding.
-#[derive(Default)]
-struct References(BTreeSet<String>);
-impl<'ast> Visit<'ast> for References {
-    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
-        if let Some(name) = expr.path.get_ident() { self.0.insert(name.to_string()); }
-        visit::visit_expr_path(self, expr);
-    }
-    fn visit_expr_field(&mut self, expr: &'ast syn::ExprField) {
-        if let syn::Expr::Path(receiver) = expr.base.as_ref()
-            && let Some(receiver) = receiver.path.get_ident()
-            && let syn::Member::Named(field) = &expr.member
-        { self.0.insert(format!("{receiver}.{field}")); }
-        visit::visit_expr_field(self, expr);
-    }
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        use syn::{parse::Parser, punctuated::Punctuated, Token};
-        if let Ok(args) = Punctuated::<syn::Expr, Token![,]>::parse_terminated.parse2(mac.tokens.clone()) {
-            for value in args { self.visit_expr(&value); }
-        } else {
-            let first = mac.tokens.clone().into_iter().take_while(|token|
-                !matches!(token, proc_macro2::TokenTree::Punct(mark) if mark.as_char() == ','))
-                .collect::<proc_macro2::TokenStream>();
-            if let Ok(value) = syn::parse2::<syn::Expr>(first) { self.visit_expr(&value); }
-        }
-    }
-}
-
+// Values are resolved at their read position. No later declaration or
+// assignment can change the provenance already captured by an earlier guard.
 #[derive(Default, Clone)]
 struct Payload {
     codes: BTreeSet<String>,
     authority: bool,
     calls: BTreeSet<String>,
-    variables: BTreeSet<String>,
 }
 impl Payload {
-    fn expression(expr: &syn::Expr) -> Self {
-        let mut f = Function::default();
-        Body { function: &mut f }.visit_expr(expr);
-        let mut names = References::default();
-        names.visit_expr(expr);
-        Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
+    fn merge(&mut self, other: &Self) {
+        self.codes.extend(other.codes.clone());
+        self.calls.extend(other.calls.clone());
+        self.authority |= other.authority;
     }
-    fn mac(mac: &syn::Macro) -> Self {
-        if let Ok(expr) = syn::parse2::<syn::Expr>(mac.tokens.clone()) {
-            return Self::expression(&expr);
-        }
-        let mut f = Function::default();
-        Body { function: &mut f }.visit_macro(mac);
-        let mut names = References::default();
-        names.visit_macro(mac);
-        Self { codes: f.refused, authority: f.authority, calls: f.calls, variables: names.0 }
+    fn reads_authority(&self, helpers: &BTreeSet<String>) -> bool {
+        self.authority || self.calls.iter().any(|call| helpers.contains(call))
     }
-    fn reads_authority(&self, helpers: &BTreeSet<String>, bindings: &BTreeMap<String, Payload>, seen: &mut BTreeSet<String>) -> bool {
-        self.authority || self.calls.iter().any(|call| helpers.contains(call)) || self.variables.iter().any(|variable|
-            seen.insert(variable.clone()) && bindings.get(variable).is_some_and(|value| value.reads_authority(helpers, bindings, seen)))
-    }
-    fn resolve(&self, functions: &BTreeMap<String, BTreeSet<String>>, bindings: &BTreeMap<String, Payload>, seen: &mut BTreeSet<String>) -> BTreeSet<String> {
+    fn resolve(&self, functions: &BTreeMap<String, BTreeSet<String>>) -> BTreeSet<String> {
         let mut codes = self.codes.clone();
         for call in &self.calls {
             if let Some(tags) = functions.get(call) { codes.extend(tags.clone()); }
-        }
-        for variable in &self.variables {
-            if seen.insert(variable.clone()) {
-                if let Some(value) = bindings.get(variable) {
-                    codes.extend(value.resolve(functions, bindings, seen));
-                }
-            }
         }
         codes
     }
 }
 
+#[derive(Default, Clone)]
+struct Value {
+    payload: Payload,
+    parts: BTreeMap<String, Value>,
+}
+impl Value {
+    fn summary(&self) -> Payload {
+        let mut result = self.payload.clone();
+        for value in self.parts.values() { result.merge(&value.summary()); }
+        result
+    }
+    fn merge(&mut self, other: &Self) {
+        self.payload.merge(&other.payload);
+        for (key, value) in &other.parts { self.parts.entry(key.clone()).or_default().merge(value); }
+    }
+    fn project(&self, key: &str) -> Self {
+        self.parts.get(key).cloned().unwrap_or_else(|| Self { payload: self.payload.clone(), ..Default::default() })
+    }
+    fn typed(ty: &syn::Type) -> Self {
+        match ty {
+            syn::Type::Reference(ty) => Self::typed(&ty.elem),
+            syn::Type::Paren(ty) => Self::typed(&ty.elem),
+            syn::Type::Tuple(ty) => Self { parts: ty.elems.iter().enumerate()
+                .map(|(i, ty)| (i.to_string(), Self::typed(ty))).collect(), ..Default::default() },
+            syn::Type::Path(ty) => {
+                let name = ty.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+                if name == "HookInput" {
+                    Self { parts: ["agent_role", "session_id", "agent_id"].into_iter().map(|field|
+                        (field.into(), Self { payload: Payload { authority: true, ..Default::default() }, ..Default::default() })).collect(), ..Default::default() }
+                } else {
+                    Self { payload: Payload { authority: matches!(name.as_str(), "QueueStartPrincipal" | "InvocationContext" | "ProxyCaller" | "MachinePrincipal"), ..Default::default() }, ..Default::default() }
+                }
+            }
+            _ => Self::default(),
+        }
+    }
+}
 
 pub(super) fn identity_env(key: &str) -> bool {
     matches!(key, "CAS_AGENT_ROLE" | "CAS_AGENT_ID" | "CAS_AGENT_NAME" | "CAS_SESSION_ID" | "CAS_FACTORY_SESSION")
@@ -114,73 +103,18 @@ pub(super) struct Site {
     key: String,
     payload: Payload,
     condition: Payload,
-    bindings: BTreeMap<String, Payload>,
-}
-#[derive(Default)]
-struct Bindings {
-    values: BTreeMap<String, Payload>,
-    counts: BTreeMap<String, usize>,
-    invalid: BTreeSet<String>,
-}
-impl<'ast> Visit<'ast> for Bindings {
-    fn visit_local(&mut self, local: &'ast syn::Local) {
-        if let syn::Pat::Ident(pat) = &local.pat {
-            let name = pat.ident.to_string();
-            *self.counts.entry(name.clone()).or_default() += 1;
-            if pat.mutability.is_some() { self.invalid.insert(name.clone()); }
-            if let Some(init) = &local.init { self.values.insert(name, Payload::expression(&init.expr)); }
-        }
-        visit::visit_local(self, local);
-    }
-    fn visit_expr_assign(&mut self, expr: &'ast syn::ExprAssign) {
-        if let syn::Expr::Path(path) = expr.left.as_ref() && let Some(name) = path.path.get_ident() {
-            self.invalid.insert(name.to_string());
-        }
-        visit::visit_expr_assign(self, expr);
-    }
-}
-
-fn bindings(signature: &syn::Signature, block: &syn::Block) -> BTreeMap<String, Payload> {
-    let mut local = Bindings::default(); local.visit_block(block);
-    let mut values = local.values.into_iter().filter(|(name, _)|
-        local.counts.get(name) == Some(&1) && !local.invalid.contains(name)).collect::<BTreeMap<_, _>>();
-    struct Types(BTreeSet<String>);
-    impl<'ast> Visit<'ast> for Types {
-        fn visit_path_segment(&mut self, segment: &'ast syn::PathSegment) {
-            self.0.insert(segment.ident.to_string()); visit::visit_path_segment(self, segment);
-        }
-    }
-    for arg in &signature.inputs {
-        let syn::FnArg::Typed(arg) = arg else { continue; };
-        let syn::Pat::Ident(name) = arg.pat.as_ref() else { continue; };
-        let mut types = Types(BTreeSet::new()); types.visit_type(&arg.ty);
-        let name = name.ident.to_string();
-        if types.0.contains("HookInput") {
-            for field in ["agent_role", "session_id", "agent_id"] {
-                values.insert(format!("{name}.{field}"), Payload { authority: true, ..Default::default() });
-            }
-        } else if types.0.iter().any(|ty| matches!(ty.as_str(), "QueueStartPrincipal" | "InvocationContext" | "ProxyCaller" | "MachinePrincipal"))
-            || matches!(name.as_str(), "caller_id" | "current_agent_id")
-        {
-            values.insert(name, Payload { authority: true, ..Default::default() });
-        }
-    }
-    values
 }
 
 #[derive(Clone)]
-pub(super) struct AuthorityValue {
-    returns: Vec<Payload>,
-    bindings: BTreeMap<String, Payload>,
-}
+pub(super) struct AuthorityValue(Vec<Payload>);
 impl AuthorityValue {
     fn reads(&self, helpers: &BTreeSet<String>) -> bool {
-        self.returns.iter().any(|value| value.reads_authority(helpers, &self.bindings, &mut BTreeSet::new()))
+        self.0.iter().any(|value| value.reads_authority(helpers))
     }
 }
 
-/// Only returned scalar identity/predicate values propagate helper provenance.
-/// Reading the role for a log or building an unrelated context is insufficient.
+/// Summarize returned identity/predicate values using the same lexical flow
+/// as refusal discovery. Incidental reads do not taint a helper's result.
 pub(super) fn authority_value(signature: &syn::Signature, block: &syn::Block) -> Option<AuthorityValue> {
     struct Output(bool);
     impl<'ast> Visit<'ast> for Output {
@@ -191,17 +125,10 @@ pub(super) fn authority_value(signature: &syn::Signature, block: &syn::Block) ->
     }
     let mut output = Output(false); output.visit_return_type(&signature.output);
     if !output.0 { return None; }
-    struct Returns(Vec<Payload>);
-    impl<'ast> Visit<'ast> for Returns {
-        fn visit_expr_return(&mut self, expr: &'ast syn::ExprReturn) {
-            if let Some(value) = &expr.expr { self.0.push(Payload::expression(value)); }
-        }
-        fn visit_item_fn(&mut self, _: &'ast syn::ItemFn) {}
-        fn visit_expr_closure(&mut self, _: &'ast syn::ExprClosure) {}
-    }
-    let mut values = Returns(Vec::new()); values.visit_block(block);
-    if let Some(syn::Stmt::Expr(value, None)) = block.stmts.last() { values.0.push(Payload::expression(value)); }
-    Some(AuthorityValue { returns: values.0, bindings: bindings(signature, block) })
+    let mut flow = Flow::new("", signature);
+    let tail = flow.block(block);
+    flow.returns.push(tail.summary());
+    Some(AuthorityValue(flow.returns))
 }
 
 fn canonical(expr: &syn::Expr) -> String {
@@ -232,106 +159,275 @@ fn canonical(expr: &syn::Expr) -> String {
 }
 
 
-struct Errors<'a> {
+// Each frame owns declarations; assignment updates the nearest frame.
+// Branches join possible values, while closures get isolated captured state.
+struct Flow<'a> {
     path: &'a str,
     function: String,
-    bindings: BTreeMap<String, Payload>,
+    scopes: Vec<BTreeMap<String, Value>>,
     condition: Option<(Payload, String)>,
-    sites: &'a mut Vec<Site>,
+    sites: Vec<Site>,
+    returns: Vec<Payload>,
     nested: bool,
 }
-impl Errors<'_> {
-    fn record(&mut self, line: usize, kind: &str, payload: Payload) {
-        if let Some((condition, key)) = &self.condition {
-            self.sites.push(Site {
-                path: self.path.into(), function: self.function.clone(), line, payload,
-                condition: condition.clone(), bindings: self.bindings.clone(),
-                key: format!("{}#{}#{kind}#{key}", self.path, self.function),
-            });
+impl<'a> Flow<'a> {
+    fn new(path: &'a str, signature: &syn::Signature) -> Self {
+        let mut flow = Self { path, function: signature.ident.to_string(), scopes: vec![BTreeMap::new()],
+            condition: None, sites: Vec::new(), returns: Vec::new(), nested: false };
+        for arg in &signature.inputs {
+            if let syn::FnArg::Typed(arg) = arg { flow.bind(&arg.pat, Value::typed(&arg.ty), true); }
+        }
+        flow
+    }
+    fn bind(&mut self, pat: &syn::Pat, value: Value, parameter: bool) {
+        match pat {
+            syn::Pat::Ident(pat) => {
+                let mut value = value;
+                if parameter && matches!(pat.ident.to_string().as_str(), "caller_id" | "current_agent_id") { value.payload.authority = true; }
+                self.scopes.last_mut().unwrap().insert(pat.ident.to_string(), value.clone());
+                if let Some((_, subpat)) = &pat.subpat { self.bind(subpat, value, parameter); }
+            }
+            syn::Pat::Tuple(pat) => self.bind_elements(pat.elems.iter().collect(), value, parameter),
+            syn::Pat::TupleStruct(pat) => self.bind_elements(pat.elems.iter().collect(), value, parameter),
+            syn::Pat::Struct(pat) => for field in &pat.fields { self.bind(&field.pat, value.project(&member(&field.member)), parameter); },
+            syn::Pat::Slice(pat) => self.bind_elements(pat.elems.iter().collect(), value, parameter),
+            syn::Pat::Reference(pat) => self.bind(&pat.pat, value, parameter),
+            syn::Pat::Paren(pat) => self.bind(&pat.pat, value, parameter),
+            syn::Pat::Type(pat) => { let mut value = value; value.merge(&Value::typed(&pat.ty)); self.bind(&pat.pat, value, parameter); }
+            syn::Pat::Or(pat) => for pat in &pat.cases { self.bind(pat, value.clone(), parameter); },
+            _ => {}
         }
     }
-    fn body(&mut self, signature: &syn::Signature, block: &syn::Block) {
-        let prior_name = std::mem::replace(&mut self.function, signature.ident.to_string());
-        let prior_bindings = std::mem::take(&mut self.bindings);
-        let prior_condition = self.condition.take();
-        self.bindings = bindings(signature, block);
-        self.visit_block(block);
-        self.bindings = prior_bindings;
-        self.function = prior_name;
-        self.condition = prior_condition;
+    fn bind_elements(&mut self, patterns: Vec<&syn::Pat>, value: Value, parameter: bool) {
+        let rest = patterns.iter().position(|pat| matches!(pat, syn::Pat::Rest(_)));
+        let count = patterns.len();
+        for (index, pat) in patterns.into_iter().enumerate() {
+            let slot = if rest.is_some_and(|rest| index > rest) {
+                value.parts.len().saturating_sub(count - index)
+            } else { index };
+            self.bind(pat, value.project(&slot.to_string()), parameter);
+        }
+    }
+    fn assign(&mut self, place: &syn::Expr, value: Value) {
+        match place {
+            syn::Expr::Path(path) if path.path.get_ident().is_some() => {
+                let name = path.path.get_ident().unwrap().to_string();
+                if let Some(scope) = self.scopes.iter_mut().rev().find(|scope| scope.contains_key(&name)) { scope.insert(name, value); }
+            }
+            syn::Expr::Tuple(tuple) => for (i, place) in tuple.elems.iter().enumerate() { self.assign(place, value.project(&i.to_string())); },
+            syn::Expr::Array(array) => for (i, place) in array.elems.iter().enumerate() { self.assign(place, value.project(&i.to_string())); },
+            syn::Expr::Struct(item) => for field in &item.fields { self.assign(&field.expr, value.project(&member(&field.member))); },
+            syn::Expr::Field(field) => {
+                let mut base = self.expr(&field.base);
+                base.parts.insert(member(&field.member), value);
+                self.assign(&field.base, base);
+            }
+            syn::Expr::Paren(expr) => self.assign(&expr.expr, value),
+            syn::Expr::Unary(expr) => self.assign(&expr.expr, value),
+            _ => {}
+        }
+    }
+    fn join(&mut self, other: &[BTreeMap<String, Value>]) {
+        for (scope, other) in self.scopes.iter_mut().zip(other) {
+            for (key, value) in scope { if let Some(other) = other.get(key) { value.merge(other); } }
+        }
+    }
+    fn block(&mut self, block: &syn::Block) -> Value {
+        self.scopes.push(BTreeMap::new());
+        let mut tail = Value::default();
+        for statement in &block.stmts {
+            tail = Value::default();
+            match statement {
+                syn::Stmt::Local(local) => {
+                    let value = local.init.as_ref().map(|init| self.expr(&init.expr)).unwrap_or_default();
+                    if let Some(init) = &local.init && let Some((_, otherwise)) = &init.diverge {
+                        let prior = self.condition.replace((value.summary(), canonical(&init.expr)));
+                        self.expr(otherwise); self.condition = prior;
+                    }
+                    self.bind(&local.pat, value, false);
+                }
+                syn::Stmt::Expr(expr, semicolon) => { let value = self.expr(expr); if semicolon.is_none() { tail = value; } }
+                syn::Stmt::Macro(mac) => { self.mac(&mac.mac); }
+                syn::Stmt::Item(_) => {} // nested functions have their own collector and no captures
+            }
+        }
+        self.scopes.pop();
+        tail
+    }
+    fn record(&mut self, span: proc_macro2::Span, kind: &str, payload: Payload) {
+        if let Some((condition, key)) = &self.condition {
+            self.sites.push(Site { path: self.path.into(), function: self.function.clone(), line: span.start().line,
+                key: format!("{}#{}#{kind}#{key}", self.path, self.function), payload, condition: condition.clone() });
+        }
+    }
+    fn expr(&mut self, expr: &syn::Expr) -> Value {
+        match expr {
+            syn::Expr::Path(path) => path.path.get_ident().and_then(|name|
+                self.scopes.iter().rev().find_map(|scope| scope.get(&name.to_string()).cloned())).unwrap_or_default(),
+            syn::Expr::Field(field) => self.expr(&field.base).project(&member(&field.member)),
+            syn::Expr::Tuple(tuple) => Value { parts: tuple.elems.iter().enumerate().map(|(i, value)| (i.to_string(), self.expr(value))).collect(), ..Default::default() },
+            syn::Expr::Array(array) => Value { parts: array.elems.iter().enumerate().map(|(i, value)| (i.to_string(), self.expr(value))).collect(), ..Default::default() },
+            syn::Expr::Struct(item) => {
+                let mut value = item.rest.as_ref().map(|rest| self.expr(rest)).unwrap_or_default();
+                for field in &item.fields { value.parts.insert(member(&field.member), self.expr(&field.expr)); }
+                value
+            }
+            syn::Expr::Reference(expr) => self.expr(&expr.expr),
+            syn::Expr::Paren(expr) => self.expr(&expr.expr),
+            syn::Expr::Try(expr) => self.expr(&expr.expr),
+            syn::Expr::Block(expr) => self.block(&expr.block),
+            syn::Expr::Unsafe(expr) => self.block(&expr.block),
+            syn::Expr::Async(expr) => self.closure(&[], &syn::Expr::Block(syn::ExprBlock { attrs: Vec::new(), label: None, block: expr.block.clone() })),
+            syn::Expr::Return(expr) => {
+                if let Some(value) = &expr.expr {
+                    let mut value = self.expr(value).summary();
+                    if let Some((condition, _)) = &self.condition { value.merge(condition); }
+                    self.returns.push(value);
+                }
+                Value::default()
+            }
+            syn::Expr::Assign(expr) => { let value = self.expr(&expr.right); self.assign(&expr.left, value); Value::default() }
+            syn::Expr::Binary(expr) => {
+                let mut value = self.expr(&expr.left); value.payload.merge(&self.expr(&expr.right).summary());
+                if matches!(expr.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_) | syn::BinOp::MulAssign(_) | syn::BinOp::DivAssign(_) | syn::BinOp::RemAssign(_) | syn::BinOp::BitXorAssign(_) | syn::BinOp::BitAndAssign(_) | syn::BinOp::BitOrAssign(_) | syn::BinOp::ShlAssign(_) | syn::BinOp::ShrAssign(_)) { self.assign(&expr.left, value.clone()); }
+                value
+            }
+            syn::Expr::Let(expr) => { let value = self.expr(&expr.expr); self.bind(&expr.pat, value.clone(), false); value }
+            syn::Expr::Closure(expr) => self.closure(&expr.inputs.iter().collect::<Vec<_>>(), &expr.body),
+            syn::Expr::If(expr) => {
+                self.scopes.push(BTreeMap::new());
+                let condition = self.expr(&expr.cond).summary();
+                let common = self.scopes.clone();
+                let prior = self.condition.replace((condition.clone(), canonical(&expr.cond)));
+                let mut value = self.block(&expr.then_branch);
+                self.scopes.pop();
+                let then_state = self.scopes.clone();
+                self.scopes = common; self.scopes.pop();
+                if let Some((_, branch)) = &expr.else_branch { value.merge(&self.expr(branch)); }
+                self.join(&then_state);
+                self.condition = prior;
+                value.payload.merge(&condition);
+                value
+            }
+            syn::Expr::Match(expr) => {
+                let source = self.expr(&expr.expr);
+                let common = self.scopes.clone();
+                let prior = self.condition.clone();
+                let mut value = Value::default();
+                let mut joined = common.clone();
+                for arm in &expr.arms {
+                    self.scopes = common.clone(); self.scopes.push(BTreeMap::new());
+                    self.bind(&arm.pat, source.clone(), false);
+                    let (condition, key) = if let Some((_, guard)) = &arm.guard { (self.expr(guard).summary(), canonical(guard)) }
+                        else { (source.summary(), canonical(&expr.expr)) };
+                    self.condition = Some((condition, key));
+                    value.merge(&self.expr(&arm.body)); self.scopes.pop();
+                    let arm_state = self.scopes.clone(); self.scopes = joined; self.join(&arm_state); joined = self.scopes.clone();
+                }
+                self.scopes = joined; self.condition = prior;
+                value.payload.merge(&source.summary());
+                value
+            }
+            syn::Expr::While(expr) => {
+                let before = self.scopes.clone(); self.scopes.push(BTreeMap::new());
+                let condition = self.expr(&expr.cond).summary();
+                let prior = self.condition.replace((condition, canonical(&expr.cond)));
+                self.block(&expr.body); self.scopes.pop(); self.join(&before); self.condition = prior;
+                Value::default()
+            }
+            syn::Expr::ForLoop(expr) => {
+                let source = self.expr(&expr.expr); let before = self.scopes.clone(); self.scopes.push(BTreeMap::new());
+                self.bind(&expr.pat, source, false); self.block(&expr.body); self.scopes.pop(); self.join(&before);
+                Value::default()
+            }
+            syn::Expr::Loop(expr) => { let before = self.scopes.clone(); let value = self.block(&expr.body); self.join(&before); value }
+            syn::Expr::Call(call) => {
+                let name = match call.func.as_ref() { syn::Expr::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default(), _ => String::new() };
+                let refusal = matches!(name.as_str(), "Err" | "error" | "invalid_params" | "internal_error")
+                    || name == "with_pre_tool_permission" && call.args.first().and_then(super::literal).as_deref() == Some("deny");
+                let prior_nested = self.nested; self.nested |= refusal;
+                let mut value = self.expr(&call.func);
+                value.payload.calls.insert(name.clone());
+                value.payload.authority |= authority_symbol(&name)
+                    || matches!(name.as_str(), "var" | "var_os") && call.args.first().and_then(super::literal).is_some_and(|key| identity_env(&key))
+                    || name == "from_process" && matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.segments.iter().any(|s| s.ident == "InvocationContext"));
+                if matches!(name.as_str(), "tag" | "refusal_tag" | "override_tag") {
+                    if let Some(code) = call.args.first().and_then(super::literal) { value.payload.codes.insert(code); }
+                }
+                let constructor = name.chars().next().is_some_and(char::is_uppercase);
+                for (index, arg) in call.args.iter().enumerate() {
+                    let arg = self.expr(arg);
+                    if constructor { value.parts.insert(index.to_string(), arg); }
+                    else { value.payload.merge(&arg.summary()); }
+                }
+                self.nested = prior_nested;
+                if refusal && !prior_nested { self.record(expr.span(), &name, value.summary()); }
+                value
+            }
+            syn::Expr::MethodCall(call) => {
+                let mut value = Value { payload: self.expr(&call.receiver).summary(), ..Default::default() };
+                value.payload.authority |= authority_symbol(&call.method.to_string());
+                for arg in &call.args { value.payload.merge(&self.expr(arg).summary()); }
+                value
+            }
+            syn::Expr::Macro(expr) => self.mac(&expr.mac),
+            _ => {
+                struct Children<'a, 'b> { flow: &'a mut Flow<'b>, value: Value }
+                impl<'ast> Visit<'ast> for Children<'_, '_> {
+                    fn visit_expr(&mut self, expr: &'ast syn::Expr) { self.value.payload.merge(&self.flow.expr(expr).summary()); }
+                }
+                let mut children = Children { flow: self, value: Value::default() };
+                visit::visit_expr(&mut children, expr); children.value
+            }
+        }
+    }
+    fn closure(&mut self, inputs: &[&syn::Pat], body: &syn::Expr) -> Value {
+        let saved = self.scopes.clone(); self.scopes.push(BTreeMap::new());
+        for input in inputs { self.bind(input, Value::default(), true); }
+        let prior = self.condition.take(); let outer_returns = std::mem::take(&mut self.returns);
+        let mut value = self.expr(body);
+        for returned in &self.returns { value.payload.merge(returned); }
+        self.returns = outer_returns; self.condition = prior; self.scopes = saved;
+        value
+    }
+    fn mac(&mut self, mac: &syn::Macro) -> Value {
+        use syn::{parse::Parser, punctuated::Punctuated, Token};
+        let name = mac.path.segments.last().map(|s| s.ident.to_string()).unwrap_or_default();
+        let mut raw = Function::default(); Body { function: &mut raw }.visit_macro(mac);
+        let mut value = Value { payload: Payload { codes: raw.refused, ..Default::default() }, ..Default::default() };
+        let args = Punctuated::<syn::Expr, Token![,]>::parse_terminated.parse2(mac.tokens.clone()).or_else(|_| {
+            let first = mac.tokens.clone().into_iter().take_while(|token| !matches!(token, proc_macro2::TokenTree::Punct(mark) if mark.as_char() == ','))
+                .collect::<proc_macro2::TokenStream>();
+            syn::parse2::<syn::Expr>(first).map(|expr| std::iter::once(expr).collect())
+        });
+        let mut condition = None;
+        if let Ok(args) = args { for (index, arg) in args.iter().enumerate() {
+            let arg_value = self.expr(arg); value.payload.merge(&arg_value.summary());
+            if index == 0 { condition = Some((arg_value.summary(), canonical(arg))); }
+        } }
+        if !self.nested && name == "ensure" {
+            let prior = std::mem::replace(&mut self.condition, condition); self.record(mac.span(), "ensure", value.summary()); self.condition = prior;
+        } else if !self.nested && name == "bail" { self.record(mac.span(), "bail", value.summary()); }
+        value
     }
 }
-impl<'ast> Visit<'ast> for Errors<'_> {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if !test_only(&item.attrs) { visit::visit_item_mod(self, item); }
-    }
-    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        if !test_only(&item.attrs) { visit::visit_item_impl(self, item); }
-    }
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if !test_only(&item.attrs) { self.body(&item.sig, &item.block); }
-    }
-    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        if !test_only(&item.attrs) { self.body(&item.sig, &item.block); }
-    }
-    fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
-        self.visit_expr(&expr.cond);
-        let prior = self.condition.replace((Payload::expression(&expr.cond), canonical(&expr.cond)));
-        self.visit_block(&expr.then_branch);
-        if let Some((_, branch)) = &expr.else_branch { self.visit_expr(branch); }
-        self.condition = prior;
-    }
-    fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
-        self.visit_expr(&expr.expr);
-        let prior = self.condition.replace((Payload::expression(&expr.expr), canonical(&expr.expr)));
-        for arm in &expr.arms { self.visit_arm(arm); }
-        self.condition = prior;
-    }
-    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
-        let prior = self.condition.clone();
-        if let Some((_, guard)) = &arm.guard {
-            self.condition = Some((Payload::expression(guard), canonical(guard)));
-        }
-        self.visit_expr(&arm.body);
-        self.condition = prior;
-    }
-    fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
-        let name = match expr.func.as_ref() {
-            syn::Expr::Path(path) => path.path.segments.last().map(|s| s.ident.to_string()),
-            _ => None,
-        };
-        let refusal = match name.as_deref() {
-            Some("Err" | "error" | "invalid_params" | "internal_error") => true,
-            Some("with_pre_tool_permission") => expr.args.first().and_then(super::literal).as_deref() == Some("deny"),
-            _ => false,
-        };
-        if !self.nested && refusal {
-            self.record(expr.span().start().line, name.as_deref().unwrap(), Payload::expression(&syn::Expr::Call(expr.clone())));
-            self.nested = true;
-            visit::visit_expr_call(self, expr);
-            self.nested = false;
-        } else { visit::visit_expr_call(self, expr); }
-    }
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let Some(name) = mac.path.segments.last() else { return; };
-        if self.nested { return; }
-        if name.ident == "ensure" {
-            use syn::{parse::Parser, punctuated::Punctuated, Token};
-            if let Ok(args) = Punctuated::<syn::Expr, Token![,]>::parse_terminated.parse2(mac.tokens.clone())
-                && let Some(condition) = args.first()
-            {
-                let prior = self.condition.replace((Payload::expression(condition), canonical(condition)));
-                self.record(mac.span().start().line, "ensure", Payload::mac(mac));
-                self.condition = prior;
-            }
-        } else if name.ident == "bail" {
-            self.record(mac.span().start().line, "bail", Payload::mac(mac));
-        }
-    }
+fn member(member: &syn::Member) -> String {
+    match member { syn::Member::Named(name) => name.to_string(), syn::Member::Unnamed(index) => index.index.to_string() }
 }
 
 pub(super) fn rust(path: &str, _source: &str, file: &syn::File, sites: &mut Vec<Site>) {
-    Errors { path, function: String::new(), bindings: BTreeMap::new(), condition: None, sites, nested: false }.visit_file(file);
+    struct Collector<'a, 'b> { path: &'a str, sites: &'b mut Vec<Site> }
+    impl<'ast> Visit<'ast> for Collector<'_, '_> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) { if !test_only(&item.attrs) { visit::visit_item_mod(self, item); } }
+        fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) { if !test_only(&item.attrs) { visit::visit_item_impl(self, item); } }
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if !test_only(&item.attrs) { let mut flow = Flow::new(self.path, &item.sig); flow.block(&item.block); self.sites.extend(flow.sites); visit::visit_item_fn(self, item); }
+        }
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if !test_only(&item.attrs) { let mut flow = Flow::new(self.path, &item.sig); flow.block(&item.block); self.sites.extend(flow.sites); visit::visit_impl_item_fn(self, item); }
+        }
+    }
+    Collector { path, sites }.visit_file(file);
 }
 
 pub(super) fn script(path: &str, source: &str, declared: &BTreeSet<String>, sites: &mut Vec<Site>) {
@@ -365,7 +461,7 @@ pub(super) fn script(path: &str, source: &str, declared: &BTreeSet<String>, site
             sites.push(Site {
                 path: path.into(), function: "script".into(), line: index + 1,
                 key: format!("{path}#script#exit#{condition}"),
-                payload: Payload { codes, ..Default::default() }, condition: Payload { authority: true, ..Default::default() }, bindings: BTreeMap::new(),
+                payload: Payload { codes, ..Default::default() }, condition: Payload { authority: true, ..Default::default() },
             });
         }
         if trimmed.ends_with("; fi") { conditions.pop(); }
@@ -386,17 +482,17 @@ fn decode_baseline(bytes: &[u8]) -> Result<Counts, String> {
     }).collect()
 }
 
-fn baseline(root: &Path, audit: &mut Audit) -> Counts {
+fn baseline(root: &Path, target: &str, audit: &mut Audit) -> Counts {
     let path = root.join(BASELINE);
     if !path.exists() { return Counts::new(); }
     let current = match std::fs::read(&path).map_err(|error| error.to_string()).and_then(|bytes| decode_baseline(&bytes)) {
         Ok(counts) => counts,
         Err(error) => { audit.gaps.push(format!("{BASELINE}: {error}")); return Counts::new(); }
     };
-    // Real checkouts retain the minimum allowance from every version, so a
-    // removal can never be silently undone by growing the baseline later.
-    // Unversioned parser fixtures have no history; the test also exercises a
-    // real Git history, including an attempted committed growth and shrink.
+    // Only landed target history limits the allowance. Unmerged delivery
+    // commits can refine a first seed; a landed reduction/deletion is final.
+    // BASE_SHA is the existing CI comparison base; local calls use the merge
+    // base with origin/main. Fixtures name an explicit target branch.
     if root.join(".git").exists() {
         let complete = Command::new("git").args(["rev-parse", "--is-shallow-repository"]).current_dir(root).output()
             .is_ok_and(|result| result.status.success() && result.stdout == b"false\n");
@@ -404,15 +500,27 @@ fn baseline(root: &Path, audit: &mut Audit) -> Counts {
             audit.gaps.push(format!("{BASELINE}: complete Git history is required to validate the ratchet"));
             return current;
         }
-        let history = Command::new("git").args(["log", "--first-parent", "--diff-filter=AM", "--format=%H", "--", BASELINE]).current_dir(root).output();
+        let target = if target == "origin/main" {
+            Command::new("git").args(["merge-base", "HEAD", target]).current_dir(root).output()
+        } else {
+            Command::new("git").args(["rev-parse", "--verify", &format!("{target}^{{commit}}")]).current_dir(root).output()
+        };
+        let target = match target {
+            Ok(result) if result.status.success() => String::from_utf8_lossy(&result.stdout).trim().to_owned(),
+            _ => { audit.gaps.push(format!("{BASELINE}: cannot resolve landed baseline target")); return current; }
+        };
+        let history = Command::new("git").args(["log", "--first-parent", "--no-renames", "--diff-filter=AMDT", "--format=%H", &target, "--", BASELINE]).current_dir(root).output();
         match history {
             Ok(history) if history.status.success() => {
                 for sha in String::from_utf8_lossy(&history.stdout).lines() {
-                    let blob = Command::new("git").args(["show", &format!("{sha}:{BASELINE}")]).current_dir(root).output();
-                    let older = blob.map_err(|error| error.to_string()).and_then(|blob| {
+                    let older = (|| {
+                        let tree = Command::new("git").args(["ls-tree", "--name-only", sha, "--", BASELINE]).current_dir(root).output().map_err(|error| error.to_string())?;
+                        if !tree.status.success() { return Err(format!("cannot read baseline tree at {sha}")); }
+                        if tree.stdout.is_empty() { return Ok(Counts::new()); }
+                        let blob = Command::new("git").args(["show", &format!("{sha}:{BASELINE}")]).current_dir(root).output().map_err(|error| error.to_string())?;
                         if !blob.status.success() { return Err(format!("cannot read baseline history at {sha}")); }
                         decode_baseline(&blob.stdout)
-                    });
+                    })();
                     match older {
                         Ok(older) => for (key, count) in &current {
                             if *count > older.get(key).copied().unwrap_or(0) {
@@ -429,7 +537,7 @@ fn baseline(root: &Path, audit: &mut Audit) -> Counts {
     current
 }
 
-pub(super) fn finish(root: &Path, sites: Vec<Site>, functions: &[Function], registered: &BTreeSet<String>, audit: &mut Audit) {
+pub(super) fn finish(root: &Path, target: &str, sites: Vec<Site>, functions: &[Function], registered: &BTreeSet<String>, audit: &mut Audit) {
     let mut names = BTreeMap::<String, Vec<&Function>>::new();
     for f in functions { names.entry(f.name.clone()).or_default().push(f); }
     let mut helpers = BTreeSet::new();
@@ -444,10 +552,10 @@ pub(super) fn finish(root: &Path, sites: Vec<Site>, functions: &[Function], regi
     }
     let functions = names.into_iter().filter_map(|(name, functions)|
         (functions.len() == 1).then(|| (name, functions[0].refused.clone()))).collect();
-    let allowed = baseline(root, audit);
+    let allowed = baseline(root, target, audit);
     for site in sites {
-        if !site.condition.reads_authority(&helpers, &site.bindings, &mut BTreeSet::new()) { continue; }
-        let codes = site.payload.resolve(&functions, &site.bindings, &mut BTreeSet::new());
+        if !site.condition.reads_authority(&helpers) { continue; }
+        let codes = site.payload.resolve(&functions);
         let covered = !codes.is_empty() && codes.iter().all(|code| registered.contains(code));
         let count = if covered { 0 } else {
             let count = audit.authority_uncoded.entry(site.key.clone()).or_default(); *count += 1; *count

@@ -141,6 +141,12 @@ fn every_registered_refusal_site_emits_its_code() {
         ("let_else", r#"fn probe() { let Some(caller) = self.resolve_registered_caller()? else { return Ok(()); }; if caller.role == Worker { return Err("denied"); } }"#, 1),
         ("for_pattern", r#"fn probe() { for caller in self.resolve_registered_caller()? { if denied(caller) { return Err("denied"); } } }"#, 1),
         ("slice_reference", r#"fn probe() { let &[ref caller, _] = &[self.get_agent_id()?, ordinary()]; if denied(caller) { return Err("denied"); } }"#, 1),
+        ("tuple_rest", r#"fn probe() { let (.., caller) = (ordinary(), ordinary(), self.get_agent_id()?); if denied(caller) { return Err("denied"); } }"#, 1),
+        ("assign_pattern", r#"fn probe() { let (mut caller, mut model) = (ordinary(), ordinary()); (caller, model) = (self.get_agent_id()?, ordinary()); if denied(caller) { return Err("denied"); } if model.role == Worker { return Err("ordinary"); } }"#, 1),
+        ("field_assignment", r#"fn probe() { let mut data = Pair { caller: ordinary(), model: ordinary() }; data.caller = self.get_agent_id()?; if denied(data.caller) { return Err("denied"); } if data.model.role == Worker { return Err("ordinary"); } }"#, 1),
+        ("while_let", r#"fn probe() { while let Some(caller) = self.resolve_registered_caller()? { if caller.role == Worker { return Err("denied"); } } }"#, 1),
+        ("let_else_refusal", r#"fn probe() { let Some(caller) = self.resolve_registered_caller()? else { anyhow::bail!("denied"); }; }"#, 1),
+        ("compound_assignment", r#"fn probe() { let mut allowed = true; allowed &= self.is_supervisor_from_env(); if !allowed { return Err("denied"); } }"#, 1),
         ("verification_tools", r#"fn probe() { if terminal { let caller_id = self.get_agent_id()?; } let caller_id = self.get_agent_id()?; let mut caller = agent_store.get(&caller_id)?; if !caller.is_alive() { return Err(McpError { code: INVALID_REQUEST }); } let direct = caller.role == Supervisor; let handoff = caller.role == Standard && caller.parent_id != caller_id; if !direct && !handoff { return Err(McpError { code: INVALID_PARAMS }); } }"#, 2),
     ] {
         std::fs::write(policy_dir.join("gates_cmd.rs"), format!("fn unrelated() {{ tag(\"G-01\", \"unrelated\"); }}\n{source}")).unwrap();
@@ -182,15 +188,21 @@ fn every_registered_refusal_site_emits_its_code() {
             .args(args).status().unwrap().success());
     };
     git(&["init","-q"]);
+    git(&["commit", "--allow-empty", "-qm", "unseeded target"]);
+    git(&["branch", "unseeded"]);
     git(&["add","cas-cli/gate-audit-authority-baseline.json"]);
     git(&["commit","-qm","initial baseline"]);
+    // First landing: no target baseline yet, regardless of delivery history.
+    std::fs::write(&probe, legacy).unwrap();
+    assert!(gate_audit::scan_against(fixture.path(), &fixture_registry, "unseeded").gaps.is_empty());
+    git(&["branch", "landed"]);
     write_baseline(&grown);
     git(&["add","cas-cli/gate-audit-authority-baseline.json"]);
     git(&["commit","-qm","attempted baseline growth"]);
-    assert!(!gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    assert!(!gate_audit::scan_against(fixture.path(), &fixture_registry, "landed").gaps.is_empty());
     write_baseline(&std::collections::BTreeMap::new());
     std::fs::write(&probe, "fn unrelated() { tag(\"G-01\", \"unrelated\"); }").unwrap();
-    assert!(gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty());
+    assert!(gate_audit::scan_against(fixture.path(), &fixture_registry, "landed").gaps.is_empty());
     // A landed deletion consumes all allowance; restoring an older seed
     // cannot regain it, even when the old seed had never been edited.
     git(&["restore", "cas-cli/gate-audit-authority-baseline.json"]);
@@ -199,13 +211,14 @@ fn every_registered_refusal_site_emits_its_code() {
     std::fs::remove_file(&baseline).unwrap();
     git(&["add", "-u"]);
     git(&["commit", "-qm", "delete baseline"]);
-    if gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty() {
+    git(&["branch", "-f", "landed"]);
+    if gate_audit::scan_against(fixture.path(), &fixture_registry, "landed").gaps.is_empty() {
         binding_failures.push(("baseline_deleted", 0, 1));
     }
     write_baseline(&seed);
     git(&["add", "cas-cli/gate-audit-authority-baseline.json"]);
     git(&["commit", "-qm", "restore old seed"]);
-    if gate_audit::scan(fixture.path(), &fixture_registry).gaps.is_empty() {
+    if gate_audit::scan_against(fixture.path(), &fixture_registry, "landed").gaps.is_empty() {
         binding_failures.push(("baseline_restored", 0, 1));
     }
     assert!(binding_failures.is_empty(), "{binding_failures:?}");

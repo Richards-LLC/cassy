@@ -514,6 +514,12 @@ fn reaches(functions: &[Function], producer: &Function, target: &str) -> bool {
 /// Scan declarations, AST control-flow candidates, result types and script flags.
 /// Registry tuples are (code, stage, title, source), from the same build scan.
 pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit {
+    let target = std::env::var("BASE_SHA").ok().filter(|value| !value.trim().is_empty() && value.bytes().any(|byte| byte != b'0'))
+        .unwrap_or_else(|| "origin/main".into());
+    scan_against(root, registry, &target)
+}
+
+pub fn scan_against(root: &Path, registry: &[(String, String, String, String)], target: &str) -> Audit {
     let mut paths = Vec::new();
     for dir in ["cas-cli/src", "crates", "scripts"] {
         files(&root.join(dir), &mut paths);
@@ -694,7 +700,7 @@ pub fn scan(root: &Path, registry: &[(String, String, String, String)]) -> Audit
         all_overridden.extend(f.overridden.clone());
     }
     let registered: BTreeSet<_> = registry.iter().map(|r| r.0.clone()).collect();
-    refusals::finish(root, refusal_sites, &functions, &registered, &mut audit);
+    refusals::finish(root, target, refusal_sites, &functions, &registered, &mut audit);
     for f in &functions {
         for code in f.refused.union(&f.overridden) {
             if !registered.contains(code) {

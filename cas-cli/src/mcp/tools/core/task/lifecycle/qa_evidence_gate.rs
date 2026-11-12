@@ -241,6 +241,14 @@ pub(crate) fn ledger_preflight(
             "QA LEDGER REJECTED: task artifact directory escapes its project namespace".into(),
         );
     }
+    // A no-code audit report may be named LEDGER.md (cas-test-audit). Only a
+    // file that declares the canonical QA matrix is held to it (GH #1766, #1817).
+    if task.execution_note.as_deref() == Some("no-code")
+        && std::fs::read_to_string(&ledger)
+            .is_ok_and(|body| !crate::qa_ledger::declares_canonical(&body))
+    {
+        return Ok(());
+    }
     // A covering review owns the canonical evidence for shipped work. Do not
     // apply a newer producer-ledger grammar retroactively to that delivery.
     // Resolve the actual delivery, rather than using an old anchor alone: a
@@ -872,6 +880,36 @@ mod tests {
         std::fs::write(task_dir.join("LEDGER.md"), "malformed evidence").unwrap();
         let _ = ledger_preflight(&root, &task, true)
                 .unwrap_err();
+    }
+
+    #[test]
+    fn no_code_audit_report_named_ledger_is_not_a_qa_matrix() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        env.set_current_dir(dir.path());
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let artifacts = dir.path().join("artifacts");
+        let mut config = crate::config::Config::default();
+        config
+            .set("factory.artifacts_root", artifacts.to_str().unwrap())
+            .unwrap();
+        config.save(&root).unwrap();
+        let mut task = Task::new("cas-audit".into(), "Audit tests".into());
+        task.execution_note = Some("no-code".into());
+        let task_dir =
+            crate::config::project_factory_artifacts_root(&root, &artifacts).join(&task.id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ledger = task_dir.join("LEDGER.md");
+        let audit = "# Test audit\n\n| layer | cost | where |\n|---|---|---|\n| unit | 3m | ci |\n\n| id | item | verdict | tests | evidence | fix | covering | confidence |\n|---|---|---|---|---|---|---|---|\n| L2 | a.rs:1 | dup | t | e | f | none needed: dead | high |\n";
+        std::fs::write(&ledger, audit).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_ok());
+        // Declaring the canonical matrix restores validation.
+        std::fs::write(&ledger, format!("schema: 2\n{audit}")).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_err());
+        // Code tasks keep checking every ledger.
+        task.execution_note = None;
+        std::fs::write(&ledger, audit).unwrap();
+        assert!(ledger_preflight(&root, &task, true).is_err());
     }
 
     #[test]

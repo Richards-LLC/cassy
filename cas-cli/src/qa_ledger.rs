@@ -575,6 +575,24 @@ pub fn check(path: &Path, min_rows: usize) -> Report {
     report
 }
 
+/// True when `body` declares itself a canonical QA evidence ledger: the
+/// scaffold's `# QA evidence:` title, a `schema:` header or the matrix header.
+/// Any other `LEDGER.md` (a no-code audit report) is ordinary prose and tables.
+pub fn declares_canonical(body: &str) -> bool {
+    let expected = cells(HEADER);
+    let mut fence = false;
+    body.lines().map(str::trim).any(|line| {
+        if line.starts_with("```") || line.starts_with("~~~") {
+            fence = !fence;
+            return false;
+        }
+        !fence
+            && (line.starts_with("# QA evidence:")
+                || line.starts_with("schema:")
+                || (line.contains('|') && cells(line) == expected))
+    })
+}
+
 pub fn minimum_rows(task: &cas_types::Task) -> usize {
     if task.execution_note.as_deref() != Some("no-code") && !task.demo_statement.trim().is_empty() {
         4

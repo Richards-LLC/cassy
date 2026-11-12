@@ -423,7 +423,7 @@ fn idle_with_ready_work(db: &rusqlite::Connection, cas_root: &Path, from: Option
         waits.entry(key).or_default().push((start, now, format!("hold since {}", super::when(start))));
     }
     match notices(db, &["worker_idle"]) {
-        Ok(idle) => for n in idle {
+        Ok(idle) => for n in idle.into_iter().filter(|n| from.is_none_or(|f| n.at >= f) && n.at < now) {
             let (Some(worker), Some(session)) = (n.payload["worker"].as_str(), n.payload["factory_session"].as_str()) else { continue };
             let next = log.starts.iter().chain(&log.stops).filter(|(w, at)| w == worker && *at > n.at).map(|(_, at)| *at)
                 .chain(log.holds.iter().filter(|(s, w, at, _)| s == session && w == worker && *at > n.at).map(|(_, _, at, _)| *at))

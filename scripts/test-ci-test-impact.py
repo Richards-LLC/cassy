@@ -358,7 +358,7 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertEqual(phase("plan").returncode, 0)
         self.assertEqual(phase("own").returncode, 0)
         values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
-        self.assertEqual((values["scoped"], values["ring-shards"]), ("true", "[1]"))
+        self.assertEqual((values["mode"], values["ring-shards"]), ("scoped", "[1]"))
         own_run = next(line for line in calls.read_text().splitlines() if "nextest run" in line)
         self.assertIn("test(/^alpha::/)", own_run)
         self.assertNotIn("binary(beta_test)", own_run)
@@ -366,12 +366,15 @@ path="tests/builtin_archive_portability_test.rs"
         self.assertNotEqual(ring.returncode, 0, "a consumer suite failure outside the module fails the ring")
         ring_run = calls.read_text().splitlines()[-1]
         self.assertIn("--archive-file suite.tar.zst", ring_run)
-        self.assertIn("and not ((binary(cas) and (test(/^alpha::/))))", ring_run)
+        own = json.loads(state.read_text())["split"]["own"]
+        self.assertIn(f"-E {own} ", own_run)
+        self.assertIn(f"and not ({own})", ring_run)
+        self.assertIn("binary(beta_test)", ring_run)
         self.assertIn("--partition count:1/1", ring_run)
         self.select("scripts/release.sh")
         self.assertEqual(phase("plan").returncode, 0)
-        values = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
-        self.assertEqual(values["scoped"], "false", "a workspace plan stays with the train suite")
+        split = json.loads(state.read_text())["split"]
+        self.assertEqual((split["build"], split["ring"]), (["--workspace"], f"(all()) and not ({own})"), "a workspace plan runs whole, own first")
 
 
 if __name__ == "__main__":

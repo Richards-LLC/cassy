@@ -233,43 +233,44 @@ def lane_split(root, selection):
 
     Own tests come first: unit tests of the directly changed top-level modules,
     edited integration suites, and directly changed crates. The ring follows:
-    everything else this plan selected for them. A workspace plan has no
-    provable scope; it returns None and the train suite keeps that run.
+    everything else the plan selected, including a whole workspace plan.
     """
-    if selection["mode"] != "scoped":
-        return None
-    crates, _ = workspace(root)
     paths = selection["paths"]
-    direct = {name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths)}
-    multiple = len(selection["commands"]) > 1
-    build, selected, own = [], [], []
-    for command in selection["commands"]:
-        packages = command.get("packages", [command["package"]])
-        if command["stems"] is None:
-            build += [arg for package in packages for arg in ("-p", package)]
-            selected += [f"package({package})" for package in packages]
-            own += [f"package({package})" for package in packages if package in direct]
+    if selection["mode"] != "scoped":
+        build, selected = ["--workspace"], "all()"
+    else:
+        build, selected = [], []
+        multiple = len(selection["commands"]) > 1
+        for command in selection["commands"]:
+            packages = command.get("packages", [command["package"]])
+            if command["stems"] is None:
+                build += [arg for package in packages for arg in ("-p", package)]
+                selected += [f"package({package})" for package in packages]
+                continue
+            args = command["args"]
+            build += ["-p", "cas"] if multiple else args[:args.index("-E")]
+            selected.append(f"(package(cas) and ({args[args.index('-E') + 1]}))")
+        selected = " or ".join(selected)
+    own = []
+    try:
+        crates, _ = workspace(root)
+        direct = sorted(name for name, (member, _) in crates.items() if any(p.startswith(member + "/") for p in paths))
+        mapping = inventory(root, crates["cas"][1]) if "cas" in direct else {}
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        direct = []
+    for name in direct:
+        if name != "cas":
+            own.append(f"package({name})")
             continue
-        args = command["args"]
-        expression = args[args.index("-E") + 1]
-        build += ["-p", "cas"] if multiple else args[:args.index("-E")]
-        mapping = inventory(root, crates["cas"][1])
-        changed = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
-        parts = []
-        if "--lib" in args and changed and all(SAFE.fullmatch(name) for name in changed):
-            parts.append("(binary(cas) and (" + " or ".join(f"test(/^{name}::/)" for name in changed) + "))")
-        for stem in command["stems"]:
+        modules = sorted({p.split("/")[2].removesuffix(".rs") for p in paths if p.startswith("cas-cli/src/")} - {"lib", "main"})
+        parts = [f"(binary(cas) and test(/^{module}::/))" for module in modules if SAFE.fullmatch(module) and "-" not in module]
+        for stem, target in sorted(mapping.items()):
             if any(p == f"cas-cli/tests/{stem}.rs" or p.startswith(f"cas-cli/tests/{stem}/") for p in paths):
-                target = mapping[stem]
                 parts.append(f"binary({target})" if target == stem else f"(binary({target}) and test({stem}::))")
-        guard = (lambda text: f"(package(cas) and ({text}))") if multiple else (lambda text: text)
-        selected.append(guard(expression))
         if parts:
-            own.append(guard(" or ".join(parts)))
-    selected = " or ".join(selected)
+            own.append("(package(cas) and (" + " or ".join(parts) + "))")
     own = " or ".join(own) or None
     return {"build": build, "selected": selected, "own": own, "ring": f"({selected}) and not ({own})" if own else selected}
-
 
 def lane_count(root, source, expression):
     """Count the non-ignored tests a filter selects, so no phase runs empty."""
@@ -296,8 +297,8 @@ def lane(root, args):
         selection = plan(root, args.base_sha, args.zero_base_ref, args.history)
         split = lane_split(root, selection)
         write(out, {"plan": selection, "split": split})
-        outputs = {"scoped": str(split is not None).lower(), "build-args": " ".join(split["build"]) if split else "", "reason": "; ".join(selection["reasons"])}
-        print(f"Lane impact: {selection['mode']}" + (f" ({outputs['reason']}); the train suite owns this delivery's Rust tests" if split is None else f"; own: {split['own']}; ring: {split['ring']}"))
+        outputs = {"mode": selection["mode"], "build-args": " ".join(split["build"])}
+        print(f"Lane impact: {selection['mode']} ({'; '.join(selection['reasons']) or 'delivery range'}); own: {split['own']}; ring: {split['ring']}")
         status = 0
     else:
         saved = json.loads(out.read_text())

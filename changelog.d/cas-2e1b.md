@@ -6,5 +6,5 @@
   train red about 35 minutes later. Now: the slim lane runs that same
   selection for the delivery's range on hosted runners, the changed modules'
   own tests first and the remaining selected tests in up to three shards only
-  after those pass. Deliveries with no provable scope (build policy, scripts
-  or workflow changes) still rely on the train suite.
+  after those pass. When the selector cannot narrow a change (build policy,
+  scripts or workflow edits), the lane runs the whole suite in the same order.

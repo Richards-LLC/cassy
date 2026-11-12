@@ -317,8 +317,8 @@ jobs:
   # to this delivery's range, runs here before merge instead of surfacing as a
   # train red. Fail fast: this job builds the selection and runs the changed
   # modules' own tests; the ring shards below start only if those pass. A
-  # workspace plan (build/test policy, scripts or an unmappable path) has no
-  # provable scope and stays with the train suite, so nothing runs twice.
+  # workspace plan (build/test policy, scripts or an unmappable path) runs
+  # whole, as the train's selector decided, still own tests first.
   lane-impact:
     name: Scoped Validation — impact own tests
     if: vars.CAS_LANE_SLIM == 'true' && needs.ci-diff.outputs.rust-unaffected != 'true'
@@ -360,19 +360,16 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/setup-rust-linux
-        if: steps.plan.outputs.scoped == 'true'
         with:
           cache-key: fast-validation-suite-archive
           shared-key: fast-validation-suite-build
           cache-save-if: "false"
 
       - name: Install nextest
-        if: steps.plan.outputs.scoped == 'true'
         uses: taiki-e/install-action@nextest
 
       - id: own
         name: Build the selection and run own tests
-        if: steps.plan.outputs.scoped == 'true'
         run: python3 scripts/ci-test-impact.py lane --phase own --out target/ci-impact/lane.json --github-output "$GITHUB_OUTPUT"
 
       - name: Archive the selection for the ring shards
@@ -410,7 +407,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Report sccache stats
-        if: always() && steps.plan.outputs.scoped == 'true'
+        if: always()
         run: ./scripts/ci-sccache-summary.sh "Scoped Validation — impact own tests"
 
   lane-impact-ring:

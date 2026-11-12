@@ -3092,8 +3092,8 @@ builds the selection and runs the changed modules' unit tests, edited
 integration suites and directly changed crates first; up to three `impact ring`
 shards then run the rest of the selection from its archive, only after the own
 tests pass. A workspace plan (build/test policy, `scripts/`, `.github/` or an
-unmappable path) has no provable scope and stays with the train suite, so no
-suite runs twice. Lane receipts are published as `lane-impact-*`, outside the
+unmappable path) runs the whole workspace, still own tests first, exactly as
+the selector decided. Lane receipts are published as `lane-impact-*`, outside the
 selector's failure history. Release-train pushes and
 merge-group events call the same reusable `ci.yml` through
 `full-validation.yml`: preflight, every script/CI-tier test, Commander web,

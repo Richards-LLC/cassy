@@ -105,6 +105,7 @@
 - `cas-cli/src/qa_batch/`, `cas-cli/src/qa_post_release.rs`, `cas-cli/src/release_reconcile.rs` — release membership, batch verdicts and durable reconciliation.
 - `cas-cli/src/fast_lane.rs`, `cas-cli/src/fast_lane_walk.rs` — fast-lane eligibility and post-merge proof.
 - `cas-cli/src/quality_ledger/`, `crates/cas-store/src/quality_event_store.rs`, `docs/ESTIMATES.md` — quality events, delivery metrics and measured estimates.
+- `cas-cli/src/cli/ledger.rs`, `cas-cli/src/cli/ledger_scorers.rs` — `cas ledger report` and its rubric scorers with cited hits.
 - `cas-cli/src/hub/`, `cas-cli/src/bridge/server/`, `cas-cli/src/cli/hub.rs` — Commander service, bridge, pairing and durable input.
 - `hub-web/src/main.ts`, `hub-web/src/styles.css` — browser bootstrap, worker cards and desktop/phone presentation.
 - `hub-web/src/connection.ts`, `hub-web/src/status-refresh.ts`, `hub-web/src/conversation-store.ts` — authenticated connections and conversation state.
